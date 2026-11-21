@@ -165,3 +165,14 @@ class GateRepairCase(unittest.TestCase):
                          raw + b'test result: ok. 1 passed; 0 failed; 0 ignored;\n'):
             with self.subTest(raw=modified), self.assertRaises(ReceiptError):
                 repair.wal_coverage(modified, recipes)
+
+    def test_formal_source_rebind_accepts_only_the_exact_reviewed_projection(self):
+        path, (before, after) = next(iter(repair.FORMAL_SOURCE_REFINEMENTS['durable-jobs'].items()))
+        document = {'input_sha256': {path: before}}
+        with mock.patch.object(repair.retention, 'git_bytes', return_value=b'actual renamed panic message'), \
+             mock.patch.object(repair.retention, 'digest', return_value=after) as digest:
+            self.assertEqual(repair.formal_input_projection('durable-jobs', document, CURRENT),
+                             ({path: after}, {path: (before, after)}))
+            digest.return_value = 'f' * 64
+            with self.assertRaises(ReceiptError):
+                repair.formal_input_projection('durable-jobs', document, CURRENT)

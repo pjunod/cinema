@@ -302,6 +302,76 @@ def compiled_members(raw, expected):
     return classfiles, jar
 
 
+FORMAL_SOURCE_REFINEMENTS = {
+    'durable-jobs': {
+        # Only the already-measured title test's panic diagnostics changed.
+        'crates/plurx-core/tests/store_contract/dv_title_jobs.rs': (
+            '5bcf53c4f3bd8a98b21c6940a102b7c80e8ace99524c07f8d47780ea3bc79bcc',
+            '95646795c4013d1dd79a799aa26e7dc2cae324dd32d5b32b5b105f9a85ea4ec0',
+        ),
+    },
+    'operation-progress': {
+        # This initialization adds an empty, Linux-only backend identity.
+        # The progress protocol, synchronization, and wakeup paths are unchanged.
+        'crates/plurxd/src/transcode/manager/construct.rs': (
+            'd56b41d8524d65b5ae52b5dbe31d63ffa561d8057e6ec9e0f42ed4da6aa9493c',
+            '16f88ecf66ee3e256536cec33dad37a72d2aa5cc3dd304fd30acacb14334cb3c',
+        ),
+    },
+}
+
+
+def formal_input_projection(package, document, current):
+    old_inputs = document['input_sha256']
+    observed = {path: retention.digest(retention.git_bytes(current, path)) for path in old_inputs}
+    changes = {path: (expected, observed[path]) for path, expected in old_inputs.items() if expected != observed[path]}
+    receipts.require(not changes or changes == FORMAL_SOURCE_REFINEMENTS[package],
+                     'Formal concrete source changed beyond the reviewed refinement: ' + package)
+    return observed, changes
+
+
+def formal_solver_profile(document):
+    cases = []
+    for case in document['configs']:
+        receipts.require(case['complete'] is True and case['expected_verdict'] == case['actual_verdict']
+                         and retention.DIGEST.fullmatch(case['config_sha256']) is not None,
+                         'An actual formal configuration did not produce its required complete outcome')
+        cases.append({key: case[key] for key in ('config', 'config_sha256', 'expected_verdict', 'purpose')})
+    receipts.require(cases and len({case['config'] for case in cases}) == len(cases),
+                     'Formal model configuration census is absent or repeated')
+    return {**{key: document[key] for key in ('model_sha256', 'runner_sha256', 'toolchain', 'resource_policy', 'mapping_sha256')},
+            'configs': cases}
+
+
+def current_formal_mapping(package, current, current_inputs, profile):
+    # Static correspondence only. The pinned solver has already completed all
+    # the configurations; this command confirms the combined source mapping.
+    runner = 'scripts/check-formal'
+    runner_raw = retention.git_bytes(current, runner)
+    receipts.require(Path(runner).read_bytes() == runner_raw
+                     and retention.digest(runner_raw) == profile['runner_sha256'],
+                     'Current formal runner differs from the actual solver producer')
+    models = [sha for path, sha in current_inputs.items()
+              if path.startswith('verification/' + package + '/') and path.endswith('.tla')]
+    receipts.require(models == [profile['model_sha256']], 'Current formal model differs from the actual solver input')
+    env = os.environ.copy()
+    for secret in ('GITHUB_TOKEN', 'FORGEJO_TOKEN', 'ACTIONS_RUNTIME_TOKEN'):
+        env.pop(secret, None)
+    raw = subprocess.check_output(
+        [sys.executable, '-B', runner, 'check-mapping', '--package', package],
+        timeout=60, env=env,
+    )
+    mapping = receipts.bounded_json(raw)
+    receipts.require(mapping['package'] == package and mapping['source_drift'] == []
+                     and mapping['mapping_sha256'] == profile['mapping_sha256']
+                     and mapping['input_sha256'] == current_inputs,
+                     'Current static correspondence does not match the previous solver profile')
+    for case in profile['configs']:
+        matches = [digest for path, digest in current_inputs.items() if path.endswith('/' + case['config'])]
+        receipts.require(matches == [case['config_sha256']], 'Current formal configuration digest differs')
+    return {'mapping_sha256': mapping['mapping_sha256'], 'receipt_sha256': retention.digest(raw)}
+
+
 def formal_coverage(api, artifacts, job, run, old, current):
     from validation import source_gate_landing as landing
     raw = landing.uploaded_archive(api, artifacts, f'formal-model-{run}-1', job, 'preflight')
@@ -325,12 +395,17 @@ def formal_coverage(api, artifacts, job, run, old, current):
                              and model['mapping_sha256'] == document['mapping_sha256'],
                              'Earlier formal execution or its input mapping is incomplete')
             for path, digest in document['input_sha256'].items():
-                receipts.require(retention.git_bytes(old, path) == retention.git_bytes(current, path)
-                                 and retention.digest(retention.git_bytes(old, path)) == digest,
-                                 'A completed formal input changed: ' + path)
+                receipts.require(retention.digest(retention.git_bytes(old, path)) == digest,
+                                 'Historical model receipt lists another concrete input: ' + path)
+            current_inputs, changes = formal_input_projection(package, document, current)
+            profile = formal_solver_profile(document)
             result[package] = {'artifact_sha256': retention.digest(raw),
                                'receipt_sha256': retention.digest(archive.read(names[0])),
-                               'source_commit': old}
+                               'source_commit': old, 'solver_profile': profile,
+                               'current_input_sha256': current_inputs,
+                               'reviewed_source_refinements': {path: list(pair) for path, pair in changes.items()}}
+            if changes:
+                result[package]['current_mapping'] = current_formal_mapping(package, current, current_inputs, profile)
     return result
 
 
