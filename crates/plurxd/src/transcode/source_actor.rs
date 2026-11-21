@@ -19,7 +19,7 @@ enum SourceBacking {
 /// the owned worker factory constructs this gate; there is no wire constructor.
 pub(crate) struct SourceProducerAuthority {
     store: Arc<dyn Store>,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    source_members: crate::cluster::SourceMembers,
     master: Arc<plurx_core::secrets::CredentialKey>,
     registry_boot_id: uuid::Uuid,
     ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
@@ -118,8 +118,8 @@ impl SourceProducerAuthority {
         }
         use plurx_core::sharing_source_sessions::SourcePublicationAuthorityRead;
         let members = self
-            .membership
-            .observe_source_admission_members()
+            .source_members
+            .observe()
             .await
             .map_err(|_| "Source member observation failed".to_owned())?
             .ok_or_else(|| "Source member floor is unavailable".to_owned())?;
@@ -1018,8 +1018,7 @@ impl SourceProducerAuthority {
         SourceWorkerError,
     > {
         let members = self
-            .membership
-            .observe_source_admission_members()
+            .source_members.observe()
             .await
             .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.members_store", "Source preparation refused"); SourceWorkerError::Unavailable })?
             .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.members_absent", "Source preparation refused"); SourceWorkerError::Unavailable })?;
@@ -1065,8 +1064,7 @@ impl SourceProducerAuthority {
         SourceWorkerError,
     > {
         let members = self
-            .membership
-            .observe_source_admission_members()
+            .source_members.observe()
             .await
             .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.members", error_class = "store", "Source admission refused"); SourceWorkerError::Unavailable })?
             .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.members", error_class = "absent", "Source admission refused"); SourceWorkerError::Unavailable })?;
@@ -1215,7 +1213,7 @@ impl TranscodeManager {
             manager: Arc::downgrade(self),
             gate: Arc::new(SourceProducerAuthority {
                 store: Arc::clone(&self.store),
-                membership: state.membership.clone(),
+                source_members: state.cluster.source_members(),
                 master: Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
@@ -1690,8 +1688,8 @@ impl TranscodeManager {
                 startup_stage = "activation_members";
                 let members = owner
                     .gate
-                    .membership
-                    .observe_source_admission_members()
+                    .source_members
+                    .observe()
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
@@ -1775,8 +1773,8 @@ impl TranscodeManager {
                 }
                 let members = owner
                     .gate
-                    .membership
-                    .observe_source_admission_members()
+                    .source_members
+                    .observe()
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;

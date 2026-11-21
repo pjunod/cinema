@@ -122,7 +122,7 @@ pub(super) async fn local_worker_capacity(state: &AppState) -> ActivityWorkers {
 
 async fn local_workers_with_details(state: &AppState, detailed: bool) -> ActivityWorkers {
     let runtime = state.transcode.media_node_runtime().await;
-    let accepting_work = state.serving.is_ready() && !state.membership.local_maintenance_active();
+    let accepting_work = state.cluster.ready() && !state.cluster.maintenance_active();
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
@@ -313,7 +313,7 @@ pub fn prometheus_cluster_activity() -> String {
 #[allow(dead_code)] // wired now so #326 does not need state/main territory
 #[derive(Clone)]
 pub struct PeerActivityClient {
-    membership: plurx_core::cluster::membership::MembershipManager,
+    directory: crate::cluster::Directory,
     transport: PeerTransport,
     reads: Arc<tokio::sync::Mutex<PeerActivityReadGate>>,
     owner_reads:
@@ -323,10 +323,10 @@ pub struct PeerActivityClient {
 #[allow(dead_code)]
 impl PeerActivityClient {
     #[must_use]
-    pub fn new(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
+    pub fn new(transport: PeerTransport, directory: crate::cluster::Directory) -> Self {
         Self {
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport,
+            directory,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
             owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -339,8 +339,8 @@ impl PeerActivityClient {
             &self.reads,
             move || async move {
                 directory
-                    .membership
-                    .activity_peers()
+                    .directory
+                    .targets(crate::cluster::Purpose::Voters)
                     .await
                     .inspect_err(|_| record_aggregation(2))
             },
@@ -379,8 +379,8 @@ impl PeerActivityClient {
             }
         }
         let peer = self
-            .membership
-            .activity_peers()
+            .directory
+            .targets(crate::cluster::Purpose::Voters)
             .await?
             .into_iter()
             .find(|peer| peer.node_id == owner_node_id);
@@ -556,8 +556,9 @@ pub async fn snapshot(
 ) -> Result<(HeaderMap, Json<ActivitySnapshot>), StatusCode> {
     let auth = peer_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_activity_request(&auth)
+        .cluster
+        .authentication()
+        .authorize_activity(&auth)
         .await
         .unwrap_or(false)
     {
@@ -1118,7 +1119,12 @@ mod tests {
     #[tokio::test]
     async fn reachable_peer_without_activity_origin_is_unsupported_not_unreachable() {
         let client = PeerActivityClient::new(
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            crate::cluster::test_calls(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
+            crate::cluster::Directory::new(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
         );
         let outcome = fetch_peer_activity(
             client,

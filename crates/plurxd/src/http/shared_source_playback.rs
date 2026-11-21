@@ -2021,8 +2021,9 @@ async fn own_start(
         _intent: (*intent).clone(),
     });
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .cluster
+        .source_members()
+        .observe()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
@@ -2074,8 +2075,9 @@ async fn own_start(
         return Err(SourceStartFailure::Unresolved);
     }
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .cluster
+        .source_members()
+        .observe()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
@@ -2112,9 +2114,7 @@ async fn own_start(
             .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_wait", error_class = "deadline", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     }
 
-    let members = state
-        .membership
-        .observe_source_admission_members()
+    let members = state.cluster.source_members().observe()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.members", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_members_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
@@ -2485,14 +2485,12 @@ impl RealSourceStartFixture {
         // The request assertions use real, fresh membership without racing
         // its periodic write. The production clock and authority checks run.
         self.membership_owner.finish().await;
-        self.state
-            .membership
+        let membership = self.state.cluster.test_membership();
+        membership
             .heartbeat()
             .await
             .expect("publish the real fixture roster");
-        assert!(self
-            .state
-            .membership
+        assert!(membership
             .observe_source_admission_members()
             .await
             .expect("read the fresh fixture roster")
@@ -2650,7 +2648,11 @@ async fn build_real_source_start_fixture(
         )
     });
     let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
+        Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&crate::cluster::StartupClockAdapter(clock.as_ref())),
+        ))
+        .await
     } else {
         crate::sharing_fixture_clock::select_applied_singleton(&config).await
     }
@@ -2678,13 +2680,13 @@ async fn build_real_source_start_fixture(
             .await
             .expect("actual startup clock observer")
     } else {
-        crate::clock_offset::ClockObserver::new(state_mut.membership.clone())
+        crate::clock_offset::ClockObserver::new(state_mut.cluster.operations().clock())
     };
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut.catalogue = selected.catalogue_reader();
-    state_mut.replication = selected.replication_monitor();
+    state_mut.replace_replication(selected.replication_monitor());
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        state_mut.membership.clone(),
+        state_mut.cluster.test_membership().clone(),
         Arc::clone(&state_mut.store),
     );
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -2694,17 +2696,20 @@ async fn build_real_source_start_fixture(
     ));
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
     state_mut
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual registry boot publication before admission");
 
     let replication_owner =
-        SourceFixtureMembershipOwner::start_replication(state.replication.clone());
-    let membership_owner = SourceFixtureMembershipOwner::start(state.membership.clone());
+        SourceFixtureMembershipOwner::start_replication(state.cluster.test_replication().clone());
+    let membership_owner =
+        SourceFixtureMembershipOwner::start(state.cluster.test_membership().clone());
     let store = Arc::clone(&state.store);
     store
         .put_setting(keys::SW_POOL_THREADS, "4")

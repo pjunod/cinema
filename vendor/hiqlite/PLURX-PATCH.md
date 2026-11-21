@@ -409,7 +409,9 @@ made-up URL and prevents the fork from being declared fully tracked.
   every listener is built from them. The proxy listener is not changed.
   Files: `src/start.rs`.
 - The applied mark (playback-start E1, `docs/streaming/PLAYBACK-START-E1-BUILD.md`
-  §4.1). `NodeConfig::applied_mark_tables` registers up to sixteen tables; the
+  §4.1). `NodeConfig::applied_mark_tables` registers up to thirty-two tables; the
+  bounded mask is `u32` (including the full-width case); existing slot order
+  is preserved when Plurx appends the four canonical roster tables. The
   writer installs an SQLite update hook (rusqlite `hooks`) that sets one bit
   per registered table, and `publish_then_send` turns those bits into
   revisions and stores the applied log index after the SQLite work has

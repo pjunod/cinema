@@ -45,6 +45,25 @@ const OLD_OPERATIONS_SQL: &str = "SELECT node.node_id, node.raft_id, node.last_s
          WHERE removal.node_id = node.node_id) \
      ORDER BY node.raft_id";
 
+// Artwork's producer at the slice-3 effort base, without a peer limit.
+const OLD_ARTWORK_SQL: &str = "SELECT http.public_http_url \
+    FROM cluster_node_http http JOIN cluster_nodes node ON node.node_id = http.node_id \
+    WHERE node.removed_at IS NULL AND node.node_id != $1 \
+      AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal WHERE removal.node_id = node.node_id) \
+      AND node.last_seen_at >= $2 ORDER BY node.last_seen_at DESC, node.raft_id";
+
+fn old_artwork_urls(db: &Fixture) -> Vec<String> {
+    db.db
+        .prepare(OLD_ARTWORK_SQL)
+        .expect("artwork query")
+        .query_map(rusqlite::params![LOCAL, reachable_after(NOW)], |row| {
+            row.get(0)
+        })
+        .expect("artwork rows")
+        .collect::<Result<_, _>>()
+        .expect("artwork endpoints")
+}
+
 /// `activity_peers`.
 fn old_activity_peers(db: &Fixture) -> Vec<ActivityPeer> {
     let voters = db
@@ -298,6 +317,15 @@ fn activity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityPeerRow> {
 fn assert_equivalent(name: &str, db: &Fixture) {
     let snapshot = db.snapshot();
     assert_eq!(
+        snapshot
+            .artwork(NOW)
+            .into_iter()
+            .filter_map(|peer| peer.http_base)
+            .collect::<Vec<_>>(),
+        old_artwork_urls(db),
+        "{name}: artwork endpoints"
+    );
+    assert_eq!(
         snapshot.voters(NOW),
         old_activity_peers(db),
         "{name}: voters"
@@ -429,6 +457,50 @@ fn every_purpose_keeps_its_producers_caps_beyond_the_limit() {
 }
 
 #[test]
+fn artwork_keeps_sql_order_and_uncapped_noncommitted_endpoints() {
+    let highest = MAX_ACTIVITY_PEERS as u64 + 20;
+    let mut rows = (2..=highest)
+        .map(|id| NodeRow {
+            role: Some("learner"),
+            progress: None,
+            last_seen_at: NOW - (id % 3) as i64 * 1_000,
+            ..NodeRow::ready(id)
+        })
+        .collect::<Vec<_>>();
+    rows[0].removed = true;
+    rows[1].fenced = true;
+    rows[2].http = false;
+    rows[3].last_seen_at = STALE;
+    rows[4].last_seen_at = NOW - NODE_REACHABLE_WINDOW_MS;
+    rows.last_mut().expect("highest row").last_seen_at = NOW + 1;
+    let db = Fixture::new(1, &[1, 2], &[1], &rows);
+    // Repeated URLs are not deduplicated by the original SQL.
+    for id in [8, 9] {
+        db.db.execute("UPDATE cluster_node_http SET public_http_url = 'http://same.invalid' WHERE node_id = ?1",
+            rusqlite::params![node_id(id)]).expect("duplicate endpoint");
+    }
+    let snapshot = db.snapshot();
+    let peers = snapshot.artwork(NOW);
+    let urls = peers
+        .iter()
+        .filter_map(|peer| peer.http_base.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(urls, old_artwork_urls(&db));
+    assert!(peers.len() > MAX_ACTIVITY_PEERS);
+    assert_eq!(peers[0].raft_id, highest);
+    assert!(peers.iter().any(|peer| peer.raft_id == 6)); // inclusive heartbeat boundary
+    assert_eq!(
+        urls.iter()
+            .filter(|url| *url == "http://same.invalid")
+            .count(),
+        2
+    );
+    assert!(snapshot
+        .artwork(NOW + NODE_REACHABLE_WINDOW_MS + 2)
+        .is_empty());
+}
+
+#[test]
 fn an_unknown_stored_role_fails_the_media_directory_as_it_did() {
     let (members, voters, mut rows) = matrix();
     rows.push(NodeRow {
@@ -472,10 +544,14 @@ fn an_unclustered_process_has_no_peers_and_is_the_one_voter() {
 
 #[test]
 fn the_roster_read_names_exactly_its_tables() {
-    // The production mark registers no roster table yet (see ROSTER_TABLES),
-    // so its stamp is the applied index; it must still fit the mark.
-    assert!(crate::store::applied_mark_tables().count() <= hiqlite::APPLIED_MARK_MAX_TABLES);
+    let registered: Vec<_> = crate::store::applied_mark_tables().collect();
+    assert!(registered.len() <= hiqlite::APPLIED_MARK_MAX_TABLES);
+    assert_eq!(
+        registered.iter().copied().collect::<BTreeSet<_>>().len(),
+        registered.len()
+    );
     for table in ROSTER_TABLES {
+        assert_eq!(registered.iter().filter(|name| **name == table).count(), 1);
         assert!(ROSTER_SQL.contains(&format!("{table} ")), "{table}");
     }
 }

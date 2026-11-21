@@ -4,7 +4,7 @@ use super::*;
 use plurx_core::cluster::coordination::Lease;
 use plurx_core::domain::{LibraryKind, NewLibrary};
 use plurx_core::store::background_jobs::{
-    ClaimJob, ClaimOutcome, EnqueueOutcome, JobKind, JobToken,
+    ClaimBlock, ClaimJob, ClaimOutcome, EnqueueOutcome, JobKind, JobToken,
 };
 use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, NewLibraryWork,
@@ -464,11 +464,9 @@ async fn recovery_old_identity_never_releases_replacement_custody() {
     assert_eq!(unsettled, 1);
 }
 
-/// Lease expiry is the release: an abandoned physical custody counts as one
-/// ordinary reader until the sweep (or replay) releases it, so it no longer
-/// refuses an already-accepted manual scan outright.
+/// An expired lease leaves physical custody charged until release is verified.
 #[tokio::test]
-async fn abandoned_custody_does_not_block_an_already_accepted_manual_library_scan() {
+async fn accepted_manual_library_scan_waits_for_abandoned_custody_replay() {
     let fixture = Fixture::new();
     let library = fixture
         .store
@@ -516,16 +514,31 @@ async fn abandoned_custody_does_not_block_an_already_accepted_manual_library_sca
         now_ms: 10_000,
         dispatched_at_ms: 10_000,
     };
-    let ClaimOutcome::Claimed { job } = fixture.store.claim_job(claim()).await.expect("scan claim")
-    else {
-        panic!("an abandoned custody must not refuse an accepted scan")
-    };
-    assert_eq!(job.id, job_id);
-    assert_eq!(job.fence, 1);
+    let verdict = fixture
+        .store
+        .explain_job_claim(claim())
+        .await
+        .expect("scan claim verdict")
+        .expect("accepted scan");
+    assert!(verdict.kind_demand);
+    assert_eq!(verdict.block, Some(ClaimBlock::MaintenanceReader));
+    let refusal = fixture.store.claim_job(claim()).await.expect("scan claim");
+    assert!(matches!(refusal, ClaimOutcome::Contended), "{refusal:?}");
+    assert_eq!(fixture.count("background_source_custody"), 1);
+    assert!(path.exists());
+
     replay_at(&fixture.store, &fixture.dir, &identity(NEW_BOOT), NODE)
         .await
         .expect("verified physical reboot replay");
+    assert_eq!(fixture.count("background_source_custody"), 0);
     assert!(!path.exists());
+
+    let outcome = fixture.store.claim_job(claim()).await.expect("scan claim");
+    let ClaimOutcome::Claimed { job } = outcome else {
+        panic!("accepted scan must be claimable after custody release: {outcome:?}")
+    };
+    assert_eq!(job.id, job_id);
+    assert_eq!(job.fence, 1);
 }
 
 #[test]

@@ -15,6 +15,7 @@ use futures_util::{future::BoxFuture, stream, StreamExt};
 use plurx_core::cluster::clock::{
     ClockDecision, ClockRefusal, ClusterClockGuard, OwnedClockAcquisitionTicket,
 };
+#[cfg(test)]
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
@@ -982,6 +983,7 @@ impl ControlRouteError {
             StoreError::Migration(_) => "migration",
             StoreError::JoinRefused(_) => "join_refused",
             StoreError::Task(_) => "task",
+            StoreError::AnalysisAdmission(_) => "analysis_admission",
             StoreError::Identity(_) => "identity",
             StoreError::Credential(_) => "credential",
             StoreError::FenceRejected { .. } => "fence_rejected",
@@ -2790,20 +2792,25 @@ impl MediaSessionCoordinator {
         applied: Arc<dyn RouteView>,
     ) -> Arc<Self> {
         let directory = crate::cluster::Directory::new(membership.clone());
-        Self::with_directory(membership, directory, store, applied)
+        Self::with_directory(
+            crate::cluster::test_calls(membership),
+            directory,
+            store,
+            applied,
+        )
     }
 
     /// The coordinator over this node's store and applied view (`AppState`'s
     /// `applied`, which reads the same store's replica), sharing the
     /// process's peer directory.
     pub(crate) fn with_directory(
-        membership: MembershipManager,
+        transport: PeerTransport,
         directory: crate::cluster::Directory,
         store: Arc<dyn Store>,
         applied: Arc<dyn RouteView>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership),
+            transport,
             directory,
             store,
             routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -6686,7 +6693,7 @@ pub(crate) async fn takeover_loop(state: AppState) {
             scan_cursor = None;
             continue;
         }
-        let clock = state.membership.clock_guard();
+        let clock = state.cluster.clock();
         let page = match clock_guarded_expiry_scan(&clock, |now_ms| {
             state
                 .store
@@ -7389,8 +7396,8 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
-    let clock = acquire_takeover_clock(&state.membership.clock_guard(), &route.owner_node_id)
-        .map_err(|cause| {
+    let clock =
+        acquire_takeover_clock(&state.cluster.clock(), &route.owner_node_id).map_err(|cause| {
             metric.outcome = TAKEOVER_SKIPPED;
             format!("media-session takeover clock refused: {cause:?}")
         })?;
