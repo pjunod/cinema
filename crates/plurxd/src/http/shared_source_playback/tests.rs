@@ -1162,6 +1162,7 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
                     SourceStartTaskStage::ReadingIntent { .. } => "reading_intent".to_owned(),
                     SourceStartTaskStage::IntentReady { .. } => "intent_ready".to_owned(),
                     SourceStartTaskStage::Claiming { .. } => "claiming".to_owned(),
+                    SourceStartTaskStage::Unclaimed { .. } => "claim_refused".to_owned(),
                     SourceStartTaskStage::Acquired(_) => "acquired".to_owned(),
                     SourceStartTaskStage::Assigning(_) => "assigning".to_owned(),
                     SourceStartTaskStage::Assigned(_) => "assigned".to_owned(),
@@ -1207,6 +1208,115 @@ async fn sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end() {
         SourceFixtureMode::DolbyVisionStripped,
     ))
     .await;
+}
+/// A claim the Store answers "unavailable" wrote no binding. Its Start is
+/// refused, and the receiver's cleanup End must then settle: nothing durable
+/// is owed, so there is no row for a release to find. Before this, End
+/// answered 503 for ever and the entry held one of the registry's eight
+/// slots until the node restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_refused_claim_settles_end_and_frees_its_registry_slot() {
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Copy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("Source preparation finished before a refused claim");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let (url, headers, body) = (
+        sessions.clone(),
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    );
+    let starting =
+        tokio::spawn(
+            async move { actual_resource_request(address, true, &url, headers, body).await },
+        );
+    let held = pause.reached().await;
+    // Preparation passed with sharing on. The claim's own guard reads the
+    // switch again in its transaction and now refuses, writing nothing.
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "0")
+        .await
+        .expect("sharing switched off before the claim");
+    held.release();
+    let response = starting.await.expect("refused Start task");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .expect("refusal body");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let refusal: Value = serde_json::from_slice(&bytes).expect("typed refusal");
+    assert_eq!(refusal["code"], "sharing_start_unavailable");
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+        .await
+        .expect("sharing switched back on");
+    assert_eq!(fixture.active_source_sessions().await, 0);
+    assert_eq!(
+        fixture.state.transcode.source_http_starts.live_entries(),
+        0,
+        "a claim that wrote nothing holds no registry slot"
+    );
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"].as_str().expect("request");
+    for _ in 0..2 {
+        // The receiver's cleanup End, and its exact replay.
+        let response = actual_resource_request(
+            address,
+            true,
+            &format!("{sessions}/{request}/end"),
+            fixture.headers.clone(),
+            fixture.request.clone(),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("End receipt");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "End after a refused claim: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let receipt: Value = serde_json::from_slice(&bytes).expect("End receipt");
+        assert_eq!(receipt["settled"], json!(true));
+        assert_eq!(receipt["state"], json!("settled"));
+        assert!(receipt.get("session_id").is_none());
+    }
+    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
 }
 /// The production web shape on one node: range caps through a receiver that
 /// affirms ranges, Dolby Vision relay and processed upgrades. The Source runs

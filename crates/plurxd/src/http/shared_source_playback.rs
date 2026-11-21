@@ -82,6 +82,12 @@ enum SourceStartTaskStage {
         // outcome, never as an adopted factory or physical-admission authority.
         intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
     },
+    /// The Store answered this planned incarnation's claim, and the answer
+    /// wrote no binding (unavailable, at capacity or in conflict). Unlike a
+    /// lost reply, nothing durable or physical is owed for it.
+    Unclaimed {
+        planned_incarnation: Uuid,
+    },
     Acquired(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigning(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigned(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
@@ -102,6 +108,12 @@ enum SourceUninvokedCleanup {
         planned_incarnation: Uuid,
         intent: Box<plurx_core::sharing_source_sessions::SourceSessionIntent>,
     },
+    /// The claim affirmatively wrote nothing for this planned incarnation.
+    /// There is no row to release: the joined task is the whole obligation,
+    /// so its End settles without a Store exchange.
+    Unclaimed {
+        planned_incarnation: Uuid,
+    },
     G0(plurx_core::sharing_source_sessions::SourceBindingHandle),
     G1(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
 }
@@ -111,6 +123,9 @@ impl SourceUninvokedCleanup {
             Self::UncertainG0 {
                 planned_incarnation,
                 ..
+            }
+            | Self::Unclaimed {
+                planned_incarnation,
             } => *planned_incarnation,
             Self::G0(binding) => binding.incarnation_id(),
             Self::G1(assignment) => assignment.binding().incarnation_id(),
@@ -119,6 +134,7 @@ impl SourceUninvokedCleanup {
     async fn release(&self, state: &crate::state::AppState) -> Result<(), SourceStartFailure> {
         use plurx_core::sharing_source_sessions::SourceReleaseOutcome;
         let result = match self {
+            Self::Unclaimed { .. } => return Ok(()),
             Self::UncertainG0 { intent, .. } => {
                 state
                     .store
@@ -154,6 +170,9 @@ impl SourceStartTaskStage {
             | Self::Claiming {
                 planned_incarnation,
                 ..
+            }
+            | Self::Unclaimed {
+                planned_incarnation,
             } => Some(*planned_incarnation),
             Self::Acquired(binding) | Self::Assigning(binding) => Some(binding.incarnation_id()),
             Self::Assigned(assignment)
@@ -207,6 +226,7 @@ impl SourceStartEntry {
                     SourceStartTaskStage::ReadingIntent { .. } => "reading_intent",
                     SourceStartTaskStage::IntentReady { .. } => "intent_ready",
                     SourceStartTaskStage::Claiming { .. } => "claiming",
+                    SourceStartTaskStage::Unclaimed { .. } => "claim_refused",
                     SourceStartTaskStage::Acquired(_) => "preparing",
                     SourceStartTaskStage::Assigning(_) => "assigning",
                     SourceStartTaskStage::Assigned(_) => "ingress_admission",
@@ -245,6 +265,11 @@ impl SourceStartEntry {
                             intent: Box::new(intent.clone()),
                         })
                     }
+                    SourceStartTaskStage::Unclaimed {
+                        planned_incarnation,
+                    } => Some(SourceUninvokedCleanup::Unclaimed {
+                        planned_incarnation: *planned_incarnation,
+                    }),
                     SourceStartTaskStage::Acquired(binding)
                     | SourceStartTaskStage::Assigning(binding) => {
                         Some(SourceUninvokedCleanup::G0(binding.clone()))
@@ -2093,9 +2118,23 @@ async fn own_start(
         SourceClaimOutcome::InFlight(_)
         | SourceClaimOutcome::Resolved { .. }
         | SourceClaimOutcome::Retired(_) => return Err(SourceStartFailure::Unresolved),
-        SourceClaimOutcome::Conflict => return Err(SourceStartFailure::Conflict),
-        SourceClaimOutcome::Unavailable => return Err(SourceStartFailure::Unavailable),
-        SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
+        // Each of these is the Store's own answer for this fresh planned
+        // incarnation, and none of them wrote a binding. Retaining the
+        // unknown-claim stage would owe a release of a row that does not
+        // exist: End could never settle and the entry would hold its
+        // registry slot until restart.
+        outcome @ (SourceClaimOutcome::Conflict
+        | SourceClaimOutcome::Unavailable
+        | SourceClaimOutcome::Capacity(_)) => {
+            entry.retain_stage(SourceStartTaskStage::Unclaimed {
+                planned_incarnation,
+            });
+            return Err(match outcome {
+                SourceClaimOutcome::Conflict => SourceStartFailure::Conflict,
+                SourceClaimOutcome::Capacity(_) => SourceStartFailure::Capacity,
+                _ => SourceStartFailure::Unavailable,
+            });
+        }
         SourceClaimOutcome::RetargetUnassigned => {
             // This is an affirmative atomic no-binding result, unlike an
             // error/lost reply. Preserve no ambiguous-claim cleanup obligation.
