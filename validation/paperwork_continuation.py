@@ -174,6 +174,9 @@ def bind_selection(plan, base, candidate):
     dependency = dependencies.requirements(plan, candidate)
     if dependency is not None:
         plan['dependency_profile'] = dependency
+    if 'node_preflight' in plan:
+        from validation import selected_root_custody
+        plan['root_ownership'] = selected_root_custody.prepare(operations, candidate)
 
 
 def prepare(api, value, environment, root, mode):
@@ -185,7 +188,7 @@ def prepare(api, value, environment, root, mode):
     else:
         document, _, repository, _ = retention.verify_identity(
             api, raw, d['sha256'], bind, candidate, d['attachment_id'], d['attachment_uuid'])
-    r.require(document['version'] == main.MAIN_ANCESTOR_POLICY and document['source_commit'] == candidate,
+    r.require(document['version'] in main.TYPED_POLICIES and document['source_commit'] == candidate,
               'Paperwork needs exact-source authenticated main-Python continuation')
     plan = main.prepare(api, document, bind, candidate, repository)
     bind_selection(plan, bind['base_sha'], candidate)
@@ -208,7 +211,8 @@ def marker(plan, kind):
             'selected_sha256': canonical_digest(suite['uncovered']),
             'comparison': plan.get('comparison'),
             'dependency_profile': plan.get('dependency_profile'),
-            'dependency_runtime': plan.get('dependency_runtime')}
+            'dependency_runtime': plan.get('dependency_runtime'),
+            **({'root_ownership': plan['root_ownership']} if 'root_ownership' in plan else {})}
 
 
 def current_outcomes(raw, plan, *, capture_runtime=False):
@@ -249,12 +253,19 @@ def current_outcomes(raw, plan, *, capture_runtime=False):
 
 def coverage_shape(value, bind, run, inventory=None):
     r.positive(run)
-    r.require(isinstance(value, dict) and set(value) == COVERAGE_FIELDS and value['version'] == 1
+    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'root_ownership'}
+    r.require(isinstance(value, dict) and set(value) in (COVERAGE_FIELDS, selected_fields)
+              and value['version'] == 1
               and value['head'] == bind['head_sha'] and value['base'] == bind['base_sha']
               and value['pr'] == bind['pull_request'] and value['run'] == run,
               'Unknown current paperwork coverage scope')
     r.positive(value['pr']); r.positive(value['preflight_job'])
     from validation import selected_python_dependencies as dependencies
+    if 'node_coverage' in value:
+        from validation import selected_node_preflight
+        selected_node_preflight.coverage_shape(value['node_coverage'])
+        from validation import selected_root_custody
+        selected_root_custody.coverage_shape(value['root_ownership'])
     runtime = value['dependency_runtime']
     dependencies.validate_runtime(runtime, dependencies.PROFILE if runtime is not None else None)
     for field in ('evidence_sha256', 'inventory_sha256', 'preflight_log_sha256'):
@@ -293,6 +304,10 @@ def final_coverage(api, value, environment, root):
                 'inventory_sha256': canonical_digest(sorted(inventory)), 'retained_ids': sorted(retained),
                 'current_pass_ids': sorted(due), 'preflight_log_sha256': retention.digest(raw),
                 'dependency_runtime': runtime}
+    from validation import selected_node_preflight
+    node = selected_node_preflight.coverage(raw, plan)
+    if node is not None:
+        coverage.update(node_coverage=node, root_ownership=plan['root_ownership'])
     coverage_shape(coverage, bind, run_id, inventory)
     return coverage
 

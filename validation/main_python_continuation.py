@@ -8,10 +8,12 @@ from validation import main_unit_receipts as main
 from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as r
 from validation import nextest_shard_continuation as nextest
-from validation.workspace_rust_continuation import metadata_only_workflow
+from validation.workspace_rust_continuation import source_gate_workflow_compatible
 
 POLICY = 'main-python-journal-continuation-v1'
 MAIN_ANCESTOR_POLICY = 'main-python-journal-continuation-v2'
+NODE_PREFLIGHT_POLICY = 'main-python-journal-continuation-v3'
+TYPED_POLICIES = {MAIN_ANCESTOR_POLICY, NODE_PREFLIGHT_POLICY}
 PRODUCER_INPUTS = {'validation/main_unit_receipts.py': 'b4112a92f0dd6acb63937c837eeb899db76ab8d8dfad8025f12e7924622ac5f4', 'validation/main_preflight_adoption.py': '7741d9786e509de6c3feb8aa69602b065ee37e1ecd6b3236388f468c3dd51b51', 'validation/python_unit_receipts.py': 'fdbcd7ef5c93a47a7ee5b3dbf5a7c5a525e9b5f721a457f3b943fd836ee58a8e', '.github/workflows/main-fast-lane.yml': '3ce991087d99bc508988d674d37ca48eb99cec34ce0d18af4fc36ec7c0878e22'}
 
 
@@ -131,9 +133,12 @@ def origin_impacts(origin, candidate, changes, known):
 def prepare(api, record, binding, candidate, repository):
     fields = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit',
               'prior', 'run', 'journal_artifact', 'changes', 'source_impacts'}
-    if record.get('version') == MAIN_ANCESTOR_POLICY:
+    version = record.get('version')
+    if version in TYPED_POLICIES:
         fields.add('main_journals')
-    r.require(set(record) == fields and record['version'] in {POLICY, MAIN_ANCESTOR_POLICY}
+    if version == NODE_PREFLIGHT_POLICY:
+        fields.add('node_preflight')
+    r.require(set(record) == fields and version in TYPED_POLICIES | {POLICY}
               and record['source_commit'] == candidate and binding['schema'] == 2,
               'Unknown main-Python continuation contract')
     prior, run = r.sha(record['prior']), r.positive(record['run'])
@@ -153,7 +158,7 @@ def prepare(api, record, binding, candidate, repository):
               'Original Python journal did not complete cleanly')
     origins = authenticate_origins(api, scope, journal, runs, candidate)
     supplements = []
-    if record['version'] == MAIN_ANCESTOR_POLICY:
+    if version in TYPED_POLICIES:
         supplements, extra_origins = authenticate_main_journals(
             api, record['main_journals'], binding, candidate, repository)
         r.require(not set(origins).intersection(extra_origins), 'Supplement duplicates original run authority')
@@ -178,7 +183,7 @@ def prepare(api, record, binding, candidate, repository):
                   'Python source impact hashes differ')
         if path.startswith('.github/'):
             r.require(before is not None and after is not None
-                      and ((path == '.github/workflows/ci.yml' and metadata_only_workflow(before, after))
+                      and ((path == '.github/workflows/ci.yml' and source_gate_workflow_compatible(before, after))
                            or (path == '.github/workflows/main-fast-lane.yml'
                                and nextest.projected_main_workflow(before) == nextest.projected_main_workflow(after))),
                       'Protected Python CI workflow changed')
@@ -206,8 +211,13 @@ def prepare(api, record, binding, candidate, repository):
     r.require(not {key for key in applicability.refusals if key in universe and key not in invalidated and key not in applicable},
               'Python pass applicability is unknown; refusing broad replay')
     applicability.finish(applicable)
-    return {'source_commit': candidate, 'authenticated_origins': origins, 'suites': {kind: {
+    result = {'source_commit': candidate, 'authenticated_origins': origins, 'suites': {kind: {
         'inventory': names, 'uncovered': [name for name in names if kind + ':' + name not in applicable],
         'prior_discovery': [], 'retained_source_records': {key: value for key, value in applicable.items()
                                                        if key.startswith(kind + ':')}}
         for kind, names in inventories.items()}}
+    if version == NODE_PREFLIGHT_POLICY:
+        from validation import selected_node_preflight
+        result['node_preflight'] = selected_node_preflight.prepare(
+            api, record['node_preflight'], record['main_journals'], candidate, repository)
+    return result

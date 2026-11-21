@@ -289,6 +289,8 @@ jobs:
     # four minutes before units and was still progressing at the 10m cutoff.
     # Keep all validation and receipt publication within a finite 30m limit.
     timeout-minutes: 30
+    outputs:
+      root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -312,6 +314,7 @@ jobs:
           PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
+          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
         run: python3 -m validation.native_python_execute prepare
       - name: Check validation catalog and contract unit tests
         env:
@@ -390,9 +393,13 @@ jobs:
       - name: Check the shared player input contract
         env:
           RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
+          NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}
+          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
         run: |
           if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then
             echo "Adopted authenticated complete two-script Node preflight"
+          elif [ "$NODE_SELECTION" = true ]; then
+            python3 -m validation.native_python_execute node
           else
             node tests/playback/player-input-contract.test.js
             node tests/web/player-dom.test.js
@@ -648,7 +655,7 @@ jobs:
           WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
         run: python3 -m validation.workspace_rust_continuation
       - name: Verify source recovery ownership in the root Linux unit container
-        if: steps.workspace-continuation.outputs.root_retained != 'true'
+        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'
         run: |
           # This container is already the root-capable pinned Linux unit
           # surface. Exercise real UID/GID handoff instead of counting the

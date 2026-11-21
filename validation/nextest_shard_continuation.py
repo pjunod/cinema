@@ -459,9 +459,9 @@ def reviewed_changes(record, candidate, universe):
                   and witness['after'] == (retention.digest(after) if after is not None else None),
                   'Nextest applicability bytes differ')
         if path == '.github/workflows/ci.yml':
-            from validation.workspace_rust_continuation import metadata_only_workflow
-            r.require(before is not None and after is not None and metadata_only_workflow(before, after),
-                      'Changed protected workflow execution, beyond exact source-gate metadata')
+            from validation.workspace_rust_continuation import source_gate_workflow_compatible
+            r.require(before is not None and after is not None and source_gate_workflow_compatible(before, after),
+                      'Changed protected workflow outside the exact source-gate projection')
         if path == '.github/workflows/main-fast-lane.yml':
             r.require(projected_main_workflow(before) == projected_main_workflow(after),
                       'Unreviewed automatic source-gate routing workflow')

@@ -113,7 +113,40 @@ def metadata_only_workflow(before, after):
         return False
 
 
+SELECTED_PREFLIGHT_BLOCKS = (
+    (b"    outputs:\n      root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}\n", b""),
+    (b"          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n"
+     b"        run: python3 -m validation.native_python_execute prepare\n",
+     b"        run: python3 -m validation.native_python_execute prepare\n"),
+    (b"          NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}\n"
+     b"          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}\n", b""),
+    (b'          elif [ "$NODE_SELECTION" = true ]; then\n'
+     b"            python3 -m validation.native_python_execute node\n", b""),
+    (b"        if: steps.workspace-continuation.outputs.root_retained != 'true'"
+     b" && needs.preflight.outputs.root_ownership_retained != 'true'\n",
+     b"        if: steps.workspace-continuation.outputs.root_retained != 'true'\n"),
+)
+
+
+def selected_preflight_projection(raw):
+    if b'root_ownership_retained' not in raw and b'NODE_SELECTION' not in raw:
+        return raw
+    receipts.require(all(raw.count(selected) == 1 for selected, _ in SELECTED_PREFLIGHT_BLOCKS),
+                     'Unreviewed selected Node or root custody workflow change')
+    for selected, original in SELECTED_PREFLIGHT_BLOCKS:
+        raw = raw.replace(selected, original)
+    return raw
+
+
+def source_gate_workflow_compatible(before, after):
+    try:
+        return metadata_only_workflow(before, selected_preflight_projection(after))
+    except receipts.ReceiptError:
+        return False
+
+
 def check_workflow_environment(workflow, expected):
+    workflow = selected_preflight_projection(workflow.encode()).decode()
     commands.canonical_job_keys(workflow)
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
