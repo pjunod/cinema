@@ -20,6 +20,8 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    'validation/selected_python_dependencies.py',
+    'tests/validation/test_selected_python_dependencies.py',
     'scripts/paperwork',
     'validation/paperwork_continuation.py',
     'tests/validation/test_paperwork_continuation.py',

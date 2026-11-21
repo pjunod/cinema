@@ -130,6 +130,20 @@ and landing validate it again. Default paperwork still executes its full rule
 set, and readying an enrolled PR requires the completed authenticated manual
 source gate. A preliminary deferral never becomes a passed method.
 
+The cluster facade census and media wire compatibility checks read the exact
+comparison tree. Imported journals omit the resolved runtime `origin/main`,
+so these two methods run against the bound current main in the selected
+preflight. Other paperwork methods keep their authenticated source outcomes.
+
+A selected missing CVVDP RGB16 packing case requires its pinned NumPy 2.2.6
+wheel on CPython 3.12 on Linux x86_64. Preparation verifies the official wheel and
+complete package closure, stages it under `target/validation/python-deps`, and
+checks the actual import before any selected test body. Only the operations
+process receives that NumPy namespace; no global install, image change or model
+runtime is involved. The execution markers and qualification artifact retain
+the actual interpreter/package identity. An unavailable dependency fails
+preparation instead of crediting a skip. Default unenrolled execution is unchanged.
+
 The source-gate provider uses unchanged `rust_units.Keys` with one closed
 metadata projection: only the scope step's API-token env plumbing is removed.
 Original compile/test recipe bytes must match their reviewed digest. Actual

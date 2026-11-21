@@ -19,8 +19,12 @@ RULE_MODULES = ('test_docs_index', 'test_infra_names', 'test_api_doc_routes',
                 'test_status_pr_claims', 'test_doc_status_audit', 'test_web_test_inventory',
                 'test_script_syntax', 'test_media_pool_wire', 'test_cluster_facade_ratchet',
                 'test_doc_size_budget')
+COMPARISON_METHODS = {
+    'test_cluster_facade_ratchet.ClusterFacadeRatchetTest.test_the_census_never_loosens_against_the_merge_base',
+    'test_media_pool_wire.TreeTests.test_head_wire_is_compatible_with_the_base',
+}
 COVERAGE_FIELDS = {'version', 'head', 'base', 'pr', 'run', 'preflight_job', 'evidence_sha256',
-                   'inventory_sha256', 'retained_ids', 'current_pass_ids', 'preflight_log_sha256'}
+                   'inventory_sha256', 'retained_ids', 'current_pass_ids', 'preflight_log_sha256', 'dependency_runtime'}
 
 
 def canonical_digest(value):
@@ -153,6 +157,21 @@ def rule_inventory(plan, root):
     return inventory, retained, due
 
 
+def bind_selection(plan, base, candidate):
+    # Imported PR journals do not record the resolved origin/main read by these methods.
+    operations = plan['suites']['operations']
+    r.require(COMPARISON_METHODS <= set(operations['inventory']),
+              'Comparison-domain paperwork cases changed')
+    for name in COMPARISON_METHODS:
+        operations['retained_source_records'].pop('operations:' + name, None)
+    operations['uncovered'] = sorted(set(operations['uncovered']) | COMPARISON_METHODS)
+    plan['comparison'] = {'base_sha': base, 'merge_target': base}
+    from validation import selected_python_dependencies as dependencies
+    dependency = dependencies.requirements(plan, candidate)
+    if dependency is not None:
+        plan['dependency_profile'] = dependency
+
+
 def prepare(api, value, environment, root, mode):
     bind, pull = binding(api, value, environment, root, mode)
     d = value['python_unit_evidence']; candidate = value['head']
@@ -165,7 +184,7 @@ def prepare(api, value, environment, root, mode):
     r.require(document['version'] == main.MAIN_ANCESTOR_POLICY and document['source_commit'] == candidate,
               'Paperwork needs exact-source authenticated main-Python continuation')
     plan = main.prepare(api, document, bind, candidate, repository)
-    plan['comparison'] = {'base_sha': bind['base_sha'], 'merge_target': bind['base_sha']}
+    bind_selection(plan, bind['base_sha'], candidate)
     inventory, retained, due = rule_inventory(plan, root)
     return bind, pull, plan, inventory, retained, due
 
@@ -183,10 +202,12 @@ def marker(plan, kind):
             'evidence_sha256': plan['evidence_sha256'],
             'inventory_sha256': canonical_digest(suite['inventory']),
             'selected_sha256': canonical_digest(suite['uncovered']),
-            'comparison': plan.get('comparison')}
+            'comparison': plan.get('comparison'),
+            'dependency_profile': plan.get('dependency_profile'),
+            'dependency_runtime': plan.get('dependency_runtime')}
 
 
-def current_outcomes(raw, plan):
+def current_outcomes(raw, plan, *, capture_runtime=False):
     text = re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+ ', '', raw.decode('utf-8', 'strict'), flags=re.M)
     begin = list(re.finditer(r'^SELECTED-PYTHON-BEGIN (.+)$', text, re.M))
     end = list(re.finditer(r'^SELECTED-PYTHON-END (.+)$', text, re.M))
@@ -194,8 +215,16 @@ def current_outcomes(raw, plan):
               and len(begin) == len(end) == 2, 'Missing or repeated direct Python execution framing')
     observed = {}
     previous = -1
+    from validation import selected_python_dependencies as dependencies
+    runtime_seen = None
     for index, kind in enumerate(('validation', 'operations')):
         expected = marker(plan, kind)
+        actual_begin = r.bounded_json(begin[index][1].encode())
+        runtime = actual_begin.get('dependency_runtime')
+        dependencies.validate_runtime(runtime, plan.get('dependency_profile'))
+        r.require(index == 0 or runtime_seen == runtime, 'Dependency runtime changed between selected suites')
+        runtime_seen = runtime
+        expected['dependency_runtime'] = runtime
         r.require(previous < begin[index].start() < end[index].start()
                   and r.bounded_json(begin[index][1].encode()) == expected
                   and r.bounded_json(end[index][1].encode()) == expected,
@@ -211,7 +240,7 @@ def current_outcomes(raw, plan):
                   'Current direct Python cases failed, skipped or incomplete')
         observed.update({kind + ':' + name: value for name, value in rows.items()})
         previous = end[index].end()
-    return observed
+    return (observed, runtime_seen) if capture_runtime else observed
 
 
 def coverage_shape(value, bind, run, inventory=None):
@@ -221,6 +250,9 @@ def coverage_shape(value, bind, run, inventory=None):
               and value['pr'] == bind['pull_request'] and value['run'] == run,
               'Unknown current paperwork coverage scope')
     r.positive(value['pr']); r.positive(value['preflight_job'])
+    from validation import selected_python_dependencies as dependencies
+    runtime = value['dependency_runtime']
+    dependencies.validate_runtime(runtime, dependencies.PROFILE if runtime is not None else None)
     for field in ('evidence_sha256', 'inventory_sha256', 'preflight_log_sha256'):
         r.require(isinstance(value[field], str) and retention.DIGEST.fullmatch(value[field]) is not None,
                   'Missing paperwork coverage digest')
@@ -250,12 +282,13 @@ def final_coverage(api, value, environment, root):
     r.require(header is not None and header[1] == 'preflight' and header[2] == 'workflow_dispatch',
               'Current preflight creator job differs')
     plan['evidence_sha256'] = value['python_unit_evidence']['sha256']
-    observed = current_outcomes(raw, plan)
+    observed, runtime = current_outcomes(raw, plan, capture_runtime=True)
     r.require(due <= set(observed), 'Required current paperwork methods lack direct outcomes')
     coverage = {'version': 1, 'head': value['head'], 'base': value['base'], 'pr': value['pr'],
                 'run': run_id, 'preflight_job': job['id'], 'evidence_sha256': plan['evidence_sha256'],
                 'inventory_sha256': canonical_digest(sorted(inventory)), 'retained_ids': sorted(retained),
-                'current_pass_ids': sorted(due), 'preflight_log_sha256': retention.digest(raw)}
+                'current_pass_ids': sorted(due), 'preflight_log_sha256': retention.digest(raw),
+                'dependency_runtime': runtime}
     coverage_shape(coverage, bind, run_id, inventory)
     return coverage
 

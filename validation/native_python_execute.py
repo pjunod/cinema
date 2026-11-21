@@ -38,7 +38,7 @@ def prepare(api, descriptor, binding, candidate):
         proof = main_python_continuation.prepare(api, document, binding, candidate, repository)
         result = {**proof, 'evidence_sha256': sha}
         if enrolled:
-            result['comparison'] = {'base_sha': binding['base_sha'], 'merge_target': binding['base_sha']}
+            paperwork.bind_selection(result, binding['base_sha'], candidate)
         return result
     receipts.require(set(document) == {'version', 'repository', 'pr', 'branch', 'base_sha',
                                        'source_commit', 'command_units'}
@@ -87,6 +87,10 @@ def main(kind):
         plan = prepare(retention.runner_api(os.environ),
                        receipts.bounded_json(os.environ['PYTHON_UNIT_EVIDENCE'].encode()),
                        receipts.bounded_json(os.environ['PROMOTION_BINDING'].encode()), candidate)
+        from validation import selected_python_dependencies as dependencies
+        dependency = plan.get('dependency_profile')
+        if dependency is not None:
+            plan['dependency_runtime'] = dependencies.stage(dependency, os.environ)
         receipts.atomic_json(SELECTION, plan)
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             print('selection_sha256=' + retention.digest(SELECTION.read_bytes()), file=output)
@@ -104,11 +108,14 @@ def main(kind):
                          'Python comparison input differs from exact current main')
         os.environ['PLURX_VALIDATION_BASE'] = comparison['base_sha']
         os.environ['PLURX_VALIDATION_MERGE_TARGET'] = comparison['merge_target']
+    from validation import selected_python_dependencies as dependencies
+    dependencies.activate(plan, kind)
     from validation.paperwork_continuation import marker
     import json
     identity = json.dumps(marker(plan, kind), sort_keys=True, separators=(',', ':'))
     print('SELECTED-PYTHON-BEGIN ' + identity, file=sys.stderr, flush=True)
     run_selection(plan['suites'][kind], receipts.discover(kind))
+    dependencies.finish(plan)
     print('SELECTED-PYTHON-END ' + identity, file=sys.stderr, flush=True)
 
 

@@ -138,6 +138,23 @@ class PaperworkContinuationTests(unittest.TestCase):
                                   'uncovered': ['test_docs_index.Case.test_body'],
                                   'retained_source_records': {}} for kind in ('validation', 'operations')}}
 
+    def test_unbound_historical_comparison_reexecutes_only_exact_actual_tree_cases(self):
+        plan = self.plan()
+        operations = plan['suites']['operations']
+        retained = 'test_media_pool_wire.TreeTests.test_inventory_is_exhaustive'
+        operations['inventory'] += sorted(pc.COMPARISON_METHODS | {retained})
+        operations['retained_source_records'] = {
+            'operations:' + name: {} for name in pc.COMPARISON_METHODS | {retained}
+        }
+
+        pc.bind_selection(plan, 'd' * 40, plan['source_commit'])
+
+        self.assertEqual(plan['comparison'], {'base_sha': 'd' * 40, 'merge_target': 'd' * 40})
+        self.assertEqual(set(operations['uncovered']),
+                         pc.COMPARISON_METHODS | {'test_docs_index.Case.test_body'})
+        self.assertEqual(set(operations['retained_source_records']), {'operations:' + retained})
+        self.assertNotIn('dependency_profile', plan)
+
     def execution(self, plan):
         text = ''
         for kind in ('validation', 'operations'):
@@ -177,7 +194,8 @@ class PaperworkContinuationTests(unittest.TestCase):
         bind = self.scope(); ids = ['operations:test_docs_index.Case.test_one']
         value = {'version': 1, 'head': 'a' * 40, 'base': 'b' * 40, 'pr': 17, 'run': 9,
                  'preflight_job': 12, 'evidence_sha256': 'c' * 64, 'inventory_sha256': pc.canonical_digest(ids),
-                 'retained_ids': [], 'current_pass_ids': ids, 'preflight_log_sha256': 'd' * 64}
+                 'retained_ids': [], 'current_pass_ids': ids, 'preflight_log_sha256': 'd' * 64,
+                 'dependency_runtime': None}
         pc.coverage_shape(value, bind, 9, ids)
         for changed in ({k: v for k, v in value.items() if k != 'current_pass_ids'},
                         {**value, 'run': 8}, {**value, 'head': 'e' * 40},
