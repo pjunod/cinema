@@ -1348,7 +1348,7 @@ impl ReceiverStartActor {
             let custody = retained;
             // One outage budget for this connection's whole life.
             let mut span = crate::serving_fence::UnknownSpan::default();
-            let mut serving = state.serving.subscribe();
+            let mut serving = state.cluster.subscribe_authority();
             // Looks happen when an authority table changes, the serving
             // fence moves, or the lease or the original login lapses; at
             // most once a second (A6 M3). The connection was admitted on a

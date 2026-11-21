@@ -2800,6 +2800,99 @@ async fn local_https_certificate_exports_only_loaded_public_chain_even_after_dis
     assert_eq!(after["certificate"], snapshot["certificate"]);
 }
 
+#[test]
+fn discovery_policy_route_is_exact_for_every_admission_projection() {
+    for role in [
+        None,
+        Some(LocalServingRole::Learner),
+        Some(LocalServingRole::Fenced),
+    ] {
+        assert!(capacity_role_refusal(role, &Method::GET, crate::discovery::PATH).is_none());
+        assert!(capacity_role_refusal(role, &Method::POST, crate::discovery::PATH).is_some());
+        assert!(
+            capacity_role_refusal(role, &Method::GET, "/api/v1/server/discovery/extra").is_some()
+        );
+        assert!(capacity_role_refusal(role, &Method::GET, "/api/v1/settings").is_some());
+    }
+    assert!(learner_route_eligible(&Method::GET, crate::discovery::PATH));
+    assert!(maintenance_route_eligible(
+        &Method::GET,
+        crate::discovery::PATH
+    ));
+    assert!(!maintenance_route_eligible(
+        &Method::POST,
+        crate::discovery::PATH
+    ));
+}
+
+#[tokio::test]
+async fn discovery_route_survives_learner_and_maintenance_admission() {
+    // The real handler's state is standalone. Inject only admission facts,
+    // proving both production gates admit this exact Store-free public route.
+    let app = router(test_state_without_router());
+    for (role, maintenance) in [
+        (LocalServingRole::Unclustered, false),
+        (LocalServingRole::Learner, false),
+        (LocalServingRole::Fenced, false),
+        (LocalServingRole::Voter, true),
+    ] {
+        let admitted = app.clone().layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: Next| async move {
+                if let Some(response) = capacity_maintenance_refusal(
+                    maintenance,
+                    request.method(),
+                    request.uri().path(),
+                ) {
+                    return response;
+                }
+                if let Some(response) =
+                    capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                {
+                    return response;
+                }
+                next.run(request).await
+            },
+        ));
+        let response = admitted
+            .clone()
+            .oneshot(get(crate::discovery::PATH, None))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("bounded eligibility"),
+            json!({"advertise":true})
+        );
+        if maintenance || role == LocalServingRole::Learner {
+            assert_eq!(
+                call(&admitted, get("/api/v1/settings", None)).await.0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        assert!(!learner_route_eligible(&method, crate::discovery::PATH));
+        assert!(!maintenance_route_eligible(&method, crate::discovery::PATH));
+    }
+    for path in [
+        "/api/v1/server/discovery/extra",
+        "/api/v1/server/discovery-other",
+    ] {
+        assert!(!learner_route_eligible(&Method::GET, path));
+        assert!(!maintenance_route_eligible(&Method::GET, path));
+    }
+}
+
 #[tokio::test]
 async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
     let root = crate::test_tempdir().expect("tempdir");
@@ -3071,8 +3164,8 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
 async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
     use plurx_core::cluster::clock::PeerClockOffset;
     let (app, state) = test_app_with_state();
-    state.serving.validation_set_ready(true).await;
-    let clock = state.membership.clock_guard();
+    state.cluster.test_fence().validation_set_ready(true).await;
+    let clock = state.cluster.test_membership().clock_guard();
     let publish = |offset_us| {
         let ticket = clock.roster(&["peer".to_owned()]);
         assert!(clock.publish(
@@ -3129,7 +3222,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         call_text(&app, get("/healthz", None)).await.0,
         StatusCode::OK
     );
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     assert_eq!(
         evaluate_readiness(&state).await.reason,
         Some(ReadinessFailure::QuorumUnavailable),
@@ -3139,7 +3232,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         cluster_operations::operations_readiness(&state).reason,
         Some(ReadinessFailure::QuorumUnavailable)
     );
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     clock.roster_failed();
     assert!(
         evaluate_readiness(&state).await.ready,
@@ -3165,7 +3258,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
 #[tokio::test]
 async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
     let (app, state) = test_app_with_state();
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
 
     assert_eq!(
         evaluate_readiness(&state).await,
@@ -6898,7 +6991,7 @@ async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_w
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
 
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     let (status, readiness) = call(&app, get("/api/v1/live-tv/readiness", Some(&admin))).await;
     assert_eq!(status, StatusCode::OK, "{readiness}");
     assert_eq!(readiness["ready"], false);
@@ -21590,7 +21683,7 @@ async fn facts_skip_photos_and_folders() {
 async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects() {
     use tower::ServiceExt;
     let state = test_state_without_router();
-    let fence = state.serving.clone();
+    let fence = state.cluster.test_fence().clone();
     let app = Router::new()
         .route(
             "/items/one/direct",
@@ -21643,7 +21736,7 @@ async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects
 async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
     use tower::ServiceExt;
     let state = test_state_without_router();
-    let fence = state.serving.clone();
+    let fence = state.cluster.test_fence().clone();
     let app = Router::new()
         .route(
             "/internal/media/fragment-index/key",

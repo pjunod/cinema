@@ -1,7 +1,7 @@
 //! Public HDHomeRun readiness and sanitized channel lineup.
 
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use super::peer_transport::{
-    deadline_after, PeerAuthMode, PeerResponse, PeerTransport, PeerTransportError,
-};
+use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransportError};
 use crate::live_tv::{
     capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
     LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus, LiveTvSnapshot,
@@ -183,7 +181,7 @@ pub(crate) async fn guide_replica_loop(
         // then is the configuration read from the Store and acted on.
         if guide_viewed_on(&state.applied, &state.node_id).await {
             if let Ok(config) = state.live_tv.config().await {
-                if config.guide_fetches() && state.serving.is_ready() {
+                if config.guide_fetches() && state.cluster.authority().state().ready {
                     let _ = owner_guide(&state, &config, guide::refresh_window(config.guide_hours))
                         .await;
                 }
@@ -493,7 +491,7 @@ pub(crate) async fn issue_start(
     body: Option<Json<PublicLiveTvStart>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let deadline = deadline_after(PUBLIC_START_DEADLINE);
-    let generation = state.serving.authority().admit().ok_or_else(|| {
+    let generation = state.cluster.authority().admit().ok_or_else(|| {
         api_error(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
         ))
@@ -540,7 +538,7 @@ pub(crate) async fn start_session(
     // snapshot, two start attempts and two activation attempts can outlive the
     // clients' 45 s POST timeout and leave a session nobody is holding.
     let deadline = deadline_after(PUBLIC_START_DEADLINE);
-    let ingress_generation = state.serving.authority().admit().ok_or_else(|| {
+    let ingress_generation = state.cluster.authority().admit().ok_or_else(|| {
         ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
@@ -626,7 +624,7 @@ pub(crate) async fn start_session(
     let current = state.live_tv.config().await.map_err(api_error)?;
     if current.generation != config.generation
         || !current.enabled
-        || !state.serving.authority().is_current(ingress_generation)
+        || !state.cluster.authority().is_current(ingress_generation)
     {
         let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
         return Err(ApiError::typed_detail(
@@ -1043,7 +1041,7 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    let protocol = state.membership.live_tv_protocol_pending_nodes().await;
+    let protocol = state.cluster.live_tv_pending_nodes().await;
     let protocol_ready = matches!(&protocol, Ok(nodes) if nodes.is_empty());
     checks.push(LiveTvReadinessCheck {
         id: "cluster_protocol",
@@ -1062,7 +1060,7 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    let serving_ready = state.serving.is_ready();
+    let serving_ready = state.cluster.authority().state().ready;
     checks.push(LiveTvReadinessCheck {
         id: "serving_authority",
         ready: serving_ready,
@@ -1387,7 +1385,7 @@ async fn owner_resource(
     state: &AppState,
     request: LiveTvResourceRequest,
 ) -> Result<Response<Body>, ApiError> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
@@ -1605,218 +1603,6 @@ async fn owner_recovery_exchange<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// Same order as `PEER_STATUS_CACHE_TTL` in `cluster_operations`, and one sixth
-/// of the roster's own 30 s `NODE_REACHABLE_WINDOW_MS`.
-///
-/// What this bounds is the staleness this memory *adds* to the roster's, not
-/// how soon a dead peer is noticed. The memory refills from `activity_peers`,
-/// which keeps reporting a silent peer `reachable` for the whole 30 s window,
-/// so a peer that stops heartbeating stays here for as long as the roster calls
-/// it reachable plus at most this TTL. The TTL cannot make the memory notice a
-/// dead peer before the roster does. What stops an ingress relaying at a dead
-/// owner is the other rule: every `PeerTransportError` from an exchange drops
-/// the entry, so the first failed request re-resolves.
-pub(crate) const OWNER_PEER_TTL: Duration = Duration::from_secs(5);
-
-/// Where the owner was last resolved to be. Only an address: which node owns a
-/// capability is decided per request by `capability_owner`, and this is
-/// consulted only after that decision has already named `node_id`.
-struct CachedOwnerPeer {
-    node_id: String,
-    http_base: String,
-    resolved_at: tokio::time::Instant,
-}
-
-/// One HTTP client for every Live TV ingress-to-owner exchange, plus a short
-/// memory of where the owner is.
-///
-/// Nothing about a credential is cached: `PeerTransport` signs each request
-/// and verifies each response from `membership` exactly as it did when every
-/// call site built its own client. What is saved is the client (a connection
-/// pool that used to be built and dropped per request) and the
-/// `activity_peers` read behind it.
-pub(crate) struct LiveTvPeers {
-    transport: PeerTransport,
-    owner: StdMutex<Option<CachedOwnerPeer>>,
-    metrics: std::sync::Arc<LiveTvPeerMetrics>,
-}
-
-/// The counters alone, so the `/metrics` substate can read them without
-/// holding this node's Live TV HTTP client.
-#[derive(Default)]
-pub(crate) struct LiveTvPeerMetrics {
-    hits: AtomicU64,
-    resolutions: AtomicU64,
-    invalidations: AtomicU64,
-}
-
-impl LiveTvPeerMetrics {
-    /// Three series an operator reads together: `hit` should dwarf `resolved`
-    /// on a busy ingress, and a climbing `invalidated` is the owner moving or
-    /// a peer refusing this node's signatures, not cache pressure.
-    pub(crate) fn prometheus(&self) -> String {
-        format!(
-            "# HELP plurx_live_tv_owner_peer_total Live TV owner-address resolutions on an ingress, by outcome.\n\
-             # TYPE plurx_live_tv_owner_peer_total counter\n\
-             plurx_live_tv_owner_peer_total{{outcome=\"hit\"}} {}\n\
-             plurx_live_tv_owner_peer_total{{outcome=\"resolved\"}} {}\n\
-             plurx_live_tv_owner_peer_total{{outcome=\"invalidated\"}} {}\n",
-            self.hits.load(Ordering::Acquire),
-            self.resolutions.load(Ordering::Acquire),
-            self.invalidations.load(Ordering::Acquire),
-        )
-    }
-}
-
-impl LiveTvPeers {
-    pub(crate) fn new(
-        membership: plurx_core::cluster::membership::MembershipManager,
-    ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            transport: PeerTransport::new(membership),
-            owner: StdMutex::new(None),
-            metrics: std::sync::Arc::new(LiveTvPeerMetrics::default()),
-        })
-    }
-
-    pub(crate) fn metrics_handle(&self) -> std::sync::Arc<LiveTvPeerMetrics> {
-        std::sync::Arc::clone(&self.metrics)
-    }
-
-    fn owner_slot(&self) -> std::sync::MutexGuard<'_, Option<CachedOwnerPeer>> {
-        self.owner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Drop the remembered address. Called whenever an exchange proved the
-    /// address wrong rather than merely unlucky — see `note_owner_exchange`.
-    fn invalidate_owner(&self) {
-        if self.owner_slot().take().is_some() {
-            self.metrics.invalidations.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// The owner's `(node_id, http_base)`, resolved at most once per
-    /// `OWNER_PEER_TTL` or per invalidation.
-    ///
-    /// `expected` is the node a capability already named, so a cached entry
-    /// for a different node is a miss rather than an answer: the cache maps a
-    /// node id to a base and never chooses the owner.
-    async fn owner_base<F, Fut, E>(&self, expected: &str, resolve: F) -> Result<(String, String), E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<(String, String), E>>,
-    {
-        let now = tokio::time::Instant::now();
-        {
-            let cached = self.owner_slot();
-            if let Some(entry) = cached.as_ref() {
-                if entry.node_id == expected
-                    && now.duration_since(entry.resolved_at) < OWNER_PEER_TTL
-                {
-                    let answer = (entry.node_id.clone(), entry.http_base.clone());
-                    drop(cached);
-                    self.metrics.hits.fetch_add(1, Ordering::Relaxed);
-                    return Ok(answer);
-                }
-            }
-        }
-        let (node_id, http_base) = resolve().await?;
-        self.metrics.resolutions.fetch_add(1, Ordering::Relaxed);
-        *self.owner_slot() = Some(CachedOwnerPeer {
-            node_id: node_id.clone(),
-            http_base: http_base.clone(),
-            resolved_at: tokio::time::Instant::now(),
-        });
-        Ok((node_id, http_base))
-    }
-
-    /// What an exchange proved about *where the owner is*.
-    ///
-    /// Every `PeerTransportError` drops the entry, for two different reasons:
-    /// `Unreachable` and `TimedOut` say the address or its reachability
-    /// changed, and `InvalidResponse` says a key or capability on the peer did
-    /// — neither is something to keep routing at for the rest of the TTL. A
-    /// 404 on an internal path is the third: the peer is an older build that
-    /// does not serve this route, and re-resolving is the only way this node
-    /// ever notices a newer peer taking over. Any other status means the owner
-    /// answered from the address we had, which is exactly what the entry
-    /// claims.
-    fn note_owner_exchange(&self, outcome: Result<reqwest::StatusCode, PeerTransportError>) {
-        match outcome {
-            Err(_) | Ok(reqwest::StatusCode::NOT_FOUND) => self.invalidate_owner(),
-            Ok(_) => {}
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn request(
-        &self,
-        expected_node_id: &str,
-        base: &str,
-        method: reqwest::Method,
-        path: &str,
-        body: Vec<u8>,
-        deadline: tokio::time::Instant,
-        max_response_bytes: usize,
-        auth_mode: PeerAuthMode,
-    ) -> Result<PeerResponse, PeerTransportError> {
-        let outcome = self
-            .transport
-            .request(
-                expected_node_id,
-                base,
-                method,
-                path,
-                body,
-                deadline,
-                max_response_bytes,
-                auth_mode,
-            )
-            .await;
-        self.note_owner_exchange(
-            outcome
-                .as_ref()
-                .map(|response| response.status)
-                .map_err(|error| *error),
-        );
-        outcome
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn request_stream(
-        &self,
-        expected_node_id: &str,
-        base: &str,
-        method: reqwest::Method,
-        path: &str,
-        body: Vec<u8>,
-        deadline: tokio::time::Instant,
-        auth_mode: PeerAuthMode,
-    ) -> Result<reqwest::Response, PeerTransportError> {
-        let outcome = self
-            .transport
-            .request_stream(
-                expected_node_id,
-                base,
-                method,
-                path,
-                body,
-                deadline,
-                auth_mode,
-            )
-            .await;
-        self.note_owner_exchange(
-            outcome
-                .as_ref()
-                .map(reqwest::Response::status)
-                .map_err(|error| *error),
-        );
-        outcome
-    }
-}
-
 /// Every failure here happens *before* a request leaves this node, so none of
 /// them is the owner's verdict — and a client that reads one as a verdict
 /// throws away the hint that is its only handle on a session the owner may
@@ -1831,14 +1617,11 @@ async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String)
             Decided::Ingress,
         ));
     }
-    state
-        .live_tv_peers
-        .owner_base(expected, || resolve_owner_peer(state, expected))
-        .await
+    resolve_owner_peer(state, expected).await
 }
 
-/// The roster read the cache above stands in front of: one node-local hiqlite
-/// `query_map` plus the in-process metrics read inside `activity_peers`.
+/// Resolve the selected owner from the current stamped directory. Each
+/// lookup re-evaluates applied membership, endpoint and time-based reachability.
 async fn resolve_owner_peer(
     state: &AppState,
     expected: &str,
@@ -1970,7 +1753,7 @@ async fn owner_snapshot_within(
     probe_graph: bool,
     budget: tokio::time::Instant,
 ) -> Result<LiveTvSnapshot, LiveTvError> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));
@@ -2216,11 +1999,21 @@ async fn voter(
     state: &AppState,
     node_id: &str,
 ) -> Result<Option<(String, String)>, crate::cluster::ClusterError> {
-    Ok(state
-        .cluster
-        .peers(crate::cluster::Purpose::Voters)
-        .await?
-        .find(node_id))
+    owner_from_roster(
+        node_id,
+        state.cluster.peers(crate::cluster::Purpose::Voters),
+    )
+    .await
+}
+
+/// Consume this lookup's fresh roster; never retain an address or a failure.
+async fn owner_from_roster(
+    expected: &str,
+    roster: impl std::future::Future<
+        Output = Result<crate::cluster::Peers, crate::cluster::ClusterError>,
+    >,
+) -> Result<Option<(String, String)>, crate::cluster::ClusterError> {
+    Ok(roster.await?.find(expected))
 }
 
 /// Up to three voters to ask for a relayed guide, in Raft order: reachable,
@@ -2603,176 +2396,94 @@ mod tests {
         );
     }
 
-    /// A `LiveTvPeers` with no membership behind it. Every assertion below is
-    /// about the cache in front of the roster read, so the resolver is a
-    /// closure the test counts; the transport is never used.
-    fn test_peers() -> std::sync::Arc<LiveTvPeers> {
-        LiveTvPeers::new(plurx_core::cluster::membership::MembershipManager::unavailable())
-    }
-
-    async fn resolved(
-        peers: &LiveTvPeers,
-        expected: &str,
-        base: &'static str,
-        calls: &AtomicU64,
-    ) -> Result<(String, String), ()> {
-        peers
-            .owner_base(expected, || async {
-                calls.fetch_add(1, Ordering::Relaxed);
-                Ok((expected.to_owned(), base.to_owned()))
+    #[tokio::test]
+    async fn owner_lookup_observes_every_fresh_roster_without_a_ttl() {
+        let lookups = AtomicU64::new(0);
+        for port in 8080..8100 {
+            let base = format!("http://owner-a:{port}");
+            let answer = owner_from_roster("owner-a", async {
+                lookups.fetch_add(1, Ordering::Relaxed);
+                Ok(crate::cluster::Peers::for_test(vec![
+                    plurx_core::cluster::membership::ActivityPeer {
+                        node_id: "owner-a".into(),
+                        raft_id: 1,
+                        reachable: true,
+                        http_base: Some(base.clone()),
+                    },
+                ]))
             })
             .await
+            .expect("fresh roster");
+            assert_eq!(answer, Some(("owner-a".into(), base)));
+        }
+        assert_eq!(lookups.load(Ordering::Relaxed), 20);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn relayed_requests_share_one_client_and_resolve_the_owner_once_per_ttl() {
-        // Twenty relayed resources inside one second is an ordinary playlist
-        // poll from four clients. Before this cache each one did its own
-        // `activity_peers` read — a node-local SQL query plus an in-process
-        // metrics read — and built its own `reqwest::Client`.
-        let peers = test_peers();
-        let calls = AtomicU64::new(0);
-        for _ in 0..20 {
-            let answer = resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-                .await
-                .expect("resolution");
-            assert_eq!(
-                answer,
-                ("owner-a".to_owned(), "http://owner-a:8080".to_owned())
-            );
-            tokio::time::advance(Duration::from_millis(50)).await;
-        }
+    #[tokio::test]
+    async fn owner_lookup_observes_removal_and_reachability_and_never_another_identity() {
+        let row = |id: &str, reachable, base: Option<&str>| {
+            plurx_core::cluster::membership::ActivityPeer {
+                node_id: id.into(),
+                raft_id: 1,
+                reachable,
+                http_base: base.map(str::to_owned),
+            }
+        };
+        let find = |expected: &'static str, rows| {
+            owner_from_roster(expected, async move {
+                Ok(crate::cluster::Peers::for_test(rows))
+            })
+        };
         assert_eq!(
-            calls.load(Ordering::Relaxed),
-            1,
-            "one resolution for twenty relayed requests inside the TTL"
+            find(
+                "owner-b",
+                vec![
+                    row("owner-a", true, Some("http://a")),
+                    row("owner-b", true, Some("http://b"))
+                ]
+            )
+            .await
+            .expect("roster lookup"),
+            Some(("owner-b".into(), "http://b".into()))
         );
-        assert_eq!(peers.metrics.hits.load(Ordering::Relaxed), 19);
-        assert_eq!(peers.metrics.resolutions.load(Ordering::Relaxed), 1);
-
-        // And the TTL really is a bound, not a latch: past it the roster is
-        // read again, because `reachable` is derived from 10 s heartbeats and
-        // a five-second-old answer is the most this may assert.
-        tokio::time::advance(OWNER_PEER_TTL).await;
-        resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-            .await
-            .expect("resolution");
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_owner_exchange_invalidates_the_cached_peer() {
-        // Each of the three transport failures says something different about
-        // the peer, and all three say the address is no longer proven: an
-        // unreachable or timed-out owner may have moved, and a response this
-        // node cannot verify means a key or capability changed under it.
-        for error in [
-            PeerTransportError::Unreachable,
-            PeerTransportError::TimedOut,
-            PeerTransportError::InvalidResponse,
-        ] {
-            let peers = test_peers();
-            let calls = AtomicU64::new(0);
-            resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
+        assert!(
+            find("owner-b", vec![row("owner-a", true, Some("http://a"))])
                 .await
-                .expect("first resolution");
-            peers.note_owner_exchange(Err(error));
-            resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
+                .expect("roster lookup")
+                .is_none()
+        );
+        assert!(
+            find("owner-b", vec![row("owner-b", false, Some("http://b"))])
                 .await
-                .expect("second resolution");
-            assert_eq!(
-                calls.load(Ordering::Relaxed),
-                2,
-                "{error:?} must re-resolve rather than keep routing at the old address"
-            );
-            assert_eq!(peers.metrics.invalidations.load(Ordering::Relaxed), 1);
-        }
+                .expect("roster lookup")
+                .is_none()
+        );
+        assert!(find("owner-b", vec![row("owner-b", true, None)])
+            .await
+            .expect("roster lookup")
+            .is_none());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn an_owner_that_does_not_serve_an_internal_path_is_re_resolved_and_any_other_status_is_not(
-    ) {
-        // A 404 on an internal path is an older build answering, so the next
-        // request looks for the owner again rather than spending the TTL on a
-        // peer that cannot serve the route. Every other status — including the
-        // 503 a busy owner returns and the 410 an expired capability gets — was
-        // answered *from this address*, which is all the entry claims.
-        let peers = test_peers();
-        let calls = AtomicU64::new(0);
-        resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-            .await
-            .expect("first resolution");
-        for status in [
-            reqwest::StatusCode::OK,
-            reqwest::StatusCode::GONE,
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            reqwest::StatusCode::CONFLICT,
-        ] {
-            peers.note_owner_exchange(Ok(status));
-            resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-                .await
-                .expect("cached");
-            assert_eq!(calls.load(Ordering::Relaxed), 1, "{status} kept the entry");
-        }
-        peers.note_owner_exchange(Ok(reqwest::StatusCode::NOT_FOUND));
-        resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-            .await
-            .expect("re-resolution");
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
-        assert_eq!(peers.metrics.invalidations.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_owner_move_is_a_miss_and_never_answers_for_the_wrong_node() {
-        // The capability names its owner before this is consulted, so an entry
-        // for another node is not an answer at all. Returning the cached base
-        // here would relay a capability to a node that does not hold it.
-        let peers = test_peers();
-        let calls = AtomicU64::new(0);
-        resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-            .await
-            .expect("owner A");
-        let moved = resolved(&peers, "owner-b", "http://owner-b:8080", &calls)
-            .await
-            .expect("owner B");
-        assert_eq!(moved.0, "owner-b");
-        assert_eq!(moved.1, "http://owner-b:8080");
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
-        assert_eq!(peers.metrics.hits.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_resolution_is_not_remembered_as_an_address() {
-        // A roster read that found no reachable owner must leave the cache
-        // empty: caching the failure would turn one unreachable moment into
-        // five seconds of them, and caching the *previous* address would route
-        // at a node the roster has just stopped calling reachable.
-        let peers = test_peers();
-        let calls = AtomicU64::new(0);
-        let failed: Result<(String, String), ()> = peers
-            .owner_base("owner-a", || async {
-                calls.fetch_add(1, Ordering::Relaxed);
-                Err(())
-            })
-            .await;
-        assert!(failed.is_err());
-        assert_eq!(peers.metrics.resolutions.load(Ordering::Relaxed), 0);
-        resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
-            .await
-            .expect("resolution after the failure");
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn the_owner_peer_ttl_stays_inside_the_window_the_roster_derives_reachability_from() {
-        // `reachable` is `now - last_seen_at <= 30 s`, refreshed by 10 s
-        // heartbeats. The memory refills from that roster, so it can never
-        // notice a silent peer sooner than the roster does; the TTL only bounds
-        // how much staleness it adds on top (here at most 5 s over the 30 s
-        // window). A dead owner is dropped from the memory by the first failed
-        // exchange, which `a_failed_owner_exchange_invalidates_the_cached_peer`
-        // pins. This guard keeps the added staleness small against the window.
-        assert!(OWNER_PEER_TTL <= Duration::from_secs(30) / 6);
+    #[tokio::test]
+    async fn failed_owner_lookup_is_retried_against_the_next_roster() {
+        assert!(owner_from_roster("owner-a", async {
+            Err(crate::cluster::ClusterError::for_test())
+        })
+        .await
+        .is_err());
+        let answer = owner_from_roster("owner-a", async {
+            Ok(crate::cluster::Peers::for_test(vec![
+                plurx_core::cluster::membership::ActivityPeer {
+                    node_id: "owner-a".into(),
+                    raft_id: 1,
+                    reachable: true,
+                    http_base: Some("http://new".into()),
+                },
+            ]))
+        })
+        .await
+        .expect("new lookup");
+        assert_eq!(answer, Some(("owner-a".into(), "http://new".into())));
     }
 
     #[test]

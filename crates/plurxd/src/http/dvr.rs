@@ -461,7 +461,7 @@ pub(crate) async fn overview(
         .await
         .ok()
         .map(|settings| LiveTvConfig::from_snapshot(&settings, &state.node_id).owner_node_id);
-    let peers = if state.cluster_advertisement && state.membership.is_replicated() {
+    let peers = if state.cluster_advertisement && state.cluster.role().is_clustered() {
         match owner.filter(|owner| owner != &state.node_id) {
             Some(owner) => state
                 .peer_activity

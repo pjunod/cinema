@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 
-use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::store::{
     AnalysisRequest, LiveAnalysisEngines, NewAnalysisRequest, Store, StrandedRemedy,
 };
@@ -24,7 +23,7 @@ use crate::state::AppState;
 pub(crate) struct ReconcileContext<'a> {
     pub(crate) store: &'a dyn Store,
     pub(crate) node_id: &'a str,
-    pub(crate) membership: Option<&'a MembershipManager>,
+    pub(crate) jobs: Option<&'a crate::cluster::Jobs>,
     pub(crate) peers: Option<&'a PeerActivityClient>,
 }
 
@@ -33,7 +32,7 @@ impl<'a> ReconcileContext<'a> {
         Self {
             store: &*state.store,
             node_id: &state.node_id,
-            membership: Some(&state.membership),
+            jobs: Some(state.cluster.jobs()),
             peers: Some(&state.peer_activity),
         }
     }
@@ -111,19 +110,7 @@ pub(crate) async fn engines_in(
 /// `{this node}` on a single node, `None` when replicated membership could
 /// not be read (which disables that remedy rather than guessing).
 async fn read_members(ctx: ReconcileContext<'_>) -> Option<std::collections::BTreeSet<String>> {
-    let membership = ctx.membership?;
-    let mut members = std::collections::BTreeSet::from([ctx.node_id.to_owned()]);
-    if membership.is_replicated() {
-        members.extend(
-            membership
-                .operations_peers()
-                .await
-                .ok()?
-                .into_iter()
-                .map(|peer| peer.node_id),
-        );
-    }
-    Some(members)
+    ctx.jobs?.reconciliation_members(ctx.node_id).await.ok()
 }
 
 async fn read_engines(ctx: ReconcileContext<'_>) -> Result<BTreeMap<String, String>, ApiError> {
@@ -134,8 +121,8 @@ async fn read_engines(ctx: ReconcileContext<'_>) -> Result<BTreeMap<String, Stri
             crate::ffmpeg::fragment_index_engine_digest().await,
         );
     }
-    if let (Some(membership), Some(peers)) = (ctx.membership, ctx.peers) {
-        if !membership.is_replicated() {
+    if let (Some(jobs), Some(peers)) = (ctx.jobs, ctx.peers) {
+        if !jobs.clustered() {
             return Ok(engines);
         }
         let peers = peers.snapshots().await.map_err(|_| {

@@ -2405,7 +2405,7 @@
     include!("../../vodencode_manager_tests.rs");
 
     async fn seed_file(store: &Arc<dyn Store>) -> i64 {
-        seed_file_at(store, &placeholder_source().await).await
+        seed_file_at(store, placeholder_source()).await
     }
 
     /// The stand-in, not FFmpeg, is what the start spawned. Its marker is
@@ -2461,89 +2461,31 @@
     /// against a process exit, and a loaded runner lost it in about one
     /// transcode test per full run.
     ///
-    /// Encode one independent 4K frame, then stream-copy it at 50-second
-    /// intervals. Each packet is a real keyframe, and the last packet ends
-    /// at 6,000 seconds. Nextest starts each test in its own process, so
-    /// publish one complete file without replacing a parallel winner.
-    async fn placeholder_source() -> String {
-        static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
-        SOURCE
-            .get_or_init(|| async {
-                let dir = std::fs::canonicalize(std::env::temp_dir())
-                    .expect("canonical system temporary directory");
-                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s-loop.mkv");
-                if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
-                    return path.to_string_lossy().into_owned();
-                }
+    /// Embed the sparse 4K HEVC source so parallel test processes can
+    /// open it without competing for an encoder during startup.
+    fn placeholder_source() -> &'static str {
+        static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        const VIDEO: &[u8] = include_bytes!("placeholder-4k-hevc.mkv");
+        SOURCE.get_or_init(|| {
+            use std::io::Write;
 
-                let seed = tempfile::NamedTempFile::new_in(&dir)
-                    .expect("unique placeholder seed path")
-                    .into_temp_path();
-                let staging = tempfile::NamedTempFile::new_in(&dir)
-                    .expect("unique placeholder staging path")
-                    .into_temp_path();
-                let ffmpeg = crate::ffmpeg::ffmpeg_bin();
-                tokio::time::timeout(std::time::Duration::from_secs(120), async {
-                    let mut encode = tokio::process::Command::new(&ffmpeg);
-                    encode.args([
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "color=c=black:size=3840x2160:rate=1/50:duration=50",
-                        "-frames:v",
-                        "1",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:v",
-                        "libx265",
-                        "-preset",
-                        "ultrafast",
-                        "-x265-params",
-                        "log-level=none:keyint=1:pools=none",
-                    ]);
-                    run_placeholder_ffmpeg(encode, seed.as_ref(), "encode").await;
-
-                    let mut remux = tokio::process::Command::new(&ffmpeg);
-                    remux
-                        .args(["-stream_loop", "119", "-i"])
-                        .arg(&seed)
-                        .args(["-map", "0:v:0", "-c:v", "copy"]);
-                    run_placeholder_ffmpeg(remux, staging.as_ref(), "remux").await;
-                })
-                .await
-                .expect("placeholder source creation exceeded its deadline");
-
+            let dir = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical system temporary directory");
+            let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s-v2.mkv");
+            if !path.exists() {
+                let mut staging = tempfile::NamedTempFile::new_in(&dir)
+                    .expect("create a private placeholder source");
+                staging.write_all(VIDEO).expect("write the placeholder source");
                 if let Err(error) = staging.persist_noclobber(&path) {
-                    assert!(
-                        error.error.kind() == std::io::ErrorKind::AlreadyExists
-                            && std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0),
-                        "publishing the placeholder source failed: {error}"
-                    );
+                    assert_eq!(error.error.kind(), std::io::ErrorKind::AlreadyExists);
                 }
-                path.to_string_lossy().into_owned()
-            })
-            .await
-            .clone()
-    }
-
-    async fn run_placeholder_ffmpeg(
-        mut command: tokio::process::Command,
-        path: &std::path::Path,
-        stage: &str,
-    ) {
-        let output = command
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .args(["-hide_banner", "-loglevel", "error", "-f", "matroska", "-y"])
-            .arg(path)
-            .output()
-            .await
-            .unwrap_or_else(|error| panic!("starting placeholder source {stage} failed: {error}"));
-        assert!(
-            output.status.success(),
-            "placeholder source {stage} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+            }
+            assert_eq!(
+                std::fs::read(&path).expect("read the placeholder source"),
+                VIDEO
+            );
+            path.to_string_lossy().into_owned()
+        })
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {

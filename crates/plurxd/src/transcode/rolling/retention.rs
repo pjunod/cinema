@@ -333,7 +333,10 @@ pub(super) async fn gc_expired_segments(session: &Session) {
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                             Err(error) => {
                                 removed = false;
-                                tracing::warn!(target: "plurxd::transcode", %error, %child, index, "split rendition remains in retired scratch");
+                                tracing::warn!(
+                                    target: "plurxd::transcode",
+                                    %error, %child, index, "split rendition remains in retired scratch"
+                                );
                             }
                         }
                     }

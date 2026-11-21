@@ -1456,8 +1456,9 @@ async fn authenticate(
             tokio::time::timeout(
                 Duration::from_secs(9),
                 state
-                    .membership
-                    .authorize_internal_peer_request(&auth, "POST", path, body)
+                    .cluster
+                    .authentication()
+                    .authorize_exact_request(&auth, "POST", path, body)
             )
             .await,
             Ok(Ok(true))
@@ -1481,10 +1482,12 @@ async fn signed(
         return Err(unavailable());
     }
     let payload = crate::http::peer_transport::signed_response_payload(status.as_u16(), &body);
-    let signature =
-        state
-            .membership
-            .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload);
+    let signature = state.cluster.authentication().sign_exact_response(
+        &auth.node_id,
+        &auth.nonce,
+        path,
+        &payload,
+    );
     let signature = signature.map_err(|_| unavailable())?;
     remaining(deadline)?;
     Response::builder()
@@ -2353,8 +2356,8 @@ pub(super) async fn collect_fresh_location(
     let peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state
-            .membership
-            .media_peers_for_route(crate::http::learner_route_eligible(
+            .cluster
+            .media_targets_for_route(crate::http::learner_route_eligible(
                 &axum::http::Method::POST,
                 LOCATE_PATH,
             )),

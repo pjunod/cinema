@@ -2659,6 +2659,7 @@ pub(crate) async fn build_riding_with_store(
 /// in `videos` order. Every build carries the same `source_unchanged`: one
 /// held source, one fence.
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) async fn build_riding_shared(
     file: &MediaFile,
     videos: &[transcode::CopyVideoOptions],

@@ -3811,14 +3811,14 @@ async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector()
                 held,
                 None,
                 ProbeStreamSelection::LegacyVideoOrdinal(0),
-                Duration::from_millis(200),
+                Duration::from_secs(3),
                 None,
             )
             .await
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !COMPLETION_WORKER_STARTED.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
