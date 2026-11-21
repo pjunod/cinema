@@ -51,12 +51,51 @@ def desktop_proof(api, descriptor, scope, current, current_run):
     r.require(origin['job'] == descriptor['job'] and origin['pr'] == scope['pr']
               and native.unchanged(origin['commit'], current, 'desktop_macos'),
               'Desktop test origin or current inputs differ')
+    log = api.bytes(f"/actions/jobs/{origin['job']}/logs")
+    require_archive_creator(log, artifact['name'], descriptor['archive_sha256'])
     with authenticated_download(api, artifact, descriptor['archive_sha256']) as stream:
         data = native.archive_member(stream, 'desktop-macos-check.log')
-    native.verify_desktop(data)
+    outcomes = desktop_outcomes(data)
     inputs = native.input_digest(current, {'inputs': native.INPUTS['desktop_macos']})
     return {'origin': origin, 'archive_sha256': descriptor['archive_sha256'],
-            'log_sha256': retention.digest(data), 'input_digest': inputs}
+            'log_sha256': retention.digest(data), 'input_digest': inputs, 'outcomes': outcomes}
+
+
+def require_archive_creator(log, name, expected):
+    r.require(isinstance(expected, str) and retention.DIGEST.fullmatch(expected)
+              and log.count(f'Artifact {name} has been successfully uploaded!'.encode()) == 1
+              and log.count(f'SHA256 hash of uploaded artifact zip is {expected}'.encode()) == 1,
+              'Native artifact lacks its creator log digest')
+
+
+def desktop_outcomes(data):
+    native.verify_desktop(data)
+    cases = re.compile(r"Test Case '-\[(PlurxTrayUITests|PlurxTrayCoreTests)\.([A-Za-z_]\w*) "
+                       r"(test\w+)\]' (started\.|passed \([0-9]+(?:\.[0-9]+)? seconds\)\.)")
+    sections = re.split(r"(?m)^Test Suite 'All tests' started at [^\n]+\n", data.decode('utf-8'))
+    expected = {'PlurxTrayUITests': 14, 'PlurxTrayCoreTests': 61}
+    r.require(len(sections) == len(expected) + 1, 'Missing native desktop XCTest suite')
+    outcomes = {}
+    for (namespace, count), text in zip(expected.items(), sections[1:], strict=True):
+        r.require(len(re.findall(r"(?m)^Test Suite 'All tests' passed at [^\n]+\n"
+                                 + rf'\s*Executed {count} tests, with 0 failures \(0 unexpected\)', text)) == 1,
+                  'Desktop XCTest terminal does not match its required suite')
+        started, passed = set(), set()
+        for line in text.splitlines():
+            if not line.startswith('Test Case '):
+                continue
+            event = cases.fullmatch(line)
+            r.require(event is not None and event[1] == namespace, 'Unexpected desktop XCTest case or terminal')
+            case = event[2] + '/' + event[3]
+            if event[4] == 'started.':
+                r.require(case not in started, 'Repeated desktop XCTest start')
+                started.add(case)
+            else:
+                r.require(case in started and case not in passed, 'Unbound or repeated desktop XCTest outcome')
+                passed.add(case)
+        r.require(started == passed and len(passed) == count, 'Incomplete desktop XCTest case census')
+        outcomes[namespace] = {'pass_count': count, 'cases_sha256': retention.digest('\n'.join(sorted(passed)).encode())}
+    return outcomes
 
 
 def artifact_for(api, descriptor, name):
@@ -189,10 +228,8 @@ def mobile_proof(api, descriptor, scope, current, base, current_run):
               'Original Apple mobile job did not pass its native environment contract')
     log = api.bytes(f'/actions/jobs/{job_id}/logs')
     artifact_name = f'tv-navigation-{rid}-1'
-    r.require(retention.digest(log) == descriptor['job_log_sha256']
-              and log.count(f'Artifact {artifact_name} has been successfully uploaded!'.encode()) == 1
-              and log.count(f"SHA256 hash of uploaded artifact zip is {descriptor['archive_sha256']}".encode()) == 1,
-              'Mobile job log or TV navigation publication differs')
+    r.require(retention.digest(log) == descriptor['job_log_sha256'], 'Actual mobile job log differs')
+    require_archive_creator(log, artifact_name, descriptor['archive_sha256'])
     projection = reviewed_mobile_inputs(source, current)
     profiles = shared_outcomes(log, rid)
     with authenticated_download(api, artifact_for(api, descriptor, artifact_name), descriptor['archive_sha256']) as stream:

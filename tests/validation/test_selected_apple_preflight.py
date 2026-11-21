@@ -61,6 +61,25 @@ class SelectedApplePreflightTests(unittest.TestCase):
             with self.assertRaises(r.ReceiptError):
                 apple.rejoin_fragments(raw + '\n' + raw)
 
+    def test_desktop_proof_requires_both_complete_named_xctest_suites(self):
+        def suite(namespace, count):
+            lines = ["Test Suite 'All tests' started at time"]
+            for case in range(count):
+                event = f"Test Case '-[{namespace}.ExampleTests testCase{case}]'"
+                lines.extend([event + ' started.', event + ' passed (0.01 seconds).'])
+            lines.extend(["Test Suite 'All tests' passed at time",
+                          f'Executed {count} tests, with 0 failures (0 unexpected)'])
+            return '\n'.join(lines).encode() + b'\n'
+
+        ui, core = suite('PlurxTrayUITests', 14), suite('PlurxTrayCoreTests', 61)
+        result = apple.desktop_outcomes(ui + core)
+        self.assertEqual({key: row['pass_count'] for key, row in result.items()},
+                         {'PlurxTrayUITests': 14, 'PlurxTrayCoreTests': 61})
+        for incomplete in (core, ui, ui + core.replace(b'testCase60', b'testCase59'),
+                           ui.replace(b'0 failures', b'1 failures') + core):
+            with self.subTest(incomplete=incomplete[-100:]), self.assertRaises(r.ReceiptError):
+                apple.desktop_outcomes(incomplete)
+
     def test_formal_reuse_requires_complete_exact_original_and_current_input_hashes(self):
         commit, candidate = 'a' * 40, 'b' * 40
         hashes = {'worker-refinement.cfg': 'c' * 64}
