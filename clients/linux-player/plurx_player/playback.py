@@ -350,7 +350,7 @@ class Playback:
             return
         self.seek_film(target)
 
-    def seek_film(self, target):
+    def seek_film(self, target, *, preserve_pause=False):
         duration = self.duration_ms()
         target_ms = max(0, round(target * 1000))
         if duration:
@@ -359,7 +359,9 @@ class Playback:
         if self.session is None or (self.session.get("vod") and local_ms >= 0):
             self.mpv.command("seek", local_ms / 1000, "absolute+exact")
         else:
-            self.recreate(target_ms)
+            if preserve_pause:
+                self.paused = bool(self.mpv.get("pause", self.paused))
+            self.recreate(target_ms, paused=preserve_pause and self.paused)
 
     def on_file_loaded(self):
         if self.pending_quality is not None:
@@ -440,7 +442,7 @@ class Playback:
             return  # inside the session: mpv seeks within the playlist
         self.recreate(self.origin_ms + target_local)
 
-    def recreate(self, target_ms):
+    def recreate(self, target_ms, *, paused=False):
         """Outside the available range: a fresh session that starts at the target."""
         self.log(f"seek to {target_ms} ms is outside the session; re-creating it")
         try:
@@ -454,7 +456,7 @@ class Playback:
         self.last_position_ms = target_ms
         self.load(self.http.url(self.session["playlist_url"]), (target_ms - self.origin_ms) / 1000)
         self.show_film_timeline()
-        self.mpv.set("pause", False)
+        self.mpv.set("pause", paused)
         self.recreations += 1
 
     # -- Cinema controls ------------------------------------------------------
@@ -938,7 +940,7 @@ class Playback:
                 self.progress("seek")
             if self.deferred_film_seek is not None:
                 target, self.deferred_film_seek = self.deferred_film_seek, None
-                self.seek_film(target)
+                self.seek_film(target, preserve_pause=True)
         elif name == "seek":
             self.ended = False
             self.seeking = True

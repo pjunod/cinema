@@ -373,6 +373,24 @@ class CinemaControls(LauncherCase):
         self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 3_000_500)
         self.assertEqual(Preferences(self.config).quality, '1080')
 
+    def test_quality_admission_preserves_paused_film_seek_on_rolling_success(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000, 3_000_000]
+        self.mpv.props(skip_restart_on=2)
+        self.intent_at(6, 'cinema-quality', '1080')
+        self.intent_at(8, 'osc-film-seek', '3000.5')
+        self.clock.at(14, lambda: self.mpv.emit({'event': 'playback-restart'}))
+        self.close_at(20)
+        with self.delay_quality_admission(time_pos=10, pause=True):
+            self.assertEqual(self.run_launcher(), 0)
+        incumbent, candidate, replacement = self.server.sessions
+        self.assertEqual(self.released_sessions(),
+                         [incumbent['session_id'], candidate['session_id'], replacement['session_id']])
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')],
+                         ['5.000', '6.000', '0.500'])
+        self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], True)
+        self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 3_000_500)
+        self.assertEqual(Preferences(self.config).quality, '1080')
+
     def test_quality_admission_preserves_queued_film_seek_after_rolling_rollback(self):
         self.advertise_quality(); self.server.origins = [60_000, 64_000, 3_000_000]
         self.mpv.props(skip_restart_on=2)
@@ -381,7 +399,7 @@ class CinemaControls(LauncherCase):
         self.clock.at(14, lambda: self.mpv.emit({'event': 'end-file', 'reason': 'error',
                                                'file_error': 'fixture decode failure'}))
         self.close_at(20)
-        with self.delay_quality_admission(time_pos=10):
+        with self.delay_quality_admission(time_pos=10, pause=True):
             self.assertEqual(self.run_launcher(), 0)
         incumbent, candidate, replacement = self.server.sessions
         self.assertEqual(self.released_sessions(),
@@ -393,6 +411,7 @@ class CinemaControls(LauncherCase):
         self.assertGreaterEqual(creates[-1]['at'], deletes[0]['at'])
         self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')],
                          ['5.000', '6.000', '10.000', '0.500'])
+        self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], True)
         self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 3_000_500)
         self.assertEqual(Preferences(self.config).quality, 'auto')
 
