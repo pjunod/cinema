@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use super::internal_activity::{ActivityDelivery, PeerActivityOutcome, SharedPeerActivity};
+use super::internal_activity::{
+    ActivityDelivery, PeerActivityOutcome, ReceiverProcessedRow, SharedPeerActivity,
+    SourceProcessedRow,
+};
 use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
@@ -4908,7 +4911,7 @@ impl ClusterDelivery {
             title: delivery.title,
             started_unix: delivery.started_unix,
             idle_seconds: delivery.idle_seconds,
-            session_id: None,
+            session_id: delivery.session_id,
             delivered_bytes: delivery.delivered_bytes,
             delivered_bps: delivery.delivered_bps,
             node_id,
@@ -5041,6 +5044,115 @@ fn clustered_deliveries(
             .then(left.node_id.cmp(&right.node_id))
     });
     out
+}
+
+fn clustered_source_processed(
+    mut local: Vec<SourceProcessedRow>,
+    peers: &PeerActivityRead,
+) -> Vec<SourceProcessedRow> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.source_processed.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| {
+        right
+            .started_unix
+            .cmp(&left.started_unix)
+            .then(left.stop_id.cmp(&right.stop_id))
+    });
+    local.truncate(128);
+    local
+}
+
+fn clustered_receiver_processed(
+    mut local: Vec<ReceiverProcessedRow>,
+    peers: &PeerActivityRead,
+) -> Vec<ReceiverProcessedRow> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.receiver_processed.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| left.stop_id.cmp(&right.stop_id));
+    local.truncate(128);
+    local
+}
+
+fn receiver_processed_owner<'a>(
+    peers: &'a PeerActivityRead,
+    stop_id: &str,
+) -> Result<Option<&'a str>, ()> {
+    let PeerActivityRead::Peers(outcomes) = peers else {
+        return match peers {
+            PeerActivityRead::LocalOnly => Ok(None),
+            PeerActivityRead::DirectoryUnavailable => Err(()),
+            PeerActivityRead::Peers(_) => unreachable!(),
+        };
+    };
+    let mut owner = None;
+    let mut incomplete = false;
+    for (node_id, outcome) in outcomes.iter() {
+        match outcome {
+            PeerActivityOutcome::Answered(snapshot) => {
+                if snapshot
+                    .receiver_processed
+                    .iter()
+                    .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
+                {
+                    return Err(());
+                }
+            }
+            _ => incomplete = true,
+        }
+    }
+    if owner.is_none() && incomplete {
+        Err(())
+    } else {
+        Ok(owner)
+    }
+}
+
+/// Resolve one signed Stop target only from an answered, node-checked Activity
+/// snapshot. Silence and duplicate ownership cannot become a guessed address.
+fn source_processed_owner<'a>(
+    peers: &'a PeerActivityRead,
+    stop_id: &str,
+) -> Result<Option<&'a str>, ()> {
+    let PeerActivityRead::Peers(outcomes) = peers else {
+        return match peers {
+            PeerActivityRead::LocalOnly => Ok(None),
+            PeerActivityRead::DirectoryUnavailable => Err(()),
+            PeerActivityRead::Peers(_) => unreachable!(),
+        };
+    };
+    let mut owner = None;
+    let mut incomplete = false;
+    for (node_id, outcome) in outcomes.iter() {
+        match outcome {
+            PeerActivityOutcome::Answered(snapshot) => {
+                if snapshot
+                    .source_processed
+                    .iter()
+                    .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
+                {
+                    return Err(());
+                }
+            }
+            _ => incomplete = true,
+        }
+    }
+    if owner.is_none() && incomplete {
+        Err(())
+    } else {
+        Ok(owner)
+    }
 }
 
 fn clustered_live_tv(
@@ -5662,20 +5774,51 @@ pub async fn activity_detail(
     // it. This page polls every few seconds; a name read that waits for the
     // peer fan-out to finish would add its latency to every poll for nothing.
     let replicated = state.cluster_advertisement && state.cluster.role().is_clustered();
-    let ((sessions, deliveries), peers, hostnames) = if replicated {
-        let (local, peers, hostnames) = tokio::join!(
-            deliveries(&state),
-            peer_activity(&state),
-            node_hostnames(&state, user.0.is_admin)
-        );
-        (local, peers, hostnames)
-    } else {
-        (
-            deliveries(&state).await,
-            PeerActivityRead::LocalOnly,
-            BTreeMap::new(),
-        )
-    };
+    let ((sessions, deliveries), peers, hostnames, source_processed, receiver_processed) =
+        if replicated {
+            let (local, peers, hostnames, source_processed, receiver_processed) = tokio::join!(
+                deliveries(&state),
+                peer_activity(&state),
+                node_hostnames(&state, user.0.is_admin),
+                async {
+                    if user.0.is_admin {
+                        super::internal_activity::local_source_processed(&state).await
+                    } else {
+                        Vec::new()
+                    }
+                },
+                async {
+                    if user.0.is_admin {
+                        super::internal_activity::local_receiver_processed(&state).await
+                    } else {
+                        Vec::new()
+                    }
+                },
+            );
+            (
+                local,
+                peers,
+                hostnames,
+                source_processed,
+                receiver_processed,
+            )
+        } else {
+            (
+                deliveries(&state).await,
+                PeerActivityRead::LocalOnly,
+                BTreeMap::new(),
+                if user.0.is_admin {
+                    super::internal_activity::local_source_processed(&state).await
+                } else {
+                    Vec::new()
+                },
+                if user.0.is_admin {
+                    super::internal_activity::local_receiver_processed(&state).await
+                } else {
+                    Vec::new()
+                },
+            )
+        };
     // Topology is configuration, not the number of peers answering this read.
     let clustered = replicated;
     let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
@@ -5774,6 +5917,12 @@ pub async fn activity_detail(
     // This is folded into the existing page read rather than making the web
     // client add a second polling loop beside /activity/detail.
     if user.0.is_admin {
+        response["source_processed"] =
+            serde_json::to_value(clustered_source_processed(source_processed, &peers))
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["receiver_processed"] =
+            serde_json::to_value(clustered_receiver_processed(receiver_processed, &peers))
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
         response["analysis"] = match super::analysis::activity_summary(&state).await {
             Ok(mut summary) => {
                 summary["progress"] = serde_json::Value::Array(clustered_analysis_progress(
@@ -5897,6 +6046,77 @@ pub async fn stop_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if id.starts_with("receiver-s-") {
+        match state
+            .sharing
+            .receiver_starts
+            .stop_processed_activity(std::sync::Arc::new(state.clone()), &id)
+            .await
+        {
+            Ok(true) => return Ok(Json(serde_json::json!({ "ok": true }))),
+            Err(()) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "receiver Source End is still settling".to_owned(),
+                ))
+            }
+            Ok(false) => {}
+        }
+        let peers = peer_activity(&state).await;
+        let owner = receiver_processed_owner(&peers, &id).map_err(|_| {
+            ApiError::ServiceUnavailable(
+                "the receiver owner could not be resolved from current Activity".to_owned(),
+            )
+        })?;
+        let Some(owner) = owner else {
+            return Err(ApiError::NotFound("receiver processed session"));
+        };
+        return match state.peer_activity.stop_processed_on(owner, &id).await {
+            Ok(StatusCode::NO_CONTENT) => Ok(Json(serde_json::json!({ "ok": true }))),
+            Ok(StatusCode::NOT_FOUND) => Err(ApiError::NotFound("receiver processed session")),
+            _ => Err(ApiError::ServiceUnavailable(
+                "receiver Source End is still settling".to_owned(),
+            )),
+        };
+    }
+    if id.starts_with("source-s-") {
+        match state.transcode.stop_source_processed_session(&id).await {
+            Ok(true) => return Ok(Json(serde_json::json!({ "ok": true }))),
+            Err(_) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "Source processed work is still settling".to_owned(),
+                ))
+            }
+            Ok(false) => {}
+        }
+        let peers = peer_activity(&state).await;
+        let owner = source_processed_owner(&peers, &id).map_err(|_| {
+            ApiError::ServiceUnavailable(
+                "the Source owner could not be resolved from current Activity".to_owned(),
+            )
+        })?;
+        if let Some(owner) = owner {
+            let status = state
+                .peer_activity
+                .stop_processed_on(owner, &id)
+                .await
+                .map_err(|_| {
+                    ApiError::ServiceUnavailable(
+                        "the Source node did not confirm the stop".to_owned(),
+                    )
+                })?;
+            return match status {
+                StatusCode::NO_CONTENT => Ok(Json(serde_json::json!({ "ok": true }))),
+                StatusCode::NOT_FOUND => Err(ApiError::NotFound("Source processed session")),
+                StatusCode::SERVICE_UNAVAILABLE => Err(ApiError::ServiceUnavailable(
+                    "Source processed work is still settling".to_owned(),
+                )),
+                _ => Err(ApiError::Internal(
+                    "unexpected Source stop status".to_owned(),
+                )),
+            };
+        }
+        return Err(ApiError::NotFound("Source processed session"));
+    }
     let mut candidates = state.transcode.active_session_ids().await;
     // VOD sessions live in their own registry; without them here the
     // Terminal::AdminStop arm is unreachable from its only intended caller.

@@ -21815,6 +21815,8 @@ fn contract_inventory_matches_every_store_method() {
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
     // +3: claim diagnostics, targeted FEL head work, and bounded title revisits.
+    // FEL head is exercised on both backends by
+    // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
     assert_eq!(declared.len(), 632, "review the Store method count");
     assert_eq!(
         covered, declared,

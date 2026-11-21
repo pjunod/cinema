@@ -72,6 +72,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Source playback Start observes membership at its claim boundary after pure
+  preparation. Slow filesystem or planning work no longer consumes the
+  five-second authority proof before it is used; claim expiry, file and grant
+  checks, and overlapping playback ownership are preserved.
+
 - Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
   Resume. Resume binds the renderer to the actual source pictures observed by
   the rolling copy, and the original AAC rendition continues across the switch.

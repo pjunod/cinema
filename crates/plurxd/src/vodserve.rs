@@ -168,7 +168,7 @@ impl TrialClaim {
 
     /// The trial took its bundle with the reservation: the request is then
     /// kept to its deadline rather than its short refresh lifetime.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn mark_admitted(&self) {
         self.admitted
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1744,6 +1744,8 @@ use marker_dispatch::*;
 // split: begin vod-generation
 #[path = "vod/generation.rs"]
 mod generation;
+#[cfg(test)]
+pub(crate) use generation::copy_video_pipeline;
 use generation::*;
 #[path = "vod/stream_format.rs"]
 mod stream_format;
