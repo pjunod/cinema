@@ -369,28 +369,18 @@ mod tests {
         seal(&connection);
         drop(connection);
         let store = SqliteStore::open(&path).expect("new binary");
-        let mut pending = store
-            .job_migration_status()
-            .await
-            .expect("sealed import work")
-            .awaiting_import;
-        // Pages also budget duplicated SQL bytes, so enqueue SQL growth can
-        // reduce rows per page. Bound the fill by accepted work, requiring
-        // progress until the queue reaches its reserved-headroom frontier.
-        let page_attempt_budget = pending;
-        for _ in 0..page_attempt_budget {
+        let mut full = store.job_migration_status().await.expect("initial status");
+        // SQL size determines how many entries fit on a page. Each successful
+        // page must remove at least one pending entry before capacity stops
+        // progress, so allow one final page to observe that refusal.
+        for _ in 0..=full.awaiting_import {
+            let pending = full.awaiting_import;
             store.import_legacy_jobs(1_000).await.expect("bounded page");
-            let progress = store.job_migration_status().await.expect("progress");
-            assert!(
-                progress.awaiting_import < pending,
-                "fill must make progress before the foreground-headroom frontier"
-            );
-            pending = progress.awaiting_import;
-            if pending <= 260 {
+            full = store.job_migration_status().await.expect("progress");
+            if full.awaiting_import == pending {
                 break;
             }
         }
-        let full = store.job_migration_status().await.expect("full status");
         assert_eq!(full.accepted, 4_100);
         assert_eq!(
             full.materialized, 3_840,

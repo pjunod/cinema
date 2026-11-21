@@ -89,6 +89,12 @@ bump may break compatibility and a **patch** bump never does.
 - Background Dolby Vision FEL measurement can qualify the current renderer
   while requests for an older renderer remain pending.
 
+- Revisit older Dolby Vision title scans after a busy source becomes available,
+  while continuing to discover work on other sources.
+- Recover expired Dolby Vision title attempts after physical source custody clears.
+  Activity distinguishes expired leases from live owners. Analysis requests report
+  the admission failure, and reconciliation preserves copy coordinator requests.
+
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while

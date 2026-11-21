@@ -598,15 +598,17 @@ test("expired durable leases do not masquerade as live executions", () => {
   const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
     priority:0,age_ms:1427*60000,not_before_ms:0,supported:true,
     lease_expires_ms:now-3600000,observed_at_ms:now};
-  Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],
+  Object.assign(painter.durable,{observed:now,rows:[job],counts:[{kind:"subtitle_extract",state:"running",count:6,expired_leases:5}],detail:{job,waiters:[],
     attempts:[{node_id:"owner-id",started_at_ms:job.lease_expires_ms-120000,outcome:null}]}});
   const html=paint(snapshot({node_hostnames:{"owner-id":"<lab6>"}}));
   assert.match(html, /Lease expired · awaiting recovery/);
   assert.match(html, /previous owner/);
+  assert.match(html, /1 running · 5 awaiting recovery/);
+  assert.match(html, /running \(6, 5 expired\)/);
   painter.view.inspector={kind:"job",id:"expired"};painter.view.detailTab="history";
   assert.match(painter.inspect(), /&lt;lab6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
   assert.doesNotMatch(html, /<lab6>/);
-  Object.assign(painter.durable,{rows:[],detail:null});
+  Object.assign(painter.durable,{rows:[],counts:[],detail:null});
 });
 
 function refreshingQueue(q,api){

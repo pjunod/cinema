@@ -748,7 +748,7 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
 }
 
 /// The helpers that take the create's plan (D3b, contract §4.2).
-/// `None` reads the Store exactly as before.
+/// Passing `None` for the plan reads the Store.
 const PLANNED_HELPERS: &[&str] = &[
     "cluster_playlist_is_typeless",
     "create_cluster_session",
@@ -842,69 +842,117 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/start.rs", "start_with_audio_offset", "rolling_start_inputs", "plan"),
 ];
 
-/// The declared plan argument of the call whose `(` is at `open`, with its
-/// whitespace collapsed. Source custody and native FEL permits follow it in
-/// helpers that declare those trailing arguments.
-fn plan_argument(text: &str, open: usize, helper: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut depth = 0_i32;
-    let mut start = open + 1;
-    let mut arguments = Vec::new();
-    for (index, byte) in bytes.iter().enumerate().skip(open) {
+/// The argument list (including parentheses) in masked source.
+fn argument_list(text: &str, open: usize) -> &str {
+    let mut depth = 0;
+    for (index, byte) in text.bytes().enumerate().skip(open) {
         match byte {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => {
+            b'(' => depth += 1,
+            b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    let arg = text[start..index].trim();
-                    if !arg.is_empty() {
-                        arguments.push(arg);
-                    }
-                    break;
+                    return &text[open..=index];
                 }
-            }
-            b',' if depth == 1 => {
-                let arg = text[start..index].trim();
-                if !arg.is_empty() {
-                    arguments.push(arg);
-                }
-                start = index + 1;
             }
             _ => {}
         }
     }
-    let plan = match helper {
-        // The Source VOD helpers append processed-work custody.
-        "prepare_vod_encoding_with_source" | "prepare_vod_encoding_with_source_scoped" => {
-            arguments.iter().rev().nth(1)
+    panic!("unterminated argument list");
+}
+
+fn require_fixed_plan_slot(attributes: &[syn::Attribute]) -> syn::Result<()> {
+    for attribute in attributes {
+        if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
+            return Err(syn::Error::new_spanned(
+                attribute,
+                "conditional parameters and arguments must follow the plan slot",
+            ));
         }
-        // The rolling FEL helpers append a Linux-only preparation permit.
-        "start_live_recovery_session" => {
-            assert_eq!(
-                arguments.len(),
-                10,
-                "{helper} changed its source argument count"
-            );
-            arguments.get(7)
-        }
-        "start_copy_with_audio_offset" => {
-            assert_eq!(
-                arguments.len(),
-                18,
-                "{helper} changed its source argument count"
-            );
-            arguments.get(16)
-        }
-        _ => arguments.last(),
     }
-    .expect("planned helper has a plan argument");
-    plan.split_whitespace().collect::<Vec<_>>().join("")
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PlanParameter {
+    position: usize,
+    has_receiver: bool,
+}
+
+impl PlanParameter {
+    fn argument_position(&self, call_prefix: &str) -> usize {
+        // Dot calls carry the receiver outside the argument list.
+        self.position - usize::from(self.has_receiver && call_prefix.ends_with('.'))
+    }
+}
+
+fn plan_parameter(helper: &str, arguments: &str) -> syn::Result<PlanParameter> {
+    let signature: syn::Signature = syn::parse_str(&format!("fn {helper}{arguments}"))?;
+    let mut has_receiver = false;
+    for (position, parameter) in signature.inputs.iter().enumerate() {
+        match parameter {
+            syn::FnArg::Receiver(receiver) => {
+                require_fixed_plan_slot(&receiver.attrs)?;
+                has_receiver = true;
+            }
+            syn::FnArg::Typed(parameter) => {
+                require_fixed_plan_slot(&parameter.attrs)?;
+                if matches!(&*parameter.pat, syn::Pat::Ident(binding) if binding.ident == "plan") {
+                    return Ok(PlanParameter {
+                        position,
+                        has_receiver,
+                    });
+                }
+            }
+        }
+    }
+    Err(syn::Error::new_spanned(
+        signature.ident,
+        "planned helper has no plan parameter",
+    ))
+}
+
+fn plan_argument(arguments: &str, parameter: usize) -> syn::Result<Option<String>> {
+    use syn::parse::{ParseStream, Parser};
+
+    let parse_arguments = |input: ParseStream<'_>| {
+        let list;
+        syn::parenthesized!(list in input);
+        let mut plan = None;
+        let mut index = 0;
+        // Match source positions only through an unconditional plan slot.
+        // Parsing expressions keeps commas in generics and closures out of the count.
+        while !list.is_empty() {
+            if index <= parameter {
+                require_fixed_plan_slot(&list.fork().call(syn::Attribute::parse_outer)?)?;
+            }
+            let mut cursor = list.cursor();
+            list.parse::<syn::Expr>()?;
+            if index == parameter {
+                let end = list.cursor();
+                let mut tokens = proc_macro2::TokenStream::new();
+                while cursor != end {
+                    let (token, next) = cursor.token_tree().expect("plan argument token");
+                    tokens.extend([token]);
+                    cursor = next;
+                }
+                plan = Some(tokens.to_string().split_whitespace().collect());
+            }
+            index += 1;
+            if !list.is_empty() {
+                list.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(plan)
+    };
+    parse_arguments.parse_str(arguments)
 }
 
 #[test]
 fn every_plan_argument_is_pinned_by_call() {
-    let mut found = BTreeSet::new();
-    for (path, text) in sources() {
+    let sources = sources();
+    let mut parameters = BTreeMap::new();
+    let mut calls = Vec::new();
+    for (path, text) in &sources {
         let bytes = text.as_bytes();
         for helper in PLANNED_HELPERS {
             for (pos, _) in text.match_indices(helper) {
@@ -918,18 +966,29 @@ fn every_plan_argument_is_pinned_by_call() {
                 if !rest.trim_start().starts_with('(') {
                     continue;
                 }
-                if text[..pos].trim_end().ends_with("fn") {
-                    continue;
-                }
                 let open = end + (rest.len() - rest.trim_start().len());
-                found.insert((
-                    path.clone(),
-                    enclosing(&text, pos),
-                    (*helper).to_owned(),
-                    plan_argument(&text, open, helper),
-                ));
+                let arguments = argument_list(text, open);
+                let prefix = text[..pos].trim_end();
+                if prefix.ends_with("fn") {
+                    let parameter = plan_parameter(helper, arguments)
+                        .unwrap_or_else(|error| panic!("{path}::{helper}: {error}"));
+                    assert!(
+                        parameters.insert(*helper, parameter).is_none(),
+                        "multiple definitions of planned helper {helper}"
+                    );
+                } else {
+                    calls.push((path, enclosing(text, pos), *helper, prefix, arguments));
+                }
             }
         }
+    }
+    let mut found = BTreeSet::new();
+    for (path, caller, helper, prefix, arguments) in calls {
+        let parameter = parameters[helper].argument_position(prefix);
+        let argument = plan_argument(arguments, parameter)
+            .unwrap_or_else(|error| panic!("{path}::{caller} calls {helper}: {error}"))
+            .unwrap_or_else(|| panic!("{path}::{caller} calls {helper} without a plan argument"));
+        found.insert((path.clone(), caller, helper.to_owned(), argument));
     }
     let pinned: BTreeSet<(String, String, String, String)> = PLAN_CALLS
         .iter()
@@ -955,6 +1014,91 @@ fn every_plan_argument_is_pinned_by_call() {
             assert!(origin, "{path}::{caller}: {argument}");
         }
     }
+}
+
+#[test]
+fn the_plan_slot_survives_cfg_gated_arguments() {
+    let parameter = plan_parameter(
+        "start",
+        r#"(&self, hint: Option<Result<u8, u8>>, plan: Option<&StartPlan>,
+             #[cfg(target_os = "linux")] prepared: Option<Start>)"#,
+    )
+    .expect("fixed plan slot")
+    .argument_position("manager.");
+    let correct = r#"(hint(), plan, #[cfg(target_os = "linux")] None)"#;
+    let wrong = r#"(hint(), None, #[cfg(target_os = "linux")] plan)"#;
+    assert_eq!(
+        plan_argument(correct, parameter)
+            .expect("correct call")
+            .as_deref(),
+        Some("plan")
+    );
+    assert_eq!(
+        plan_argument(wrong, parameter)
+            .expect("wrong plan")
+            .as_deref(),
+        Some("None")
+    );
+    assert_eq!(
+        plan_argument("(hint(),)", parameter).expect("short call"),
+        None
+    );
+}
+
+#[test]
+fn qualified_calls_include_the_explicit_receiver_in_the_plan_position() {
+    let parameter = plan_parameter(
+        "start",
+        "(&self, req: Request, file: File, hwaccel: Hardware, hint: Option<Hint>,
+          plan: Option<&StartPlan>)",
+    )
+    .expect("planned method");
+    let dot = "(req, file, hwaccel, None, Some(&start_plan))";
+    let qualified = "(self, req, file, hwaccel, None, Some(&start_plan))";
+    for (prefix, arguments) in [("self.", dot), ("Self::", qualified)] {
+        assert_eq!(
+            plan_argument(arguments, parameter.argument_position(prefix))
+                .expect("planned call")
+                .as_deref(),
+            Some("Some(&start_plan)")
+        );
+    }
+}
+
+#[test]
+fn cfg_cannot_shift_or_remove_the_plan_slot() {
+    let signature = r#"(#[cfg(target_os = "linux")] hint: Option<Hint>,
+        plan: Option<&StartPlan>, #[cfg(not(target_os = "linux"))] other: Option<Other>)"#;
+    let call = r#"(#[cfg(not(target_os = "linux"))] None, plan,
+        #[cfg(target_os = "linux")] None)"#;
+    let error = "conditional parameters and arguments must follow the plan slot";
+    assert_eq!(
+        plan_parameter("start", signature)
+            .expect_err("cfg shifts the formal plan slot")
+            .to_string(),
+        error
+    );
+    assert_eq!(
+        plan_argument(call, 1)
+            .expect_err("the call uses the opposite guard before plan")
+            .to_string(),
+        error
+    );
+    assert_eq!(
+        plan_parameter(
+            "start",
+            "(#[cfg_attr(linux, cfg(extra))] plan: Option<&StartPlan>)"
+        )
+        .expect_err("cfg_attr can remove the formal plan slot")
+        .to_string(),
+        error
+    );
+    assert_eq!(
+        plan_argument("(#[cfg_attr(linux, cfg(extra))] plan)", 0)
+            .expect_err("cfg_attr can remove the actual plan argument")
+            .to_string(),
+        error
+    );
 }
 
 /// Every applied-view handle is spelled `applied`, so the receiver check

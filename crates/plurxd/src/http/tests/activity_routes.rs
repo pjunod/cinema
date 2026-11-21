@@ -275,13 +275,13 @@ fn committed_learner_and_maintenance_owner_admit_signed_activity_and_stop() {
             .heartbeat()
             .await
             .expect("publish learner route role");
-        assert_eq!(
-            membership.local_serving_role().await.expect("learner role"),
-            LocalServingRole::Learner
-        );
         let mut state = test_state_with_store(Arc::clone(&learner.store), owner.clone());
         state.replace_membership(membership.clone());
-        state.replication = learner.replication_monitor();
+        state.replace_replication(learner.replication_monitor());
+        assert_eq!(
+            state.cluster.admission_role().await.expect("learner role"),
+            LocalServingRole::Learner
+        );
         state.catalogue = learner.catalogue_reader();
         let app = router(state);
         admitted_activity_routes(&app, &signer, &owner).await;

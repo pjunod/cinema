@@ -1496,24 +1496,28 @@ pub(super) async fn coordination_request(
                     == plurx_core::store::analysis_coordination::STRANDED_CODE)
     };
     let now = crate::state::clock_ms();
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let request = context
         .store
-        .enqueue_analysis_request(&NewAnalysisRequest {
-            request_id,
-            file_id: source.file_id,
-            source_size: source.source_size,
-            source_mtime: source.source_mtime,
-            component: "fragment_index".into(),
-            pipeline_version: source.pipeline_marker(),
-            video_identity: source.video_marker(),
-            requested_generation: source.requested_generation.clone(),
-            priority: "normal".into(),
-            trigger: "background".into(),
-            force_rebuild: false,
-            target_node_id: source.origin_node_id.clone(),
-            not_before_ms: now,
-            created_at_ms: now,
-        })
+        .enqueue_analysis_request_with(
+            &NewAnalysisRequest {
+                request_id,
+                file_id: source.file_id,
+                source_size: source.source_size,
+                source_mtime: source.source_mtime,
+                component: "fragment_index".into(),
+                pipeline_version: source.pipeline_marker(),
+                video_identity: source.video_marker(),
+                requested_generation: source.requested_generation.clone(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: source.origin_node_id.clone(),
+                not_before_ms: now,
+                created_at_ms: now,
+            },
+            live.as_deref(),
+        )
         .await
         .map_err(|error| error.to_string())?;
     if request.pipeline_version != source.pipeline_marker() {
