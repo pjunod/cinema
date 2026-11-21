@@ -4485,6 +4485,23 @@ assert.equal(context.ACT_TIMER, null);
         # Ordinary PRs retain only the small identity/digest receipt. Pushes
         # and final qualifications retain exact binaries for one day.
         build = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        before_smoke = "Build the runtime from only the verified binaries"
+        self.assertLess(
+            build.index("Bind the binary set to this candidate tree"),
+            build.index("Retain candidate binaries for push, tag, and qualification runs"),
+        )
+        self.assertLess(
+            build.index("Retain candidate binaries for push, tag, and qualification runs"),
+            build.index(before_smoke),
+        )
+        self.assertLess(
+            build.index("Retain candidate binaries for non-qualification push and tag runs"),
+            build.index(before_smoke),
+        )
+        self.assertLess(
+            build.index("Back up the running image and restore it into a fresh container"),
+            build.index("Retain the exact package receipt"),
+        )
         self.assertIn(
             "name: Retain candidate binaries for push, tag, and qualification runs",
             build,

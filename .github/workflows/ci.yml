@@ -2250,6 +2250,8 @@ jobs:
           python3 -m validation.release_dockerfile --binary-export \
             Dockerfile Dockerfile.binaries
           echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Preflight package workspace space
+        run: scripts/release-package-candidate --check-space .
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -2280,6 +2282,33 @@ jobs:
               exit 1
             }
           done
+      - name: Retain candidate binaries for push, tag, and qualification runs
+        if: needs.scope.outputs.qualification == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/*.dwp
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain candidate binaries for non-qualification push and tag runs
+        if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/*.dwp
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
       # Dockerfile.release starts FROM the private, digest-pinned media
       # runtime; its builder needs the same fleet credential the publishers use.
       - name: Authenticate the runtime build to the private media-runtime registry
@@ -2334,33 +2363,6 @@ jobs:
             release-bin/*.sha256
           if-no-files-found: error
           retention-days: 14
-      - name: Retain candidate binaries for push, tag, and qualification runs
-        if: needs.scope.outputs.qualification == 'true'
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-binaries-${{ matrix.arch }}
-          path: |
-            release-bin/plurxd
-            release-bin/plurx-cluster-check
-            release-bin/*.dwp
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 1
-      - name: Retain candidate binaries for non-qualification push and tag runs
-        if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
-        continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-binaries-${{ matrix.arch }}
-          path: |
-            release-bin/plurxd
-            release-bin/plurx-cluster-check
-            release-bin/*.dwp
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 1
       - name: Bound persistent BuildKit state
         if: always() && steps.buildx-cache.outputs.local == 'true'
         env:

@@ -261,12 +261,16 @@ class ReleasePublicationContractCase(unittest.TestCase):
             image.index("release-image-digest-${{ matrix.arch }}"),
         )
         self.assertLess(
-            image.index("release-image-digest-${{ matrix.arch }}"),
+            image.index("Bind the binary set to the tagged tree and verify its ABI"),
             image.index("release-binary-receipt-${{ matrix.arch }}"),
+        )
+        self.assertLess(
+            image.index("release-binary-receipt-${{ matrix.arch }}"),
+            image.index("Verify the pushed platform image"),
         )
         binary_receipt = image.split(
             "- name: Retain the exact tagged binary receipt for one day", 1
-        )[1].split("\n  reuse:", 1)[0]
+        )[1].split("\n      - name:", 1)[0]
         self.assertIn("continue-on-error: true", binary_receipt)
         self.assertIn("needs: [resolve, image, reuse]", publish)
         self.assertIn("Reconfirm the remote tag has not moved", publish)
@@ -829,6 +833,8 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         ).stdout.strip()
         for name in BINARIES:
             packed_pair(export, name)
+            (export / name).chmod(0o755)
+            (export / f"{name}.dwp").chmod(0o644)
         (export / "rustc-version").write_text(
             "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
         )
@@ -916,6 +922,65 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 
 
 
+
+    def test_candidate_packager_links_correct_modes_and_copies_wrong_modes(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            source, export, artifact, commit = self.package_a_candidate(fixture)
+            for name in BINARIES:
+                self.assertTrue(os.path.samefile(export / name, artifact / name))
+                self.assertTrue(
+                    os.path.samefile(export / f"{name}.dwp", artifact / f"{name}.dwp")
+                )
+
+            binary = export / "plurxd"
+            original = binary.read_bytes()
+            binary.unlink()
+            binary.write_bytes(original)
+            binary.chmod(0o600)
+            output = fixture / "normalized"
+            subprocess.run(
+                [str(ROOT / "scripts/release-package-candidate"), str(source),
+                 str(ROOT), str(export), str(output), "x86_64-unknown-linux-gnu",
+                 commit, commit],
+                check=True,
+                env=own_repository_environment(),
+            )
+            self.assertFalse(os.path.samefile(binary, output / binary.name))
+            self.assertEqual(binary.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((output / binary.name).stat().st_mode & 0o777, 0o755)
+            self.assertEqual((output / binary.name).read_bytes(), original)
+
+    def test_candidate_packager_rejects_unverified_export_before_publishing(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            source, export, artifact, commit = self.package_a_candidate(fixture)
+            sidecar = export / "plurxd.dwp"
+            original = sidecar.read_bytes()
+            sidecar.unlink()
+            destination = fixture / "rejected"
+            argv = [str(ROOT / "scripts/release-package-candidate"), str(source),
+                    str(ROOT), str(export), str(destination), "x86_64-unknown-linux-gnu",
+                    commit, commit]
+
+            sidecar.symlink_to(artifact / sidecar.name)
+            result = subprocess.run(
+                argv, capture_output=True, text=True, env=own_repository_environment()
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing regular plurxd.dwp", result.stderr)
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(fixture.glob(".release-bin.*")), [])
+
+            sidecar.unlink()
+            sidecar.write_bytes(b"invalid packed debug")
+            result = subprocess.run(
+                argv, capture_output=True, text=True, env=own_repository_environment()
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(fixture.glob(".release-bin.*")), [])
+            self.assertEqual((artifact / sidecar.name).read_bytes(), original)
 
     def test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent(self):
         source = historical_media_source()
