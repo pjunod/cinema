@@ -1,6 +1,6 @@
 # Keep generated subtitles when Cinema refuses a switch
 
-Build: 309
+Build: 310
 Issue: #1292
 
 When the requested subtitles would require HDR conversion or an overlay during
