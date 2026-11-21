@@ -8621,6 +8621,12 @@ async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotentl
         })
         .await
         .expect("claim");
+    let (status, body) = call(&app, get(&format!("{detail}?explain=true"), Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let predicates = &body["job"]["claim_predicates"];
+    assert_eq!(predicates["evaluated"], true);
+    assert_eq!(predicates["first_block"], "state");
+    assert_eq!(predicates["node_id"], state.node_id.as_str());
     for path in ["/api/v1/cluster/jobs?state=running", &detail] {
         let (status, body) = call(&app, get(path, Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{body}");

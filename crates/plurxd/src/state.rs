@@ -1856,6 +1856,9 @@ pub struct JobManager {
     statuses: Mutex<HashMap<i64, ScanStatus>>,
     /// Live counters for in-flight scans, sampled by `all_statuses`.
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
+    /// Coalesced hint for the local title worker after a durable viewer admission.
+    #[cfg(target_os = "linux")]
+    pub(crate) title_viewer_wake: tokio::sync::Notify,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
     /// Per-request completion signals for a `POST /scan` that waits
@@ -4090,6 +4093,8 @@ impl JobManager {
             tmdb_base: None,
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            title_viewer_wake: tokio::sync::Notify::new(),
             library_wake: tokio::sync::Notify::new(),
             scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),
