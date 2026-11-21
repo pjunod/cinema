@@ -613,8 +613,9 @@ pub(crate) async fn close_http(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", CLOSE_PATH, &body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, "POST", CLOSE_PATH, &body)
         .await
         .unwrap_or(false)
     {
@@ -708,7 +709,7 @@ pub(crate) async fn close_http(
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
             let payload = crate::http::peer_transport::signed_response_payload(200, &body);
-            let Ok(signature) = state.membership.sign_internal_peer_response(
+            let Ok(signature) = state.cluster.authentication().sign_exact_response(
                 &auth.node_id,
                 &auth.nonce,
                 CLOSE_PATH,

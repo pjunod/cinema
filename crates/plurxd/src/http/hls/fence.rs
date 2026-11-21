@@ -157,7 +157,7 @@ pub(crate) fn note_control_error_origin(location: &'static std::panic::Location<
 pub(crate) async fn hold_for_outage_resolution(state: &AppState) {
     let deadline =
         tokio::time::Instant::now().into_std() + crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
-    while let Some(baseline) = state.serving.authority().outage_baseline() {
+    while let Some(baseline) = state.cluster.authority().outage_baseline() {
         match state
             .transcode
             .wait_for_outage_resolution(baseline, deadline)
@@ -182,13 +182,12 @@ pub(crate) async fn hold_for_outage_resolution(state: &AppState) {
 /// proof has to correlate one by one, and their rate is bounded by the
 /// players asking.
 pub(crate) async fn observe_hls_session_response(
-    serving: &crate::serving_fence::ServingFence,
+    authority: crate::serving_fence::ServingAuthority,
     route: HlsSessionRoute,
     path: &str,
     run: impl std::future::Future<Output = Response>,
 ) -> Response {
     let started_at = Instant::now();
-    let authority = serving.authority();
     let arrival = authority.state();
     let (response, context) = RESPONSE_CONTEXT
         .scope(RefCell::new(ResponseContext::default()), async {
@@ -334,8 +333,11 @@ mod tests {
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
         fence.validation_set_ready(false).await;
         let route = hls_session_route("GET", "/api/v1/hls/{session}/{segment}").expect("route");
-        let response =
-            observe_hls_session_response(&fence, route, "/api/v1/hls/abc/seg00277.m4s", async {
+        let response = observe_hls_session_response(
+            fence.authority(),
+            route,
+            "/api/v1/hls/abc/seg00277.m4s",
+            async {
                 note_owner_identity("rolling", Some(7));
                 note_relay("node-b");
                 ApiError::typed(
@@ -344,8 +346,9 @@ mod tests {
                     "changed",
                 )
                 .into_response()
-            })
-            .await;
+            },
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let lines = buffer.tail("trace", 16);
         let line = lines
@@ -376,10 +379,11 @@ mod tests {
         );
 
         // A success is not logged at all.
-        let ok = observe_hls_session_response(&fence, route, "/api/v1/hls/abc/x", async {
-            StatusCode::OK.into_response()
-        })
-        .await;
+        let ok =
+            observe_hls_session_response(fence.authority(), route, "/api/v1/hls/abc/x", async {
+                StatusCode::OK.into_response()
+            })
+            .await;
         assert_eq!(ok.status(), StatusCode::OK);
         assert_eq!(
             buffer
@@ -399,8 +403,11 @@ mod tests {
         let fence =
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
         let route = hls_session_route("POST", "/api/v1/hls/{session}/control").expect("route");
-        let response =
-            observe_hls_session_response(&fence, route, "/api/v1/hls/secret/control", async {
+        let response = observe_hls_session_response(
+            fence.authority(),
+            route,
+            "/api/v1/hls/secret/control",
+            async {
                 let error = crate::media_sessions::ControlRouteError::Store(
                     plurx_core::error::StoreError::Database("secret backend details".into()),
                 );
@@ -414,8 +421,9 @@ mod tests {
                     Some(500),
                     None,
                 )
-            })
-            .await;
+            },
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let lines = buffer.tail("trace", 16);
         let message = &lines

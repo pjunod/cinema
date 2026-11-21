@@ -392,6 +392,7 @@ impl NativeSplitSegment {
     /// Plan private encode windows on the source frame grid. The caller has
     /// a continuous film-head copy and verifies every observed picture
     /// against this exact ordinary segment when packaging the result.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn fel_windows(
         &self,
         grid: plurx_core::transcode::VodFrameGrid,
@@ -763,7 +764,9 @@ struct NativeSplitFelReport {
 pub(crate) struct NativeSplitEntry {
     bytes: i64,
     pub(crate) audio_ticks: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) first_source_frame: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) samples: u64,
     #[cfg(target_os = "linux")]
     ordinary_video: Option<[u8; 32]>,

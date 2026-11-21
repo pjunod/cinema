@@ -359,8 +359,8 @@ async fn model_operation(
         .find(|model| model.id == id)
         .ok_or(ApiError::NotFound("subtitle model"))?;
     let mut members = state
-        .membership
-        .activity_peers()
+        .cluster
+        .voter_targets()
         .await
         .map_err(|_| ApiError::ServiceUnavailable("Worker membership unavailable".into()))?
         .into_iter()
@@ -796,7 +796,7 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
     let observation = WorkerObservation {
         node_id: state.node_id.clone(),
         label: state.server_name.chars().take(64).collect(),
-        eligible: state.serving.is_ready() && !state.membership.local_maintenance_active(),
+        eligible: state.cluster.ready() && !state.cluster.maintenance_active(),
         observed_at_ms: now,
         expires_at_ms: now.saturating_add(60_000),
         engine: Some(

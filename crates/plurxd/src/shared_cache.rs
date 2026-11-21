@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use plurx_core::cluster::coordination::LeaseClaim;
+#[cfg(test)]
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::CacheStorageMember;
 use plurx_core::fs_secure::SecureDirectory;
@@ -240,7 +241,7 @@ impl SharedCacheCoordinator {
         shared_id: String,
         cluster_id: &str,
         node_id: String,
-        membership: MembershipManager,
+        transport: PeerTransport,
         directory: crate::cluster::Directory,
         store: Arc<dyn Store>,
     ) -> Arc<Self> {
@@ -269,7 +270,7 @@ impl SharedCacheCoordinator {
             #[cfg(test)]
             publication_commit_pause: Arc::new(std::sync::Mutex::new(None)),
             node_id,
-            transport: PeerTransport::new(membership),
+            transport,
             directory,
             store,
         })
@@ -1671,7 +1672,7 @@ mod tests {
             shared_id.to_owned(),
             "test-cluster",
             node_id.to_owned(),
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
             store,
         )
