@@ -377,7 +377,8 @@ mod tests {
         // Pages also budget duplicated SQL bytes, so enqueue SQL growth can
         // reduce rows per page. Bound the fill by accepted work, requiring
         // progress until the queue reaches its reserved-headroom frontier.
-        for _ in 0..pending {
+        let page_attempt_budget = pending;
+        for _ in 0..page_attempt_budget {
             store.import_legacy_jobs(1_000).await.expect("bounded page");
             let progress = store.job_migration_status().await.expect("progress");
             assert!(
