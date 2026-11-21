@@ -24,7 +24,6 @@ PROTOCOL = "plurx-playback-control-v1"
 # How close to the end of what a growing session has produced a seek may land
 # before mpv would stall waiting for the encoder.
 SEEK_MARGIN_MS = 2000
-QUALITY_READY_TIMEOUT_S = 4.0
 # The mapper is whatever libplacebo reports. M5's build is expected to log
 # "plurx mapper: <name>"; a bare "CM vX" from libplacebo is also accepted.
 EXPLICIT_MAPPER = re.compile(r"plurx mapper:\s*(.+?)\s*$")
@@ -404,23 +403,6 @@ class Playback:
             return None
         return _track(body.get("published_end_ms")) if status == 200 and isinstance(body, dict) else None
 
-    def wait_for_quality_runway(self, replacement, origin):
-        """A newly admitted rolling session may still be publishing its first segment."""
-        deadline = self.clock() + QUALITY_READY_TIMEOUT_S
-        end = None
-        while not self.mpv.closed:
-            remaining = deadline - self.clock()
-            if remaining <= 0:
-                break
-            end = self.published_end_local_ms(replacement, timeout=min(3, remaining))
-            position = self.position_ms()
-            if position is None or position <= origin or (end is not None and position - origin < end):
-                break
-            remaining = deadline - self.clock()
-            if remaining > 0:
-                self.sleep(min(self.timing.tick_s, remaining))
-        return end
-
     def available_end_local_ms(self):
         published = self.published_end_local_ms(self.session)
         duration = _number(self.mpv.get("duration"))
@@ -527,19 +509,26 @@ class Playback:
             replacement = None if self.mode == "direct" else self.create_session(requested_position)
             origin = max(0, _track((replacement or {}).get("media_origin_ms")) or 0)
             rolling = replacement is not None and not replacement.get("vod")
-            published_end = self.wait_for_quality_runway(replacement, origin) if rolling else None
-            # Admission and the status lookup may take time while mpv continues
-            # playing the incumbent. Its origin still applies to this reading.
+            # Admission takes time while mpv continues playing the incumbent.
+            # Its origin still applies to this reading, taken once it is frozen.
             paused = bool(self.mpv.get("pause", self.paused))
             if not paused:
                 self.mpv.set("pause", True)
                 frozen = True
             position = self.position_ms()
             self.paused = paused
+            if rolling and position is not None and position > origin:
+                published_end = self.published_end_local_ms(replacement)
+                if published_end is None or position - origin >= published_end:
+                    # The incumbent outran what the candidate has published. As
+                    # for any seek outside a rolling session, admit one that
+                    # starts at the target: the frozen commit position.
+                    stale, replacement = replacement, None
+                    self.delete_session(stale)
+                    replacement = self.create_session(position)
+                    origin = max(0, _track(replacement.get("media_origin_ms")) or 0)
             duration = self.duration_ms()
-            if position is None or position < origin or (duration and position >= duration) \
-                    or (rolling and position > origin
-                        and (published_end is None or position - origin >= published_end)):
+            if position is None or position < origin or (duration and position >= duration):
                 raise PlaybackError("The new quality cannot start at the current position")
         except (ApiError, PlaybackError, MpvError) as error:
             for key, value in saved.items():

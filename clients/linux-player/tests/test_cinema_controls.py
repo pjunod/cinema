@@ -337,16 +337,28 @@ class CinemaControls(LauncherCase):
         self.assertEqual(Preferences(self.config).quality, 'auto')
         self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 62_000)
 
-    def test_quality_refuses_rolling_candidate_when_commit_position_is_beyond_its_end(self):
-        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+    def test_quality_readmits_rolling_candidate_at_commit_position_beyond_its_end(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000, 70_000]
         self.server.published_end_ms = 5_000
         self.intent_at(6, 'cinema-quality', '1080'); self.close_at(17)
         with self.delay_quality_admission(time_pos=10):
             self.assertEqual(self.run_launcher(), 0)
-        self.assertEqual(len(self.playback_commands('loadfile')), 1)
-        incumbent, candidate = self.server.sessions
-        self.assertEqual(self.released_sessions(), [candidate['session_id'], incumbent['session_id']])
-        self.assertIn('current position', self.chrome()[-1]['error'])
+        incumbent, outrun, candidate = self.server.sessions
+        creates = self.server.calls('POST', pattern=r'/hls/sessions$')
+        self.assertEqual(creates[-1]['body']['start'], 70.0)
+        # One status reading at commit; the switch never polls for runway.
+        status = [c for c in self.server.calls('GET', pattern=r'/status$')
+                  if outrun['session_id'] in c['path']]
+        self.assertEqual(len(status), 1)
+        pauses = [c for c in self.mpv.commands() if c[:2] == ['set_property', 'pause']]
+        self.assertIs(pauses[0][2], True)
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')], ['5.000', '0.000'])
+        self.assertEqual(self.released_sessions(),
+                         [outrun['session_id'], incumbent['session_id'], candidate['session_id']])
+        progress = [r['body']['position_ms'] for r in self.server.calls('POST', pattern=r'/progress$')]
+        self.assertIn(70_000, progress)
+        self.assertEqual(progress, sorted(progress))
+        self.assertEqual(Preferences(self.config).quality, '1080')
 
     def test_vod_quality_switch_keeps_playing_at_commit_position(self):
         self.advertise_quality(); self.server.origins = [60_000, 64_000]
@@ -414,27 +426,6 @@ class CinemaControls(LauncherCase):
         self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], True)
         self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 3_000_500)
         self.assertEqual(Preferences(self.config).quality, 'auto')
-
-    def test_quality_waits_for_rolling_publication_before_freezing_incumbent(self):
-        self.advertise_quality(); self.server.origins = [60_000, 64_000]
-        self.server.published_end_ms = None
-        self.intent_at(6, 'cinema-quality', '1080')
-
-        def publish():
-            self.assertEqual(len(self.playback_commands('loadfile')), 1)
-            self.assertFalse(self.playback_commands('set_property', 'pause'))
-            self.server.published_end_ms = 20_000
-            self.mpv.props(for_load=1, time_pos=13)
-
-        self.clock.at(12.5, publish)
-        self.close_at(20)
-        with self.delay_quality_admission(time_pos=10):
-            self.assertEqual(self.run_launcher(), 0)
-        status = self.server.calls('GET', pattern=r'/status$')
-        self.assertLess(status[0]['at'], 12.5)
-        self.assertGreaterEqual(status[-1]['at'], 12.5)
-        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')], ['5.000', '9.000'])
-        self.assertEqual(Preferences(self.config).quality, '1080')
 
     def test_refused_or_unadvertised_quality_keeps_existing_media(self):
         self.advertise_quality(); self.server.create_status = [200, 503]
