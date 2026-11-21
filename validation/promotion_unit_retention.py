@@ -26,6 +26,7 @@ PROTOCOL_PATHS = {
     'tests/validation/test_selected_formal_preflight.py',
     'tests/validation/test_selected_formal_preflight.py',
     'tests/validation/test_selected_apple_preflight.py',
+    'tests/operations/test_apple_tv_navigation_gate.py',
     'validation/selected_node_preflight.py',
     'validation/selected_root_custody.py',
     'tests/validation/test_selected_node_preflight.py',

@@ -2403,7 +2403,7 @@ assert.equal(context.ACT_TIMER, null);
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
-        def enabled(expression, *, apple, desktop, retained, tv_adopted=False,
+        def enabled(expression, *, apple, desktop, retained, tv_adopted=False, native_adopted=False,
                     preflight="success", train=False, scope_success=True, cancelled=False):
             values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained, "train_selected": train}
             expression = re.sub(
@@ -2415,6 +2415,8 @@ assert.equal(context.ACT_TIMER, null);
             expression = re.sub(r"needs\.preflight\.result == '(success|skipped)'",
                                 lambda match: str(preflight == match[1]), expression)
             expression = expression.replace("needs.scope.result == 'success'", str(scope_success))
+            expression = expression.replace("needs.preflight.outputs.apple_native_retained != 'true'",
+                                            str(not native_adopted))
             expression = expression.replace("!cancelled()", str(not cancelled))
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
@@ -2440,8 +2442,11 @@ assert.equal(context.ACT_TIMER, null);
                 # Retained mobile evidence never suppresses the independent tray step.
                 # Only its own authenticated native proof can adopt tray operations.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
-                self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
-                                        apple=False, desktop=True, retained=True))
+                tray_guard = workflow_step_scalar(desktop, "if")
+                self.assertTrue(enabled(tray_guard, apple=False, desktop=True, retained=True))
+                if path.endswith("/ci.yml"):
+                    self.assertFalse(enabled(tray_guard, apple=False, desktop=True, retained=False,
+                                             native_adopted=True))
                 self.assertFalse(enabled(condition, apple=False, desktop=False, retained=False))
                 self.assertTrue(enabled(condition, apple=True, desktop=False, retained=False))
                 self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
@@ -2530,6 +2535,8 @@ assert.equal(context.ACT_TIMER, null);
                                                 tv_adopted=True), name)
                     if path.endswith("/ci.yml"):
                         self.assertFalse(enabled(guard, apple=True, desktop=True, retained=True), name)
+                        self.assertFalse(enabled(guard, apple=True, desktop=False, retained=False,
+                                                 native_adopted=True), name)
 
     def test_native_macos_tray_unit_output_does_not_pollute_mobile_receipts(self):
         case_line = "Test Case '-[PlurxTrayCoreTests.ProtocolTests testFixture]' passed (0.001 seconds)."
