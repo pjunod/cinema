@@ -97,6 +97,7 @@ promotion qualification remain required; this is not built-code approval.
 | Optional Curator household login | **Reviewed and locally qualified; PR/train qualification pending.** Independent accounts, source-bound scoped grants and explicit consent on both stores. | Owner Codex/root; [canonical ledger](CURATOR-LOGIN-STATUS.md). No deployment or real-account linking. |
 | P48 · Custom tags and tag-driven Home rows | **Building on `effort/custom-tags`; Claude Opus 5.5 owns.** Owner rulings 2026-11-15: grantable `manage_tags`, suggestions and manual tagging in v1, Watchlist/Favorites become movable rows. | Build T1–T5, one adversarial review, fast lane, merge. [Plan](CUSTOM-TAGS-PLAN.md). |
 | Server-side FEL splice | **Open.** The native Safari lab accepted uninterrupted playback. The single-init video packaging and exact AAC projection are locally qualified on saved media. | Integrate exact source timing and rolling publication, review with Astra, then qualify the exact main-bound candidate. [Build ledger](../streaming/FEL-SERVER-SPLICE-BUILD.md). |
+| P49 · Shared video across VOD languages | **Planned.** Two-language indexed copy VOD. Implementation, output continuity and physical cache qualification are open. | [Implementation and acceptance plan](../streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md). |
 <!-- backlog: insert new video, playback and client rows (P-numbers) above this line -->
 
 ### 2.2 Cluster, engineering and platform projects
