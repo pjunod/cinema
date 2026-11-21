@@ -137,6 +137,8 @@ async fn drive_playback_admission<T>(
 }
 
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
+    #[cfg(target_os = "linux")]
+    title_work::initialize_native_fel_backend(&state).await;
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut idle = crate::background_jobs::IdlePoll::new();

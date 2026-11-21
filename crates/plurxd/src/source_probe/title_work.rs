@@ -132,6 +132,12 @@ impl TitleTask {
             pipeline
         };
         let scanner = tools.title_scanner_digest();
+        #[cfg(target_os = "linux")]
+        let fel = fel_backend(state, &tools).await;
+        #[cfg(not(target_os = "linux"))]
+        let fel: Option<String> = None;
+        #[cfg(target_os = "linux")]
+        state.transcode.observe_native_fel_backend(fel.clone());
         let demands = match live_demands {
             Some(demands) => demands,
             None => {
@@ -159,10 +165,6 @@ impl TitleTask {
             }
             return Ok(None);
         }
-        #[cfg(target_os = "linux")]
-        let fel = fel_backend(state, &tools).await;
-        #[cfg(not(target_os = "linux"))]
-        let fel: Option<String> = None;
         for mut demand in demands {
             #[cfg(target_os = "linux")]
             if playback_only {
@@ -568,6 +570,20 @@ pub(super) async fn probe_preempts(
         }
     }
     Ok(false)
+}
+
+// The catalogue may already have an exact title verdict when the daemon
+// starts. Make the installed backend available to routing before waiting for
+// a new title job or for the ordinary source-probe lane to become idle.
+#[cfg(target_os = "linux")]
+pub(super) async fn initialize_native_fel_backend(state: &AppState) {
+    if state.transcode.fel_qualification_capable() {
+        let identity = match ToolSet::capture().await {
+            Ok(Some(tools)) => fel_backend(state, &tools).await,
+            _ => None,
+        };
+        state.transcode.observe_native_fel_backend(identity);
+    }
 }
 
 /// Scheduling interest never substitutes for a locally readable current source

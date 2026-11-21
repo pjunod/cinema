@@ -1,3 +1,12 @@
+# Native FEL Resume clock. The optional reader drains the rolling producer's
+# bounded picture records and keeps draining discarded data until its inherited
+# descriptor closes. It owns only the read endpoint and observation channel.
+# The existing admitted producer owner still reaps FFmpeg and settles source
+# custody. A 50 ms wait caps startup's demand for complete clock records;
+# expiry declines the layout and neither stops the child nor proves settlement.
+# The shape counter adds one Tokio task, its production and test wrapper calls,
+# and the wrapper declaration. There is no additional FFmpeg launch.
+
 # Prepared native FEL startup. One source-copy command is run and reaped by
 # the existing bounded background child owner under a source job. The one
 # startup staging task holds a scratch writer and may only offer a complete
@@ -4125,7 +4134,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
 # The placeholder source fixture awaits one blocking file-lock task and
 # holds the returned lock through validation and atomic publication.
-expected_occurrences = 1184
+expected_occurrences = 1187
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4411,7 +4420,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # declared_background_spawn calls `spawn()` after recording the escape tick.
 # F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
 # configured-policy regression, not a new task or process owner.
-expected_occurrences = 26
+expected_occurrences = 27
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6104,7 +6113,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The scanner deadline fixture bounds cleanup after advancing the test clock.
 # The stored-marker fixture races the decision against the explicit
 # marker fallback pause and removes its elapsed-time observer.
-expected_occurrences = 2271
+expected_occurrences = 2272
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
