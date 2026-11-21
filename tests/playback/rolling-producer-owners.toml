@@ -1,3 +1,12 @@
+# Native FEL Resume clock. The optional reader drains the rolling producer's
+# bounded picture records and keeps draining discarded data until its inherited
+# descriptor closes. It owns only the read endpoint and observation channel.
+# The existing admitted producer owner still reaps FFmpeg and settles source
+# custody. A 50 ms wait caps startup's demand for complete clock records;
+# expiry declines the layout and neither stops the child nor proves settlement.
+# The shape counter adds one Tokio task, its production and test wrapper calls,
+# and the wrapper declaration. There is no additional FFmpeg launch.
+
 # Prepared native FEL startup. One source-copy command is run and reaped by
 # the existing bounded background child owner under a source job. The one
 # startup staging task holds a scratch writer and may only offer a complete
@@ -4124,7 +4133,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Selected and predicted copy preparation each move a borrowed read-preparation
 # slot into the task. Planning and production honor shutdown and deadlines.
 # A started producer is joined before source custody and the slot are released.
-expected_occurrences = 1185
+expected_occurrences = 1188
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4410,7 +4419,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # declared_background_spawn calls `spawn()` after recording the escape tick.
 # F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
 # configured-policy regression, not a new task or process owner.
-expected_occurrences = 26
+expected_occurrences = 27
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6105,7 +6114,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # verification and producer work. Source custody persists through physical
 # reap, and the VOD driver waits between reap attempts. Six fixture timers
 # bound the playback preview and indexed-resume tests.
-expected_occurrences = 2285
+expected_occurrences = 2286
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

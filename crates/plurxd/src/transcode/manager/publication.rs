@@ -1799,6 +1799,44 @@ impl TranscodeManager {
         {
             return Ok(false);
         }
+        use plurx_core::transcode::dv_processing::DvSelection;
+        let DvSelection::Selected(plan) = &encoding.dv_processing else {
+            return Err("native splice has no verified processing plan".into());
+        };
+        // The immutable player origin is the ordinary copy contract. Bind
+        // renderer ordinals separately, from the actual child's own pictures
+        // and the renderer's source fence, without moving any media timestamps.
+        let source_frame_base = if session.start_seconds > 0.0 {
+            let witness = split
+                .source_clock
+                .get()
+                .filter(|witness| {
+                    witness.version == runtime.source.object_version()
+                        && witness.attempt == attempt
+                        && witness.absolute_video_index == plan.absolute_source_video_index()
+                        && witness.clock.source_tick() == runtime.source_tick
+                })
+                .ok_or("native splice has no same-source resume clock")?;
+            let binding = witness
+                .clock
+                .bind(
+                    runtime.source_origin,
+                    encoding.grid,
+                    witness.absolute_video_index,
+                    witness.attempt,
+                )
+                .map_err(|error| error.to_string())?;
+            tracing::debug!(
+                target: "plurxd::http::hls",
+                session = %session_log_id(session_id),
+                first_source_frame = binding.first_source_frame,
+                copy_media_origin_us = binding.media_origin_us,
+                "native FEL resume source pictures bound"
+            );
+            binding.first_source_frame
+        } else {
+            0
+        };
         let input = tokio::fs::read(session.dir.join("init.mp4"))
             .await
             .map_err(|err| err.to_string())?;
@@ -1893,7 +1931,6 @@ impl TranscodeManager {
             };
             last_attempted = index;
             let prepared = async {
-                use plurx_core::transcode::dv_processing::DvSelection;
                 let raw = tokio::fs::read(session.dir.join(segment_name(index)))
                     .await
                     .map_err(|err| err.to_string())?;
@@ -1922,11 +1959,10 @@ impl TranscodeManager {
                 {
                     return Err("native splice has no verified ordinary return boundary".into());
                 }
-                segment.first_source_frame = entry.first_source_frame;
+                segment.first_source_frame = source_frame_base
+                    .checked_add(entry.first_source_frame)
+                    .ok_or("native splice source frame overflow")?;
                 let entries = segment.fel_windows(encoding.grid)?;
-                let DvSelection::Selected(plan) = &encoding.dv_processing else {
-                    return Err("native splice has no verified processing plan".into());
-                };
                 let (windows, _) = runtime
                     .render_native_fel_windows(
                         file,
