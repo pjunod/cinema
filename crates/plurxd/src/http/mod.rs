@@ -551,6 +551,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
         | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
@@ -2324,6 +2325,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/files/{id}/hls/prepare-startup",
             post(hls::prepare_startup).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/startup-decision",
+            post(stream::startup_decision_post).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/files/{id}/hls/continuous-candidates",

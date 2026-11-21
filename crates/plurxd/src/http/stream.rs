@@ -1962,6 +1962,7 @@ async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Ma
 #[derive(Clone, Copy)]
 enum PlanningReadPolicy {
     LocalDerivation,
+    StoredLocalEvidence,
     StoredSourceEvidence,
 }
 
@@ -2277,11 +2278,23 @@ pub async fn decision_post(
     auth: AuthUser,
     state: State<AppState>,
     path: AxPath<i64>,
-    Query(mut q): Query<Caps>,
+    Query(q): Query<Caps>,
     headers: HeaderMap,
     remote: super::network::RemoteAddress,
     Json(body): Json<DecisionBody>,
 ) -> Result<Json<DecisionResponse>, ApiError> {
+    decision(
+        auth,
+        state,
+        path,
+        Query(decision_document(q, body)?),
+        headers,
+        remote,
+    )
+    .await
+}
+
+fn decision_document(mut q: Caps, body: DecisionBody) -> Result<Caps, ApiError> {
     validate_device_caps(&body.caps)?;
     if body.caps.v != playback::DeviceCaps::VERSION {
         return Err(ApiError::BadRequest(format!(
@@ -2291,7 +2304,30 @@ pub async fn decision_post(
         )));
     }
     q.caps_v2 = Some(body.caps);
-    decision(auth, state, path, Query(q), headers, remote).await
+    Ok(q)
+}
+
+/// Detail preparation may plan from stored evidence before a source owner is
+/// admitted. A separate route keeps older servers from running Play's probes.
+pub async fn startup_decision_post(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Query(q): Query<Caps>,
+    headers: HeaderMap,
+    super::network::RemoteAddress(remote): super::network::RemoteAddress,
+    Json(body): Json<DecisionBody>,
+) -> Result<Json<DecisionResponse>, ApiError> {
+    local_decision(
+        &state,
+        &user,
+        id,
+        decision_document(q, body)?,
+        &headers,
+        remote,
+        PlanningReadPolicy::StoredLocalEvidence,
+    )
+    .await
 }
 
 /// Legacy priors have neither completed-body nor candidate-recipe provenance.
@@ -2315,7 +2351,28 @@ pub async fn decision(
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
 ) -> Result<Json<DecisionResponse>, ApiError> {
-    let mut identity = super::network::identity(&headers, remote);
+    local_decision(
+        &state,
+        &user,
+        id,
+        q,
+        &headers,
+        remote,
+        PlanningReadPolicy::LocalDerivation,
+    )
+    .await
+}
+
+async fn local_decision(
+    state: &AppState,
+    user: &plurx_core::domain::User,
+    id: i64,
+    q: Caps,
+    headers: &HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    policy: PlanningReadPolicy,
+) -> Result<Json<DecisionResponse>, ApiError> {
+    let mut identity = super::network::identity(headers, remote);
     if let Some(ref mut id) = identity {
         id.user_id = Some(user.id);
         id.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
@@ -2326,18 +2383,18 @@ pub async fn decision(
     }
     let network_prior =
         super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
-    let file = load_file(&state, id).await?;
+    let file = load_file(state, id).await?;
     decision_for_file(
-        &state,
+        state,
         file,
         q,
         network_prior,
-        Some(&user),
+        Some(user),
         (
             identity.as_ref(),
-            super::hls::link_receipts::requested_receipt(&headers),
+            super::hls::link_receipts::requested_receipt(headers),
         ),
-        PlanningReadPolicy::LocalDerivation,
+        policy,
     )
     .await
     .map(Json)
@@ -2562,7 +2619,8 @@ async fn decision_for_file(
         // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
-    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
+    let have_dovi = !matches!(marker_policy, PlanningReadPolicy::StoredSourceEvidence)
+        && crate::ffmpeg::has_dovi_rpu().await;
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
@@ -2653,7 +2711,9 @@ async fn decision_for_file(
     };
     let markers = match marker_policy {
         PlanningReadPolicy::LocalDerivation => markers_for(state, &file).await,
-        PlanningReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+        PlanningReadPolicy::StoredLocalEvidence | PlanningReadPolicy::StoredSourceEvidence => {
+            stored_markers_for_source(state, &file).await
+        }
     };
 
     // DTO defaults and the verdict now come from the same selection above.

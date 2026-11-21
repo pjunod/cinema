@@ -394,7 +394,7 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         None,
     );
     let (hydrated, hydrated_version, hydrated_key) = serve
-        .try_cluster_fragment_index(&file, video, None)
+        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::SelectedDetail)
         .await
         .expect("selected converting artifact hydrates")
         .expect("source is already attested");
@@ -408,8 +408,19 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
     assert_eq!(hydrated.rows, index.rows);
 
     crate::fragment_index_cluster::remove_local_blob(cache.path(), &cache_key).await;
+    let selected = serve
+        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::SelectedDetail)
+        .await
+        .expect_err("speculation never rehydrates or repairs a missing blob");
+    assert!(selected.contains("requires foreground hydration"));
+    let unrepaired = sqlite
+        .cluster_fragment_index_job(&cache_key, "node-a")
+        .await
+        .expect("read original job")
+        .expect("published job");
+    assert_eq!(unrepaired.state, "ready");
     let unavailable = serve
-        .try_cluster_fragment_index(&file, video, None)
+        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::Playback)
         .await
         .expect_err("a catalogue row without any verified holder is not playable");
     assert!(

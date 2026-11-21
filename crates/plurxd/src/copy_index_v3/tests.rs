@@ -232,6 +232,15 @@ impl Fixture {
     }
 
     async fn resolve(&self) -> Option<ResolvedCopyIndex> {
+        self.resolve_with_mode(ResolveMode::Foreground)
+            .await
+            .expect("resolution")
+    }
+
+    async fn resolve_with_mode(
+        &self,
+        mode: ResolveMode,
+    ) -> Result<Option<ResolvedCopyIndex>, String> {
         resolve(
             &self.store,
             None,
@@ -241,10 +250,10 @@ impl Fixture {
             &self.file,
             self.video,
             Some(&self.defects),
+            mode,
         )
         .await
-        .expect("resolution")
-        .index
+        .map(|resolution| resolution.index)
     }
 
     /// Every defect the reader has reported since the last call.
@@ -401,6 +410,62 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
     assert!(fixture.resolve().await.is_some());
     refuse_on_this_engine(&resolved.rendition_cache_key);
     assert!(fixture.resolve().await.is_none());
+}
+
+#[tokio::test]
+async fn local_only_resolution_uses_verified_bytes_without_repairing_the_head() {
+    let fixture = fixture().await;
+    let mode = ResolveMode::LocalOnly;
+    assert!(fixture
+        .resolve_with_mode(mode)
+        .await
+        .expect("no head")
+        .is_none());
+
+    let source_sha256 = hex64('a');
+    let (artifact, blob) = variant(
+        &fixture.namespace,
+        fixture.file.id,
+        &sealed_index(&source_sha256, true),
+        &source_sha256,
+    );
+    fixture.publish(NODE, &fixture.object_version, &artifact);
+    assert!(
+        fixture.resolve_with_mode(mode).await.is_err(),
+        "missing blob"
+    );
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
+
+    fixture.install(&artifact, &blob).await;
+    let path = crate::copy_analysis::v3_blob_path(
+        &crate::copy_analysis::v3_root(&fixture.cache),
+        &artifact.blob_sha256,
+    )
+    .expect("blob path");
+    let mut corrupt = blob.clone();
+    *corrupt.last_mut().expect("rows") ^= 1;
+    std::fs::write(&path, &corrupt).expect("corrupt the blob");
+    assert!(
+        fixture.resolve_with_mode(mode).await.is_err(),
+        "corrupt blob"
+    );
+    assert_eq!(std::fs::read(&path).expect("retained blob"), corrupt);
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
+
+    std::fs::write(path, blob).expect("restore the verified blob");
+    assert!(fixture
+        .store
+        .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, NODE)
+        .await
+        .expect("retire the holder"));
+    let resolved = fixture
+        .resolve_with_mode(mode)
+        .await
+        .expect("resolution")
+        .expect("verified local blob");
+    assert!(fixture.holders(&artifact).await.is_empty());
+    assert!(fixture.reported().is_empty());
+    assert_eq!(sealed_init_defect(&resolved.rendition_cache_key), None);
 }
 
 /// Another origin's head describes this node's bytes only when this node's

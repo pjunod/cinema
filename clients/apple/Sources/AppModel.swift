@@ -1253,7 +1253,8 @@ final class AppModel: ObservableObject {
                 caps: document,
                 query: query,
                 legacyQuery: { snapshot.legacyQuery + query },
-                fileContext: fileContext
+                fileContext: fileContext,
+                speculative: speculative
             )
             return (decision, document)
         } catch {

@@ -1,3 +1,4 @@
+use super::shared::AttachmentPurpose;
 use super::*;
 
 impl VodServe {
@@ -596,16 +597,24 @@ impl VodServe {
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
-    ) -> Option<crate::copy_index_v3::Resolution> {
-        let node_id = self.shared.cluster_node_id.as_deref()?;
+        purpose: AttachmentPurpose,
+    ) -> Result<Option<crate::copy_index_v3::Resolution>, String> {
+        use crate::copy_index_v3::ResolveMode;
+        let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
+            return Ok(None);
+        };
         // A recipe planned from a shared index is fenced on the engine at
         // every generation, exactly as a v2 one is. With a changed engine it
         // could not produce, so the node-local index keeps the title playing.
         // Nothing is returned, so no index is asked for either: a changed
         // engine could not build one.
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
-            return None;
+            return Ok(None);
         }
+        let mode = match purpose {
+            AttachmentPurpose::Playback => ResolveMode::Foreground,
+            AttachmentPurpose::SelectedDetail => ResolveMode::LocalOnly,
+        };
         let resolved =
             async {
                 let namespace =
@@ -626,15 +635,17 @@ impl VodServe {
                     file,
                     video,
                     self.shared.copy_analysis.get().map(Arc::as_ref),
+                    mode,
                 )
                 .await
             }
             .await;
         match resolved {
-            Ok(resolved) => Some(resolved),
+            Ok(resolved) => Ok(Some(resolved)),
+            Err(reason) if purpose == AttachmentPurpose::SelectedDetail => Err(reason),
             Err(reason) => {
                 tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v3 copy index unavailable");
-                None
+                Ok(None)
             }
         }
     }
@@ -681,6 +692,7 @@ impl VodServe {
         file: &MediaFile,
         video: CopyVideoOptions,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if let Some(viewer) = viewer {
             viewer.require_local_authority().map_err(str::to_owned)?;
@@ -744,6 +756,9 @@ impl VodServe {
                     && artifact.pipeline_sha256 == pipeline
             });
         let Some(artifact) = artifact else {
+            if purpose == AttachmentPurpose::SelectedDetail {
+                return Ok(None);
+            }
             let queued = self
                 .shared
                 .store
@@ -772,14 +787,25 @@ impl VodServe {
                 "the exact v2 artifact is awaiting queue admission".to_owned()
             });
         };
-        let index = crate::fragment_index_cluster::hydrate(
-            self.shared.store.as_ref(),
-            self.shared.cluster_membership.as_ref(),
-            node_id,
-            root,
-            &artifact,
-        )
-        .await?;
+        let index = if purpose == AttachmentPurpose::SelectedDetail {
+            let blob = crate::fragment_index_cluster::read_local_blob(root, &artifact)
+                .await?
+                .ok_or_else(|| {
+                    "the exact v2 copy index requires foreground hydration".to_owned()
+                })?;
+            Some(crate::fragment_index_cluster::decode_artifact(
+                &blob, &artifact,
+            )?)
+        } else {
+            crate::fragment_index_cluster::hydrate(
+                self.shared.store.as_ref(),
+                self.shared.cluster_membership.as_ref(),
+                node_id,
+                root,
+                &artifact,
+            )
+            .await?
+        };
         let Some(mut index) = index else {
             let repair = repair_job_for_artifact(repair, &artifact);
             // Lost work: without this transition the exact artifact remains

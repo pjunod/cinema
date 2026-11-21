@@ -507,9 +507,14 @@ struct PlurxAPI {
         caps: DeviceCaps,
         query: [URLQueryItem],
         legacyQuery: () -> [URLQueryItem],
-        fileContext: PlaybackFileContext? = nil
+        fileContext: PlaybackFileContext? = nil,
+        speculative: Bool = false
     ) async throws -> Decision {
         let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
+        if speculative {
+            return try await post(try context.apiPath("hls/startup-decision"),
+                                  query: query, body: DecisionBody(caps: caps))
+        }
         do {
             return try await post(
                 try context.apiPath("decision"),

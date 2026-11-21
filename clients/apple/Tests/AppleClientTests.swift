@@ -6585,8 +6585,11 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(try local.apiPath("hls/prepare-startup"), "files/42/hls/prepare-startup")
         XCTAssertThrowsError(try local.path("hls/prepare-startup", query: [URLQueryItem(name: "file", value: "7")]))
         XCTAssertThrowsError(try local.path("hls/prepare-startup/extra"))
+        XCTAssertEqual(try local.apiPath("hls/startup-decision"), "files/42/hls/startup-decision")
+        XCTAssertThrowsError(try local.path("hls/startup-decision/extra"))
         let session = try local.withSession("00000000-0000-4000-8000-000000000001")
         XCTAssertThrowsError(try session.path("hls/prepare-startup"))
+        XCTAssertThrowsError(try session.path("hls/startup-decision"))
     }
 
     func testNativeStartupSeekRequiresTheRequestedItemClock() {

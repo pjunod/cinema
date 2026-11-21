@@ -1536,23 +1536,26 @@ async fn establish_or_verify(
             "the immutable media engine changed before init publication".to_owned(),
         )));
     }
+    let resume_work = rendition.resume_preparation_for_epoch(epoch);
     // A v3 copy index promises the init its seal published. Checked against
     // this generation's own muxer init before any identity or init is
     // established or written, so an engine that emits another init serves
     // nothing from this plan.
     if let Some(refused) = sealed_init_refusal(&rendition.recipe, rendition.index.as_ref(), muxer) {
-        if let Some(key) = rendition.recipe.cluster_cache_key.as_deref() {
-            crate::copy_index_v3::refuse_on_this_engine(key);
-        }
-        if matches!(refused, SealedInitRefusal::Mismatch(_)) {
-            report_sealed_init(shared, &rendition.recipe);
+        if resume_work.is_none() {
+            if let Some(key) = rendition.recipe.cluster_cache_key.as_deref() {
+                crate::copy_index_v3::refuse_on_this_engine(key);
+            }
+            if matches!(refused, SealedInitRefusal::Mismatch(_)) {
+                report_sealed_init(shared, &rendition.recipe);
+            }
         }
         let refused = refused.reason().to_owned();
         tracing::warn!(
             target: "plurxd::vodserve",
             rendition = %rendition.key,
             file_id = rendition.recipe.file.id,
-            "{refused}; this process will plan the title from its next index"
+            "{refused}; discarding this generation"
         );
         return Err(Outcome::Failed(Failure::SealedInit(refused)));
     }
@@ -1568,7 +1571,6 @@ async fn establish_or_verify(
             ))));
         }
     }
-    let resume_work = rendition.resume_preparation_for_epoch(epoch);
     let charge_init = |bytes: usize| {
         if let Some(work) = resume_work.as_ref() {
             if !rendition

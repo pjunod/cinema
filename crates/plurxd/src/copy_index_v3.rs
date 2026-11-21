@@ -61,6 +61,12 @@ pub(crate) struct Resolution {
     pub(crate) own: plurx_core::store::analysis_coordination::AnalysisCoordinationSource,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolveMode {
+    Foreground,
+    LocalOnly,
+}
+
 /// Contracts whose sealed init this process's engine does not produce. The
 /// engine is fixed for the life of the process, so a refusal found by one
 /// generation holds for every later plan: planning then uses its next index
@@ -153,6 +159,7 @@ struct Consumer<'a> {
     file: &'a MediaFile,
     identity: SourceIdentity,
     object_version: String,
+    mode: ResolveMode,
     /// Where a defective healthy head is reported. None reports nothing.
     defects: Option<&'a CopyAnalysisRegistry>,
 }
@@ -160,7 +167,9 @@ struct Consumer<'a> {
 /// Resolve the v3 index for one copy of `file` on this node, or `None` when no
 /// usable head, holder or valid blob exists. `namespace` is the cluster's
 /// catalogue identity, as the publisher keyed it. `defects` is the Analysis
-/// worker's inbox for a healthy head found defective.
+/// worker's inbox for a healthy head found defective in foreground resolution.
+/// Local-only resolution returns an error if it cannot verify a matching
+/// head's local bytes, since foreground may still hydrate and use that head.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve(
     store: &dyn Store,
@@ -171,6 +180,7 @@ pub(crate) async fn resolve(
     file: &MediaFile,
     video: CopyVideoOptions,
     defects: Option<&CopyAnalysisRegistry>,
+    mode: ResolveMode,
 ) -> Result<Resolution, String> {
     // This node's current object: a stat checked against the scanner's facts.
     let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
@@ -194,7 +204,11 @@ pub(crate) async fn resolve(
         file,
         identity,
         object_version,
-        defects,
+        mode,
+        defects: match mode {
+            ResolveMode::Foreground => defects,
+            ResolveMode::LocalOnly => None,
+        },
     };
     // This node's own head, by primary key.
     let own_variant = store
@@ -301,6 +315,7 @@ impl Consumer<'_> {
             &self.root,
             variant,
             artifact,
+            self.mode,
         )
         .await?
         {
@@ -350,7 +365,9 @@ impl Consumer<'_> {
                 return Ok(None);
             }
         }
-        remember_planned(&rendition_cache_key, variant, &artifact.blob_sha256);
+        if self.mode == ResolveMode::Foreground {
+            remember_planned(&rendition_cache_key, variant, &artifact.blob_sha256);
+        }
         Ok(Some(ResolvedCopyIndex {
             index,
             object_version: self.object_version.clone(),
@@ -563,6 +580,7 @@ async fn load_blob(
     root: &Path,
     variant: &CopyIndexV3Variant,
     artifact: &CopyIndexV3Artifact,
+    mode: ResolveMode,
 ) -> Result<Loaded, String> {
     let path = crate::copy_analysis::v3_blob_path(root, &artifact.blob_sha256)
         .ok_or("invalid v3 blob digest")?;
@@ -573,6 +591,15 @@ async fn load_blob(
             .map_err(|error| format!("copy index v3 blob is busy: {error}"))?;
         read_local(&path, artifact).await
     };
+    if mode == ResolveMode::LocalOnly {
+        return match local {
+            LocalBlob::Verified(blob) => Ok(Loaded::Blob(blob)),
+            LocalBlob::Missing => Err("local copy index v3 blob is missing".into()),
+            LocalBlob::Unreadable(reason) | LocalBlob::Corrupt(reason) => Err(format!(
+                "local copy index v3 blob could not be verified: {reason}"
+            )),
+        };
+    }
     match local {
         LocalBlob::Verified(blob) => {
             // The head read already said whether this node is a listed
