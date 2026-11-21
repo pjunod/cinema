@@ -162,6 +162,32 @@ class GateRepairCase(unittest.TestCase):
             repair.current_repair_tests(raw.replace(b'... ok', b'... skipped'), due)
         with self.assertRaises(ReceiptError):
             repair.current_repair_tests(raw[:-5], due)
+        nested = raw.replace(second.encode(), b'[' * 100000 + b']' * 100000)
+        with self.assertRaises(ReceiptError):
+            repair.current_repair_tests(nested, due)
+        with self.assertRaises(ReceiptError):
+            repair.current_repair_tests(raw + b'\n\xe2\x82', due)
+
+    def test_formal_source_tolerates_only_the_fast_lane_receipt_on_the_exact_tree(self):
+        tree = mock.Mock(returncode=0, stdout='d' * 40 + '\n')
+        dirty = {'commit': SOURCE, 'dirty': True, 'tree': 'd' * 40,
+                 'dirty_paths': [repair.FAST_LANE_PYTHON_RECEIPT],
+                 'untracked_paths': [repair.FAST_LANE_PYTHON_RECEIPT],
+                 'governed_dirty_paths': [], 'governed_dirty_sha256': {}}
+        with mock.patch.object(repair.subprocess, 'run', return_value=tree):
+            self.assertTrue(repair.formal_source_clean({'dirty': False}, SOURCE))
+            self.assertTrue(repair.formal_source_clean(dirty, SOURCE))
+            for change in ({'tree': 'e' * 40},
+                           {'dirty_paths': [repair.FAST_LANE_PYTHON_RECEIPT, 'crates/x.rs']},
+                           {'untracked_paths': []},
+                           {'dirty_paths': ['verification/durable-jobs/mapping.json'],
+                            'untracked_paths': ['verification/durable-jobs/mapping.json']},
+                           {'governed_dirty_paths': ['verification/durable-jobs/model.tla']},
+                           {'governed_dirty_sha256': {'x': '0' * 64}}):
+                with self.subTest(change=change):
+                    self.assertFalse(repair.formal_source_clean({**dirty, **change}, SOURCE))
+        with mock.patch.object(repair.subprocess, 'run', return_value=mock.Mock(returncode=128, stdout='')):
+            self.assertFalse(repair.formal_source_clean(dirty, SOURCE))
 
     def test_repair_enrollment_is_closed_and_cannot_use_the_ordinary_python_descriptor(self):
         snapshot = {'sha256': '1' * 64, 'attachment_id': 3, 'attachment_uuid': 'proof-id'}

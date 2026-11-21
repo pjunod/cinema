@@ -435,6 +435,24 @@ def cluster_formal_coverage(api, repository, base, current):
             for package, proof in result.items()}
 
 
+FAST_LANE_PYTHON_RECEIPT = '.main-python-unit-receipts/receipt.json'
+
+
+def formal_source_clean(source, old):
+    """The solver ran on exactly ``old``'s committed tree.
+
+    The main fast lane writes its own untracked Python-unit receipt into the
+    checkout before the formal smokes run. That single ungoverned file is the
+    only tolerated dirt, and the recorded tree must still be ``old``'s tree.
+    """
+    if source['dirty'] is False:
+        return True
+    tree = subprocess.run(['git', 'rev-parse', old + '^{tree}'], capture_output=True, text=True)
+    return (tree.returncode == 0 and source.get('tree') == tree.stdout.strip()
+            and source.get('dirty_paths') == source.get('untracked_paths') == [FAST_LANE_PYTHON_RECEIPT]
+            and source.get('governed_dirty_paths') == [] and source.get('governed_dirty_sha256') == {})
+
+
 def formal_archive(raw, old, current, refinements):
     result = {}
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
@@ -451,7 +469,7 @@ def formal_archive(raw, old, current, refinements):
             source = document['source_git']
             receipts.require(document['package'] == model['package'] == package
                              and document['status'] == 'complete' and document['mode'] == 'smoke'
-                             and source['commit'] == old and source['dirty'] is False
+                             and source['commit'] == old and formal_source_clean(source, old)
                              and model['affected'] is True and model['input_sha256'] == document['input_sha256']
                              and model['mapping_sha256'] == document['mapping_sha256'],
                              'Earlier formal execution or its input mapping is incomplete')
@@ -852,16 +870,20 @@ def repair_tests(due):
 
 
 def repair_marker(text):
-    # A truncated or corrupted log is a refused receipt, not an interpreter error.
+    # A truncated, corrupted or pathologically nested log is a refused receipt,
+    # not an interpreter error.
     try:
         return receipts.bounded_json(text.encode())
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise receipts.ReceiptError('Malformed repair test framing') from error
 
 
 def current_repair_tests(raw, due):
     from validation import nonrust_unit_cohort as cohort
-    text = predecessor_python_lines(raw).decode()
+    try:
+        text = predecessor_python_lines(raw).decode()
+    except UnicodeDecodeError as error:
+        raise receipts.ReceiptError('Malformed repair test log encoding') from error
     begins = list(re.finditer(r'^SOURCE-GATE-REPAIR-TESTS-BEGIN (.+)$', text, re.M))
     ends = list(re.finditer(r'^SOURCE-GATE-REPAIR-TESTS-END (.+)$', text, re.M))
     receipts.require(len(begins) == len(ends) == 2 and begins[0].end() < ends[0].start() < begins[1].start()
