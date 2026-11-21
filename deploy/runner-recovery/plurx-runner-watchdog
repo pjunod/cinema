@@ -27,31 +27,67 @@ def command(*args):
     return result.stdout
 
 
-def firecracker_unrealized(slice_name, execute):
+# Slices that hold other workloads, including Incus guests the loop above
+# already charges, can never be a Firecracker reservation.
+NOT_RESERVATIONS = ("-.slice", "system.slice", "user.slice", "machine.slice", "incus.slice", "lxc.slice")
+
+
+def total_memory():
+    try:
+        lines = Path("/proc/meminfo").read_text().splitlines()
+    except OSError:
+        raise RuntimeError("MemTotal unreadable; refusing a blind VM start") from None
+    for line in lines:
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) * 1024
+    raise RuntimeError("MemTotal missing; refusing a blind VM start")
+
+
+def firecracker_slices(config):
+    """The configured reserved slices, each named once."""
+    slices = config.get("firecracker_slices", [])
+    if not isinstance(slices, list) or len(set(map(str, slices))) != len(slices):
+        raise ValueError("firecracker_slices must list distinct slice names")
+    return slices
+
+
+def firecracker_unrealized(slice_name, execute, *, total):
     """Bytes a reserved Firecracker slice may still grow into.
 
     Charged at its loaded MemoryMax minus current anonymous memory, which has
-    already left MemAvailable. Page cache stays reclaimable and is never
-    credited back. A slice without an enforced cap cannot be accounted for.
+    already left MemAvailable. Firecracker guest memory is anonymous; shmem,
+    memfd or hugetlb backing would read as anon 0 and charge the whole cap,
+    which is safe. Page cache stays reclaimable and is never credited back.
+    The slice must be top-level in the cgroup v2 hierarchy, so its cgroup is
+    CGROUP_ROOT/<slice>. A slice without an enforced cap cannot be accounted for.
     """
-    if not isinstance(slice_name, str) or not re.fullmatch(r"[A-Za-z0-9_]+\.slice", slice_name) or slice_name in (
-            "-.slice", "system.slice", "user.slice", "machine.slice"):
+    if not isinstance(slice_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+\.slice", slice_name):
+        raise ValueError("invalid reserved Firecracker slice")
+    if "-" in slice_name[:-len(".slice")]:
+        raise ValueError("reserved Firecracker slice must be top-level; '-' names a nested slice")
+    if slice_name in NOT_RESERVATIONS:
         raise ValueError("invalid reserved Firecracker slice")
     fields = dict(line.split("=", 1) for line in execute(
         "systemctl", "show", slice_name, "-p", "LoadState", "-p", "MemoryMax").splitlines() if "=" in line)
-    if fields.get("LoadState") != "loaded" or not fields.get("MemoryMax", "").isdigit():
+    cap = fields.get("MemoryMax", "")
+    # Some systemd versions report an unset limit as 2^64 - 1 rather than
+    # "infinity". Anything at or above host memory enforces nothing.
+    if (fields.get("LoadState") != "loaded" or not cap.isdigit()
+            or not 0 < int(cap) < min(2**63, total)):
         raise RuntimeError("cannot account for the reserved Firecracker slice")
     anon = 0
     try:
         statistics = (CGROUP_ROOT / slice_name / "memory.stat").read_text()
     except FileNotFoundError:
-        pass  # An inactive slice has no cgroup yet and uses nothing.
+        pass  # Inactive, or emptied since systemctl show: it uses nothing now.
+    except OSError:
+        raise RuntimeError("cannot account for Firecracker slice memory usage") from None
     else:
         values = dict(line.split(" ", 1) for line in statistics.splitlines() if " " in line)
         if not values.get("anon", "").strip().isdigit():
             raise RuntimeError("cannot account for Firecracker slice memory usage")
         anon = int(values["anon"])
-    return max(0, int(fields["MemoryMax"]) - anon)
+    return max(0, int(cap) - anon)
 
 
 def available_memory():
@@ -248,8 +284,10 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
                 unused += max(0, int(allocation[:-3]) * GIB - committed)
             # Firecracker VMs share this host's admission lock and charge these
             # guests' unused allocation; charge their reserved slice back.
-            for reserved in config.get("firecracker_slices", []):
-                unused += firecracker_unrealized(reserved, execute)
+            slices = firecracker_slices(config)
+            host_total = total_memory() if slices else None
+            for reserved in slices:
+                unused += firecracker_unrealized(reserved, execute, total=host_total)
             admission = memory() - unused
         # A later reading may be lower; never enlarge this pass's budget.
         return min(admission, memory())
