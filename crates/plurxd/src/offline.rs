@@ -400,7 +400,7 @@ pub struct OfflineManager {
     node_id: String,
     activation: tokio::sync::Mutex<()>,
     active: tokio::sync::Mutex<HashMap<String, ActivePreparation>>,
-    serving: crate::serving_fence::ServingFence,
+    restart_admissions: crate::cluster::RestartAdmissions,
     metrics: Arc<OfflineMetrics>,
     /// A package this node just created for itself: claim it now rather
     /// than when the local hint or the forced claim would.
@@ -419,7 +419,7 @@ impl OfflineManager {
         store: Arc<dyn Store>,
         transcode: Arc<TranscodeManager>,
         node_id: String,
-        serving: crate::serving_fence::ServingFence,
+        restart_admissions: crate::cluster::RestartAdmissions,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -427,7 +427,7 @@ impl OfflineManager {
             node_id,
             activation: tokio::sync::Mutex::new(()),
             active: tokio::sync::Mutex::new(HashMap::new()),
-            serving,
+            restart_admissions,
             metrics: Arc::new(OfflineMetrics::new()),
             wake: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -617,7 +617,7 @@ impl OfflineManager {
             self.metrics.record_claim_tick(ClaimOutcome::Gated);
             return policy.delay();
         }
-        let Some(restart_admission) = self.serving.try_restart_admission().await else {
+        let Some(restart_admission) = self.restart_admissions.try_admit().await else {
             drop(activation);
             policy.gated(now);
             self.metrics.record_claim_tick(ClaimOutcome::Gated);
@@ -1166,10 +1166,10 @@ mod tests {
             Arc::clone(&store),
             transcode,
             "test-node".into(),
-            crate::serving_fence::ServingFence::new(
+            crate::cluster::RestartAdmissions::for_fence(crate::serving_fence::ServingFence::new(
                 plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
                     .metrics_handle(),
-            ),
+            )),
         );
         Fixture {
             manager,
@@ -1213,10 +1213,10 @@ mod tests {
             Arc::clone(&fixture.store),
             transcode,
             "test-node".into(),
-            crate::serving_fence::ServingFence::new(
+            crate::cluster::RestartAdmissions::for_fence(crate::serving_fence::ServingFence::new(
                 plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
                     .metrics_handle(),
-            ),
+            )),
         );
         fixture
     }

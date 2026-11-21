@@ -34,7 +34,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::store::SubtitleSourcePublication;
 use serde::{Deserialize, Serialize};
@@ -484,7 +483,8 @@ pub(crate) struct StoreAccess {
     /// then classified (`never_indexed`, `hydrated_only`, `absent`) off the
     /// request path. Without it such a miss is `absent`.
     node_id: Option<String>,
-    membership: Option<MembershipManager>,
+    calls: Option<PeerTransport>,
+    directory: Option<crate::cluster::Directory>,
     jobs: Option<std::sync::Arc<crate::state::JobManager>>,
 }
 
@@ -504,7 +504,8 @@ impl StoreAccess {
             root,
             switch: Switch::Fixed(enabled),
             node_id: None,
-            membership: None,
+            calls: None,
+            directory: None,
             jobs: None,
         }
     }
@@ -530,7 +531,8 @@ impl StoreAccess {
             root: store_root(runtime_cache),
             switch: Switch::Setting(store),
             node_id: None,
-            membership: None,
+            calls: None,
+            directory: None,
             jobs: None,
         }
     }
@@ -542,8 +544,13 @@ impl StoreAccess {
         self
     }
 
-    pub(crate) fn with_membership(mut self, membership: MembershipManager) -> Self {
-        self.membership = Some(membership);
+    pub(crate) fn with_cluster(
+        mut self,
+        calls: PeerTransport,
+        directory: crate::cluster::Directory,
+    ) -> Self {
+        self.calls = Some(calls);
+        self.directory = Some(directory);
         self
     }
 
@@ -552,8 +559,12 @@ impl StoreAccess {
         self
     }
 
-    pub(crate) fn membership(&self) -> Option<&MembershipManager> {
-        self.membership.as_ref()
+    pub(crate) fn directory(&self) -> Option<&crate::cluster::Directory> {
+        self.directory.as_ref()
+    }
+
+    pub(crate) fn calls(&self) -> Option<&PeerTransport> {
+        self.calls.as_ref()
     }
 
     pub(crate) fn foreground_source_request(
@@ -588,7 +599,7 @@ impl StoreAccess {
 
     /// The operator's saved manual enable switch. Readiness probes are shown
     /// in Developer settings but never consulted when this value is set.
-    pub(crate) async fn cluster_enabled(&self) -> bool {
+    pub(crate) async fn cluster_sources_enabled(&self) -> bool {
         let Some(store) = self.catalog() else {
             return false;
         };
@@ -840,10 +851,11 @@ pub(crate) async fn hydrate_from_peers(
     ordinal: i64,
     format: RepresentationFormat,
 ) -> bool {
-    let (Some(catalog), Some(node_id), Some(membership)) = (
+    let (Some(catalog), Some(node_id), Some(transport), Some(directory)) = (
         access.catalog(),
         access.node_id(),
-        access.membership.as_ref(),
+        access.calls.as_ref(),
+        access.directory(),
     ) else {
         return false;
     };
@@ -883,7 +895,7 @@ pub(crate) async fn hydrate_from_peers(
     if bound.size != file.size as u64 || bound.mtime != file.mtime {
         return false;
     }
-    let peers = match membership.media_peers().await {
+    let peers = match directory.peers(crate::cluster::Purpose::MediaWorkers).await {
         Ok(peers) => peers,
         Err(error) => {
             tracing::debug!(file_id = file.id, %error, "listing subtitle-source peers");
@@ -891,11 +903,14 @@ pub(crate) async fn hydrate_from_peers(
         }
     };
     let reachable: std::collections::HashMap<_, _> = peers
-        .into_iter()
-        .filter(|peer| peer.reachable && peer.node_id != node_id)
-        .filter_map(|peer| peer.http_base.map(|base| (peer.node_id, base)))
+        .reachable()
+        .filter(|peer| peer.node_id != node_id)
+        .filter_map(|peer| {
+            peer.http_base
+                .clone()
+                .map(|base| (peer.node_id.clone(), base))
+        })
         .collect();
-    let transport = PeerTransport::new(membership.clone());
     for row in rows {
         if row.ordinal != ordinal
             || row.format != format.publication_name()

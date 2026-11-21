@@ -2405,7 +2405,7 @@
     include!("../../vodencode_manager_tests.rs");
 
     async fn seed_file(store: &Arc<dyn Store>) -> i64 {
-        seed_file_at(store, &placeholder_source().await).await
+        seed_file_at(store, placeholder_source()).await
     }
 
     /// The stand-in, not FFmpeg, is what the start spawned. Its marker is
@@ -2461,184 +2461,30 @@
     /// against a process exit, and a loaded runner lost it in about one
     /// transcode test per full run.
     ///
-    /// Encode one independently decodable frame, then copy it at the
-    /// same 50-second cadence as the original fixture. Every published
-    /// packet is a seek point and the 6,000-second timeline is preserved.
-    /// Each nextest process checks the cache independently. A file lock
-    /// covers a cold rebuild so no process replaces a valid source another
-    /// process already reads.
-    async fn placeholder_source() -> String {
-        static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
-        SOURCE
-                .get_or_init(|| async {
-                    tokio::time::timeout(Duration::from_secs(120), async {
-                        let dir = std::fs::canonicalize(std::env::temp_dir())
-                            .expect("canonical system temporary directory");
-                        let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s.mkv");
-                        if placeholder_source_is_valid(&path).await {
-                            return path.to_string_lossy().into_owned();
-                        }
-                        let lock_path = path.with_extension("lock");
-                        let _lock = tokio::task::spawn_blocking(move || {
-                            let file = std::fs::OpenOptions::new()
-                                .write(true)
-                                .create(true)
-                                .truncate(false)
-                                .open(lock_path)?;
-                            file.lock()?;
-                            Ok::<_, std::io::Error>(file)
-                        })
-                        .await
-                        .expect("placeholder source lock task")
-                        .expect("placeholder source rebuild lock");
-                        if !placeholder_source_is_valid(&path).await {
-                            let staging = tempfile::tempdir_in(dir).expect("private placeholder staging");
-                            build_placeholder_source(staging.path()).await;
-                            let staged = staging.path().join("source.mkv");
-                            assert!(
-                                placeholder_source_is_valid(&staged).await,
-                                "placeholder source must have 120 keyframes on the exact 6,000-second 4K HEVC timeline"
-                            );
-                            std::fs::rename(staged, &path).expect("atomic placeholder source publish");
-                        }
-                        path.to_string_lossy().into_owned()
-                    })
-                    .await
-                    .expect("placeholder source preparation exceeded its deadline")
-                })
-                .await
-                .clone()
-    }
+    /// Embed the sparse 4K HEVC source so parallel test processes can
+    /// open it without competing for an encoder during startup.
+    fn placeholder_source() -> &'static str {
+        static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        const VIDEO: &[u8] = include_bytes!("placeholder-4k-hevc.mkv");
+        SOURCE.get_or_init(|| {
+            use std::io::Write;
 
-    const PLACEHOLDER_FRAMES: usize = 120;
-    const PLACEHOLDER_FRAME_SECONDS: i64 = 50;
-
-    async fn build_placeholder_source(staging: &std::path::Path) {
-        let source = format!("color=c=black:size=3840x2160:rate=1/{PLACEHOLDER_FRAME_SECONDS}");
-        let encoder = std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
-        let encode = [
-            "-f",
-            "lavfi",
-            "-i",
-            &source,
-            "-frames:v",
-            "1",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:v",
-            "libx265",
-            "-preset",
-            "ultrafast",
-            "-x265-params",
-            "log-level=none:keyint=1:open-gop=0:pools=none:frame-threads=1",
-            "intra.mkv",
-        ];
-        let concatenate = [
-            "-f",
-            "concat",
-            "-safe",
-            "1",
-            "-i",
-            "repeat.ffconcat",
-            "-map",
-            "0:v:0",
-            "-c:v",
-            "copy",
-            "source.mkv",
-        ];
-        let mut concat = String::from("ffconcat version 1.0\n");
-        concat.push_str(
-            &format!("file intra.mkv\nduration {PLACEHOLDER_FRAME_SECONDS}\n")
-                .repeat(PLACEHOLDER_FRAMES),
-        );
-        std::fs::write(staging.join("repeat.ffconcat"), concat).expect("placeholder concat list");
-        for (stage, args) in [
-            ("encode the single IDR", encode.as_slice()),
-            ("copy the repeated IDR", concatenate.as_slice()),
-        ] {
-            let output = tokio::process::Command::new(&encoder)
-                .current_dir(staging)
-                .kill_on_drop(true)
-                .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
-                .args(args)
-                .output()
-                .await
-                .expect("start placeholder FFmpeg");
-            assert!(
-                output.status.success(),
-                "placeholder FFmpeg could not {stage}: {}",
-                String::from_utf8_lossy(&output.stderr)
+            let dir = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical system temporary directory");
+            let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s-v2.mkv");
+            if !path.exists() {
+                let mut staging = tempfile::NamedTempFile::new_in(&dir)
+                    .expect("create a private placeholder source");
+                staging.write_all(VIDEO).expect("write the placeholder source");
+                if let Err(error) = staging.persist_noclobber(&path) {
+                    assert_eq!(error.error.kind(), std::io::ErrorKind::AlreadyExists);
+                }
+            }
+            assert_eq!(
+                std::fs::read(&path).expect("read the placeholder source"),
+                VIDEO
             );
-        }
-    }
-
-    async fn placeholder_source_is_valid(path: &std::path::Path) -> bool {
-        if !path.is_file() {
-            return false;
-        }
-        let output = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
-                .kill_on_drop(true)
-                .args([
-                    "-v", "error", "-select_streams", "v:0", "-show_packets",
-                    "-show_entries", "stream=codec_name,width,height,time_base:format=format_name,duration:packet=pts,dts,duration,flags",
-                    "-of", "json",
-                ])
-                .arg(path)
-                .output()
-                .await
-                .expect("start independent placeholder FFprobe");
-        if !output.status.success() {
-            return false;
-        }
-        let Ok(document) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-            return false;
-        };
-        let Some(stream) = document["streams"]
-            .as_array()
-            .and_then(|streams| streams.first())
-        else {
-            return false;
-        };
-        let Some((numerator, denominator)) = stream["time_base"]
-            .as_str()
-            .and_then(|clock| clock.split_once('/'))
-            .and_then(|(num, den)| Some((num.parse::<i64>().ok()?, den.parse::<i64>().ok()?)))
-        else {
-            return false;
-        };
-        let format = &document["format"];
-        if stream["codec_name"] != "hevc"
-            || stream["width"] != 3840
-            || stream["height"] != 2160
-            || numerator <= 0
-            || denominator <= 0
-            || !format["format_name"]
-                .as_str()
-                .is_some_and(|name| name.split(',').any(|kind| kind == "matroska"))
-            || format["duration"]
-                .as_str()
-                .and_then(|duration| duration.parse::<f64>().ok())
-                != Some((PLACEHOLDER_FRAMES as i64 * PLACEHOLDER_FRAME_SECONDS) as f64)
-        {
-            return false;
-        }
-        let tick_matches = |value: &serde_json::Value, seconds: i64| {
-            value.as_i64().is_some_and(|ticks| {
-                i128::from(ticks) * i128::from(numerator)
-                    == i128::from(seconds) * i128::from(denominator)
-            })
-        };
-        document["packets"].as_array().is_some_and(|packets| {
-            packets.len() == PLACEHOLDER_FRAMES
-                && packets.iter().enumerate().all(|(index, packet)| {
-                    let pts = index as i64 * PLACEHOLDER_FRAME_SECONDS;
-                    tick_matches(&packet["pts"], pts)
-                        && tick_matches(&packet["dts"], pts)
-                        && tick_matches(&packet["duration"], PLACEHOLDER_FRAME_SECONDS)
-                        && packet["flags"]
-                            .as_str()
-                            .is_some_and(|flags| flags.contains('K') && !flags.contains('D'))
-                })
+            path.to_string_lossy().into_owned()
         })
     }
 

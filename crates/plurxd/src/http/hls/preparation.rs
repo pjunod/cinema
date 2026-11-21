@@ -2354,7 +2354,7 @@ pub(super) async fn process_preparation_candidate(
             if capabilities
                 .as_ref()
                 .is_some_and(|caps| caps.dual_player_preparation)
-                && state.serving.planned_outage_is_current(fence).await =>
+                && state.cluster.operations().outage_is_current(fence).await =>
         {
             prepared_relocation_owner(&state, source, &candidate, accepted_film_time_ms).await
         }
@@ -2837,7 +2837,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
     }
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
-        if !state.serving.planned_outage_is_current(fence).await {
+        if !state.cluster.operations().outage_is_current(fence).await {
             return PreparationStageOutcome::refused(
                 session_id,
                 PreparationStageRefusal::RelocationSuperseded,
@@ -3242,7 +3242,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     };
     if prime_worker {
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
-            if !state.serving.planned_outage_is_current(fence).await {
+            if !state.cluster.operations().outage_is_current(fence).await {
                 return PreparationStageOutcome::refused(
                     session_id,
                     PreparationStageRefusal::RelocationSuperseded,
@@ -3307,7 +3307,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             }
         };
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
-            if !state.serving.planned_outage_is_current(fence).await {
+            if !state.cluster.operations().outage_is_current(fence).await {
                 return PreparationStageOutcome::refused(
                     session_id,
                     PreparationStageRefusal::RelocationSuperseded,
@@ -3402,7 +3402,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             );
         }
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
-            if !state.serving.planned_outage_is_current(fence).await {
+            if !state.cluster.operations().outage_is_current(fence).await {
                 return PreparationStageOutcome::refused(
                     session_id,
                     PreparationStageRefusal::RelocationSuperseded,

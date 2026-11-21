@@ -5,7 +5,6 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::FragmentIndex;
 use plurx_core::store::{
@@ -1511,27 +1510,30 @@ fn pipeline_digest_for_transform(
 
 pub(crate) async fn hydrate(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    hydrate_inner(store, membership, node_id, root, artifact, true).await
+    hydrate_inner(store, calls, directory, node_id, root, artifact, true).await
 }
 
 pub(crate) async fn hydrate_for_job(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    hydrate_inner(store, membership, node_id, root, artifact, false).await
+    hydrate_inner(store, calls, directory, node_id, root, artifact, false).await
 }
 
 async fn hydrate_inner(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
@@ -1570,25 +1572,26 @@ async fn hydrate_inner(
             );
         }
     }
-    let Some(membership) = membership else {
+    let (Some(calls), Some(directory)) = (calls, directory) else {
         return Ok(None);
     };
-    let peers = membership
-        .media_peers()
+    let peers = directory
+        .peers(crate::cluster::Purpose::MediaWorkers)
         .await
         .map_err(|error| format!("listing fragment-index peers: {error}"))?
-        .into_iter()
+        .reachable()
+        .filter(|peer| peer.node_id != node_id)
         .filter_map(|peer| {
             peer.http_base
-                .map(|base| (peer.node_id, (base, peer.reachable)))
+                .clone()
+                .map(|base| (peer.node_id.clone(), (base, peer.reachable)))
         })
-        .filter(|(peer_node, (_, reachable))| peer_node != node_id && *reachable)
         .collect::<HashMap<_, _>>();
     let locations = store
         .cluster_fragment_index_locations(&artifact.cache_key)
         .await
         .map_err(|error| error.to_string())?;
-    let transport = PeerTransport::new(membership.clone());
+    let transport = calls;
     let path = format!("{PEER_PATH_PREFIX}{}", artifact.cache_key);
     for location in locations {
         let Some((base, _)) = peers.get(&location.node_id) else {

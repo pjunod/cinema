@@ -748,7 +748,7 @@ impl SharingManager {
         let mut next_renewal = tokio::time::Instant::now();
         let mut span = UnknownSpan::default();
         let mut wake = ListenerWake::new(
-            state.serving.subscribe(),
+            state.cluster.subscribe_authority(),
             Box::new(|| state.applied.sharing_watch(LISTENER_WATCH)),
         );
         loop {
