@@ -241,8 +241,25 @@ async fn scenario(root: &Path) {
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
         .await;
 
-    // Admissible: both propose, and both win.
+    // A worker can disappear with the physical reader still charged. Admission
+    // must reserve the viewer slot even after its reservation row is pruned.
+    pair.raw("UPDATE background_job_reservations SET expires_at_ms=0")
+        .await;
+    pair.raw(&format!(
+        "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,
+           work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+         VALUES('lapsed','lost-reader','{{}}','[\"source_io\"]','job','{}',1,'active',0,0,0)",
+        holders[0]
+    )).await;
+    pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
+        .await;
     pair.raw("DELETE FROM background_job_reservations").await;
+    pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
+        .await;
+
+    // Admissible: both propose, and both win.
+    pair.raw("DELETE FROM background_source_custody WHERE custody_id='lapsed'")
+        .await;
     let request = claim(&job, 0, fragment);
     for (backend, store) in [
         ("sqlite", &pair.sqlite as &dyn BackgroundJobStore),

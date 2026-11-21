@@ -12,7 +12,7 @@ use plurx_core::{
             CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
             JobKind, JobPayload, JobRequest, JobSettlement,
         },
-        dv_title_jobs::{TitleDemand, TitleOutput},
+        dv_title_jobs::{TitleDemand, TitleMaintenanceCursor, TitleOutput},
     },
 };
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -47,7 +47,7 @@ impl TitleTask {
     pub(super) async fn start(
         state: &AppState,
         boot: &str,
-        after: &mut i64,
+        maintenance: &mut TitleMaintenanceCursor,
         #[cfg(target_os = "linux")] live_after: &mut i64,
         #[cfg(target_os = "linux")] playback_only: bool,
     ) -> Result<Option<Self>, StoreError> {
@@ -113,8 +113,9 @@ impl TitleTask {
         } else {
             None
         };
+        // Viewer-requested work is Linux-only; other hosts walk maintenance pages.
         #[cfg(not(target_os = "linux"))]
-        let live_demands = None;
+        let live_demands: Option<std::convert::Infallible> = None;
         let tools = match ToolSet::capture().await {
             Ok(Some(tools)) => tools,
             Ok(None) => return Ok(None),
@@ -138,12 +139,14 @@ impl TitleTask {
         let fel: Option<String> = None;
         #[cfg(target_os = "linux")]
         state.transcode.observe_native_fel_backend(fel.clone());
-        let demands = match live_demands {
-            Some(demands) => demands,
+        let (demands, after) = match live_demands {
+            #[cfg(target_os = "linux")]
+            Some(demands) => (demands, live_after),
+            #[cfg(not(target_os = "linux"))]
+            Some(never) => match never {},
             None => {
-                state
-                    .store
-                    .dv_title_demands(&scanner, *after, now_ms())
+                maintenance
+                    .next_page(state.store.as_ref(), &scanner, now_ms())
                     .await?
             }
         };
@@ -151,7 +154,6 @@ impl TitleTask {
             if playback_only {
                 return Ok(None);
             }
-            *after = 0;
             #[cfg(target_os = "linux")]
             {
                 if let Err(error) = state
@@ -166,15 +168,16 @@ impl TitleTask {
             return Ok(None);
         }
         for mut demand in demands {
+            // The selected page's own position advances for every row examined,
+            // live or maintenance, before any row is skipped.
+            *after = demand.probe_revision;
             #[cfg(target_os = "linux")]
             if playback_only {
-                *live_after = demand.probe_revision;
                 if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
                     continue;
                 }
             }
             if !playback_only {
-                *after = demand.probe_revision;
                 // Live work was considered independently above; an ordinary
                 // turn must not acquire its more permissive companion class
                 // or claim a retained FEL head assigned to another node.

@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-19, plurx has 442 routes declared by the ordinary listener's
+As of 2026-11-19, plurx has 443 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 442 routes across the registered routers.
+plurx has 443 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -519,9 +519,9 @@ of never storing it.
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
-| GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page |
+| GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page. Admin responses include `source_processed[]`: Source-owned Dolby Vision preparation and rendition work with one-way `stop_id`, optional one-way published `session_id`, title, grant, viewer, reason, and `node_id`. They also include `receiver_processed[]` for actual retained B processed successors, with one-way `stop_id`, Receiver node, Source server ID and current import display name where available, viewer ID and an honest shared-item fallback title. The page joins published Source rows to their delivery by `session_id` and shows separate preparation and B successor rows. No trial bytes, progress percentage or invented start time is implied |
 | GET | `/api/v1/activity/starts` | admin | Query `limit`, `before`. One row per playback start across the cluster, newest first: each media-session create (route `vod` or `rolling`, a retry that replayed its owner's session included) and each direct or progressive request that opened a start (route `direct` or `progressive`, so a `vod_index_pending` fallback to the remux is its own row): time, title, client build, route, refusal, phases, owner node, time to first frame, outcome, index state and the `index now` action (from each title's own newest fragment-index request). `outcome` `unobserved` means no client report reached the node that handled the start (the report may have gone to another node). `before` is the `next_before` cursor of the previous page; a node's page never ends inside a millisecond, so rows sharing one are not skipped. Every committed member is asked, learners included; members that did not answer are listed under `unavailable`; their starts are missing, not absent |
-| DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
+| DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one local transcode or VOD session, or a Source processed operation by its Activity `stop_id`. A remote Source stop resolves its committed owner from the signed Activity snapshot and sends a signed, node-bound peer request; 503 means the owner did not confirm physical settlement |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
 | DELETE | `/api/v1/activity/retained/{nonce}` | admin | Releases one retained rolling output this node holds |
@@ -3115,6 +3115,14 @@ The preparation status read requires an authenticated viewer; every other route 
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
 
+A single-file analysis request returns HTTP 409 with `analysis_source_changed`,
+`analysis_prediction_stale` or `analysis_generation_conflict` when the corresponding
+identity check refuses admission. A concurrent change during result lookup can produce
+HTTP 409 with `analysis_state_changed`. HTTP 429 distinguishes the runnable intake ceiling
+(`analysis_queue_full`) from the hard active backlog ceiling (`analysis_backlog_full`).
+For a multi-component request, inspect each component's acceptance and error in the
+202 response when another component was accepted.
+
 The preparation response has `file_id` as a decimal string, `checked_at_ms`,
 `source_current`, and `active` (actual queued/running work). Its `playback`,
 `subtitles`, `markers`, `probe`, `metadata`, `versions`, `thumbnails`,
@@ -3831,7 +3839,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; two readers per domain and two library workers per provider |
 | PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` saves the desired revision immediately, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 200 with `saved`, `revision`, `applied`, latest `pending`, `waiting_on` and `waiting_total`; 400 for invalid input or a stale library root. Eligible nodes apply atomically when affected jobs and disturbed-domain readers no longer depend on the previous mapping. [Apply status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) |
 | GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, `node_id`, `limit` (1–100; default 100), and `cursor` query parameters; owner/destination filtering precedes pagination; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
-| GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
+| GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests. `more_waiters` identifies truncation. Add `?explain=true` to sample the first blocking store claim predicate on the serving node. An empty block with `evaluated=true` means these predicates passed. Placement, physical capability and turn arbitration are checked separately. |
 | POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
 | POST | `/api/v1/cluster/jobs/{id}/retry` | admin | JSON `request_id` UUID identifies one deliberate retry; failed/cancelled core work creates a fresh admin interest or fragment analysis generation. Preserve the UUID across transport retries; active work returns conflict |
 | GET | `/api/v1/cluster/nodes` | admin | Live roster, capacity, protocol range, per-node readiness |
@@ -4199,7 +4207,8 @@ streaming, and refuses a response signed for the wrong node or nonce.
 
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
-| GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| GET | `/_internal/v1/activity-snapshot` | — (signed exact member read) | Bounded node-local delivery and Source processed-work snapshot. Includes committed learners. The response is signed by the owner; an older node without this exact exchange appears as an unavailable Activity peer during the coordinated upgrade |
+| POST | `/_internal/v1/activity-source-processed-stop` | 256 B (signed exact member request) | Stops one exact Source processed operation or retained B processed successor on the named member and waits for its owner settlement or confirmed Source End. Body binds `node_id` and one-way `stop_id`; signed empty 204 means settled, 404 absent, 503 unresolved. No household credential crosses this route |
 | POST | `/_internal/v1/activity-starts` | — (signed exact request) | This node's own page of start-attempt rows for the fleet `activity/starts` read; response is signed by the node |
 | GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
@@ -4551,10 +4560,20 @@ admitted operation. Burns encode and sidecars are capped at 64 MiB. B checks
 returned HDR against the viewer's exact PQ/HLG claim; an SDR declaration
 overrides decoder HDR capability.
 
-Non-direct Dolby Vision returns 422 `sharing_start_dolby_vision_unsupported`.
-Direct keeps original bytes when the Source permits it. Downloaded burns and
-native subtitles beside HDR remain unsupported. A typed Start refusal proves
-neither End nor absence of earlier resources. Runtime qualification stays in
+Shared HLS negotiates Dolby Vision preservation, Profile 7 conversion and
+compatible-base encodes from the Source's scanned facts and the viewer's caps.
+DV delivery also requires B's explicit relay affirmation. Native text subtitles
+can accompany HDR without burning it to SDR. Older Sources may still return
+422 `sharing_start_dolby_vision_unsupported`; Direct retains original bytes
+when permitted. Downloaded burns remain unsupported.
+
+An affirming B can request one optional processed successor after first frame.
+Pending Source FEL title qualification answers typed 503
+`sharing_source_not_prepared` with `Retry-After: 1`; this is distinct from an
+owner still working at the caller deadline (`startup_timeout`). B does not
+retry the optional processed Start: it retains ordinary playback and reports
+the generation-bound processing skip. A typed refusal proves neither End nor
+absence of earlier resources. Runtime qualification stays in
 [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold

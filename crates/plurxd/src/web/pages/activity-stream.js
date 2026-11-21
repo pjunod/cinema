@@ -257,7 +257,14 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   const dels=d.deliveries||(d.sessions||[]).map(se=>({method:"transcode",user:se.user_name,item_id:se.item_id,
     title:se.item_title,started_unix:se.started_unix,idle_seconds:se.idle_seconds,session_id:se.id,
     target_height:se.target_height,encoder:se.encoder}));
-  paintActivity(detailActivitySummary(d,dels,recording));
+  const sourceRows=Array.isArray(d.source_processed)?d.source_processed:[];
+  const watching=dels.map(de=>{
+    const source=sourceRows.find(row=>row.session_id&&row.session_id===de.session_id&&(!de.node_id||row.node_id===de.node_id));
+    return source?{...de,title:source.title||de.title,user:source.viewer||de.user,source_processed:source}:de;
+  });
+  const sourcePending=sourceRows.filter(row=>!watching.some(de=>de.source_processed?.stop_id===row.stop_id));
+  const receiverProcessed=Array.isArray(d.receiver_processed)?d.receiver_processed:[];
+  paintActivity(detailActivitySummary(d,watching,recording));
   const missing=activityNodeFailures(d);
   const nodeNames=d.node_hostnames||{};
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
@@ -322,7 +329,9 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   m.innerHTML=`<div class="dvr-page-head"><div><h1>Activity</h1><p class="sub">What’s playing, recording and happening on your server.</p></div></div>
     <h2 class="section">Happening now · Watching</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
-    ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
+    ${activityWatchingHtml(watching,d.live_tv,nodeNames,sessionsById,open,d.retained_output_node)}
+    ${activitySourceProcessedHtml(sourcePending,nodeNames)}
+    ${activityReceiverProcessedHtml(receiverProcessed,nodeNames)}
     ${activitySourceRecoveryHtml(d)}
     ${activityTabsHtml()}
     <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>

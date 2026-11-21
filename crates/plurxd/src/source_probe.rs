@@ -145,7 +145,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let mut title_after = 0;
+    let mut title_cursor = plurx_core::store::dv_title_jobs::TitleMaintenanceCursor::default();
     // The F+ fit shares the title lane: it starts only when no title scan
     // does, and either one yields to ordinary probes.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -191,7 +191,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             let admission = title_work::TitleTask::start(
                 &state,
                 &boot,
-                &mut title_after,
+                &mut title_cursor,
                 &mut live_title_after,
                 true,
             );
@@ -244,7 +244,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             match title_work::TitleTask::start(
                 &state,
                 &boot,
-                &mut title_after,
+                &mut title_cursor,
                 #[cfg(target_os = "linux")]
                 &mut live_title_after,
                 #[cfg(target_os = "linux")]
@@ -276,8 +276,14 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     None => std::future::pending().await,
                 }
             };
+            // Viewer admission (and its wake hint) exists only on Linux.
+            #[cfg(target_os = "linux")]
+            let viewer_wake = state.jobs.title_viewer_wake.notified();
+            #[cfg(not(target_os = "linux"))]
+            let viewer_wake = std::future::pending::<()>();
             tokio::select! {
                 () = shutdown.cancelled() => {},
+                () = viewer_wake => {},
                 _ = title_poll => { title = None; },
                 _ = refit_poll => { refit = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
@@ -726,6 +732,8 @@ where
                 match fence.pause_source().await {
                     Ok(true) => {
                         source_paused = true;
+                        #[cfg(all(test, target_os = "linux"))]
+                        source_budget.record_test_pause_ack(&control, observation.revision);
                         if finite_hold_pressure_revision
                             != Some(crate::source_custody::source_pressure_changed().revision())
                         {

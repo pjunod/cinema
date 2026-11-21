@@ -305,6 +305,15 @@ final class SharedPlaybackControlTests: XCTestCase {
         let hdr = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "transcode") { $0["delivered_dynamic_range"] = "hdr10" }, caps: caps, quality: .p720)
         XCTAssertEqual(hdr.request.hdr10, true)
         XCTAssertNil(hdr.request.preserveDolbyVision)
+        // A copy of a Dolby Vision decision asks to preserve exactly as Local
+        // does; a decision that does not preserve asks false, a burn nothing.
+        let dvDecision = try decision { $0["source"] = ["container": "mkv", "hdr": "dolby_vision"]
+            $0["delivery"] = ["mode": "remux", "sessions_url": self.base + "/hls/sessions", "preserve_dolby_vision": true]
+            $0["delivered_dynamic_range"] = "dolby_vision"; $0["delivered_dolby_vision_profile"] = 8 }
+        let dv = try SharedPlaybackPlan.make(subject: subject, decision: dvDecision, caps: caps, quality: .original)
+        XCTAssertEqual(dv.request.copy, true); XCTAssertEqual(dv.request.preserveDolbyVision, true)
+        XCTAssertEqual(try SharedPlaybackPlan.make(subject: subject, decision: try decision(), caps: caps, quality: .original).request.preserveDolbyVision, false)
+        XCTAssertNil(try SharedPlaybackPlan.make(subject: subject, decision: dvDecision, caps: caps, quality: .original, subtitleIndex: 4).request.preserveDolbyVision)
         let projected = try SharedPreparedHandoff.successorRequest(hdr.request, selection: burn.frozenControlSelection(), positionMs: 5000)
         XCTAssertEqual(projected.subtitleBurn, 4)
         XCTAssertEqual(projected.hdr10, true)

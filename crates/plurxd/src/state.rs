@@ -108,6 +108,14 @@ pub(crate) fn node_hwaccel_key(node_id: &str) -> String {
     format!("node.{node_id}.transcode.hwaccel")
 }
 
+/// Encoders as their labels, for the settings page.
+fn encoder_labels<S: serde::Serializer>(
+    encoders: &[plurx_core::transcode::Encoder],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(encoders.iter().map(|encoder| encoder.label()))
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -162,6 +170,11 @@ pub struct SystemInfo {
     /// Whether this exact ffmpeg can run the software-decode → tonemapx
     /// Dolby Vision reshape → software-encode graph.
     pub dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape graph with, by label.
+    /// Every detected hardware encoder is probed once at boot, so a Profile 5
+    /// session never starts a capability probe of its own.
+    #[serde(serialize_with = "encoder_labels")]
+    pub dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this exact ffmpeg can run the HDR10 rung: the same software
     /// decode into `tonemapx`'s HDR *passthrough* mode at 10 bit, into
     /// libx265 Main10. Separate from `dovi_reshape` because it is a separate
@@ -1311,6 +1324,7 @@ impl AppState {
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
+            .with_dovi_reshape_hardware(system.dovi_reshape_hardware.clone())
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
@@ -1495,6 +1509,10 @@ impl AppState {
             .cluster
             .with_membership(membership, self.applied.applied_mark());
         self.live_tv_peers = self.cluster.calls();
+        self.peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            self.cluster.calls(),
+            self.cluster.directory(),
+        );
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1856,6 +1874,9 @@ pub struct JobManager {
     statuses: Mutex<HashMap<i64, ScanStatus>>,
     /// Live counters for in-flight scans, sampled by `all_statuses`.
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
+    /// Coalesced hint for the local title worker after a durable viewer admission.
+    #[cfg(target_os = "linux")]
+    pub(crate) title_viewer_wake: tokio::sync::Notify,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
     /// Per-request completion signals for a `POST /scan` that waits
@@ -4090,6 +4111,8 @@ impl JobManager {
             tmdb_base: None,
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            title_viewer_wake: tokio::sync::Notify::new(),
             library_wake: tokio::sync::Notify::new(),
             scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),

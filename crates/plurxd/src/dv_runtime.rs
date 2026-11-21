@@ -2979,17 +2979,27 @@ mod processed_selection_has_no_software_gates {
     fn entry_body() -> &'static str {
         let source = include_str!("transcode/manager/create.rs");
         source
-            .split_once("pub(crate) fn processed_upgrade_gates(")
+            .split_once("pub(crate) fn processed_upgrade_gates_with_ask(")
             .expect("processed upgrade gates")
             .1
-            .split_once("pub(crate) fn hold_processed_upgrade_root(")
-            .expect("entry point end")
+            .split_once("    /// Processed Dolby Vision / HDR10-E")
+            .expect("request-only gates end")
+            .0
+    }
+
+    fn trial_body() -> &'static str {
+        include_str!("transcode/manager/create.rs")
+            .split_once("async fn prepare_processed_upgrade_with_source(")
+            .expect("common local/Source trial")
+            .1
+            .split_once("    /// Hand a verified upgrade root")
+            .expect("trial end")
             .0
     }
 
     #[test]
     fn no_resolution_clamp_speed_threshold_or_auto_only_gate() {
-        let body = entry_body();
+        let body = format!("{}{}", entry_body(), trial_body());
         assert!(!body.contains(".min(720)"), "resolution clamp is back");
         assert!(
             !body.contains("milli_realtime"),
@@ -3001,19 +3011,18 @@ mod processed_selection_has_no_software_gates {
         );
         // Every decline after the setting check, to the end of the entry
         // point, is reported, never silent.
-        let (gates, trial) = body
-            .split_once("pub(crate) async fn prepare_processed_upgrade(")
-            .expect("the trial follows its gates");
+        let gates = entry_body();
+        let trial = trial_body();
         let after_setting = gates
             .split_once("// The setting is on for a DV source")
             .expect("setting check")
             .1;
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
         let after_gates = trial
-            .split_once("Self::processed_upgrade_gates(request, &planning, hdr10_intent)?")
+            .split_once("Self::processed_upgrade_gates_with_ask(")
             .expect("the trial reruns the gates")
             .1
-            .split_once("else {\n                return Ok(None);\n            };")
+            .split_once("return Ok(None);")
             .expect("the gates' own silent answer")
             .1;
         assert!(!after_gates.contains("Ok(None)"), "{after_gates}");
@@ -3026,12 +3035,12 @@ mod processed_selection_has_no_software_gates {
     fn a_converted_dv_copy_is_offered_the_reconstructed_profile81() {
         let body = entry_body();
         let silent = body
-            .split_once("let Some(original) = request.candidate_context")
+            .split_once("let Some(original) = ask")
             .expect("candidate context read")
             .0;
         assert!(silent.contains("convert_dolby_vision: false"), "{silent}");
         assert!(
-            silent.contains("processed_qualification_destination(request)?"),
+            silent.contains("processed_qualification_destination_with_ask("),
             "{silent}"
         );
         assert!(include_str!("transcode/manager/candidates.rs")
