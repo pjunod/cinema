@@ -314,6 +314,10 @@ def authenticate(api, descriptor, binding, candidate, *, current_run=None):
     uuid, digest = descriptor['attachment_uuid'], descriptor['sha256']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, digest)
     record, _, repository, _ = retention.verify_identity(api, raw, digest, binding, candidate, attachment, uuid)
+    if record.get('version') == 'workspace-nextest-fel-base-bridge-v1':
+        from validation import nextest_base_bridge
+        proof = nextest_base_bridge.authenticate(api, record, binding, candidate, repository, current_run=current_run)
+        return {**proof, 'digest': digest}
     if record.get('version') == 'workspace-nextest-shards-v1':
         from validation import nextest_shard_continuation as nextest
         proof = nextest.authenticate(api, record, binding, candidate, repository, current_run=current_run)
