@@ -111,7 +111,8 @@ async fn actual_nonowner_forwarding(
     let ingress_address = ingress_listener.local_addr().expect("ingress address");
     let token = worker
         .state
-        .membership
+        .cluster
+        .test_membership()
         .issue_token_for_role(Duration::from_secs(120), ClusterRole::Voter)
         .await
         .expect("actual coordinator-issued admission token");
@@ -135,7 +136,7 @@ async fn actual_nonowner_forwarding(
     );
     let mut selected = Box::pin(select_daemon_store_observing(
         &config,
-        Some(observation.as_ref()),
+        Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
     ))
     .await
     .expect("actual joined second voter");
@@ -156,9 +157,9 @@ async fn actual_nonowner_forwarding(
         .expect("actual ingress clock observer");
     ingress.node_id = selected.identity.node_id.clone();
     ingress.catalogue = selected.catalogue_reader();
-    ingress.replication = selected.replication_monitor();
+    ingress.replace_replication(selected.replication_monitor());
     ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        ingress.membership.clone(),
+        ingress.cluster.test_membership().clone(),
         Arc::clone(&ingress.store),
     );
     ingress.sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -167,21 +168,25 @@ async fn actual_nonowner_forwarding(
         config.sharing.clone(),
     ));
     ingress
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(ingress.sharing.accepted_drivers.boot_id()));
     ingress
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual ingress registry boot");
     worker
         .state
-        .membership
+        .cluster
+        .test_membership()
         .heartbeat()
         .await
         .expect("worker current membership");
     ingress
-        .membership
+        .cluster
+        .test_membership()
         .heartbeat()
         .await
         .expect("ingress current membership");
@@ -195,8 +200,11 @@ async fn actual_nonowner_forwarding(
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let peers = ingress
-                .membership
-                .media_peers()
+                .cluster
+                .test_membership()
+                .cluster_access()
+                .directory(None)
+                .media_observation(true)
                 .await
                 .expect("actual bounded-ready media peer observation");
             if peers.iter().any(|peer| {
@@ -212,6 +220,7 @@ async fn actual_nonowner_forwarding(
     })
     .await
     .expect("Source worker production passive/quorum placement readiness");
+    worker.keep_fixture_membership_stable().await;
     assert_ne!(worker.state.node_id, ingress.node_id);
     assert_ne!(
         worker.state.sharing.accepted_drivers.boot_id(),
@@ -220,13 +229,14 @@ async fn actual_nonowner_forwarding(
     // A real serving admission fence makes this ingress ineligible to produce.
     // Its public peer ingress and cleanup can still route to the serving worker.
     let _fence = ingress
-        .serving
+        .cluster
+        .test_fence()
         .begin_restart_preparation_until(
             u64::try_from(crate::state::clock_ms()).expect("positive clock") + 120_000,
         )
         .await
         .expect("actual non-serving ingress fence");
-    assert!(!ingress.serving.accepting_new_media().await);
+    assert!(!ingress.cluster.test_fence().accepting_new_media().await);
     let ingress_server = FixtureServer::spawn(
         Arc::clone(&observation),
         super::super::sharing::peer_router(ingress.clone()).merge(
@@ -236,7 +246,7 @@ async fn actual_nonowner_forwarding(
                     axum::routing::get(crate::http::internal_clock::observation_snapshot),
                 )
                 .with_state(crate::http::internal_clock::ObservationContext {
-                    membership: ingress.membership.clone(),
+                    clock: ingress.cluster.operations().clock(),
                     node_id: ingress.node_id.clone(),
                     observer: ingress.clock_observer.clone(),
                 }),

@@ -290,7 +290,7 @@ impl DesktopControl {
             build: crate::version::SOURCE_COMMIT.into(),
             browser_origin,
             supervisor: self.supervisor.clone(),
-            ready: state.serving.is_ready(),
+            ready: state.cluster.operations().ready(),
         };
         let context = Arc::new(ContextState {
             control: Arc::clone(self),
@@ -441,7 +441,7 @@ async fn identity(
     Extension(context): Extension<Arc<ContextState>>,
 ) -> Json<DaemonIdentityV1> {
     let mut identity = context.identity.clone();
-    identity.ready = state.serving.is_ready();
+    identity.ready = state.cluster.operations().ready();
     Json(identity)
 }
 async fn status(Extension(context): Extension<Arc<ContextState>>) -> LocalResult<ShutdownStatusV1> {
@@ -476,8 +476,9 @@ async fn prepare(
 ) -> LocalResult<ShutdownPreparedV1> {
     let Json(request) = request.map_err(|_| invalid("invalid shutdown preparation JSON"))?;
     let operation_guard = state
-        .serving
-        .try_planned_outage_operation_guard()
+        .cluster
+        .operations()
+        .claim_outage_operation()
         .map_err(|_| unsafe_shutdown("another planned outage operation is resolving"))?;
     tokio::spawn(async move {
         let _operation_guard = operation_guard;
@@ -529,14 +530,21 @@ async fn prepare_owned(
             lease.release().await;
         } else {
             state
-                .serving
-                .cancel_planned_outage_preparation(old.token, 0)
+                .cluster
+                .operations()
+                .cancel_outage_fence(old.token, 0)
                 .await;
         }
     }
     current_topology(&state).await?;
     let active = cluster_operations::local_owned_media_sessions(&state).await;
-    if !state.serving.restart_drain_status(active).await.drained {
+    if !state
+        .cluster
+        .operations()
+        .drain_status(active)
+        .await
+        .drained
+    {
         return Err(unsafe_shutdown(
             "playback, recordings or response delivery remain active; wait for idle and try again",
         ));
@@ -578,7 +586,12 @@ async fn prepare_owned(
             .preparation_expiry_unix_ms(Duration::from_millis(PREPARATION_MS))
             .unwrap_or(0),
     );
-    let Some(token) = state.serving.begin_desktop_preparation_until(expires).await else {
+    let Some(token) = state
+        .cluster
+        .operations()
+        .prepare_desktop_fence(expires)
+        .await
+    else {
         lease.release().await;
         return Err(unsafe_shutdown(
             "another local planned outage already owns admissions",
@@ -595,8 +608,9 @@ async fn prepare_owned(
         tokio::time::timeout(
             Duration::from_secs(3),
             state
-                .serving
-                .wait_for_restart_admissions_until(token, &state.shutdown)
+                .cluster
+                .operations()
+                .settle_outage_admissions(token, &state.shutdown)
         )
         .await,
         Ok(true)
@@ -607,7 +621,7 @@ async fn prepare_owned(
         ));
     }
     let active = cluster_operations::local_owned_media_sessions(&state).await;
-    if active != 0 || !state.serving.planned_outage_is_current(token).await {
+    if active != 0 || !state.cluster.operations().outage_is_current(token).await {
         lease.release().await;
         return Err(unsafe_shutdown(
             "playback or recordings remain active; wait for idle and try again",
@@ -646,8 +660,9 @@ async fn commit(
     // Continue through a disconnected HTTP waiter: after atomic commitment,
     // cancellation belongs to the daemon, not to the controller connection.
     let operation_guard = state
-        .serving
-        .try_planned_outage_operation_guard()
+        .cluster
+        .operations()
+        .claim_outage_operation()
         .map_err(|_| unsafe_shutdown("another planned outage operation is resolving"))?;
     tokio::spawn(async move {
         let _operation_guard = operation_guard;
@@ -676,8 +691,9 @@ async fn commit_owned(
         .as_ref()
         .ok_or_else(|| unsafe_shutdown("the replicated preparation owner is missing"))?;
     state
-        .membership
-        .commit_cluster_operation_lease(lease.claim())
+        .cluster
+        .operations()
+        .commit_outage_claim(lease.claim())
         .await
         .map_err(|_| {
             unsafe_shutdown("the exact replicated preparation was cancelled or superseded")
@@ -701,8 +717,9 @@ async fn commit_owned(
     let active = cluster_operations::local_owned_media_sessions(&state).await;
     binding(&context.control, &peer, &request.process_nonce)?;
     if !state
-        .serving
-        .commit_desktop_shutdown(prepared.token, active)
+        .cluster
+        .operations()
+        .commit_desktop_fence(prepared.token, active)
         .await
     {
         return Err(unsafe_shutdown(
@@ -740,8 +757,9 @@ async fn cancel(
         lease.release().await;
     } else {
         state
-            .serving
-            .cancel_planned_outage_preparation(prepared.token, 0)
+            .cluster
+            .operations()
+            .cancel_outage_fence(prepared.token, 0)
             .await;
     }
     Ok(Json(
@@ -781,12 +799,12 @@ fn validate_preparation<'a>(
     Ok(prepared)
 }
 async fn current_topology(state: &AppState) -> Result<MembershipStatus, LocalError> {
-    if !state.serving.is_ready() {
+    if !state.cluster.operations().ready() {
         return Err(unsafe_shutdown(
             "local serving authority is unavailable; use administrator maintenance",
         ));
     }
-    let status = tokio::time::timeout(Duration::from_secs(5), state.membership.status())
+    let status = tokio::time::timeout(Duration::from_secs(5), state.cluster.membership_status())
         .await
         .map_err(|_| unsafe_shutdown("topology observation timed out"))?
         .map_err(|_| unsafe_shutdown("topology is unknown; use administrator maintenance"))?;
@@ -1341,7 +1359,7 @@ mod tests {
             let observation = Arc::new(crate::StartupObservationHttp::new(config.server.bind));
             let selected = plurx_core::cluster::migration::select_daemon_store_observing(
                 &config,
-                Some(observation.as_ref()),
+                Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
             )
             .await
             .expect("desktop control fixture");
@@ -1361,9 +1379,8 @@ mod tests {
                 selected.identity.node_id.clone(),
                 selected.identity.cluster_id.clone(),
                 Arc::clone(&selected.credential_key),
-                selected.local_client(),
-                selected.replication_monitor(),
-                selected.membership_manager(),
+                selected.local_client().map(crate::cluster::backup_source),
+                crate::cluster::ClusterParts::of(&selected),
                 selected.catalogue_reader(),
                 selected.applied_view(),
                 store,
@@ -1378,20 +1395,28 @@ mod tests {
             );
             state.clock_observer = observation.observer().await.expect("startup clock owner");
             state
-                .membership
+                .cluster
+                .test_membership()
                 .heartbeat()
                 .await
                 .expect("desktop control fixture");
             let stop = CancellationToken::new();
             let metrics = tokio::spawn(
                 state
-                    .replication
+                    .cluster
+                    .test_replication()
                     .clone()
                     .passive_metrics_loop(stop.clone().cancelled_owned()),
             );
-            let serving = tokio::spawn(state.serving.clone().monitor_loop(stop.clone()));
+            let serving = tokio::spawn(
+                state
+                    .cluster
+                    .test_fence()
+                    .clone()
+                    .monitor_loop(stop.clone()),
+            );
             tokio::time::timeout(Duration::from_secs(8), async {
-                while !state.serving.is_ready() {
+                while !state.cluster.test_fence().is_ready() {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
@@ -1436,7 +1461,12 @@ mod tests {
             };
             assert!(committed.committed);
             assert!(state.shutdown.is_cancelled());
-            assert!(state.serving.try_restart_admission().await.is_none());
+            assert!(state
+                .cluster
+                .test_fence()
+                .try_restart_admission()
+                .await
+                .is_none());
             // Closing the controller leaves the committed daemon owner alive.
             stop.cancel();
             metrics.await.expect("desktop control fixture");

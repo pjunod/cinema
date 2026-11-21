@@ -729,10 +729,12 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
     "request_dv_fel_variant",
+    "request_dv_fel_head",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
     "dv_title_readiness",
     "dv_title_demands",
+    "dv_title_demands_through",
     "bind_dv_title_demand",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
@@ -846,6 +848,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "cancel_unshared_output_job",
     // The verdict alone, for dv_title_scan before it binds (same test file).
     "claim_verdict",
+    "explain_job_claim",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -13159,6 +13162,84 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
 }
 
+/// Reinstall the two published v124 definitions in an owned cluster, then
+/// exercise the replicated predecessor guard and repeat bootstrap after upgrade.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("dispatch upgrade client");
+    let telemetry = cluster._root.path().join("dispatch-turn-upgrade.db");
+    let bootstrap =
+        || HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry);
+    drop(bootstrap().await.expect("install current catalog"));
+    let catalog =
+        "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
+    let current = replicated_fixture_shape(&client, catalog).await;
+    let original = include_str!("../src/store/background_job_turns.sql");
+    let old_objects: Vec<_> = original
+        .split("-- next statement")
+        .filter(|sql| {
+            sql.contains("CREATE TRIGGER dispatch_turn_job ")
+                || sql.contains("CREATE VIEW dispatch_turn_protected_jobs ")
+        })
+        .collect();
+    assert_eq!(old_objects.len(), 2);
+    let mut rewind = vec![
+        (
+            "DROP TRIGGER dispatch_turn_job".to_owned(),
+            hiqlite::params!(),
+        ),
+        (
+            "DROP VIEW dispatch_turn_protected_jobs".to_owned(),
+            hiqlite::params!(),
+        ),
+    ];
+    rewind.extend(
+        old_objects
+            .into_iter()
+            .map(|sql| (sql.trim().to_owned(), hiqlite::params!())),
+    );
+    rewind.push(("INSERT INTO dispatch_turn_wait(owner,work,keys_json,queued_ms,last_seen_ms,credits) VALUES('job','old-wait','[]',1,2,3)".to_owned(), hiqlite::params!()));
+    client
+        .txn(rewind)
+        .await
+        .expect("restore deployed definitions")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete old catalog and wait");
+    let deployed = replicated_fixture_shape(&client, catalog).await;
+    assert_eq!(current.len(), deployed.len());
+    assert_eq!(
+        current
+            .iter()
+            .zip(&deployed)
+            .filter(|(a, b)| a != b)
+            .count(),
+        2
+    );
+    for _ in 0..2 {
+        drop(bootstrap().await.expect("upgrade or reopen"));
+        assert_eq!(replicated_fixture_shape(&client, catalog).await, current);
+        let rows: Vec<I64Value> = client.query_consistent_map(
+            "SELECT credits AS value FROM dispatch_turn_wait WHERE owner='job' AND work='old-wait'",
+            hiqlite::params!(),
+        ).await.expect("pending wait credits");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, 3);
+    }
+}
+
 /// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
 /// passes through v5 on bootstrap and reaches the exact current v6 view
 /// and marker, with managed receipts kept. Later bootstrap is a no-op.
@@ -13421,6 +13502,7 @@ async fn replicated_source_tail_drops(
         .chain(validated_source_tail_drops(
             &source_shape,
             &source_counts,
+            true,
             true,
             remove,
         ))
@@ -21732,7 +21814,8 @@ fn contract_inventory_matches_every_store_method() {
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
-    assert_eq!(declared.len(), 629, "review the Store method count");
+    // +3: claim diagnostics, targeted FEL head work, and bounded title revisits.
+    assert_eq!(declared.len(), 632, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -29464,6 +29547,216 @@ async fn active_legacy_identity_blocks_exact_forced_successor() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn analysis_admission_rejected_force_keeps_the_other_generation() {
+    use plurx_core::error::{
+        AnalysisAdmissionRefusal::GenerationConflict, StoreError::AnalysisAdmission,
+    };
+    use plurx_core::store::NewAnalysisRequest;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "rejected-force").await;
+        let original = NewAnalysisRequest {
+            request_id: "existing-force".into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "engine".into(),
+            video_identity: "identity-a".into(),
+            requested_generation: "forced-a".into(),
+            priority: "forced".into(),
+            trigger: "admin".into(),
+            force_rebuild: true,
+            target_node_id: "node-a".into(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        let pending = NewAnalysisRequest {
+            request_id: "valid-queue-entry".into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            video_identity: "identity-b".into(),
+            requested_generation: "normal-b".into(),
+            ..original.clone()
+        };
+        store
+            .enqueue_analysis_request(&original)
+            .await
+            .expect("first force");
+        store
+            .enqueue_analysis_request(&pending)
+            .await
+            .expect("ordinary work");
+        let colliding = NewAnalysisRequest {
+            video_identity: pending.video_identity.clone(),
+            requested_generation: "forced-b".into(),
+            ..original
+        };
+        assert!(
+            matches!(
+                store.enqueue_analysis_request(&colliding).await,
+                Err(AnalysisAdmission(GenerationConflict))
+            ),
+            "{backend}: conflicting id"
+        );
+        let kept = store
+            .analysis_request(&pending.request_id)
+            .await
+            .expect("read")
+            .expect("entry");
+        assert_eq!(
+            kept.state, "queued",
+            "{backend}: refused force preserves ordinary work"
+        );
+    })
+    .await;
+}
+
+/// A single replicated fixture write fills the queue, so this test exercises
+/// the real transaction and leader reads without thousands of setup commits.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn replicated_analysis_admission_reports_fences_and_drains_at_capacity() {
+    use plurx_core::error::{AnalysisAdmissionRefusal::*, StoreError::AnalysisAdmission};
+    use plurx_core::store::{NewAnalysisRequest, MAX_ACTIVE_ANALYSIS_REQUESTS};
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("cluster client");
+    let telemetry = cluster._root.path().join("analysis-admission-telemetry.db");
+    let store: Arc<dyn Store> = Arc::new(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("replicated schema"),
+    );
+    let (_, file_id) = seed_file(&store, "saturated-analysis").await;
+    let base = NewAnalysisRequest {
+        request_id: "original".into(),
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        component: "fragment_index".into(),
+        pipeline_version: "engine-a".into(),
+        video_identity: "video".into(),
+        requested_generation: "one".into(),
+        priority: "normal".into(),
+        trigger: "background".into(),
+        force_rebuild: false,
+        target_node_id: "node-a".into(),
+        not_before_ms: 1,
+        created_at_ms: 1,
+    };
+    store
+        .enqueue_analysis_request(&base)
+        .await
+        .expect("admit original");
+    let running = store
+        .claim_analysis_request_compatible("node-a", Some("engine-a"), 10, 1000)
+        .await
+        .expect("claim")
+        .expect("original");
+    let stale = NewAnalysisRequest {
+        source_size: 10_001,
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&stale).await,
+        Err(AnalysisAdmission(SourceChanged))
+    ));
+    let stale_prediction = NewAnalysisRequest {
+        request_id: "expired-prediction".into(),
+        requested_generation: "predict:expired".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&stale_prediction).await,
+        Err(AnalysisAdmission(PredictionExpired))
+    ));
+    // A reused request id with a different generation cannot silently join.
+    let conflict = NewAnalysisRequest {
+        requested_generation: "two".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&conflict).await,
+        Err(AnalysisAdmission(GenerationConflict))
+    ));
+    client.execute("WITH RECURSIVE n(i) AS (VALUES (1) UNION ALL SELECT i+1 FROM n WHERE i < $1)
+        INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,priority,trigger,force_rebuild,target_node_id,state,not_before_ms,created_at_ms,updated_at_ms)
+        SELECT 'fill-'||i,$2,10000,1,'fragment_index','engine-b','video-'||i,'one','normal','background',0,'node-b','queued',1,1,1 FROM n",
+        hiqlite::params!(MAX_ACTIVE_ANALYSIS_REQUESTS - 1, file_id)).await.expect("fill queue");
+    let next = NewAnalysisRequest {
+        request_id: "next".into(),
+        video_identity: "next".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&next).await,
+        Err(AnalysisAdmission(QueueFull))
+    ));
+    let duplicate = NewAnalysisRequest {
+        request_id: "duplicate".into(),
+        ..base.clone()
+    };
+    assert_eq!(
+        store
+            .enqueue_analysis_request(&duplicate)
+            .await
+            .expect("join at cap")
+            .request_id,
+        base.request_id
+    );
+    let viewer = NewAnalysisRequest {
+        request_id: "viewer".into(),
+        video_identity: "viewer".into(),
+        priority: "foreground".into(),
+        trigger: "playback".into(),
+        ..base
+    };
+    store
+        .enqueue_analysis_request(&viewer)
+        .await
+        .expect("playback headroom");
+    assert!(store
+        .complete_analysis_request(&running, "published-result", 11)
+        .await
+        .expect("finish at cap"));
+    assert!(matches!(
+        store.enqueue_analysis_request(&next).await,
+        Err(AnalysisAdmission(QueueFull))
+    ));
+    assert!(matches!(
+        store.enqueue_analysis_request(&conflict).await,
+        Err(AnalysisAdmission(GenerationConflict))
+    ));
+    let viewer = store
+        .claim_analysis_request_compatible("node-a", Some("engine-a"), 12, 1000)
+        .await
+        .expect("viewer claim")
+        .expect("viewer");
+    assert!(store
+        .complete_analysis_request(&viewer, "viewer-result", 13)
+        .await
+        .expect("finish viewer"));
+    assert_eq!(
+        store
+            .enqueue_analysis_request(&next)
+            .await
+            .expect("refill freed slot")
+            .request_id,
+        "next"
+    );
 }
 
 #[tokio::test]

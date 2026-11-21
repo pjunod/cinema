@@ -250,14 +250,14 @@ async fn vod_recovery_fixture(
     let owner = install_vod_http_session(&fixture, base, session_id).await;
     let loop_task = tokio::spawn(
         std::sync::Arc::clone(&fixture.state.transcode)
-            .serving_fence_loop(fixture.state.serving.subscribe()),
+            .serving_fence_loop(fixture.state.cluster.test_fence().subscribe()),
     );
     fixture.state.transcode.outage_owner_started().await;
     (fixture, owner, loop_task)
 }
 
 fn recover_after(state: &crate::state::AppState, after: Duration) -> tokio::task::JoinHandle<()> {
-    let serving = state.serving.clone();
+    let serving = state.cluster.test_fence().clone();
     tokio::spawn(async move {
         tokio::time::sleep(after).await;
         serving.validation_set_ready(true).await;
@@ -274,7 +274,7 @@ fn is_serving_fenced(error: &ApiError) -> bool {
 async fn a_loss_at_admission_recovers_with_a_fresh_authorization() {
     let dir = crate::test_tempdir().expect("recovery dir");
     let (fixture, owner, _loop) = vod_recovery_fixture(dir.path(), "vod-admit-loss").await;
-    fixture.state.serving.validation_set_ready(false).await;
+    fixture.state.cluster.test_fence().validation_set_ready(false).await;
     let recovery = recover_after(&fixture.state, Duration::from_millis(150));
     let started = Instant::now();
     authorize_and_commit_buffered(
@@ -317,7 +317,7 @@ async fn a_loss_between_authorization_and_commit_recovers_with_a_fresh_authoriza
             .await
             .map_err(RawPublicationError::Rejected)?;
         if run == 0 {
-            state.serving.validation_set_ready(false).await;
+            state.cluster.test_fence().validation_set_ready(false).await;
             recover_after(state, Duration::from_millis(100));
         }
         state
@@ -340,7 +340,7 @@ async fn a_recovery_already_superseded_by_a_new_loss_does_not_spend_the_retry() 
     let dir = crate::test_tempdir().expect("recovery dir");
     let (fixture, owner, _loop) = vod_recovery_fixture(dir.path(), "vod-superseded").await;
     let state = fixture.state.clone();
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     let request = tokio::spawn({
         let state = state.clone();
         async move {
@@ -373,9 +373,9 @@ async fn a_recovery_already_superseded_by_a_new_loss_does_not_spend_the_retry() 
         .outage_loss_resolved
         .arm("outage loss resolved");
     let sessions = state.transcode.hold_sessions_for_test().await;
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     let hold = pause.reached().await;
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     drop(hold);
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert_eq!(
@@ -397,7 +397,7 @@ async fn a_recovery_already_superseded_by_a_new_loss_does_not_spend_the_retry() 
     );
     assert!(!request.is_finished());
 
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     request
         .await
         .expect("request task")
@@ -410,7 +410,7 @@ async fn a_recovery_already_superseded_by_a_new_loss_does_not_spend_the_retry() 
 async fn a_fenced_then_expired_response_carries_serving_fenced() {
     let dir = crate::test_tempdir().expect("recovery dir");
     let (fixture, owner, _loop) = vod_recovery_fixture(dir.path(), "vod-expired").await;
-    fixture.state.serving.validation_set_ready(false).await;
+    fixture.state.cluster.test_fence().validation_set_ready(false).await;
     let error = authorize_and_commit_buffered(
         &fixture.state,
         "vod-expired",
@@ -432,14 +432,14 @@ async fn a_fenced_then_expired_response_carries_serving_fenced() {
 async fn a_session_retired_during_the_wait_is_refused_after_recovery() {
     let dir = crate::test_tempdir().expect("recovery dir");
     let (fixture, owner, _loop) = vod_recovery_fixture(dir.path(), "vod-retired").await;
-    fixture.state.serving.validation_set_ready(false).await;
+    fixture.state.cluster.test_fence().validation_set_ready(false).await;
     let retire_then_recover = tokio::spawn({
         let state = fixture.state.clone();
         async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let (_, ()) = tokio::join!(
                 state.transcode.begin_session_publication_fence("vod-retired"),
-                state.serving.validation_set_ready(true),
+                state.cluster.test_fence().validation_set_ready(true),
             );
         }
     });
@@ -485,10 +485,10 @@ async fn a_held_read_runs_after_recovery_while_creates_and_control_fail_fast() {
     use tokio::time::Instant;
     let (app, state) = crate::http::tests::test_app_with_state();
     let _loop = tokio::spawn(
-        std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
+        std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.cluster.test_fence().subscribe()),
     );
     state.transcode.outage_owner_started().await;
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
 
     for (method, path) in [
         ("POST", "/api/v1/hls/sessions"),
@@ -548,7 +548,7 @@ async fn abandoning_after_the_first_media_handoff_then_reauthorizing_publishes_o
     let fixture = HlsDeliveryFixture::publish_actor_managed(dir.path(), &session_id).await;
     let _loop = tokio::spawn(
         std::sync::Arc::clone(&fixture.state.transcode)
-            .serving_fence_loop(fixture.state.serving.subscribe()),
+            .serving_fence_loop(fixture.state.cluster.test_fence().subscribe()),
     );
     fixture.state.transcode.outage_owner_started().await;
     fixture.mark_started().await;
@@ -594,7 +594,7 @@ async fn abandoning_after_the_first_media_handoff_then_reauthorizing_publishes_o
             // Past the handoff and the actor's authorization, before any
             // byte is committed: lose authority here.
             handoff_seen.store(true, std::sync::atomic::Ordering::SeqCst);
-            state.serving.validation_set_ready(false).await;
+            state.cluster.test_fence().validation_set_ready(false).await;
             recover_after(state, Duration::from_millis(100));
         }
         state

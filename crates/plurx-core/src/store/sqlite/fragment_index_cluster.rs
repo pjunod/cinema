@@ -601,7 +601,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         ]);
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
-            transaction.execute(
+            let inserted = transaction.execute(
                 &format!(
                     "INSERT INTO analysis_requests
                     (request_id, file_id, source_size, source_mtime, component,
@@ -718,7 +718,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     super::super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR,
                 ],
             )?;
-            if request.force_rebuild {
+            if inserted == 1 && request.force_rebuild {
                 transaction.execute(
                     "UPDATE analysis_attempts
                         SET phase = 'canceled', phase_updated_at_ms = ?1,
@@ -812,6 +812,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         "SELECT {REQUEST_COLS} FROM analysis_requests
                           WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3
                             AND component = ?4
+                            AND EXISTS (SELECT 1 FROM files WHERE id = ?1 AND size = ?2 AND mtime = ?3)
                             AND video_identity = ?8
                             AND ((pipeline_version = ?5 AND requested_generation = ?6
                                   AND target_node_id = ?7)
@@ -846,12 +847,21 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request_from_row,
                 )
                 .optional()?;
-            transaction.commit()?;
-            active.ok_or_else(|| {
-                StoreError::Task(
-                    "analysis source changed or the active request queue is full".to_owned(),
-                )
-            })
+            if let Some(active) = active {
+                transaction.commit()?;
+                return Ok(active);
+            }
+            use super::super::fragment_index_cluster::{
+                analysis_admission_error, analysis_admission_refusal_sql, analysis_headroom,
+            };
+            let input = serde_json::to_string(&request)
+                .map_err(|error| StoreError::Task(error.to_string()))?;
+            let reason: u8 = transaction.query_row(
+                &analysis_admission_refusal_sql(),
+                params![input, live, analysis_headroom(&request), false],
+                |row| row.get(0),
+            )?;
+            Err(analysis_admission_error(usize::from(reason)))
         })
         .await
     }

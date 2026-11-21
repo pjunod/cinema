@@ -80,7 +80,11 @@ async fn build_receiver_fixture(
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
     let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
+        Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&crate::cluster::StartupClockAdapter(clock.as_ref())),
+        ))
+        .await
     } else {
         crate::sharing_fixture_clock::select_applied_singleton(&config).await
     }
@@ -106,7 +110,7 @@ async fn build_receiver_fixture(
     state.node_id = selected.identity.node_id.clone();
     state.replace_membership(selected.membership_manager());
     state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        state.membership.clone(),
+        state.cluster.test_membership().clone(),
         Arc::clone(&state.store),
     );
     state.clock_observer = if let Some(clock) = &startup_clock {
@@ -115,10 +119,10 @@ async fn build_receiver_fixture(
             .await
             .expect("actual startup clock observer")
     } else {
-        crate::clock_offset::ClockObserver::new(state.membership.clone())
+        crate::clock_offset::ClockObserver::new(state.cluster.operations().clock())
     };
     state.catalogue = selected.catalogue_reader();
-    state.replication = selected.replication_monitor();
+    state.replace_replication(selected.replication_monitor());
     state.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -129,10 +133,12 @@ async fn build_receiver_fixture(
         },
     ));
     state
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
     state
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual B fixture registry boot");

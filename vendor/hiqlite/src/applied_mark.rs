@@ -24,11 +24,11 @@
 //! Nothing here crosses the wire; revisions are meaningless on another node.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Registered tables a node may name in [`crate::NodeConfig::applied_mark_tables`].
-pub const APPLIED_MARK_MAX_TABLES: usize = 16;
+pub const APPLIED_MARK_MAX_TABLES: usize = 32;
 
 #[derive(Debug)]
 pub(crate) struct AppliedMark {
@@ -43,10 +43,10 @@ pub(crate) struct AppliedMark {
     names: Vec<String>,
     /// Writer-local: set by the update hook on the writer thread, taken by
     /// `publish` on the same thread.
-    pending: AtomicU16,
+    pending: AtomicU32,
     /// Registered tables whose slot moves on a deleted row only (a table
     /// rewritten in place by routine activity, whose removal is the event).
-    deletes_only: u16,
+    deletes_only: u32,
     /// Live [`AppliedWatch`]es per slot. `publish` notifies only when a slot
     /// it bumped has one, so a busy table nobody waits on costs a mask test.
     interest: [AtomicUsize; APPLIED_MARK_MAX_TABLES],
@@ -80,7 +80,7 @@ impl AppliedMark {
             "NodeConfig::is_valid bounds the registered applied-mark tables"
         );
         let names: Vec<String> = tables.iter().map(|name| name.as_ref().to_owned()).collect();
-        let deletes_only = deletes_only.iter().fold(0_u16, |mask, table| {
+        let deletes_only = deletes_only.iter().fold(0_u32, |mask, table| {
             let slot = names
                 .iter()
                 .position(|name| name == table.as_ref())
@@ -92,7 +92,7 @@ impl AppliedMark {
             applied_index: AtomicU64::new(0),
             tables: Default::default(),
             names,
-            pending: AtomicU16::new(0),
+            pending: AtomicU32::new(0),
             deletes_only,
             interest: Default::default(),
             changed: tokio::sync::Notify::new(),
@@ -101,11 +101,11 @@ impl AppliedMark {
         })
     }
 
-    fn all_bits(&self) -> u16 {
-        if self.names.len() >= 16 {
-            u16::MAX
+    fn all_bits(&self) -> u32 {
+        if self.names.len() == APPLIED_MARK_MAX_TABLES {
+            u32::MAX
         } else {
-            (1_u16 << self.names.len()) - 1
+            (1_u32 << self.names.len()) - 1
         }
     }
 
@@ -324,10 +324,9 @@ impl AppliedWatch {
     #[must_use]
     pub fn moved(&self) -> bool {
         self.mark.generation.load(Ordering::Acquire) != self.generation
-            || self
-                .revisions
-                .iter()
-                .any(|(slot, revision)| self.mark.tables[slot.0].load(Ordering::Acquire) != *revision)
+            || self.revisions.iter().any(|(slot, revision)| {
+                self.mark.tables[slot.0].load(Ordering::Acquire) != *revision
+            })
     }
 
     /// Whether the image was trusted (even generation) when captured.
@@ -440,6 +439,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn upper_slots_move_independently_and_full_width_invalidation_is_safe() {
+        let names: Vec<_> = (0..32).map(|slot| format!("table_{slot}")).collect();
+        let mark = AppliedMark::with_deletes_only(&names, &["table_31"]);
+        let handle = mark.handle();
+        let revision = |slot: usize| handle.revision(handle.slot(&names[slot]).unwrap());
+        mark.note_row_change(false, "main", "table_16");
+        mark.note_row_change(false, "main", "table_31");
+        mark.publish(Some(1));
+        for slot in 0..32 {
+            assert_eq!(revision(slot), u64::from(slot == 16), "slot {slot}");
+        }
+        mark.note_row_change(true, "main", "table_31");
+        mark.publish(Some(2));
+        assert_eq!(revision(16), 1);
+        assert_eq!(revision(31), 1);
+        mark.prime_schema_version(Some(1));
+        mark.note_schema_version(Some(2));
+        mark.publish(Some(3));
+        for slot in 0..32 {
+            assert_eq!(
+                revision(slot),
+                1 + u64::from(slot == 16 || slot == 31),
+                "slot {slot}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "bounds the registered applied-mark tables")]
+    fn a_thirty_third_table_is_rejected() {
+        let names: Vec<_> = (0..33).map(|slot| format!("table_{slot}")).collect();
+        let _ = AppliedMark::new(&names);
+    }
+
+    #[tokio::test]
+    async fn the_highest_slot_watch_ignores_updates_but_observes_deletion_and_replacement() {
+        let names: Vec<_> = (0..32).map(|slot| format!("table_{slot}")).collect();
+        let mark = AppliedMark::with_deletes_only(&names, &["table_31"]);
+        let handle = mark.handle();
+        let watch = handle.watch(&[handle.slot("table_31").unwrap()]);
+        mark.note_row_change(false, "main", "table_31");
+        mark.note_row_change(true, "main", "table_16");
+        mark.publish(Some(1));
+        assert!(!watch.moved());
+        mark.note_row_change(true, "main", "table_31");
+        mark.publish(Some(2));
+        tokio::time::timeout(Duration::from_secs(1), watch.changed())
+            .await
+            .expect("high-bit deletion wake");
+        let watch = handle.watch(&[handle.slot("table_31").unwrap()]);
+        let replacement = mark.begin_replacement();
+        tokio::time::timeout(Duration::from_secs(1), watch.changed())
+            .await
+            .expect("high-bit replacement wake");
+        assert!(!handle.watch(&[]).trusted());
+        replacement.complete();
+        assert!(handle.watch(&[]).trusted());
+    }
+
+    #[test]
     fn only_registered_tables_in_main_set_their_own_bit() {
         let mark = AppliedMark::new(&["settings", "media_sessions"]);
         let handle = mark.handle();
@@ -546,7 +605,15 @@ mod watch_tests {
     use std::time::Duration;
 
     const TABLES: [&str; 10] = [
-        "settings", "media_sessions", "t2", "t3", "t4", "t5", "t6", "t7", "sharing_imports",
+        "settings",
+        "media_sessions",
+        "t2",
+        "t3",
+        "t4",
+        "t5",
+        "t6",
+        "t7",
+        "sharing_imports",
         "tokens",
     ];
 
@@ -595,9 +662,11 @@ mod watch_tests {
         mark.note_row_change(false, "main", "media_sessions");
         mark.publish(Some(1));
         assert!(!watch.moved());
-        assert!(tokio::time::timeout(Duration::from_millis(50), watch.changed())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), watch.changed())
+                .await
+                .is_err()
+        );
         let waker = std::sync::Arc::clone(&mark);
         let publisher = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -630,9 +699,15 @@ mod watch_tests {
         let first = handle.watch(&[slot]);
         let second = handle.watch(&[slot]);
         drop(first);
-        assert_eq!(mark.interest[0].load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(
+            mark.interest[0].load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
         drop(second);
-        assert_eq!(mark.interest[0].load(std::sync::atomic::Ordering::Acquire), 0);
+        assert_eq!(
+            mark.interest[0].load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
     }
 
     #[tokio::test]

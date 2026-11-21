@@ -632,16 +632,6 @@ mod tests {
         let (store, _job, active) = crate::background_jobs::tests::active().await;
         let fence = active.fence();
         let budget = fence.source_budget();
-        let now = crate::state::clock_ms();
-        // A real exhausted finite receipt: the allocator's existing timer
-        // advances to a fresh Store grant while the process is verified held.
-        *budget.grant.lock().await = Some(BackgroundSourceServiceGrant {
-            receipt_id: uuid::Uuid::new_v4().to_string(),
-            epoch_id: now / 5000,
-            expires_at_ms: now + 3000,
-            byte_allowance: Some(0),
-            resource_keys: vec!["source_io".into()],
-        });
         let directory = crate::test_tempdir().expect("create source test temp directory");
         let manager = crate::transcode::TranscodeManager::new(
             store,
@@ -699,7 +689,23 @@ mod tests {
                             Some(started.elapsed());
                         result
                     };
-                    let (child, allowance) = tokio::join!(child, budget.allowance(1));
+                    let allowance = async {
+                        // Start the finite hold with the read, after fragment
+                        // admission and the initial source-authority check.
+                        // Their latency must not consume this test receipt.
+                        let mut grant = budget.grant.lock().await;
+                        let now = crate::state::clock_ms();
+                        *grant = Some(BackgroundSourceServiceGrant {
+                            receipt_id: uuid::Uuid::new_v4().to_string(),
+                            epoch_id: now / 5000,
+                            expires_at_ms: now + 3000,
+                            byte_allowance: Some(0),
+                            resource_keys: vec!["source_io".into()],
+                        });
+                        drop(grant);
+                        budget.allowance(1).await
+                    };
+                    let (child, allowance) = tokio::join!(child, allowance);
                     drop(activity);
                     allowance.expect("source allowance resolves after the quota hold");
                     child
@@ -730,7 +736,7 @@ mod tests {
         let (elapsed, child_finished) = quota_held_scanner(false).await;
         assert!(
             elapsed >= Duration::from_millis(3500),
-            "quota holds must not spend the scanner's 1200ms active budget"
+            "quota holds must not spend the scanner's 1200ms active budget: probe={elapsed:?}, child={child_finished:?}"
         );
         assert!(child_finished >= Duration::from_millis(3500));
     }

@@ -27,8 +27,10 @@ pub(crate) mod subtitle_fixture;
 pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
+#[cfg(target_os = "linux")]
+pub(crate) use metrics::claim_skipped;
 use metrics::Event;
-pub(crate) use metrics::{accepted_claims, claim_skipped, prometheus};
+pub(crate) use metrics::{accepted_claims, prometheus};
 
 #[path = "background_jobs/analysis_reconcile.rs"]
 pub(crate) mod analysis_reconcile;

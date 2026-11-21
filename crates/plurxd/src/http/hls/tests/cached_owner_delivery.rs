@@ -52,7 +52,7 @@ mod cached_owner_delivery_tests {
         let startup = Arc::new(crate::StartupObservationHttp::new(
             source_config.server.bind,
         ));
-        let selected = select_daemon_store_observing(&source_config, Some(startup.as_ref()))
+        let selected = select_daemon_store_observing(&source_config, Some(&crate::cluster::StartupClockAdapter(startup.as_ref())))
             .await
             .expect("actual singleton activation within production phase");
         let leader = selected.membership_manager();
@@ -108,7 +108,7 @@ mod cached_owner_delivery_tests {
             Duration::from_secs(45),
             Box::pin(select_daemon_store_observing(
                 &learner_config,
-                Some(learner_startup.as_ref()),
+                Some(&crate::cluster::StartupClockAdapter(learner_startup.as_ref())),
             )),
         )
         .await
@@ -126,7 +126,7 @@ mod cached_owner_delivery_tests {
             .membership_snapshot();
         assert!(applied.committed && applied.members.contains(&token.raft_id));
         assert!(!applied.voters.contains(&token.raft_id));
-        assert!(!learner.may_run_cluster_jobs().await);
+        assert!(!plurx_core::cluster::coordination::ClusterJobAuthority::may_run_cluster_jobs(&learner.cluster_access().jobs()).await);
 
         let user = owner
             .store
@@ -184,7 +184,7 @@ mod cached_owner_delivery_tests {
         ingress.replace_membership(learner);
         ingress.store = Arc::clone(&owner.store);
         ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-            ingress.membership.clone(),
+            ingress.cluster.test_membership().clone(),
             Arc::clone(&owner.store),
         );
         let file = owner
@@ -242,13 +242,13 @@ mod cached_owner_delivery_tests {
                         .await
                         .expect("actual owner readiness heartbeat");
                     ingress
-                        .membership
+                        .cluster.test_membership()
                         .heartbeat()
                         .await
                         .expect("actual finalized ingress heartbeat");
                     let peers = ingress
-                        .membership
-                        .media_peers()
+                        .cluster.test_membership()
+                        .cluster_access().directory(None).media_observation(true)
                         .await
                         .expect("actual committed media directory");
                     if let Some(peer) = peers
@@ -266,8 +266,8 @@ mod cached_owner_delivery_tests {
             })
             .await
             .expect("actual sampled owner becomes eligible before relay");
-            let clock = super::super::super::peer_transport::PeerTransport::new(
-                ingress.membership.clone(),
+            let clock = crate::cluster::test_calls(
+                ingress.cluster.test_membership().clone(),
             )
             .clock_request(&owner.state.node_id, &source_config.cluster.join_url)
             .await
