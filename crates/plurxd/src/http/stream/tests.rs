@@ -2720,7 +2720,7 @@ fn a_marker_in_the_wrong_half_of_the_runtime_is_rejected() {
 async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_backfill() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     let (_, state) = super::super::tests::test_app_with_state();
-    let directory = tempfile::tempdir().expect("Source marker fixture");
+    let directory = crate::test_tempdir().expect("Source marker fixture");
     let path = directory.path().join("legacy-source.mp4");
     std::fs::write(&path, b"Source marker presence fixture").expect("actual presence");
     let library = state
@@ -2773,24 +2773,24 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
         .await
         .expect("file read")
         .expect("file");
-    let pause = pause_next_marker_fallback_for_test(&path);
     let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
-    let decision = tokio::select! {
-        biased;
-        _ = pause.wait() => panic!("Source entered the live-probe marker fallback"),
-        decision = decision_for_source_file(
+    let decision = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        decision_for_source_file(
             &state,
             file.clone(),
             Caps {
                 caps_v2: Some(caps),
                 ..Default::default()
             },
-        ) => decision.expect("actual Source engine"),
-    };
-    assert_eq!(
-        serde_json::to_value(&decision.markers).expect("markers"),
-        serde_json::to_value(markers_from_chapters(&[], file.duration_ms))
-            .expect("stored evidence only")
+        ),
+    )
+    .await
+    .expect("Source never enters the paused live-probe fallback")
+    .expect("actual Source engine");
+    assert!(
+        decision.markers.is_empty(),
+        "unobserved chapters are unknown"
     );
     assert_eq!(
         state
@@ -2809,21 +2809,18 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
             .is_none(),
         "decision must not backfill an annotation set"
     );
-    // The ordinary Local fallback still enters its existing owned seam.
-    // The Source race can cancel its barrier wait, so use a fresh barrier.
-    let pause = pause_next_marker_fallback_for_test(&path);
-    let local_state = state.clone();
-    let local_file = file.clone();
-    let local = tokio::spawn(async move { markers_for(&local_state, &local_file).await });
-    tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait())
+    assert!(state
+        .store
+        .analysis_requests(10)
         .await
-        .expect("Local fallback retained");
-    local.abort();
-    let _ = local.await;
-    marker_fallback_pauses()
-        .lock()
-        .expect("pause registry")
-        .remove(path.to_str().expect("path"));
+        .expect("analysis requests")
+        .is_empty());
+    let ambiguous = annotation_set_from_markers(annotation_source_identity(&file), &[]);
+    state
+        .store
+        .put_timeline_annotation_set(id, 600_000, &ambiguous)
+        .await
+        .expect("legacy fallback set without chapter evidence");
     let chapters =
         serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("scan chapters");
     state
@@ -2846,7 +2843,7 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
     );
     state
         .store
-        .put_timeline_annotation_set_if_missing(id, 600_000, &manual)
+        .put_timeline_annotation_set(id, 600_000, &manual)
         .await
         .expect("persisted annotation fixture");
     assert_eq!(
@@ -2906,13 +2903,22 @@ async fn chapters_backfill_into_the_stored_probe() {
 
     let chapters = serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("json");
     store
-        .merge_file_probe_chapters(legacy, &chapters)
+        .merge_file_probe_chapters_if_missing(legacy, 1, 1, &chapters)
         .await
         .expect("merge");
     store
-        .merge_file_probe_chapters(unprobed, &chapters)
+        .merge_file_probe_chapters_if_missing(unprobed, 1, 1, &chapters)
         .await
         .expect("merge on a null probe is a no-op, not an error");
+
+    store
+        .merge_file_probe_chapters_if_missing(legacy, 1, 2, "[]")
+        .await
+        .expect("merge file probe chapters if missing");
+    store
+        .merge_file_probe_chapters_if_missing(legacy, 1, 1, "[]")
+        .await
+        .expect("merge file probe chapters if missing");
 
     let raw = store
         .get_file_probe_json(legacy)

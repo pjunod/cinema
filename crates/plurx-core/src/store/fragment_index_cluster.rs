@@ -2250,6 +2250,22 @@ pub struct ClusterFragmentIndexLocation {
     pub last_seen_at_ms: i64,
 }
 
+/// Components that the current analysis worker can execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnalysisClaimMode {
+    All,
+    SkipMarkersOnly,
+}
+
+impl AnalysisClaimMode {
+    pub(crate) fn component_clause(self) -> &'static str {
+        match self {
+            Self::All => "component <> 'subtitle_source'",
+            Self::SkipMarkersOnly => "component = 'skip_markers'",
+        }
+    }
+}
+
 #[async_trait]
 pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// The Developer diagnostic reads coverage independently of queue state.
@@ -2428,6 +2444,34 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         targeted_only: bool,
         cross_node: bool,
         excluded_video_identities: &[String],
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_for_capacity_in_mode(
+            node_id,
+            pipeline_version,
+            now_ms,
+            lease_expires_ms,
+            viewer_only,
+            targeted_only,
+            cross_node,
+            excluded_video_identities,
+            AnalysisClaimMode::All,
+        )
+        .await
+    }
+
+    /// Apply the component restriction to claim selection, fencing and expiry.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_analysis_request_for_capacity_in_mode(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
+        viewer_only: bool,
+        targeted_only: bool,
+        cross_node: bool,
+        excluded_video_identities: &[String],
+        mode: AnalysisClaimMode,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at
