@@ -88,6 +88,15 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
  'crates/plurxd/src/transcode/rolling/retention.rs',
  'crates/plurxd/src/transcode/rolling/session.rs',
  'crates/plurxd/src/transcode/tests/chunk_03.rs',
+ 'crates/plurxd/src/web/player/decode-tiers.js',
+ 'crates/plurxd/src/web/reader.js',
+ 'docs/performance/README.md',
+ 'scripts/codec-hdr-cvvdp',
+ 'scripts/codec-hdr-score',
+ 'tests/operations/test_codec_hdr_cvvdp.py',
+ 'tests/web/reader-layout.browser.cjs',
+ 'tests/web/shared-decision.test.js',
+ 'validation/points.toml',
 }
 
 # Reviewed recipes, not a source-commit or pull-request exception. Different
