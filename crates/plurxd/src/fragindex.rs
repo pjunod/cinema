@@ -2668,7 +2668,7 @@ pub(crate) async fn build_riding_with_store(
 /// [`build_riding`] for several identities from one read of the held source,
 /// in `videos` order. Every build carries the same `source_unchanged`: one
 /// held source, one fence.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) async fn build_riding_shared(
     file: &MediaFile,
     videos: &[transcode::CopyVideoOptions],

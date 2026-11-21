@@ -582,6 +582,10 @@ pub(super) enum RateStop {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "fixed candidate inputs and expected fixture results"
+)]
 mod tests {
     use super::*;
 

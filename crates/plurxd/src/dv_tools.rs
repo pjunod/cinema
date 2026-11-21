@@ -598,6 +598,10 @@ impl ToolSet {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "synthetic bundle fixture and expected artifact lookups"
+)]
 mod m7_encoder_manifest_tests {
     use super::*;
 

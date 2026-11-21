@@ -1852,7 +1852,7 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {

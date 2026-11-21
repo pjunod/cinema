@@ -382,6 +382,10 @@ async fn commit_pending(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "sealed scratch fixtures and expected recovery results"
+)]
 mod tests {
     use super::*;
     use plurx_core::transcode::{

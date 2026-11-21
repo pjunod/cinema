@@ -666,6 +666,10 @@ fn parse_digest(text: &str) -> Result<[u8; 32], String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "synthetic fMP4 fixtures and expected readback"
+)]
 mod tests {
     use super::*;
     use plurx_core::{

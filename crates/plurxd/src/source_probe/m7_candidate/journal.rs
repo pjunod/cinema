@@ -589,6 +589,10 @@ fn remove(dir: &File, name: &str) -> Result<(), Error> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "owned scratch journal fixtures and expected replay results"
+)]
 mod tests {
     use super::*;
     use std::{cell::Cell, fs, path::PathBuf};

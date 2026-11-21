@@ -1,5 +1,9 @@
 //! One owned future inside the existing source-probe scheduler. No new daemon.
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "expected title fixtures and serialized settlement checkpoints"
+)]
 mod m7_settlement_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "title_work_tests.rs"]

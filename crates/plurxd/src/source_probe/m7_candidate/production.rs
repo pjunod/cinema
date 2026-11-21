@@ -100,6 +100,10 @@ struct CompletedEncode {
     trace_configuration: String,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate authoring binds the title claim, frozen recipe, held planes, scratch and cancellation"
+)]
 pub(in crate::source_probe) async fn prepare_authored(
     context: &TitleContext<'_>,
     title: &HeldTitle,
@@ -1796,6 +1800,10 @@ fn execution(error: impl std::fmt::Display) -> PrepareError {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "fixed slot intents and expected route lookups"
+)]
 mod durable_attempt_tests {
     use super::*;
     use std::cell::Cell;

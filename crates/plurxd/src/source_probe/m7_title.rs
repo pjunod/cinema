@@ -732,7 +732,7 @@ fn source_plan(
     let numerator =
         FRAMES as u128 * u128::from(cadence.denominator()) * u128::from(time_base.denominator());
     let denominator = u128::from(cadence.numerator()) * u128::from(time_base.numerator());
-    if numerator % denominator != 0 {
+    if !numerator.is_multiple_of(denominator) {
         return Err(EvaluationError::Unsupported(
             "M7 exposure is not integral on the fitted source clock".into(),
         ));
@@ -1018,6 +1018,10 @@ fn string(error: impl std::fmt::Display) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "positive fixture clocks and expected automatic rate plans"
+)]
 mod tests {
     use super::*;
 
