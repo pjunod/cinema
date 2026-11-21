@@ -39,6 +39,7 @@ PROTOCOL_PATHS = {
     'tests/validation/test_paperwork_continuation.py',
     'CHANGELOG.md',
     'tests/playback/rolling-producer-owners.toml',
+    'tests/client-fixes.toml',
     'verification/durable-jobs/mapping.json',
     '.github/workflows/main-fast-lane.yml',
     'validation/merge_train.py',

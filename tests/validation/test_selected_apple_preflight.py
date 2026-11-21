@@ -13,9 +13,10 @@ class SelectedApplePreflightTests(unittest.TestCase):
         top = ['Xcode 27.2', 'Build version 27B52']
         top = ['', *top]
         blocks = []
-        boot = 'A' * 36
-        device = {'iphone': ('iPhone', 'iOS'), 'ipad': ('iPad', 'iOS'), 'tvos': ('Apple TV', 'tvOS')}
-        for profile, (label, os_name) in device.items():
+        device = {'iphone': ('iPhone', 'iOS', 'A'), 'ipad': ('iPad', 'iOS', 'B'),
+                  'tvos': ('Apple TV', 'tvOS', 'C')}
+        for profile, (label, os_name, unique_id) in device.items():
+            boot = unique_id * 36
             top.append(f'Monitoring boot status for plurx CI {label} 10-1 ({boot}).')
             case = apple.PIP_CASE.replace('/', ' ')
             start = f"Test Case '-[plurx_{os_name}Tests.{case}]'"
