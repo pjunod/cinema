@@ -342,6 +342,14 @@ fn dvh1_completeness_revision_retries_only_affected_copy_indexes() {
         let video =
             transcode::CopyVideoOptions::new(true, preserve).with_parameter_set_retention(retain);
         let mut old_recipe = transcode::copy_video_args(&file, video);
+        // Every ordinary copy identity carries its landing-clock revision;
+        // only the dvh1 completeness component may differ here.
+        if video.dolby_vision_refit().is_none() {
+            old_recipe.push(format!(
+                "--plurx-copy-landing-clock={}",
+                plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+            ));
+        }
         old_recipe.push(format!(
             "--plurx-hdr10-index={}",
             fmp4::HDR10_INDEX_METADATA_REVISION

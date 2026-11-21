@@ -1486,7 +1486,11 @@ mod tests {
         let report = validate_page(&conn, 64).expect("backfill");
         assert_eq!(report.refused, 1);
         assert_eq!(report.remaining, 0);
-        assert_eq!(validation_marker(&conn, 7, "fingerprint"), -1);
+        // A refused row records the negative current revision.
+        assert_eq!(
+            validation_marker(&conn, 7, "fingerprint"),
+            -i64::from(VALIDATION_REVISION)
+        );
         assert_eq!(fingerprints(&conn, 7), vec!["fingerprint"]);
     }
 
