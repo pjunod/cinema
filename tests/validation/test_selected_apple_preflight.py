@@ -1,6 +1,7 @@
 """Require distinct native profile outcomes and exact formal smoke inputs."""
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from validation import python_unit_receipts as r
 from validation import selected_apple_preflight as apple
@@ -79,6 +80,30 @@ class SelectedApplePreflightTests(unittest.TestCase):
                            ui.replace(b'0 failures', b'1 failures') + core):
             with self.subTest(incomplete=incomplete[-100:]), self.assertRaises(r.ReceiptError):
                 apple.desktop_outcomes(incomplete)
+
+    def test_reader_resource_requires_the_successful_current_job_and_exact_bytes(self):
+        candidate = 'a' * 40
+        binding = {'head_sha': candidate}
+        plan = {'apple_preflight': {'mobile': {'inputs': {
+            'reader_resource_sha256': ['b' * 64, 'c' * 64],
+        }}}}
+        job = {'name': 'Apple iOS + tvOS tests', 'id': 14, 'run_id': 19, 'repo_id': 1,
+               'attempt': 1, 'status': 'success', 'runs_on': apple.native.RUNS_ON}
+        api = Mock()
+        api.pages.return_value = [job]
+        with patch.object(apple.retention, 'git_bytes', return_value=b'reader source'):
+            identity = apple.reader_identity(candidate)
+            event = apple.READER_MARKER + json.dumps(identity) + '\n'
+            current = ('** BUILD SUCCEEDED **\n' + event).encode()
+            api.bytes.return_value = current
+            self.assertEqual(apple.reader_build_proof(api, 1, binding, plan, 19)['reader_sha256'],
+                             identity['reader_sha256'])
+            for raw in (event.encode(), current + current,
+                        current.replace(candidate.encode(), b'd' * 40), current.replace(
+                            identity['reader_sha256'].encode(), b'e' * 64)):
+                api.bytes.return_value = raw
+                with self.subTest(raw=raw[-100:]), self.assertRaises(r.ReceiptError):
+                    apple.reader_build_proof(api, 1, binding, plan, 19)
 
     def test_formal_reuse_requires_complete_exact_original_and_current_input_hashes(self):
         commit, candidate = 'a' * 40, 'b' * 40

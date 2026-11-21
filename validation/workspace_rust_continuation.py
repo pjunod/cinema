@@ -118,7 +118,8 @@ SELECTED_PREFLIGHT_BLOCKS = (
         b'    timeout-minutes: 30\n'
         b'    outputs:\n'
         b'      root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}\n'
-        b'      apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}\n',
+        b'      apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}\n'
+        b'      apple_current_reader_required: ${{ steps.python-continuation.outputs.apple_current_reader_required }}\n',
         b'    timeout-minutes: 30\n',
     ),
     (
@@ -211,6 +212,9 @@ SELECTED_PREFLIGHT_BLOCKS = (
         b"        if: always() && needs.scope.outputs.desktop_macos == 'true'\n",
     ),
     (
+        b'      - name: Compile and verify the current iOS reader resource\n'
+        b"        if: needs.preflight.outputs.apple_native_retained == 'true' && needs.preflight.outputs.apple_current_reader_required == 'true'\n"
+        b'        run: python3 -m validation.selected_apple_preflight build-current-ios-reader\n'
         b'      - name: Verify the pinned mobile Apple toolchain\n'
         b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
         b'      - name: Verify the pinned mobile Apple toolchain\n'
@@ -249,13 +253,26 @@ SELECTED_PREFLIGHT_BLOCKS = (
 )
 
 
+def job_body(raw, job, next_job):
+    header, end = f'\n  {job}:\n'.encode(), f'\n  {next_job}:\n'.encode()
+    start, finish = raw.find(header), raw.find(end)
+    receipts.require(raw.count(header) == raw.count(end) == 1 and 0 <= start < finish,
+                     'Invalid selected preflight workflow job boundary')
+    return raw[start:finish]
+
+
 def selected_preflight_projection(raw):
     if not any(marker in raw for marker in (
         b'root_ownership_retained', b'NODE_SELECTION', b'formal_worker_refinement_retained', b'apple_native_retained',
     )):
         return raw
-    receipts.require(all(raw.count(selected) == 1 for selected, _ in SELECTED_PREFLIGHT_BLOCKS),
-                     'Unreviewed selected preflight workflow change')
+    preflight = job_body(raw, 'preflight', 'rust_compile')
+    check = job_body(raw, 'check', 'cluster_store_legacy')
+    apple = job_body(raw, 'apple', 'android_apks')
+    blocks = (preflight,) * 4 + (check,) + (apple,) * 8
+    receipts.require(all(raw.count(selected) == 1 and selected in job
+                         for (selected, _), job in zip(SELECTED_PREFLIGHT_BLOCKS, blocks, strict=True)),
+                     'Unreviewed selected preflight workflow change or job placement')
     for selected, original in SELECTED_PREFLIGHT_BLOCKS:
         raw = raw.replace(selected, original)
     return raw

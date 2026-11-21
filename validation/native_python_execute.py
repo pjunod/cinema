@@ -107,7 +107,10 @@ def main(kind):
             if 'formal_preflight' in plan:
                 print('formal_worker_refinement_retained=true', file=output)
             if 'apple_preflight' in plan:
+                from validation import selected_apple_preflight
                 print('apple_native_retained=true', file=output)
+                if selected_apple_preflight.requires_current_reader(plan):
+                    print('apple_current_reader_required=true', file=output)
         return
     receipts.require(kind in KINDS | {'node'}, 'Unknown selected preflight suite')
     raw = SELECTION.read_bytes()

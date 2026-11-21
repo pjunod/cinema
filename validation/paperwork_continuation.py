@@ -253,7 +253,8 @@ def current_outcomes(raw, plan, *, capture_runtime=False):
 
 def coverage_shape(value, bind, run, inventory=None):
     r.positive(run)
-    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'root_ownership', 'formal_preflight', 'apple_preflight'}
+    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'root_ownership', 'formal_preflight',
+                                         'apple_preflight', 'current_ios_reader'}
     r.require(isinstance(value, dict) and set(value) in (COVERAGE_FIELDS, selected_fields)
               and value['version'] == 1
               and value['head'] == bind['head_sha'] and value['base'] == bind['base_sha']
@@ -315,6 +316,9 @@ def final_coverage(api, value, environment, root):
     if node is not None:
         coverage.update(node_coverage=node, root_ownership=plan['root_ownership'],
                         formal_preflight=plan['formal_preflight'], apple_preflight=plan['apple_preflight'])
+        from validation import selected_apple_preflight
+        coverage['current_ios_reader'] = selected_apple_preflight.reader_build_proof(
+            api, repo['id'], bind, plan, run_id)
     coverage_shape(coverage, bind, run_id, inventory)
     return coverage
 

@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from pathlib import Path
 import re
+import subprocess
+import sys
 
 from validation import native_receipts as native
 from validation import promotion_unit_retention as retention
@@ -252,3 +256,76 @@ def prepare(api, descriptor, scope, binding, candidate):
     current_run = int(os.environ['GITHUB_RUN_ID']) if os.environ.get('GITHUB_RUN_ID') else None
     return {'provider': POLICY, 'desktop': desktop_proof(api, descriptor['desktop'], scope, candidate, current_run),
             'mobile': mobile_proof(api, descriptor['mobile'], scope, candidate, binding['base_sha'], current_run)}
+
+
+
+READER_MARKER = 'SELECTED-CURRENT-IOS-READER '
+READER_BUILD = Path('target/validation/selected-ios-reader-build')
+
+
+def requires_current_reader(plan):
+    before, current = plan['apple_preflight']['mobile']['inputs']['reader_resource_sha256']
+    return before != current
+
+
+def reader_identity(candidate):
+    return {'source_commit': candidate,
+            'reader_sha256': retention.digest(retention.git_bytes(candidate, READER)),
+            'scheme': 'plurx-iOS', 'sdk': 'iOS 27.2 Simulator', 'arch': 'arm64'}
+
+
+def build_current_reader():
+    candidate = r.sha(os.environ['GITHUB_SHA'])
+    r.require(native.git('rev-parse', 'HEAD') == candidate and not native.git('diff', '--name-only', 'HEAD'),
+              'Current iOS build source or checkout differs')
+    r.require(subprocess.check_output(['xcodebuild', '-version'], text=True).strip() == native.XCODE
+              and subprocess.check_output(['xcodegen', '--version'], text=True).strip() == 'Version: 2.46.0'
+              and subprocess.check_output(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'],
+                                          text=True).strip() == '27.2',
+              'Current iOS reader build toolchain differs')
+    run = r.positive(int(os.environ['GITHUB_RUN_ID']))
+    r.require(os.environ['GITHUB_RUN_ATTEMPT'] == '1', 'Current iOS build requires its first protected run')
+    directory = READER_BUILD / str(run)
+    r.require(not any(path.is_symlink() for path in (directory, *directory.parents)),
+              'Unexpected iOS build path')
+    build = directory.resolve()
+    temporary = build / 'tmp'
+    temporary.mkdir(parents=True, exist_ok=False)
+    environment = {**os.environ, 'TMPDIR': str(temporary)}
+    subprocess.run(['xcodegen', 'generate'], cwd='clients/apple', env=environment, check=True)
+    subprocess.run(['xcodebuild', '-project', 'plurx.xcodeproj', '-scheme', 'plurx-iOS',
+                    '-configuration', 'Debug', '-destination', 'generic/platform=iOS Simulator',
+                    'ARCHS=arm64', '-derivedDataPath', str(build / 'DerivedData'),
+                    'CODE_SIGNING_ALLOWED=NO', 'build'], cwd='clients/apple', env=environment, check=True)
+    app = build / 'DerivedData/Build/Products/Debug-iphonesimulator/plurx.app'
+    reader = app / 'reader.js'
+    expected = reader_identity(candidate)
+    r.require(reader.is_file() and reader.resolve() == reader
+              and retention.digest(reader.read_bytes()) == expected['reader_sha256']
+              and native.git('rev-parse', 'HEAD') == candidate and not native.git('diff', '--name-only', 'HEAD'),
+              'The current iOS app did not contain the exact tracked reader resource')
+    print(READER_MARKER + json.dumps(expected, sort_keys=True, separators=(',', ':')), flush=True)
+
+
+def reader_build_proof(api, repository, binding, plan, run):
+    if not requires_current_reader(plan):
+        return None
+    jobs = [job for job in api.pages(f'/actions/runs/{run}/jobs') if job['name'] == 'Apple iOS + tvOS tests']
+    r.require(len(jobs) == 1 and jobs[0]['run_id'] == run and jobs[0]['repo_id'] == repository
+              and jobs[0]['attempt'] == 1 and jobs[0]['status'] == 'success' and jobs[0]['runs_on'] == native.RUNS_ON,
+              'Missing successful current iOS reader build job')
+    job = r.positive(jobs[0]['id'])
+    log = api.bytes(f'/actions/jobs/{job}/logs')
+    text = re.sub(r'(?m)^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', log.decode('utf-8', 'strict'))
+    proof = re.findall(r'^' + re.escape(READER_MARKER) + r'(.+)$', text, re.M)
+    built = re.findall(r'^\*\* BUILD SUCCEEDED \*\*$', text, re.M)
+    r.require(len(proof) == len(built) == 1
+              and text.index(built[0]) < text.index(READER_MARKER)
+              and r.bounded_json(proof[0].encode()) == reader_identity(binding['head_sha']),
+              'Current iOS reader build did not produce the exact resource witness')
+    return {'job': job, 'run': run, **r.bounded_json(proof[0].encode()), 'log_sha256': retention.digest(log)}
+
+
+if __name__ == '__main__':
+    r.require(sys.argv[1:] == ['build-current-ios-reader'], 'Unknown selected Apple command')
+    build_current_reader()

@@ -292,6 +292,7 @@ jobs:
     outputs:
       root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}
       apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}
+      apple_current_reader_required: ${{ steps.python-continuation.outputs.apple_current_reader_required }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1891,6 +1892,9 @@ jobs:
           path: target/validation/desktop-macos-check.log
           if-no-files-found: error
           retention-days: 14
+      - name: Compile and verify the current iOS reader resource
+        if: needs.preflight.outputs.apple_native_retained == 'true' && needs.preflight.outputs.apple_current_reader_required == 'true'
+        run: python3 -m validation.selected_apple_preflight build-current-ios-reader
       - name: Verify the pinned mobile Apple toolchain
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: |

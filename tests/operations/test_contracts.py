@@ -2525,6 +2525,13 @@ assert.equal(context.ACT_TIMER, null);
                         continue
                     if name == desktop_name:
                         continue
+                    if path.endswith("/ci.yml") and name == "Compile and verify the current iOS reader resource":
+                        self.assertEqual(workflow_step_scalar(step, "if"),
+                            "needs.preflight.outputs.apple_native_retained == 'true' && "
+                            "needs.preflight.outputs.apple_current_reader_required == 'true'")
+                        self.assertEqual(workflow_step_scalar(step, "run"),
+                                         "python3 -m validation.selected_apple_preflight build-current-ios-reader")
+                        continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")
