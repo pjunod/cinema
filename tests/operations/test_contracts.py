@@ -4952,6 +4952,16 @@ assert.equal(context.ACT_TIMER, null);
         # newer than it.
         runners = rostered_runners()
         self.assertTrue(runners, "the runner roster is empty")
+        labels_in_use = {label for _, carried in runners for label in carried}
+        ephemeral = {}
+        for profile in runner_fleet().get("ephemeral_jobs", []):
+            key = (profile["workflow"], profile["job"])
+            label = profile["label"]
+            self.assertNotIn(key, ephemeral)
+            self.assertRegex(label, r"^ci-fleet-[a-z0-9-]+$")
+            self.assertNotIn(label, labels_in_use)
+            labels_in_use.add(label)
+            ephemeral[key] = profile
 
         workflow_paths = sorted(
             path.relative_to(ROOT).as_posix()
@@ -4961,9 +4971,23 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn(".github/workflows/store-shards.yml", workflow_paths)
 
         selections = 0
+        seen_ephemeral = set()
         for path in workflow_paths:
+            workflow = read(path)
+            ephemeral_declarations = []
             parsed: list[tuple[str, ...]] = []
             for name, block in workflow_job_blocks(path).items():
+                profile = ephemeral.get((path, name))
+                if profile:
+                    seen_ephemeral.add((path, name))
+                    declaration = f"[{profile['label']}]"
+                    self.assertEqual(re.findall(r"(?m)^ +runs-on: (.+)$", block),
+                                     [declaration])
+                    ephemeral_declarations.append(declaration)
+                    self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
+                    expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
+                                f" && github.sha == vars.{profile['commit_variable']}")
+                    self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
                 for labels in self_hosted_label_sets(block):
                     parsed.append(labels)
                     selections += 1
@@ -4985,13 +5009,16 @@ assert.equal(context.ACT_TIMER, null);
             # wearing a different hat, so compare against the whole file.
             self.assertEqual(
                 sorted(parsed),
-                sorted(self_hosted_label_sets(read(path))),
+                sorted(self_hosted_label_sets(workflow)),
                 f"{path} selects a self-hosted runner in a shape this test "
                 "cannot parse; teach self_hosted_label_sets to read it",
             )
             if path in GITHUB_ONLY_WORKFLOWS:
-                continue  # GitHub-hosted by design; see the GitHub-only contract
-            for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", read(path)):
+                continue
+            for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", workflow):
+                if declaration in ephemeral_declarations:
+                    ephemeral_declarations.remove(declaration)
+                    continue
                 self.assertTrue(
                     declaration.startswith("[self-hosted, ")
                     or declaration == "${{ fromJSON(matrix.runs_on) }}"
@@ -5001,6 +5028,23 @@ assert.equal(context.ACT_TIMER, null);
         # Guard against the parser silently matching nothing at all and the
         # loop above passing vacuously.
         self.assertGreater(selections, 20)
+        self.assertEqual(seen_ephemeral, set(ephemeral))
+
+    def test_an_ephemeral_selector_cannot_be_reused_by_a_quoted_job(self):
+        profile = next(profile for profile in runner_fleet()["ephemeral_jobs"]
+                       if profile["job"] == "validation-markers")
+        original_read = read
+
+        def add_job(path):
+            workflow = original_read(path)
+            if path == profile["workflow"]:
+                sibling = f'\n  "unauthorized":\n    runs-on: [{profile["label"]}]\n'
+                workflow = workflow.replace("\njobs:\n", "\njobs:" + sibling, 1)
+            return workflow
+
+        with mock.patch(f"{__name__}.read", side_effect=add_job):
+            with self.assertRaisesRegex(AssertionError, "has a non-local runner declaration"):
+                self.test_every_self_hosted_runs_on_is_satisfiable_by_a_rostered_runner()
 
     def test_the_runner_roster_keeps_heavy_cluster_lanes_off_shared_hosts(self):
         # The roster is only worth what its own shape guarantees. `ci-store`
