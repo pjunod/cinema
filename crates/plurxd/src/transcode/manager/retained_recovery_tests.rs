@@ -1,5 +1,219 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+fn ready_native_fel_request() -> SessionRequest {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+
+    let route = crate::media_sessions::takeover_eligible_route(
+        "native-fel-admission",
+        "00000000-0000-4000-8000-0000000000a1",
+    );
+    let start: crate::media_sessions::RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("durable fixture");
+    let mut req = start.request;
+    req.presentation = Presentation::Vod;
+    req.kind = SessionKind::Copy {
+        aac: true,
+        preserve_dolby_vision: true,
+        convert_dolby_vision: true,
+        dual_layer_as_copied: false,
+    };
+    req.automatic = true;
+    req.start_seconds = 0.0;
+    req.audio_offset_ms = 0;
+    req.audio_delivery = None;
+    req.transport = Some("native".into());
+    let digest = [42; 32];
+    let mut context = TranscodeManager::candidate_context(&QualityCandidate {
+        id: CandidateId::for_recipe_digest(digest),
+        recipe_digest: digest,
+        route: CandidateRoute::Remux,
+        planned_codec: Some("hevc".into()),
+        processed_dv: false,
+        normalized_geometry: false,
+        width: 3840,
+        height: 2160,
+        target_height: 2160,
+        average_bps: None,
+        peak_bps: None,
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: true,
+        sustainable: true,
+    });
+    context.canonical_caps = Some(
+        serde_json::from_value(serde_json::json!({
+            "v": 2, "video": [{"codec": "hevc", "profiles": ["main10"], "present": ["pq"]}],
+            "containers": ["mp4"], "transports": ["hls"], "audio": ["aac"],
+            "hls_hevc_sample_entries": ["hvc1", "hev1"]
+        }))
+        .expect("native HLS caps"),
+    );
+    req.candidate_context = Some(Box::new(context));
+    req.previous_session_id = None;
+    req.reopen_reason = None;
+    req.control_sequence = None;
+    req
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
+    let req = ready_native_fel_request();
+    assert!(may_prefer_prepared_native_fel(&req));
+
+    let mut resume = req.clone();
+    resume.start_seconds = 592.252;
+    assert!(may_start_native_fel(&resume));
+    assert!(!may_prefer_prepared_native_fel(&resume));
+
+    let exclusions: [fn(&mut SessionRequest); 8] = [
+        |req| req.vod_only = true,
+        |req| req.passive_vod = true,
+        |req| req.start_seconds = 1.0,
+        |req| req.audio_offset_ms = 1,
+        |req| req.automatic = false,
+        |req| req.transport = Some("hlsjs".into()),
+        |req| req.control_sequence = Some(1),
+        |req| {
+            req.candidate_context
+                .as_mut()
+                .expect("native FEL request candidate")
+                .selected_candidate
+                .processed_dv = true
+        },
+    ];
+    for exclude in exclusions {
+        let mut changed = req.clone();
+        exclude(&mut changed);
+        assert!(!may_prefer_prepared_native_fel(&changed));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_fel_local_start_failure_can_try_vod_before_deadline() {
+    use crate::transcode::manager_start::NATIVE_FEL_START_UNAVAILABLE;
+    let error = vod_refusal_error(NATIVE_FEL_START_UNAVAILABLE, "copy producer unavailable");
+    let now = tokio::time::Instant::now();
+    assert!(native_fel_can_try_vod(
+        &error,
+        Some(now + Duration::from_secs(1))
+    ));
+    assert!(!native_fel_can_try_vod(&error, Some(now)));
+    let authority_lost = vod_refusal_error("serving_fence", "serving authority changed");
+    assert!(!native_fel_can_try_vod(&authority_lost, None));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_fel_resume_requires_one_unambiguous_copy_video_stream() {
+    use crate::transcode::manager_start::native_copy_video_index;
+    let video = serde_json::json!({"index": 2, "codec_type":"video"});
+    let audio = serde_json::json!({"index": 0, "codec_type":"audio"});
+    let cover = serde_json::json!({
+        "index": 1, "codec_type": "video", "disposition": {"attached_pic": 1}
+    });
+    let select =
+        |streams| native_copy_video_index(&serde_json::json!({"streams": streams}).to_string());
+    assert_eq!(select(vec![audio.clone(), video.clone()]), Some(2));
+    assert_eq!(select(vec![audio.clone(), cover.clone()]), None);
+    assert_eq!(select(vec![audio, cover, video]), None);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn clustered_initial_vod_start_primes_a_cold_native_fel_head() {
+    use plurx_core::{
+        domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
+        store::{LibraryStore, MediaStore, SettingsStore, ViewSource},
+    };
+    let directory = crate::test_tempdir().expect("cold native start");
+    let store = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let library = store
+        .create_library(&NewLibrary {
+            name: "native-fel".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![directory.path().to_path_buf()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "cold native FEL".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let missing = directory.path().join("source-unavailable.mkv");
+    let file_id = store
+        .upsert_file(
+            item,
+            missing.to_str().expect("path"),
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("hevc".into()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    rpu_present: Some(true),
+                    el_present: Some(true),
+                    ..Default::default()
+                },
+                raw_json: Some("{}".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file facts");
+    store
+        .put_setting(keys::DV_FEL_REENCODE, "1")
+        .await
+        .expect("enable FEL processing");
+    let manager = TranscodeManager::new(
+        store.clone(),
+        directory.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let snapshot = store
+        .playback_planning_snapshot(file_id, &QUALITY_PLANNING_KEYS)
+        .await
+        .expect("planning")
+        .expect("file");
+    let plan = crate::http::hls::start_plan::StartPlan::new(snapshot, ViewSource::Authority);
+    let mut req = ready_native_fel_request();
+    req.file_id = file_id;
+    req.request_id = Some(uuid::Uuid::new_v4().to_string());
+    let recovery = SessionRecoveryIdentity {
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        recovery_epoch: uuid::Uuid::new_v4().to_string(),
+    };
+    assert!(!manager.native_fel_head_is_target(file_id));
+    let result = manager
+        .create_cluster_session(
+            &req,
+            &recovery,
+            "viewer",
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            manager.serving_authority.state().loss_generation,
+            Some(&plan),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "the ordinary source in this fixture is unavailable"
+    );
+    assert!(manager.native_fel_head_is_target(file_id));
+}
+
 #[test]
 fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decoder() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};

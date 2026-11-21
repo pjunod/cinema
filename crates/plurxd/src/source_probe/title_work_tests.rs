@@ -838,6 +838,7 @@ fn stored_title() -> TitleDemand {
     TitleDemand {
         queued_job_id: None,
         active_job_id: None,
+        fel_head_target: None,
         playback_requested: false,
         scanner_digest: None,
         playback_recipes: Vec::new(),

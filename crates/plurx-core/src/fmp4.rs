@@ -5262,8 +5262,39 @@ pub(crate) fn visit_length_prefixed_hevc_nals(
 /// same source picture despite different metadata packaging.
 pub fn hevc_base_layer_vcl_sha256(sample: &[u8]) -> Result<[u8; 32], Fmp4Error> {
     use sha2::{Digest, Sha256};
-    let mut sha = Sha256::new();
-    let mut first_slices = 0;
+    let mut hash = Sha256::new();
+    visit_base_layer_vcl_picture(sample, |framed, _| hash.update(framed))?;
+    Ok(hash.finalize().into())
+}
+
+/// Identity and exact byte count of a base-layer picture as produced by
+/// FFmpeg's VCL-only HEVC filter. Compare this with the clock output from
+/// the same copy process before associating its timestamp with a muxed sample.
+pub fn hevc_cbs_base_layer_vcl_identity(sample: &[u8]) -> Result<([u8; 32], usize), Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut len = 0;
+    let mut invalid = false;
+    visit_base_layer_vcl_picture(sample, |_, nal| {
+        let start_code: &[u8] = if len == 0 { &[0, 0, 0, 1] } else { &[0, 0, 1] };
+        invalid |= nal.windows(3).any(|bytes| bytes == [0, 0, 1]);
+        hash.update(start_code);
+        hash.update(nal);
+        // Each Annex B delimiter is at most as long as the sample's
+        // four-byte length prefix, so this sum cannot exceed sample.len().
+        len += start_code.len() + nal.len();
+    })?;
+    if invalid {
+        return malformed("source witness contains an unescaped Annex-B delimiter");
+    }
+    Ok((hash.finalize().into(), len))
+}
+
+fn visit_base_layer_vcl_picture(
+    sample: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]),
+) -> Result<(), Fmp4Error> {
+    let mut picture = None;
     let mut malformed_header = false;
     visit_length_prefixed_hevc_nals(sample, 4, |framed, kind| {
         let nal = &framed[4..];
@@ -5271,19 +5302,25 @@ pub fn hevc_base_layer_vcl_sha256(sample: &[u8]) -> Result<[u8; 32], Fmp4Error> 
             malformed_header = true;
             return;
         }
-        if kind.is_some_and(|kind| kind < 32) {
+        if let Some(kind) = kind.filter(|kind| *kind < 32) {
             let Some(header) = nal.get(2) else {
                 malformed_header = true;
                 return;
             };
-            first_slices += usize::from(header & 0x80 != 0);
-            sha.update(framed);
+            let identity = (kind, nal[1] & 7);
+            let first_slice = header & 0x80 != 0;
+            match picture {
+                None if first_slice => picture = Some(identity),
+                Some(previous) if !first_slice && previous == identity => {}
+                _ => malformed_header = true,
+            }
+            visit(framed, nal);
         }
     })?;
-    if malformed_header || first_slices != 1 {
+    if malformed_header || picture.is_none() {
         return malformed("source witness requires exactly one layer-zero coded picture");
     }
-    Ok(sha.finalize().into())
+    Ok(())
 }
 
 /// Hash HEVC EBSP payloads in FFmpeg CBS Annex-B framing, preserving every

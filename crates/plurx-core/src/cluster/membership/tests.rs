@@ -9295,7 +9295,7 @@ fn a_local_node_that_cannot_name_itself_is_omitted_not_sentinelled() {
 fn the_hostname_read_stays_cheap_and_delegates_its_naming_rules() {
     let source = production_source();
     let accessor = source
-        .split_once("pub async fn node_hostnames(")
+        .split_once("pub(super) async fn node_hostnames(")
         .expect("node_hostnames accessor")
         .1
         .split_once("\n    /// Resolve the directly observable")

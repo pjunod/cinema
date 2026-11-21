@@ -29,6 +29,228 @@ pub struct CopyPictureTime {
     pub duration: u32,
 }
 
+/// Absolute source picture and film origin of an observed rolling copy.
+/// The producer binds this proof to its own source handle and generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedCopyPictureClock {
+    pub first_source_frame: u64,
+    pub media_origin_us: i64,
+}
+
+/// A copy reader has proved the first retained pictures and their exact
+/// source-to-copy translation. The renderer supplies its own held-source
+/// origin and cadence when it needs to turn these timestamps into frames.
+pub struct CopiedPictureClock {
+    source_pts: Vec<i64>,
+    ticks: (u32, u32),
+    first_decode_offset: i128,
+    steady_offset: i128,
+    scale: i128,
+}
+
+/// Match an initial closed copy fragment against a bounded SHA-256 clock from
+/// the same input and copy process. This checks the actual emitted pictures
+/// before Rust rewrites metadata or the player receives the split master.
+#[cfg(test)]
+fn bind_copy_picture_clock(
+    fragment: &Fragment,
+    init: &super::Init,
+    observations: &[crate::segplan::packet_clock::SourcePictureObservation],
+    source_origin: crate::transcode::dv_processing::DvSourceOrigin,
+    grid: crate::transcode::VodFrameGrid,
+    source_video_index: u32,
+    continuity_epoch: u64,
+) -> Result<VerifiedCopyPictureClock, Fmp4Error> {
+    observe_copy_picture_clock(fragment, init, observations)?.bind(
+        source_origin,
+        grid,
+        source_video_index,
+        continuity_epoch,
+    )
+}
+
+/// Before mutation or publication, prove that each raw copy sample came
+/// from the source-clock record at the same decode-order position.
+pub fn observe_copy_picture_clock(
+    fragment: &Fragment,
+    init: &super::Init,
+    observations: &[crate::segplan::packet_clock::SourcePictureObservation],
+) -> Result<CopiedPictureClock, Fmp4Error> {
+    let input = init
+        .video()
+        .filter(|video| {
+            video.codec == Some(VideoCodec::Hevc)
+                && video.nal_length_size == 4
+                && video.timescale != 0
+        })
+        .ok_or_else(|| unsupported("copy picture clock requires four-byte HEVC framing"))?;
+    if !super::classify(fragment, init).is_clean() {
+        return Err(unsupported("copy picture clock requires a clean opening"));
+    }
+    let moof = check_fragment_track_boxes(fragment, init.tracks.len())?;
+    if parse_moof(&fragment.bytes[..moof.size], moof.header_len, &init.tracks)? != fragment.tracks {
+        return malformed("copy picture clock differs from serialized samples");
+    }
+    if fragment.tracks.len() != init.tracks.len()
+        || init.tracks.iter().any(|track| {
+            fragment
+                .tracks
+                .iter()
+                .filter(|media| media.track_id == track.id)
+                .count()
+                != 1
+        })
+    {
+        return malformed("copy picture clock requires one fragment for each track");
+    }
+    super::track_projection::check_media_extents(fragment)?;
+    let video = fragment
+        .track(input.id)
+        .ok_or_else(|| unsupported("copy picture clock has no video track"))?;
+    let Some(first) = observations.first().filter(|first| {
+        first.time_base_num != 0
+            && first.time_base_den != 0
+            && observations.len() >= 2
+            && observations.len() == video.sample_count()
+            && observations
+                .windows(2)
+                .all(|pair| pair[0].dts < pair[1].dts)
+    }) else {
+        return Err(unsupported("copy picture clock has an incomplete fragment"));
+    };
+
+    let ticks = (first.time_base_num, first.time_base_den);
+    let scale = i128::from(ticks.1) * i128::from(input.timescale);
+    let mut dts = video.base_decode_time;
+    let mut first_decode_offset = 0;
+    let mut steady = None::<i128>;
+    let mut source_pts = Vec::with_capacity(observations.len());
+    for (index, ((sample, bytes), observed)) in fragment
+        .samples_with_bytes(input.id)
+        .into_iter()
+        .zip(observations)
+        .enumerate()
+    {
+        let bytes = bytes.ok_or_else(|| unsupported("copy picture lies outside mdat"))?;
+        let (hash, size) = super::hevc_cbs_base_layer_vcl_identity(bytes)?;
+        if observed.sequence != index as u64
+            || (observed.time_base_num, observed.time_base_den) != ticks
+            || observed.checksum != hash
+            || observed.size != size as u64
+            || sample.duration == 0
+        {
+            return Err(unsupported("copy picture does not match its source clock"));
+        }
+        let source_scale = i128::from(ticks.0) * i128::from(input.timescale);
+        let local_scale = i128::from(ticks.1);
+        let decode_offset = (i128::from(observed.dts) * source_scale)
+            .checked_sub(i128::from(dts) * local_scale)
+            .ok_or_else(|| unsupported("copy decode clock overflows"))?;
+        let pts = i128::from(dts) + i128::from(sample.cto);
+        let present_offset = (i128::from(observed.pts) * source_scale)
+            .checked_sub(pts * local_scale)
+            .ok_or_else(|| unsupported("copy presentation clock overflows"))?;
+        if decode_offset.abs_diff(present_offset) > u128::from(ticks.1) {
+            return Err(unsupported("copy picture composition offset changed"));
+        }
+
+        // The ordinary MP4 mux can extend the first video sample to align
+        // with audio. Keep its actual source PTS. All subsequent samples
+        // must share the steady source-to-media translation, rounded by at
+        // most one stored media tick.
+        if index == 0 {
+            first_decode_offset = decode_offset;
+        } else if steady.get_or_insert(decode_offset).abs_diff(decode_offset) > u128::from(ticks.1)
+        {
+            return Err(unsupported("copy picture changed its steady timeline"));
+        }
+        source_pts.push(
+            observed
+                .pts
+                .checked_mul(i64::from(ticks.0))
+                .ok_or_else(|| unsupported("copy source PTS overflows"))?,
+        );
+        dts = dts
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| unsupported("copy decode clock overflows"))?;
+    }
+    source_pts.sort_unstable();
+    let steady_offset =
+        steady.ok_or_else(|| unsupported("copy steady timeline was not observed"))?;
+    Ok(CopiedPictureClock {
+        source_pts,
+        ticks,
+        first_decode_offset,
+        steady_offset,
+        scale,
+    })
+}
+
+impl CopiedPictureClock {
+    pub fn source_tick(&self) -> (u32, u32) {
+        self.ticks
+    }
+
+    pub fn bind(
+        &self,
+        source_origin: crate::transcode::dv_processing::DvSourceOrigin,
+        grid: crate::transcode::VodFrameGrid,
+        source_video_index: u32,
+        continuity_epoch: u64,
+    ) -> Result<VerifiedCopyPictureClock, Fmp4Error> {
+        use crate::transcode::dv_processing::{
+            dv_observed_source_grid_start, DvFrameKey, DvTimestamp,
+        };
+
+        let keys = self
+            .source_pts
+            .iter()
+            .enumerate()
+            .map(|(index, pts)| {
+                Ok(DvFrameKey {
+                    absolute_video_index: source_video_index,
+                    continuity_epoch,
+                    pts: DvTimestamp::new(*pts, self.ticks.1)
+                        .map_err(|error| Fmp4Error::Malformed(error.to_string()))?,
+                    display_ordinal: index as u64,
+                })
+            })
+            .collect::<Result<Vec<_>, Fmp4Error>>()?;
+        let first_source_frame =
+            dv_observed_source_grid_start(&keys, self.ticks, source_origin, grid)
+                .map_err(|error| Fmp4Error::Malformed(error.to_string()))?;
+        let media_tick = i128::from(self.ticks.1);
+        let frame_span = self.scale * i128::from(grid.denominator) / i128::from(grid.numerator);
+        if !self
+            .first_decode_offset
+            .checked_sub(self.steady_offset)
+            .is_some_and(|extension| (-media_tick..=frame_span + media_tick).contains(&extension))
+        {
+            return Err(unsupported(
+                "copy first sample exceeds timestamp alignment tolerance",
+            ));
+        }
+        let (origin_num, origin_den) = source_origin.exact();
+        let numerator = self
+            .steady_offset
+            .checked_mul(i128::from(origin_den))
+            .and_then(|offset| offset.checked_sub(i128::from(origin_num) * self.scale))
+            .and_then(|film_offset| film_offset.checked_mul(1_000_000))
+            .ok_or_else(|| unsupported("copy film origin overflows"))?;
+        let denominator = self.scale * i128::from(origin_den);
+        let rounded = numerator
+            .checked_add(numerator.signum() * (denominator / 2))
+            .ok_or_else(|| unsupported("copy film origin overflows"))?
+            / denominator;
+        let media_origin_us =
+            i64::try_from(rounded).map_err(|_| unsupported("copy film origin overflows"))?;
+        Ok(VerifiedCopyPictureClock {
+            first_source_frame,
+            media_origin_us,
+        })
+    }
+}
+
 /// Match the first FEL source pictures to the first unpublished ordinary
 /// segment. The publisher binds both inputs to the same selected source
 /// and rechecks its ownership and segment frontier at publication.
@@ -325,7 +547,7 @@ pub(super) fn write_single_track_fragment(
     })
 }
 
-fn check_fragment_boxes(fragment: &Fragment) -> Result<super::BoxHeader, Fmp4Error> {
+fn check_media_fragment_boxes(fragment: &Fragment) -> Result<super::BoxHeader, Fmp4Error> {
     let moof = peek_box(&fragment.bytes, 0)?
         .filter(|hdr| hdr.kind() == b"moof" && hdr.size <= fragment.bytes.len())
         .ok_or_else(|| unsupported("splice requires a bounded moof"))?;
@@ -337,20 +559,39 @@ fn check_fragment_boxes(fragment: &Fragment) -> Result<super::BoxHeader, Fmp4Err
     {
         return malformed("splice mdat range differs from the fragment bytes");
     }
+    Ok(moof)
+}
+
+fn check_fragment_boxes(fragment: &Fragment) -> Result<super::BoxHeader, Fmp4Error> {
+    check_fragment_track_boxes(fragment, 1)
+}
+
+fn check_fragment_track_boxes(
+    fragment: &Fragment,
+    tracks: usize,
+) -> Result<super::BoxHeader, Fmp4Error> {
+    let moof = check_media_fragment_boxes(fragment)?;
     let body = &fragment.bytes[moof.header_len..moof.size];
     let boxes = children(body)?;
-    let [(mfhd, mfhd_start, mfhd_end), (traf, start, end)] = boxes.as_slice() else {
-        return Err(unsupported("splice requires one mfhd and one traf"));
+    let [(mfhd, start, end), track_boxes @ ..] = boxes.as_slice() else {
+        return malformed("splice moof has no header");
     };
     if mfhd.kind() != b"mfhd"
-        || *mfhd_end - *mfhd_start != 8
-        || be_u32(body, *mfhd_start) != 0
-        || traf.kind() != b"traf"
-        || *end != body.len()
+        || *end - *start != 8
+        || be_u32(body, *start) != 0
+        || track_boxes.len() != tracks
+        || !track_boxes
+            .last()
+            .is_some_and(|(_, _, end)| *end == body.len())
     {
         return malformed("invalid splice moof");
     }
-    check_track_boxes(&body[*start..*end])?;
+    for (header, start, end) in track_boxes {
+        if header.kind() != b"traf" {
+            return malformed("splice moof carries an unexpected box");
+        }
+        check_track_boxes(&body[*start..*end])?;
+    }
     Ok(moof)
 }
 
@@ -407,6 +648,116 @@ pub(super) fn check_track_boxes(traf: &[u8]) -> Result<(), Fmp4Error> {
 mod tests {
     use super::*;
     use crate::fmp4::mp4_box;
+
+    #[test]
+    fn copy_picture_clock_binds_resume_to_the_kept_media() {
+        use crate::fmp4::{FragmentReader, Unit};
+        use crate::segplan::packet_clock::SourcePictureObservation;
+        use crate::transcode::dv_processing::{DvSourceOrigin, DvTimestamp};
+        use crate::transcode::{VodFrameGrid, VodSourceClock};
+
+        let mut reader = FragmentReader::new();
+        reader.push(include_bytes!(
+            "../../tests/fixtures/dv-runtime/authored.mp4"
+        ));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+            panic!("missing fixture init");
+        };
+        let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+            panic!("missing fixture fragment");
+        };
+        let track = init.video().expect("fixture video");
+        let mut source_dts = fragment
+            .track(track.id)
+            .expect("fragment video")
+            .base_decode_time as i64
+            + 12_012_000;
+        let observations: Vec<_> = fragment
+            .samples_with_bytes(track.id)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (sample, bytes))| {
+                let (checksum, size) =
+                    super::super::hevc_cbs_base_layer_vcl_identity(bytes.expect("fixture picture"))
+                        .expect("coded picture");
+                let picture = SourcePictureObservation {
+                    sequence: index as u64,
+                    dts: source_dts,
+                    pts: source_dts + sample.cto,
+                    duration: u64::from(sample.duration),
+                    size: size as u64,
+                    checksum,
+                    flags: 0,
+                    side_data_count: 0,
+                    time_base_num: 1,
+                    time_base_den: track.timescale,
+                };
+                source_dts += i64::from(sample.duration);
+                picture
+            })
+            .collect();
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(0, 1).expect("zero timestamp"),
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("common origin");
+        let grid = VodFrameGrid::new(24_000, 1_001).expect("NTSC");
+        let proof = |observations| {
+            bind_copy_picture_clock(&fragment, &init, observations, origin, grid, 0, 1)
+        };
+        let aligned = proof(&observations).expect("matcher found the retained pictures");
+        assert_eq!(aligned.first_source_frame, 12_048);
+        assert_eq!(aligned.media_origin_us, 500_500_000);
+        assert!(proof(&observations[1..]).is_err());
+        let mut changed = observations.clone();
+        changed[1].checksum[0] ^= 1;
+        assert!(proof(&changed).is_err());
+        let mut mistimed = observations.clone();
+        mistimed[1].pts += 2;
+        assert!(proof(&mistimed).is_err());
+    }
+
+    #[test]
+    fn copy_picture_clock_matches_real_hevc_aac_mux() {
+        use crate::fmp4::{FragmentReader, Unit};
+        use crate::segplan::packet_clock::PictureClockParser;
+        use crate::transcode::dv_processing::{DvSourceOrigin, DvTimestamp};
+        use crate::transcode::{VodFrameGrid, VodSourceClock};
+
+        // The authored HEVC fixture, copied through FFmpeg with 48 kHz AAC
+        // and the rolling MP4 flags. The same run wrote this VCL framehash.
+        let mut reader = FragmentReader::new();
+        reader.push(include_bytes!(
+            "../../tests/fixtures/dv-runtime/authored-with-aac.mp4"
+        ));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+            panic!("missing fixture init");
+        };
+        let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+            panic!("missing fixture fragment");
+        };
+        let mut parser = PictureClockParser::default();
+        let clock: Vec<_> =
+            include_str!("../../tests/fixtures/dv-runtime/authored-with-aac.framehash")
+                .lines()
+                .filter_map(|line| parser.push_line(line).expect("framehash row"))
+                .collect();
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(0, 1).expect("zero timestamp"),
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("common origin");
+        let grid = VodFrameGrid::new(24_000, 1_001).expect("NTSC");
+        assert_eq!(fragment.tracks.len(), 2);
+        assert_eq!(
+            bind_copy_picture_clock(&fragment, &init, &clock, origin, grid, 0, 1)
+                .expect("same-child mux and picture clock"),
+            VerifiedCopyPictureClock {
+                first_source_frame: 48,
+                media_origin_us: 1_980_667,
+            }
+        );
+    }
 
     fn video(id: u32, timescale: u32) -> Track {
         Track {

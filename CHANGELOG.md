@@ -72,6 +72,24 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
+  Resume. Resume binds the renderer to the actual source pictures observed by
+  the rolling copy, and the original AAC rendition continues across the switch.
+
+- Safari 27.2 on macOS can select the verified native Dolby Vision HLS splice
+  when the browser supports native HLS and PQ Main10 playback.
+
+- Native HLS can start with a verified cached FEL prefix from the existing title job even when ordinary VOD is available, with continuous original audio and ordinary startup when the prefix cannot be used. Rebuilding a missing prefix reuses the current scan and quality verdict.
+
+- Background Dolby Vision FEL measurement can qualify the current renderer
+  while requests for an older renderer remain pending.
+
+- Revisit older Dolby Vision title scans after a busy source becomes available,
+  while continuing to discover work on other sources.
+- Recover expired Dolby Vision title attempts after physical source custody clears.
+  Activity distinguishes expired leases from live owners. Analysis requests report
+  the admission failure, and reconciliation preserves copy coordinator requests.
+
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while

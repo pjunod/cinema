@@ -18,9 +18,6 @@ use crate::state::AppState;
 use crate::state::JobManager;
 
 const BACKUP_RESOURCE: &str = "backup:cluster";
-/// The cut's anchor entry. It changes no row; the Raft log index that
-/// commits it is the point the snapshot must cover.
-const BACKUP_ANCHOR_SQL: &str = "UPDATE settings SET updated_at = updated_at WHERE 0";
 const POINTER_MAX_BYTES: u64 = 128;
 
 #[derive(Default)]
@@ -62,7 +59,7 @@ impl BackupMetrics {
 pub(crate) struct BackupManager {
     store: Arc<dyn Store>,
     jobs: Arc<JobManager>,
-    client: Option<hiqlite::Client>,
+    source: Option<crate::cluster::BackupSource>,
     data_dir: PathBuf,
     credential_key_path: PathBuf,
     node_id: String,
@@ -77,7 +74,7 @@ impl BackupManager {
     pub(crate) fn new(
         store: Arc<dyn Store>,
         jobs: Arc<JobManager>,
-        client: Option<hiqlite::Client>,
+        source: Option<crate::cluster::BackupSource>,
         data_dir: PathBuf,
         credential_key_path: PathBuf,
         node_id: String,
@@ -87,7 +84,7 @@ impl BackupManager {
         Arc::new(Self {
             store,
             jobs,
-            client,
+            source,
             data_dir,
             credential_key_path,
             node_id,
@@ -121,7 +118,7 @@ impl BackupManager {
                     )
                 })?,
         };
-        let Some(client) = self.client.as_ref() else {
+        let Some(source) = self.source.as_ref() else {
             self.metrics.error.fetch_add(1, Ordering::Relaxed);
             return Err(StoreError::Task(
                 "portable cluster backup requires the activated replicated store".to_owned(),
@@ -131,7 +128,7 @@ impl BackupManager {
             self.metrics.skipped.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         };
-        let result = self.build_under_lease(client, &destination).await;
+        let result = self.build_under_lease(source, &destination).await;
         if let Err(error) = lease.release().await {
             tracing::warn!(error = %error, "backup lease cleanup was ambiguous");
         }
@@ -178,60 +175,37 @@ impl BackupManager {
 
     async fn build_under_lease(
         &self,
-        client: &hiqlite::Client,
+        source: &crate::cluster::BackupSource,
         destination: &Path,
     ) -> Result<(PathBuf, ClusterBackupManifest), StoreError> {
         // One budget belongs to this already-acquired backup lease. Catch-up,
         // the one snapshot trigger and publication all consume this deadline.
         let deadline = tokio::time::Instant::now() + self.snapshot_timeout;
         let local_progress = || async {
-            let metrics = client.metrics_db().await.map_err(|error| {
+            let metrics = source.progress().await.map_err(|error| {
                 StoreError::Database(format!("reading local Raft metrics: {error}"))
             })?;
-            Ok((
-                metrics.last_applied.as_ref().map(|log| log.index),
-                metrics.last_log_index,
-            ))
+            Ok((metrics.applied, metrics.last_log))
         };
         wait_for_local_backup_apply(deadline, 0, local_progress).await?;
         // The lease holder is any voter, and only the leader may propose an
         // entry itself. The anchor therefore goes through the write path that
         // forwards to the leader and reports the committed index; this node
         // then applies through it and cuts its own snapshot there.
-        let applied = backup_phase_before_deadline(deadline, "snapshot anchor", async {
-            client
-                .execute_acked(BACKUP_ANCHOR_SQL, hiqlite::macros::params!())
-                .await
-                .map_err(|error| {
-                    StoreError::Database(format!("anchoring the backup cut: {error}"))
-                })?
-                .log_index
-                .ok_or_else(|| {
-                    StoreError::Task(
-                        "the leader did not report the backup anchor's log index".to_owned(),
-                    )
-                })
-        })
-        .await?;
+        let applied =
+            backup_phase_before_deadline(deadline, "snapshot anchor", source.commit_anchor())
+                .await?;
         wait_for_local_backup_apply(deadline, applied, local_progress).await?;
-        backup_phase_before_deadline(deadline, "snapshot trigger", async {
-            client.trigger_local_db_snapshot().await.map_err(|error| {
-                StoreError::Database(format!("triggering database snapshot: {error}"))
-            })
-        })
-        .await?;
+        backup_phase_before_deadline(deadline, "snapshot trigger", source.trigger_snapshot())
+            .await?;
         loop {
             let metrics = backup_phase_before_deadline(deadline, "snapshot publication", async {
-                client.metrics_db().await.map_err(|error| {
+                source.progress().await.map_err(|error| {
                     StoreError::Database(format!("waiting for database snapshot: {error}"))
                 })
             })
             .await?;
-            if metrics
-                .snapshot
-                .as_ref()
-                .is_some_and(|log| log.index >= applied)
-            {
+            if metrics.snapshot.is_some_and(|index| index >= applied) {
                 break;
             }
             tokio::time::sleep_until(

@@ -15,7 +15,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ArtworkPeerAuth, MembershipManager};
+use plurx_core::cluster::membership::ArtworkPeerAuth;
 use plurx_core::domain::Item;
 use plurx_core::error::StoreError;
 use plurx_core::store::ArtworkInventoryItem;
@@ -254,12 +254,8 @@ async fn shared_materialize_original(
         .no_proxy()
         .build()
         .map_err(|_| artwork_capacity_error())?;
-    let peers = state
-        .membership
-        .reachable_peer_http_urls()
-        .await
-        .unwrap_or_default();
-    let Ok(auth) = state.membership.artwork_peer_auth(name) else {
+    let peers = state.cluster.artwork().targets().await.unwrap_or_default();
+    let Ok(auth) = state.cluster.artwork().sign(name) else {
         return Ok(false);
     };
     let owner = Arc::new(SharedArtDownloadOwner {
@@ -657,8 +653,9 @@ pub async fn serve_peer(
     let safe_name = safe_artwork_name(&filename)?;
     let auth = peer_auth_from_headers(&headers).ok_or(ApiError::Unauthorized)?;
     let verified = state
-        .membership
-        .verify_artwork_peer_auth(safe_name, &auth)
+        .cluster
+        .artwork()
+        .verify(safe_name, &auth)
         .await
         .map_err(|error| {
             tracing::warn!(code = error.code(), "cannot verify artwork peer proof");
@@ -744,20 +741,20 @@ async fn serve_cluster_artwork_with_headers(
         Err(_) => {}
     }
 
-    let membership = state.membership.clone();
+    let artwork = state.cluster.artwork();
     let Some(bytes) = fetch_and_materialize(
         &state.artwork_fetch,
         &state.artwork_dir,
         safe_name,
         move |client| async move {
-            let peers = match membership.reachable_peer_http_urls().await {
+            let peers = match artwork.targets().await {
                 Ok(peers) => peers,
                 Err(error) => {
                     tracing::warn!(code = error.code(), "cannot read artwork peer roster");
                     return None;
                 }
             };
-            fetch_peer_artwork(&client, &membership, &peers, safe_name).await
+            fetch_peer_artwork(&client, &artwork, &peers, safe_name).await
         },
     )
     .await
@@ -828,14 +825,14 @@ async fn serve_derivative(
                 return Err(artwork_capacity_error());
             }
             LocalArtworkRead::Missing => {
-                let membership = state.membership.clone();
+                let artwork = state.cluster.artwork();
                 match fetch_and_materialize(
                     &state.artwork_fetch,
                     &state.artwork_dir,
                     safe_name,
                     move |client| async move {
-                        let peers = membership.reachable_peer_http_urls().await.ok()?;
-                        fetch_peer_artwork(&client, &membership, &peers, safe_name).await
+                        let peers = artwork.targets().await.ok()?;
+                        fetch_peer_artwork(&client, &artwork, &peers, safe_name).await
                     },
                 )
                 .await
@@ -1730,11 +1727,11 @@ fn artwork_client() -> Result<reqwest::Client, reqwest::Error> {
 
 async fn fetch_peer_artwork(
     client: &reqwest::Client,
-    membership: &MembershipManager,
+    artwork: &crate::cluster::Artwork,
     peers: &[String],
     filename: &str,
 ) -> Option<Vec<u8>> {
-    let auth = membership.artwork_peer_auth(filename).ok()?;
+    let auth = artwork.sign(filename).ok()?;
     fetch_peer_artwork_with_auth(client, peers, filename, &auth).await
 }
 
@@ -2616,7 +2613,7 @@ async fn materialize_once(
     orphan_walker: &mut ArtworkOrphanWalker,
 ) -> Result<MaterializeReport, StoreError> {
     let orphans_removed = sweep_content_orphans(state, orphan_walker).await;
-    if !state.membership.is_replicated() {
+    if !state.cluster.role().is_clustered() {
         return Ok(MaterializeReport {
             orphans_removed,
             ..Default::default()
@@ -2666,7 +2663,7 @@ async fn materialize_once(
         return Ok(report);
     }
 
-    let peers = match state.membership.reachable_peer_http_urls().await {
+    let peers = match state.cluster.artwork().targets().await {
         Ok(peers) => peers,
         Err(error) => {
             tracing::warn!(code = error.code(), "cannot read artwork peer roster");
@@ -2675,7 +2672,7 @@ async fn materialize_once(
     };
     let peers = Arc::new(peers);
     let mut pulls = stream::iter(missing.into_iter().map(|reference| {
-        let membership = state.membership.clone();
+        let artwork = state.cluster.artwork();
         let peers = Arc::clone(&peers);
         let artwork_dir = state.artwork_dir.clone();
         let coordinator = Arc::clone(&state.artwork_fetch);
@@ -2688,7 +2685,7 @@ async fn materialize_once(
                     &artwork_dir,
                     &filename,
                     move |client| async move {
-                        fetch_peer_artwork(&client, &membership, &peers, &fetch_filename).await
+                        fetch_peer_artwork(&client, &artwork, &peers, &fetch_filename).await
                     },
                 )
                 .await,
@@ -2771,8 +2768,9 @@ async fn materialize_once(
             }
         }
         match state
-            .membership
-            .claim_artwork_source_repair(item_id, SOURCE_REPAIR_LEASE)
+            .cluster
+            .artwork()
+            .claim_repair(item_id, SOURCE_REPAIR_LEASE)
             .await
         {
             Ok(Some(claim)) => {
@@ -2789,11 +2787,7 @@ async fn materialize_once(
                         item_id,
                         "artwork source repair fence expired before work began"
                     );
-                    if let Err(error) = state
-                        .membership
-                        .retire_artwork_source_repair(&repair_fence)
-                        .await
-                    {
+                    if let Err(error) = state.cluster.artwork().retire_repair(&repair_fence).await {
                         tracing::warn!(
                             item_id,
                             code = error.code(),
@@ -2810,11 +2804,7 @@ async fn materialize_once(
                         .refresh_item_artwork_fenced(item_id, &repair_fence),
                 )
                 .await;
-                match state
-                    .membership
-                    .retire_artwork_source_repair(&repair_fence)
-                    .await
-                {
+                match state.cluster.artwork().retire_repair(&repair_fence).await {
                     Ok(true) => {}
                     Ok(false) => tracing::warn!(
                         item_id,
@@ -2913,16 +2903,16 @@ fn artwork_tick(view: ArtworkMembershipView) -> ArtworkTick {
 
 /// Read the three answers, asking only as many questions as the tick needs.
 async fn observe_artwork_membership(
-    membership: &plurx_core::cluster::membership::MembershipManager,
+    cluster: &crate::cluster::Cluster,
 ) -> Result<ArtworkMembershipView, plurx_core::cluster::membership::MembershipError> {
-    if membership.local_node_is_active_voter().await? {
+    if cluster.confirm_active_voter().await? {
         return Ok(ArtworkMembershipView {
             active_voter: true,
             committed_voter: true,
             committed_member: true,
         });
     }
-    if membership.local_node_is_committed_voter().await? {
+    if cluster.confirm_voter().await? {
         return Ok(ArtworkMembershipView {
             active_voter: false,
             committed_voter: true,
@@ -2932,7 +2922,7 @@ async fn observe_artwork_membership(
     Ok(ArtworkMembershipView {
         active_voter: false,
         committed_voter: false,
-        committed_member: membership.local_node_is_committed_member().await?,
+        committed_member: cluster.confirm_member().await?,
     })
 }
 
@@ -2942,8 +2932,8 @@ pub(crate) async fn materialize_loop(state: AppState) {
     let mut orphan_walker = ArtworkOrphanWalker::default();
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
-        let scope = if state.membership.is_replicated() {
-            let tick = match observe_artwork_membership(&state.membership).await {
+        let scope = if state.cluster.role().is_clustered() {
+            let tick = match observe_artwork_membership(&state.cluster).await {
                 Ok(view) => artwork_tick(view),
                 Err(error) => {
                     tracing::warn!(
@@ -3223,14 +3213,14 @@ async fn jellyfin_artwork_pass(state: &AppState) -> bool {
         {
             LocalArtworkRead::Verified(bytes) => Some(bytes),
             LocalArtworkRead::Missing => {
-                let membership = state.membership.clone();
+                let artwork = state.cluster.artwork();
                 fetch_and_materialize(
                     &state.artwork_fetch,
                     &state.artwork_dir,
                     safe_name,
                     move |client| async move {
-                        let peers = membership.reachable_peer_http_urls().await.ok()?;
-                        fetch_peer_artwork(&client, &membership, &peers, safe_name).await
+                        let peers = artwork.targets().await.ok()?;
+                        fetch_peer_artwork(&client, &artwork, &peers, safe_name).await
                     },
                 )
                 .await

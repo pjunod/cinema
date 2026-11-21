@@ -66,9 +66,18 @@ impl TranscodeManager {
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
+            #[cfg(target_os = "linux")]
+            native_fel_head: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            native_fel_target: std::sync::Mutex::new(
+                super::manager_native_fel::FelHeadTarget::load(&runtime_cache),
+            ),
+            #[cfg(target_os = "linux")]
+            native_fel_backend: std::sync::Mutex::new(None),
             runtime_cache,
             subtitle_cache,
-            subtitle_membership: None,
+            subtitle_calls: None,
+            subtitle_directory: None,
             subtitle_jobs: None,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
             artifact_qualification: std::sync::RwLock::new(ArtifactQualificationReadiness {
@@ -345,6 +354,7 @@ impl TranscodeManager {
             ffmpeg_build,
             node_id,
             None,
+            None,
         )
     }
 
@@ -353,7 +363,7 @@ impl TranscodeManager {
     /// from a canonicalized `transcode` leaf would move them when only that
     /// legacy child is a relocation symlink.
     #[allow(clippy::too_many_arguments)]
-    pub fn with_cache_layout(
+    pub(crate) fn with_cache_layout(
         mut self,
         cache_dir: PathBuf,
         runtime_cache: PathBuf,
@@ -361,13 +371,15 @@ impl TranscodeManager {
         rendition_cache: PathBuf,
         ffmpeg_build: String,
         node_id: String,
-        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_calls: Option<crate::cluster::calls::PeerTransport>,
+        cluster_directory: Option<crate::cluster::Directory>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.macos_video_probe =
             Arc::new(self.macos_video_probe.rebuilt(self.runtime_cache.clone()));
         self.subtitle_cache = subtitle_cache;
-        self.subtitle_membership = cluster_membership.clone();
+        self.subtitle_calls = cluster_calls.clone();
+        self.subtitle_directory = cluster_directory.clone();
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
@@ -377,7 +389,8 @@ impl TranscodeManager {
             Arc::clone(&self.store),
             node_id.clone(),
             crate::fragment_index_cluster::cache_root(&self.runtime_cache),
-            cluster_membership,
+            cluster_calls,
+            cluster_directory,
         );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
@@ -434,9 +447,9 @@ impl TranscodeManager {
             &self.runtime_cache,
         )
         .on_node(self.cache_location().map(|(_, node_id)| node_id));
-        let access = match &self.subtitle_membership {
-            Some(membership) => access.with_membership(membership.clone()),
-            None => access,
+        let access = match (&self.subtitle_calls, &self.subtitle_directory) {
+            (Some(calls), Some(directory)) => access.with_cluster(calls.clone(), directory.clone()),
+            _ => access,
         };
         match &self.subtitle_jobs {
             Some(jobs) => access.with_jobs(Arc::clone(jobs)),
@@ -1569,6 +1582,7 @@ impl TranscodeManager {
     /// no viewer waits, and it yields only when a viewer waits for capacity
     /// or an offline download does (decision F), or exact playback qualification
     /// needs the lane; an existing playing session alone does not preempt it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
         if *self.playback_qualification_waiters.borrow() > 0
             || self.admissions.live_is_waiting()
@@ -1673,7 +1687,7 @@ impl TranscodeManager {
         admission: &FragmentAdmission,
         resources: &TranscodeResourceEstimate,
         software_threads: Option<u32>,
-    ) -> Result<(), String> {
+    ) -> Result<crate::vodencode::EncodePermit, String> {
         if !self.fragment_worker_idle(admission) {
             return Err("foreground work is waiting for this node's capacity".into());
         }
@@ -1691,10 +1705,9 @@ impl TranscodeManager {
             None,
         )
         .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
-        if !admission.install_extension(permit) {
-            return Err("this job already holds an extended admission".into());
-        }
-        Ok(())
+        admission
+            .install_extension(permit)
+            .ok_or_else(|| "this job already holds an extended admission".into())
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented
@@ -1836,6 +1849,7 @@ impl TranscodeManager {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {

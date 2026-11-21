@@ -6238,7 +6238,7 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
 async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let state = resolver_state();
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     let digest = [0x5a; 32];
     let candidate = QualityCandidate {
         processed_dv: false,
@@ -6286,7 +6286,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
         request: staged_candidate_request(),
     };
     // Every `accepting_new_media` read now waits: the catalog cannot finish.
-    let held = state.serving.hold_planned_outage_reads_for_test().await;
+    let held = state.cluster.test_fence().hold_planned_outage_reads_for_test().await;
     let started = tokio::time::Instant::now();
     let owner = tokio::time::timeout(
         Duration::from_secs(10),

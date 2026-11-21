@@ -1309,6 +1309,52 @@ fn measured_offset_uses_resolved_audio_delivery_instead_of_legacy_encode_hint() 
 }
 
 #[test]
+fn picture_clock_keeps_existing_av_output_and_bounds_only_the_observation() {
+    let file = hevc_dv();
+    let video = CopyVideoOptions::from_probe(&file, None, false, false);
+    let plain = copy_pipe_args_with_audio_delivery(
+        &file,
+        592.252,
+        None,
+        true,
+        Pacing::unpaced(),
+        video,
+        None,
+    );
+    let measured = |url| {
+        copy_pipe_args_with_picture_clock(
+            &file,
+            592.252,
+            None,
+            true,
+            Pacing::unpaced(),
+            video,
+            None,
+            url,
+            std::num::NonZeroUsize::new(64).expect("bounded prefix"),
+        )
+    };
+    let args = measured("pipe:7").expect("one-input picture clock");
+    assert_eq!(args[0], "-copyts");
+    assert_eq!(&args[1..=plain.len()], &plain);
+    assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
+    assert_eq!(
+        &args[args.len() - 7..],
+        &[
+            "-f",
+            "framehash",
+            "-hash",
+            "sha256",
+            "-frames:v",
+            "64",
+            "pipe:7"
+        ]
+    );
+    assert!(measured("pipe:1").is_err());
+    assert!(measured("movie.mp4").is_err());
+}
+
+#[test]
 fn head_census_limits_every_output_without_changing_unbounded_measurement() {
     let file = hevc_dv();
     let video = CopyVideoOptions::from_probe(&file, None, false, false);

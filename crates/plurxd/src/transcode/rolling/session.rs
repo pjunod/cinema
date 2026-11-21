@@ -981,7 +981,16 @@ impl Session {
                     clock.first_ready_end_ms(&budget, lease.as_ref(), admission_producer_speed);
             }
             let publish = match clock.served.as_ref() {
-                None => end_list || end_ms >= budget.desired_end_ms,
+                None => {
+                    let ordinary_ready = end_list || end_ms >= budget.desired_end_ms;
+                    #[cfg(target_os = "linux")]
+                    let ordinary_ready = ordinary_ready
+                        && (end_list
+                            || !self.native_split.as_ref().is_some_and(|split| {
+                                split.defer_first_snapshot_for_prepared_head(now)
+                            }));
+                    ordinary_ready
+                }
                 Some(served) if served.producer_attempt != producer_attempt => false,
                 Some(served)
                     if end_list && (last_segment > served.last_segment || !served.end_list) =>
@@ -1430,6 +1439,20 @@ impl Session {
                 };
             }
             segments.revision = segments.revision.wrapping_add(1);
+        }
+        #[cfg(target_os = "linux")]
+        if clock.served.is_none() {
+            if let Some(split) = &self.native_split {
+                let rejected = split.publish_prepared_head(
+                    producer_attempt,
+                    served_first,
+                    served_last,
+                    self.recovery
+                        .as_ref()
+                        .map(|owner| owner.incarnation_id.as_str()),
+                );
+                queue_rejected_native_fel_objects(self, rejected);
+            }
         }
         clock.deferred_since = None;
         clock.served = Some(ServedPlaylistSnapshot {
@@ -2231,7 +2254,9 @@ impl Session {
         spawn: F,
     ) -> Result<tokio::process::ChildStdout, String>
     where
-        F: FnOnce(Option<&str>) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
+        F: FnOnce(
+            Option<&crate::source_input::SourceInput>,
+        ) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -2246,7 +2271,7 @@ impl Session {
             ),
             None => None,
         };
-        let (observed, stdout) = spawn(custody.as_ref().map(|input| input.url()))?;
+        let (observed, stdout) = spawn(custody.as_ref())?;
         let (candidate, child_job, diagnostics) = observed.into_parts();
         *slot = Some(AttemptChild::new_with_source_job(
             producer_attempt,
