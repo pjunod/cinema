@@ -59,8 +59,7 @@ final class PlayerController: ObservableObject {
     }
 
     struct SeekPreparationOwner {
-        let actionEpoch: Int
-        let seekGeneration: Int
+        let attempt: Attempt
         let targetMs: Int
     }
 
@@ -3744,7 +3743,7 @@ final class PlayerController: ObservableObject {
     /// in a device log from one that was never scheduled.
     func attemptStillCurrent(_ captured: Attempt, fence: AttemptFence) -> Bool {
         let now = snapshotAttempt()
-        if captured.stillCurrent(now, scopes: fence.scopes) { return true }
+        if fence.isCurrent(captured, now: now) { return true }
         let detail = Self.attemptStaleDetail(fence: fence, captured: captured, now: now)
         lastAttemptStaleDetail = detail
         reportAttemptStale(detail: detail)
@@ -8413,7 +8412,7 @@ final class PlayerController: ObservableObject {
     }
 
     func seekPreparationOwner(at targetMs: Int) -> SeekPreparationOwner {
-        SeekPreparationOwner(actionEpoch: viewerActionEpoch, seekGeneration: seekState.generation, targetMs: targetMs)
+        SeekPreparationOwner(attempt: snapshotAttempt(), targetMs: targetMs)
     }
 
     private func ownsSeekPreparation(
@@ -8421,12 +8420,10 @@ final class PlayerController: ObservableObject {
     ) -> Bool {
         isCurrentLifecycle(lifecycle) && !isSuperseded(generation)
             && player.currentItem === item
-            // Pause changes transport authority, not the resume point.
-            // A newer same-position selection also still needs this seek.
-            && (viewerActionEpoch == owner.actionEpoch
-                || seekState.generation == owner.seekGeneration
-                || seekState.pendingMs == owner.targetMs)
             && !Task.isCancelled
+            // A newer same-position selection can still use the seek.
+            && (seekState.pendingMs == owner.targetMs
+                || attemptStillCurrent(owner.attempt, fence: .seekPreparationDestination))
     }
 
     func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner) async throws {
