@@ -62,6 +62,11 @@ fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
     let req = ready_native_fel_request();
     assert!(may_prefer_prepared_native_fel(&req));
 
+    let mut resume = req.clone();
+    resume.start_seconds = 592.252;
+    assert!(may_start_native_fel(&resume));
+    assert!(!may_prefer_prepared_native_fel(&resume));
+
     let exclusions: [fn(&mut SessionRequest); 8] = [
         |req| req.vod_only = true,
         |req| req.passive_vod = true,
@@ -73,7 +78,7 @@ fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
         |req| {
             req.candidate_context
                 .as_mut()
-                .expect("native FEL fixture includes a selected candidate")
+                .expect("native FEL request candidate")
                 .selected_candidate
                 .processed_dv = true
         },
@@ -83,6 +88,37 @@ fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
         exclude(&mut changed);
         assert!(!may_prefer_prepared_native_fel(&changed));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_fel_local_start_failure_can_try_vod_before_deadline() {
+    use crate::transcode::manager_start::NATIVE_FEL_START_UNAVAILABLE;
+    let error = vod_refusal_error(NATIVE_FEL_START_UNAVAILABLE, "copy producer unavailable");
+    let now = tokio::time::Instant::now();
+    assert!(native_fel_can_try_vod(
+        &error,
+        Some(now + Duration::from_secs(1))
+    ));
+    assert!(!native_fel_can_try_vod(&error, Some(now)));
+    let authority_lost = vod_refusal_error("serving_fence", "serving authority changed");
+    assert!(!native_fel_can_try_vod(&authority_lost, None));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_fel_resume_requires_one_unambiguous_copy_video_stream() {
+    use crate::transcode::manager_start::native_copy_video_index;
+    let video = serde_json::json!({"index": 2, "codec_type":"video"});
+    let audio = serde_json::json!({"index": 0, "codec_type":"audio"});
+    let cover = serde_json::json!({
+        "index": 1, "codec_type": "video", "disposition": {"attached_pic": 1}
+    });
+    let select =
+        |streams| native_copy_video_index(&serde_json::json!({"streams": streams}).to_string());
+    assert_eq!(select(vec![audio.clone(), video.clone()]), Some(2));
+    assert_eq!(select(vec![audio.clone(), cover.clone()]), None);
+    assert_eq!(select(vec![audio, cover, video]), None);
 }
 
 #[cfg(target_os = "linux")]

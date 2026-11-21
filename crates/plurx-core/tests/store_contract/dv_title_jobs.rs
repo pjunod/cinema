@@ -1769,8 +1769,8 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
         let original = store
             .get_file_probe_json(file.id)
             .await
-            .expect("read settled title probe")
-            .expect("settled title probe");
+            .expect("read source probe")
+            .expect("source probe exists");
         let mut stale = request(1_004);
         stale.request = q::FelRecipeRequest::new(
             recipe.backend_identity.clone(),
@@ -1812,8 +1812,8 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
         let queued = store
             .background_job(&id)
             .await
-            .expect("read native FEL head job")
-            .expect("queued native FEL head job");
+            .expect("read background job")
+            .expect("background job exists");
         assert_eq!(queued.state, JobState::Queued);
         let wrong_node = store
             .claim_job(ClaimJob {

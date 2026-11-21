@@ -122,6 +122,9 @@ impl TitleTask {
             pipeline
         };
         let scanner = tools.title_scanner_digest();
+        let fel = fel_backend(state, &tools).await;
+        #[cfg(target_os = "linux")]
+        state.transcode.observe_native_fel_backend(fel.clone());
         let (demands, after) = match live_demands {
             Some(demands) => (demands, live_after),
             None => {
@@ -147,7 +150,6 @@ impl TitleTask {
             }
             return Ok(None);
         }
-        let fel = fel_backend(state, &tools).await;
         for mut demand in demands {
             *after = demand.probe_revision;
             if playback_only {
@@ -540,6 +542,19 @@ pub(super) async fn probe_preempts(
 /// or for the backend able to satisfy its exact pending FEL recipe.
 /// FEL verdicts measure the renderer, so its key is read only to form the FEL
 /// identity; title demand itself is keyed by the scanner alone.
+// The catalogue may already have an exact title verdict when the daemon
+// starts. Make the installed backend available to routing before waiting for
+// a new title job or for the ordinary source-probe lane to become idle.
+pub(super) async fn initialize_native_fel_backend(state: &AppState) {
+    if state.transcode.fel_qualification_capable() {
+        let identity = match ToolSet::capture().await {
+            Ok(Some(tools)) => fel_backend(state, &tools).await,
+            _ => None,
+        };
+        state.transcode.observe_native_fel_backend(identity);
+    }
+}
+
 async fn fel_backend(state: &AppState, tools: &ToolSet) -> Option<String> {
     state
         .transcode
