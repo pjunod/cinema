@@ -3921,8 +3921,17 @@ assert.equal(context.ACT_TIMER, null);
                 jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
                 for name in ("android_jvm", "android_apks")
             ),
-            2,
+            3,
         )
+        # The third login belongs only to an explicit source-gate continuation:
+        # it pulls the already pinned toolchain image by digest and never runs
+        # beside the ordinary reuse step above.
+        continuation = jobs["android_jvm"].split(
+            "- name: Authenticate the pinned Android toolchain image", 1
+        )[1].split("\n      - ", 1)[0]
+        self.assertIn("if: inputs.predecessor_run != ''", continuation)
+        self.assertIn("secrets.LOCAL_REGISTRY_TOKEN", continuation)
+        self.assertIn("noirr/android-build@$ANDROID_IMAGE_DIGEST", continuation)
         self.assertEqual(
             jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
         )
