@@ -6861,10 +6861,15 @@ async fn stored_chapter_projection_does_not_materialize_unrelated_probe_metadata
             .await
             .unwrap_or_else(|error| panic!("{backend}: store large probe: {error}"));
         let chapters = store
-            .get_file_probe_chapters_json(file_id)
+            .get_file_probe_chapters_json(file_id, 10_000, 1)
             .await
             .unwrap_or_else(|error| panic!("{backend}: project chapters: {error}"))
             .unwrap_or_else(|| panic!("{backend}: projected chapter array"));
+        assert!(store
+            .get_file_probe_chapters_json(file_id, 10_000, 2)
+            .await
+            .unwrap()
+            .is_none());
         assert!(chapters.len() < 1_024, "backend {backend}");
         assert_eq!(
             serde_json::from_str::<Vec<serde_json::Value>>(&chapters)
@@ -24759,6 +24764,101 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
 }
 
 #[tokio::test]
+async fn legacy_chapter_publication_evidence_survives_manual_generation() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "legacy-chapter-publication").await;
+        assert!(store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("raw probe")
+            .is_none());
+        let identity = SourceIdentity::new(10_000, 1, "chapter-classifier-v1");
+        let manual = TimelineAnnotation {
+            kind: AnnotationKind::Intro,
+            start_ticks: 0,
+            end_ticks: 40_000,
+            timescale: 1_000,
+            start_ms: 0,
+            end_ms: 40_000,
+            provenance: AnnotationProvenance::Manual,
+            confidence_millis: 1_000,
+            detector_version: "manual-v1".to_owned(),
+            manual_override_revision: Some(1),
+        };
+        store
+            .set_manual_timeline_annotation(
+                file_id,
+                600_000,
+                &identity,
+                &manual,
+                "manual-generation",
+            )
+            .await
+            .expect("manual correction");
+        let (_, verified) = store
+            .timeline_annotation_set_with_evidence(file_id, &identity)
+            .await
+            .expect("manual-only annotation")
+            .expect("composed annotation");
+        assert!(
+            !verified,
+            "{backend}: manual evidence alone does not verify the base"
+        );
+
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "forced-chapters".to_owned(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
+                requested_generation: "forced-chapter-generation".to_owned(),
+                priority: "forced".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: true,
+                target_node_id: String::new(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("enqueue forced analysis");
+        let request = store
+            .claim_analysis_request("analysis-node", 11, 1000)
+            .await
+            .expect("claim force analysis")
+            .expect("queued force analysis");
+        assert!(store
+            .publish_timeline_annotation_set_for_request(
+                &request,
+                600_000,
+                &TimelineAnnotationSet {
+                    source_identity: identity.clone(),
+                    generation_id: request.requested_generation.clone(),
+                    version: 1,
+                    annotations: Vec::new(),
+                },
+                12,
+            )
+            .await
+            .expect("publish chapterless analysis"));
+        let (set, verified) = store
+            .timeline_annotation_set_with_evidence(file_id, &identity)
+            .await
+            .expect("read publication evidence")
+            .expect("composed annotation");
+        assert!(
+            verified,
+            "{backend}: verified chapterless base survives manual overlay"
+        );
+        assert_eq!(set.generation_id, "manual-generation", "{backend}");
+        assert_eq!(set.annotations, vec![manual], "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn timeline_annotation_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "timeline-annotations").await;
@@ -25311,6 +25411,15 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: current semantic publish: {error}")),
             "backend {backend}: current semantic owner publishes"
         );
+        assert!(
+            store
+                .timeline_annotation_set_with_evidence(file_id, &identity)
+                .await
+                .expect("read ready publication evidence")
+                .expect("published semantic set")
+                .1,
+            "{backend}: matching ready request verifies normal legacy base"
+        );
         let attempts = store
             .analysis_attempts(&semantic_request_id, 10)
             .await
@@ -25438,6 +25547,81 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
             attempts[0].terminal_code, "source_deleted",
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn skip_markers_claim_mode_leaves_fragment_requests_queued() {
+    use plurx_core::store::AnalysisClaimMode;
+
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "chapter-only-analysis").await;
+        for (component, pipeline, target, created) in [
+            ("fragment_index", "fragment-engine", "analysis-node", 10),
+            ("skip_markers", "chapter-classifier-v1", "", 11),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: component.into(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: component.into(),
+                    pipeline_version: pipeline.into(),
+                    video_identity: String::new(),
+                    requested_generation: format!("{component}-generation"),
+                    priority: "normal".into(),
+                    trigger: "background".into(),
+                    force_rebuild: false,
+                    target_node_id: target.into(),
+                    not_before_ms: created,
+                    created_at_ms: created,
+                })
+                .await
+                .expect("enqueue analysis");
+        }
+        let claim = store
+            .claim_analysis_request_for_capacity_in_mode(
+                "analysis-node",
+                None,
+                12,
+                1012,
+                false,
+                false,
+                false,
+                &[],
+                AnalysisClaimMode::SkipMarkersOnly,
+            )
+            .await
+            .expect("marker-only claim")
+            .expect("queued marker work");
+        assert_eq!(claim.component, "skip_markers", "{backend}");
+        assert!(
+            store
+                .claim_analysis_request_for_capacity_in_mode(
+                    "analysis-node",
+                    None,
+                    13,
+                    1013,
+                    false,
+                    false,
+                    false,
+                    &[],
+                    AnalysisClaimMode::SkipMarkersOnly,
+                )
+                .await
+                .expect("second marker-only claim")
+                .is_none(),
+            "{backend}"
+        );
+        let fragment = store
+            .analysis_request("fragment_index")
+            .await
+            .expect("read fragment request")
+            .expect("fragment request remains");
+        assert_eq!(fragment.state, "queued", "{backend}");
+        assert_eq!(fragment.attempts, 0, "{backend}");
     })
     .await;
 }

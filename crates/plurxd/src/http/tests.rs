@@ -17643,72 +17643,306 @@ async fn shared_native_api_fixture_uses_the_servers_live_wire_keys() {
     );
 }
 
-#[tokio::test]
-async fn decision_rereads_a_manual_override_that_commits_during_fallback_publication() {
-    let (app, state) = test_state();
-    let admin = setup_admin(&app).await;
-    let seeded = seed_content(&state).await;
-    let file = state
-        .store
-        .get_file(seeded.file)
-        .await
-        .expect("read seeded file")
-        .expect("seeded file");
-    let pause = stream::pause_next_marker_fallback_for_test(&file.path);
+fn write_chapter_fixture(path: &Path, with_intro: bool) {
+    use plurx_core::testfixtures::{ffmpeg, require_ffmpeg, run};
+    require_ffmpeg();
+    let mut command = std::process::Command::new(ffmpeg());
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=96x64:r=8:d=1",
+    ]);
+    if with_intro {
+        let chapters = path.with_extension("ffmetadata");
+        std::fs::write(
+            &chapters,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=60000\ntitle=Intro\n",
+        )
+        .unwrap();
+        command
+            .args(["-f", "ffmetadata", "-i"])
+            .arg(chapters)
+            .args(["-map_chapters", "1"]);
+    }
+    run(command
+        .args(["-map", "0:v", "-c:v", "libx264", "-threads", "1"])
+        .arg(path));
+}
 
-    let decision_app = app.clone();
-    let decision_admin = admin.clone();
-    let decision = tokio::spawn(async move {
-        call(
-            &decision_app,
-            get(
-                &format!(
-                    "/api/v1/files/{}/decision?vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0",
-                    seeded.file
-                ),
-                Some(&decision_admin),
-            ),
+async fn catalogue_legacy_chapter_fixture(
+    state: &AppState,
+    item_id: i64,
+    path: &Path,
+) -> plurx_core::domain::MediaFile {
+    let metadata = std::fs::metadata(path).unwrap();
+    let mtime = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let file_id = state
+        .store
+        .upsert_file(
+            item_id,
+            path.to_str().unwrap(),
+            metadata.len() as i64,
+            mtime.as_secs() as i64,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: Some(9_000_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(96),
+                height: Some(64),
+                raw_json: Some(r#"{"format":{"duration":"9000"},"streams":[]}"#.into()),
+                ..Default::default()
+            },
         )
         .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), pause.wait())
-        .await
-        .expect("decision reached its authoritative annotation miss");
+        .unwrap();
+    state.store.get_file(file_id).await.unwrap().unwrap()
+}
 
-    let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", file.id);
+fn chapter_decision(file_id: i64, token: &str) -> Request<Body> {
+    get(
+        &format!("/api/v1/files/{file_id}/decision?vcodec=h264&acodec=aac&container=mp4"),
+        Some(token),
+    )
+}
+
+async fn wait_for_chapter_probe(
+    state: &AppState,
+    pause: &tokio::sync::Barrier,
+    worker: &mut tokio::task::JoinHandle<()>,
+) {
+    tokio::select! {
+        _ = pause.wait() => return,
+        _ = worker => {},
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+    }
+    panic!(
+        "background chapter probe was never reached: {:?}",
+        state.store.analysis_requests(10).await.unwrap()
+    );
+}
+
+async fn configure_chapter_worker(state: &AppState) {
+    use plurx_core::store::keys;
+    state
+        .store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+        .await
+        .unwrap();
+    state
+        .store
+        .put_setting(keys::ANALYSIS_LEASE_SECS, "15")
+        .await
+        .unwrap();
+}
+
+async fn wait_out_chapter_attempt(state: &AppState, request_id: &str, retry_at_ms: i64) {
+    // A failed or superseded claim can keep its source reservation for its lease.
+    let expires =
+        state.store.analysis_attempts(request_id, 1).await.unwrap()[0].claim_expires_at_ms;
+    let wait = expires
+        .max(retry_at_ms)
+        .saturating_sub(crate::state::clock_ms())
+        .max(0);
+    tokio::time::sleep(Duration::from_millis(wait as u64 + 1)).await;
+}
+
+#[tokio::test]
+async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() {
+    let (app, state) = test_state();
+    configure_chapter_worker(&state).await;
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().unwrap();
+    let path = dir.path().join("legacy.mp4");
+    write_chapter_fixture(&path, true);
+    let file = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+
+    let pause = stream::pause_next_chapter_probe_for_test(&file.path, Some(Duration::from_secs(1)));
+    let ((status, first), (other_status, second)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                call(&app, chapter_decision(file.id, &admin)),
+                call(&app, chapter_decision(file.id, &admin)),
+            )
+        })
+        .await
+        .expect("Play must never await the chapter probe");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_status, StatusCode::OK);
+    assert_eq!(first["markers"], json!([]));
+    assert_eq!(second["markers"], json!([]));
+    assert!(
+        state.store.analysis_requests(10).await.unwrap().is_empty(),
+        "Play returned while the background owner was unavailable to admit work"
+    );
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+    let queue = state.store.analysis_requests(10).await.unwrap();
+    assert_eq!(queue.len(), 1, "one durable request for both decisions");
+    assert_eq!(queue[0].trigger, "background");
+    let request_id = &queue[0].request_id;
+    worker.await.unwrap();
+
+    let retry = state
+        .store
+        .analysis_request(request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.state, "queued");
+    assert_eq!(retry.last_error_code, "source_probe_timeout");
+    let identity = stream::annotation_source_identity(&file);
+    assert!(state
+        .store
+        .timeline_annotation_set(file.id, &identity)
+        .await
+        .unwrap()
+        .is_none());
+
+    wait_out_chapter_attempt(&state, request_id, retry.not_before_ms).await;
+    let pause = stream::pause_next_chapter_probe_for_test(&file.path, None);
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+
     let (status, manual) = call(
         &app,
         put(
-            &manual_url,
+            &format!("/api/v1/files/{}/timeline-annotations/credits", file.id),
             Some(&admin),
             json!({
-                "start_ticks": 8_500_000,
-                "end_ticks": 9_000_000,
-                "timescale": 1000,
-                "start_ms": 8_500_000,
-                "end_ms": 9_000_000,
+                "start_ticks": 8_500_000, "end_ticks": 9_000_000, "timescale": 1000,
+                "start_ms": 8_500_000, "end_ms": 9_000_000,
             }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{manual}");
-    assert_eq!(manual["provenance"], "manual");
+    let (_, pending) = call(&app, chapter_decision(file.id, &admin)).await;
+    assert_eq!(pending["markers"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["markers"][0]["provenance"], "manual");
 
     pause.wait().await;
-    let (status, decision) = tokio::time::timeout(std::time::Duration::from_secs(5), decision)
-        .await
-        .expect("decision completed after fallback release")
-        .expect("decision task");
+    worker.await.unwrap();
+    let (status, decision) = call(&app, chapter_decision(file.id, &admin)).await;
     assert_eq!(status, StatusCode::OK, "{decision}");
-    let credits = decision["markers"]
-        .as_array()
-        .expect("decision markers")
+    let markers = decision["markers"].as_array().unwrap();
+    assert!(
+        markers
+            .iter()
+            .any(|marker| marker["kind"] == "intro" && marker["provenance"] == "authored"),
+        "{markers:?}"
+    );
+    let credits = markers
         .iter()
         .find(|marker| marker["kind"] == "credits")
-        .expect("credits marker");
+        .unwrap();
     assert_eq!(credits["start_ms"], 8_500_000);
     assert_eq!(credits["provenance"], "manual");
     assert_eq!(credits["confidence"], 1_000);
+}
+
+#[tokio::test]
+async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sources() {
+    let (app, state) = test_state();
+    configure_chapter_worker(&state).await;
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().unwrap();
+    let path = dir.path().join("replacement.mp4");
+    write_chapter_fixture(&path, true);
+    let original = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+    let old_identity = stream::annotation_source_identity(&original);
+    let legacy = stream::annotation_set_from_markers(old_identity.clone(), &[]);
+    state
+        .store
+        .put_timeline_annotation_set(original.id, 9_000_000, &legacy)
+        .await
+        .unwrap();
+    let (_, decision) = call(&app, chapter_decision(original.id, &admin)).await;
+    assert_eq!(decision["markers"], json!([]));
+
+    let pause = stream::pause_next_chapter_probe_for_test(&path, None);
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+    let old_request = state.store.analysis_requests(10).await.unwrap().remove(0);
+    let replacement_path = dir.path().join("new.mp4");
+    write_chapter_fixture(&replacement_path, false);
+    std::fs::rename(replacement_path, &path).unwrap();
+    let replacement = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+    assert_eq!(replacement.id, original.id);
+    let identity = stream::annotation_source_identity(&replacement);
+    assert_ne!(identity, old_identity);
+    pause.wait().await;
+    worker.await.unwrap();
+    assert!(state
+        .store
+        .timeline_annotation_set(replacement.id, &identity)
+        .await
+        .unwrap()
+        .is_none());
+
+    wait_out_chapter_attempt(&state, &old_request.request_id, 0).await;
+    let (_, unknown) = call(&app, chapter_decision(replacement.id, &admin)).await;
+    assert_eq!(unknown["markers"], json!([]));
+    state
+        .jobs
+        .clone()
+        .work_cluster_fragment_index_queue(state.transcode.clone())
+        .await;
+    let confirmed = state
+        .store
+        .timeline_annotation_set(replacement.id, &identity)
+        .await
+        .unwrap()
+        .expect("chapterless probe published");
+    assert_eq!(
+        state
+            .store
+            .get_file_probe_chapters_json(replacement.id, replacement.size, replacement.mtime)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("[]"),
+        "the confirmed chapterless probe also backfills raw chapter consumers"
+    );
+    assert_eq!(confirmed.version, stream::CHAPTER_EVIDENCE_VERSION);
+    assert!(confirmed
+        .annotations
+        .iter()
+        .all(|marker| marker.provenance == plurx_core::segplan::AnnotationProvenance::Estimated));
+    let (_, decision) = call(&app, chapter_decision(replacement.id, &admin)).await;
+    assert!(decision["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|marker| marker["provenance"] == "estimated"));
+    assert_eq!(
+        decision["markers"].as_array().unwrap().len(),
+        confirmed.annotations.len()
+    );
 }
 
 #[tokio::test]

@@ -55,19 +55,29 @@ impl TimelineAnnotationStore for SqliteStore {
         .await
     }
 
-    async fn timeline_annotation_set(
+    async fn timeline_annotation_set_with_evidence(
         &self,
         file_id: i64,
         source: &SourceIdentity,
-    ) -> Result<Option<TimelineAnnotationSet>, StoreError> {
+    ) -> Result<Option<(TimelineAnnotationSet, bool)>, StoreError> {
         let source = source.clone();
         self.with_read(move |conn| {
             let base = conn
                 .query_row(
-                    "SELECT generation_id, version, annotations_json
-                       FROM timeline_annotation_sets
-                      WHERE file_id = ?1 AND source_size = ?2
-                        AND source_mtime = ?3 AND argv_fingerprint = ?4",
+                    "SELECT base.generation_id, base.version, base.annotations_json,
+                              (base.version >= 2 OR base.publication_priority = 'forced' OR EXISTS (
+                                  SELECT 1 FROM analysis_requests request
+                                   WHERE request.file_id = base.file_id
+                                     AND request.source_size = base.source_size
+                                     AND request.source_mtime = base.source_mtime
+                                     AND request.component = 'skip_markers'
+                                     AND request.state = 'ready'
+                                     AND request.requested_generation = base.generation_id
+                                     AND request.result_cache_key = base.generation_id
+                              )) AS chapter_evidence
+                       FROM timeline_annotation_sets base
+                      WHERE base.file_id = ?1 AND base.source_size = ?2
+                        AND base.source_mtime = ?3 AND base.argv_fingerprint = ?4",
                     params![
                         file_id,
                         i64::try_from(source.size).unwrap_or(i64::MAX),
@@ -79,21 +89,22 @@ impl TimelineAnnotationStore for SqliteStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
+                            row.get::<_, bool>(3)?,
                         ))
                     },
                 )
                 .optional()?;
-            let (mut generation_id, version, mut annotations) = match base {
-                Some((generation_id, version, annotations_json)) => {
+            let (mut generation_id, version, mut annotations, chapter_evidence) = match base {
+                Some((generation_id, version, annotations_json, chapter_evidence)) => {
                     let annotations = serde_json::from_str(&annotations_json).map_err(|error| {
                         StoreError::Database(format!("decode timeline annotations: {error}"))
                     })?;
                     let version = u32::try_from(version).map_err(|_| {
                         StoreError::Database("invalid timeline annotation version".to_owned())
                     })?;
-                    (generation_id, version, annotations)
+                    (generation_id, version, annotations, chapter_evidence)
                 }
-                None => (String::new(), 1, Vec::new()),
+                None => (String::new(), 1, Vec::new(), false),
             };
 
             let mut statement = conn.prepare(
@@ -162,12 +173,15 @@ impl TimelineAnnotationStore for SqliteStore {
                 return Ok(None);
             }
             annotations.sort_by_key(|annotation| (annotation.start_ms, annotation.kind));
-            Ok(Some(TimelineAnnotationSet {
-                source_identity: source,
-                generation_id,
-                version,
-                annotations,
-            }))
+            Ok(Some((
+                TimelineAnnotationSet {
+                    source_identity: source,
+                    generation_id,
+                    version,
+                    annotations,
+                },
+                chapter_evidence,
+            )))
         })
         .await
     }
