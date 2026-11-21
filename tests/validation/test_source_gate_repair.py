@@ -22,6 +22,7 @@ class GateRepairCase(unittest.TestCase):
     def test_android_compile_lint_retains_only_completed_tasks_before_the_metadata_failure(self):
         lines = [
             SOURCE,
+            'Digest: sha256:' + 'd' * 64,
             repair.ANDROID_COMPILE_ARGV,
             *repair.ANDROID_COMPILE_TASKS,
             'BUILD SUCCESSFUL in 1m 15s',
@@ -83,14 +84,24 @@ class GateRepairCase(unittest.TestCase):
 
     def test_source_delta_refuses_any_runtime_change_even_with_the_same_workflow(self):
         workflow = b'original pinned commands'
-        changes = {'validation/jvm_unit_discovery.py', 'tests/validation/test_selected_pr_jvm_discovery.py',
-                   'validation/source_gate_repair.py', '.github/workflows/' + repair.REPAIR_WORKFLOW}
+        changes = repair.REPAIR_PATHS
+        corrected = 'validation/jvm_unit_discovery.py'
+        expected = repair.retention.digest(workflow)
         with mock.patch.object(paperwork, 'ancestor', return_value=True), \
-             mock.patch.object(landing, 'WORKFLOW_SHA256', repair.retention.digest(workflow)), \
-             mock.patch.object(repair.retention, 'git_bytes', return_value=workflow), \
+             mock.patch.object(landing, 'WORKFLOW_SHA256', expected), \
+             mock.patch.object(repair, 'REPAIR_WORKFLOW_SHA256', expected), \
+             mock.patch.object(repair, 'REVIEWED_CORRECTIONS', {corrected: (expected, expected)}), \
+             mock.patch.object(repair.retention, 'git_bytes') as source, \
              mock.patch.object(repair.retention, 'changed', return_value=changes) as delta:
+            old_paths = {corrected, '.github/workflows/ci.yml'}
+            source.side_effect = lambda revision, path: workflow if revision == CURRENT or path in old_paths else None
             self.assertEqual(set(repair.source_delta(Path('.'), SOURCE, CURRENT)), changes)
             delta.return_value = changes | {'crates/plurxd/src/lib.rs'}
+            with self.assertRaises(ReceiptError):
+                repair.source_delta(Path('.'), SOURCE, CURRENT)
+            delta.return_value = changes
+            source.side_effect = lambda revision, path: b'changed correction' if revision == CURRENT and path == corrected else (
+                workflow if revision == CURRENT or path in old_paths else None)
             with self.assertRaises(ReceiptError):
                 repair.source_delta(Path('.'), SOURCE, CURRENT)
 
@@ -120,3 +131,15 @@ class GateRepairCase(unittest.TestCase):
                 paperwork.enrollment(paperwork.PREFIX + json.dumps({k: v for k, v in value.items() if k != field}))
         with self.assertRaises(ReceiptError):
             paperwork.enrollment(paperwork.PREFIX + json.dumps({**value, 'python_unit_evidence': snapshot}))
+
+
+    def test_only_the_named_bounded_fixture_diagnostic_recovers_a_split_predecessor_result(self):
+        identity = ('test_nextest_shard_continuation.NextestShardContinuationTests.'
+                    'test_pidfd_capability_refuses_enosys_before_any_body')
+        prefix = f"{identity.rsplit('.', 1)[1]} ({identity}) ... "
+        raw = (prefix + 'Nextest kernel: 7.3.0-test\nok\n').encode()
+        self.assertEqual(repair.predecessor_python_lines(raw), (prefix + 'ok\n').encode())
+        ambiguous = raw.replace(b'\nok', b'\ntest_foreign (case.Case.test_foreign) ... ok\nok')
+        self.assertEqual(repair.predecessor_python_lines(ambiguous), ambiguous)
+        with self.assertRaises(ReceiptError):
+            repair.predecessor_python_lines(raw + raw)

@@ -58,8 +58,11 @@ def android_compile_lint(raw, source):
                      and 'ids = verify_adopted(Path.cwd(), proof[\'command_units\'][\'android_jvm\'])' in lines[build:error]
                      and 'import tomllib' in lines[build:error],
                      'Android failure did not occur solely in the subsequent metadata verifier')
+    images = [line.removeprefix('Digest: ') for line in lines[:argv]
+              if re.fullmatch(r'Digest: sha256:[0-9a-f]{64}', line)]
+    receipts.require(len(images) == 1, 'Original Android compile image digest is missing or contradictory')
     return {'source_commit': receipts.sha(source), 'log_sha256': retention.digest(raw),
-            'compile_tasks': list(ANDROID_COMPILE_TASKS), 'test_bodies': 0}
+            'compile_tasks': list(ANDROID_COMPILE_TASKS), 'test_bodies': 0, 'image_digest': images[0]}
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):
@@ -119,6 +122,35 @@ def rust_coverage(api, descriptor, old, pull, run, job, artifacts, root):
             'worker_inputs_sha256': worker_input, 'worker_log_sha256': retention.digest(worker_log.encode())}
 
 
+KERNEL_DIAGNOSTIC = r'Nextest kernel: [A-Za-z0-9.+_-]{1,80}'
+SPLIT_PREDECESSOR_RESULTS = {
+    'test_manual_source_guard.ManualSourceGuardTests.test_actual_authenticated_gate_omits_only_duplicate_lane_and_prints_real_provenance':
+        re.escape('Reused actual ci / Main promotion gate run 12 job 13: https://forge/actual-ci/12'),
+    'test_nextest_shard_continuation.NextestShardContinuationTests.test_failed_child_pidfd_signal_still_kills_reaps_and_closes_owned_probe':
+        re.escape('Adopted tv_navigation: original run 10 job 8 source original\n'
+                  'Adopted desktop_macos: original run 10 job 8 source original\n') + KERNEL_DIAGNOSTIC,
+    'test_nextest_shard_continuation.NextestShardContinuationTests.test_owned_child_pidfd_probe_observes_full_lifecycle_and_reaps':
+        KERNEL_DIAGNOSTIC + re.escape(
+            '\nNextest PIDfd: self/child open, signal STOP/CONT/TERM, waitid stop/continue/exit passed; child reaped'),
+    'test_nextest_shard_continuation.NextestShardContinuationTests.test_pidfd_capability_refuses_enosys_before_any_body':
+        KERNEL_DIAGNOSTIC,
+}
+
+
+def predecessor_python_lines(raw):
+    # A few named fixtures write known diagnostics while unittest is printing
+    # their outcome. Recover the contiguous terminal only in that exact form.
+    text = native.clean(raw.decode('utf-8', 'strict'))
+    for identity, diagnostics in SPLIT_PREDECESSOR_RESULTS.items():
+        method = identity.rsplit('.', 1)[1]
+        prefix = f'{method} ({identity}) ... '
+        pattern = re.compile('^' + re.escape(prefix) + diagnostics + r'\nok$', re.M)
+        matches = list(pattern.finditer(text))
+        receipts.require(len(matches) <= 1, 'Repeated interleaved Python outcome')
+        text = pattern.sub(lambda _: prefix + 'ok', text)
+    return text.encode()
+
+
 def python_coverage(api, descriptor, old, pull, run, raw, inventories, root):
     from validation import main_python_continuation as main
     from validation import paperwork_continuation as paperwork
@@ -131,7 +163,7 @@ def python_coverage(api, descriptor, old, pull, run, raw, inventories, root):
     plan = main.prepare(api, record, old, source, repository, inventories=inventories)
     paperwork.bind_selection(plan, old['base_sha'], source)
     plan['evidence_sha256'] = descriptor['sha256']
-    observed, runtime = paperwork.current_outcomes(raw, plan, capture_runtime=True)
+    observed, runtime = paperwork.current_outcomes(predecessor_python_lines(raw), plan, capture_runtime=True)
     rules, retained_rules, directly_due = paperwork.rule_inventory(plan, root)
     receipts.require(directly_due <= set(observed) and set(rules) == retained_rules | directly_due,
                      'Earlier preflight did not complete exact paperwork coverage')
@@ -147,6 +179,50 @@ def python_coverage(api, descriptor, old, pull, run, raw, inventories, root):
 ANDROID_INPUTS = ('clients/android', 'Makefile')
 ROSTER_MEMBER = re.compile(r"classes/(?:[A-Za-z0-9_$-]+/)*[A-Za-z0-9 _$'-]+\.class")
 ROSTER_JAR = 'robolectric-4.17.jar'
+ORIGINAL_ANDROID_CAPTURE = {
+    'completion.json': '37454b6815fe522b2f9e239550deb5423e775fb4f8c6c8b23485c7610ae57473',
+    'compiled-inventory-after.json': '9d80915090589a8d65d70f080fd1fc88bb9dd4eeca235fdd83031a46b4b432c7',
+    'unit-class-hashes-after.json': '87692456c591843293aa6f7410d0a214deecf760cd87afb7e0479d27cdb75a87',
+}
+
+
+def original_android_capture(envelope, unit):
+    from validation import qualification_unit_continuation as commands
+    raw = base64.b64decode(envelope['capture_receipts'], validate=True)
+    receipts.require(len(raw) <= 256 * 1024, 'Original Android capture archive exceeds bound')
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        entries = archive.infolist()
+        receipts.require(len(entries) == len(ORIGINAL_ANDROID_CAPTURE)
+                         and {entry.filename for entry in entries} == set(ORIGINAL_ANDROID_CAPTURE)
+                         and sum(entry.file_size for entry in entries) <= 1024 * 1024,
+                         'Android capture archive contains unrelated evidence')
+        records = {}
+        for name, digest in ORIGINAL_ANDROID_CAPTURE.items():
+            data = archive.read(name)
+            receipts.require(retention.digest(data) == digest, 'Original Android runtime custody differed: ' + name)
+            records[name] = receipts.bounded_json(data)
+    capture = records['completion.json']
+    inventory = records['compiled-inventory-after.json']
+    names = sorted(row['class'] + '/' + name[len(row['class']) + 1:]
+                   for row in inventory['classes'] for name in row['ids'])
+    receipts.require(capture['source_commit'] == envelope['source_commit']
+                     and capture['source_archive_sha256'] == envelope['source_archive_sha256']
+                     and commands.source_archive_digest(capture['source_commit']) == capture['source_archive_sha256']
+                     and capture['android_tree'] == envelope['compiler_inputs']['clients/android']
+                     and capture['metadata_only'] is True and capture['runtime_outcomes'] is None
+                     and capture['source_clean_start'] is True and capture['source_clean_end'] is True
+                     and capture['compiled_test_class_hashes_identical'] is True and capture['exit_code'] == 0
+                     and capture['compiled_class_count'] == len(envelope['compiled_class_sha256'])
+                     and capture['compiled_test_methods'] == len(names) == unit['ids_count']
+                     and inventory['unit_runtime_outcomes'] is None and len(set(names)) == len(names)
+                     and retention.digest(canonical(names)) == unit['ids_sha256']
+                     and records['unit-class-hashes-after.json'] == envelope['compiled_class_sha256']
+                     and envelope['completion_sha256'] == ORIGINAL_ANDROID_CAPTURE['completion.json']
+                     and envelope['compiled_inventory_sha256'] == ORIGINAL_ANDROID_CAPTURE['compiled-inventory-after.json'],
+                     'Original Android class capture does not prove the adopted compilation census')
+    return {'origin': capture['source_commit'], 'source_archive_sha256': capture['source_archive_sha256'],
+            'compiler_sha256': capture['java_binary_after']['sha256'],
+            'capture_sha256': retention.digest(raw), 'receipts': ORIGINAL_ANDROID_CAPTURE}
 
 
 def android_witness(api, descriptor, binding, pull, old, command, root):
@@ -192,13 +268,14 @@ def android_witness(api, descriptor, binding, pull, old, command, root):
     classfiles, jar = compiled_members(archive, envelope['compiled_class_sha256'])
     receipts.require(retention.digest(jar) == discovery.ROBOLECTRIC_JAR_SHA256,
                      'Android runtime JAR differs from the reviewed exact dependency')
+    captured = original_android_capture(envelope, unit)
     # Linux compilation/lint and the preserved source-equivalent original class bytes
     # have different actual origins. Keep both in the current repair receipt.
     custody = {'compile_lint': command, 'source_commit': original,
                'archive_sha256': envelope['archive_sha256'], 'evidence_sha256': snapshot['sha256'],
                'compiled_class_count': len(classfiles), 'ids_count': unit['ids_count'],
                'ids_sha256': unit['ids_sha256'], 'jvm_source_owners_sha256': unit['jvm_source_owners_sha256'],
-               'compiler_inputs': envelope['compiler_inputs']}
+               'compiler_inputs': envelope['compiler_inputs'], 'original_capture': captured}
     return custody, unit, (classfiles, jar)
 
 
@@ -258,7 +335,7 @@ def formal_coverage(api, artifacts, job, run, old, current):
 
 
 REPAIR_WORKFLOW = 'source-gate-repair.yml'
-REPAIR_WORKFLOW_SHA256 = '1cf08f179642f19aaf0c7a38de80c975851edc74995d5f01e2320fc34fae204b'
+REPAIR_WORKFLOW_SHA256 = '96ad0e5155ad9a809cde679ac53ebf2b6046e727d9cd667e61d792334753aa01'
 REPAIR_PATHS = {
     '.github/workflows/' + REPAIR_WORKFLOW,
     'tests/validation/test_selected_pr_jvm_discovery.py',
@@ -268,6 +345,28 @@ REPAIR_PATHS = {
     'validation/paperwork_continuation.py',
     'validation/source_gate_landing.py',
     'validation/source_gate_repair.py',
+}
+REVIEWED_CORRECTIONS = {
+    'tests/validation/test_selected_pr_jvm_discovery.py': (
+        'd019f5c58ae730c31d1bf6472bf1b8ccc7ec723f0084f5c9c44576eef2de0417',
+        '644e53109983c4f0402c4184e9f7a8a12be340eb1e5f7d33ee1d02ea4ad43cd8',
+    ),
+    'validation/jvm_unit_discovery.py': (
+        '182ee06ea45b8d41b8100bf7eb0618c4dc78f7f34bf59d645488a00251c9f060',
+        '96fb155b9454b0bcf60d2636cf1ae598fb455b2454defa338081bee462cacaa9',
+    ),
+    'validation/main_python_continuation.py': (
+        '1fd6ca829baab936f9b1d2dcfda3103e25c54527681a9dbe8be281df7462c4b1',
+        '071c80d2b44220cc973bdb17e7aba89c0d918eedf85d4b61fa47a3b9dc4fdbe6',
+    ),
+    'validation/paperwork_continuation.py': (
+        '4ef6c360441d98207a230c15f9be3d6519774a6f5627043f2b18370711dafac6',
+        '0d8b8d03eec785879eb0ab9fe66da990f7fa6b8e8acce189f34786c88731f0a5',
+    ),
+    'validation/source_gate_landing.py': (
+        'ef3c82b4ca916a2ab7902afc097a7810211aa685e2e6365ff1431128b17fb8cb',
+        '39571f7c97ca0de7c39f50e9d1ceb186b5c764a50057d5a314b6ec282ca81bc4',
+    ),
 }
 REPAIR_AFFECTED = {
     'operations:test_ci_cache.CiCacheContractCase.test_github_yaml_has_no_duplicate_mapping_keys',
@@ -296,9 +395,7 @@ def source_delta(root, old, current):
     receipts.require(old != current and paperwork.ancestor(root, old, current),
                      'Source gate repair must extend the original source')
     delta = retention.changed(old, current)
-    receipts.require({'validation/jvm_unit_discovery.py', 'tests/validation/test_selected_pr_jvm_discovery.py',
-                      'validation/source_gate_repair.py', '.github/workflows/' + REPAIR_WORKFLOW} <= delta
-                     and delta <= REPAIR_PATHS,
+    receipts.require(delta == REPAIR_PATHS,
                      'Source gate repair changed inputs outside the closed Android verifier repair')
     workflow = retention.git_bytes(old, '.github/workflows/ci.yml')
     receipts.require(workflow is not None and workflow == retention.git_bytes(current, '.github/workflows/ci.yml')
@@ -309,8 +406,16 @@ def source_delta(root, old, current):
         before = retention.git_bytes(old, path)
         after = retention.git_bytes(current, path)
         receipts.require(after is not None, 'Source-gate repair removed a governed file')
-        changes[path] = {'before': retention.digest(before) if before is not None else None,
-                         'after': retention.digest(after)}
+        before_digest = retention.digest(before) if before is not None else None
+        after_digest = retention.digest(after)
+        if path in REVIEWED_CORRECTIONS:
+            receipts.require((before_digest, after_digest) == REVIEWED_CORRECTIONS[path],
+                             'A reviewed source-gate repair correction changed: ' + path)
+        else:
+            receipts.require(before is None, 'Repair plumbing must be new at the predecessor source')
+        changes[path] = {'before': before_digest, 'after': after_digest}
+    receipts.require(changes['.github/workflows/' + REPAIR_WORKFLOW]['after'] == REPAIR_WORKFLOW_SHA256,
+                     'Repair workflow bytes differ from the reviewed command graph')
     return changes
 
 
@@ -396,6 +501,9 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
     rust = rust_coverage(api, receipts.bounded_json(inputs['workspace_rust_evidence'].encode()), old,
                          pull, run, job_by_key['rust'], artifacts, root)
     formal = formal_coverage(api, artifacts, job_by_key['preflight'], run, prior, current)
+    device = android_device_coverage(api, artifacts, job_by_key['android_apks'], job_by_key['android_device'],
+                                     logs['android_apks'], logs['android_device'])
+    independent = independent_command_coverage(api, artifacts, job_by_key, logs, prior, root)
     packages = {}
     for arch, target in (('amd64', 'x86_64-unknown-linux-gnu'), ('arm64', 'aarch64-unknown-linux-gnu')):
         job = job_by_key['package_' + arch]
@@ -404,7 +512,8 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
                                               'package_smoke', target, prior, root)
     return {'run': run, 'source_commit': prior, 'base': binding['base_sha'], 'source_delta': changes,
             'jobs': data, 'rust': rust, 'python': python, 'formal': formal, 'packages': packages,
-            'android': android, 'python_due': due}, jvm, snapshot
+            'android': android, 'android_device': device, 'independent_commands': independent,
+            'python_due': due}, jvm, snapshot
 
 
 def repair_event(api, number, candidate, base, root, run_id, states):
@@ -467,6 +576,25 @@ def stage_android(root, payload):
         path = destination / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
+
+
+TEST_SELECTION = Path('target/validation/source-gate-repair-selection.json')
+
+
+def execute_selected_tests(environment):
+    for secret in ('GITHUB_TOKEN', 'FORGEJO_TOKEN', 'ACTIONS_RUNTIME_TOKEN',
+                   'ACTIONS_RUNTIME_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_RESULTS_URL'):
+        os.environ.pop(secret, None)
+    raw = TEST_SELECTION.read_bytes()
+    value = receipts.bounded_json(raw)
+    receipts.require(retention.digest(raw) == environment['SOURCE_GATE_REPAIR_SELECTION_SHA256']
+                     and set(value) == {'head', 'run', 'due'}
+                     and value['head'] == environment['GITHUB_SHA']
+                     and value['head'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+                     and value['run'] == receipts.positive(int(environment['GITHUB_RUN_ID']))
+                     and value['due'] == sorted(set(value['due'])),
+                     'Current repair test selection was altered or belongs to another run')
+    repair_tests(value['due'])
 
 
 def repair_tests(due):
@@ -563,7 +691,8 @@ def repair_result(api, repo, pull, binding, value, root, run):
     marker = 'Android repair unit binding ' + retention.digest(payload[UNIT_BINDING_PATH])
     terminal = f"Current compiled JVM source cohort verified: {jvm['ids_count']} methods; zero bodies executed"
     receipts.require(android_rows.count(marker) == android_rows.count(terminal) == 1
-                     and android_rows.index(terminal) < android_rows.index(marker),
+                     and android_rows.index(terminal) < android_rows.index(marker)
+                     and android_rows.count('Digest: ' + reference['android']['compile_lint']['image_digest']) == 1,
                      'Missing direct Android metadata verification of the same downloaded source cohort')
     arm_result = None
     if reference['jobs']['package_arm64']['status'] == 'failure':
@@ -588,7 +717,12 @@ def paperwork_check(api, value, environment, root, mode):
     if mode == 'final':
         run = receipts.positive(int(environment['GITHUB_RUN_ID']))
         repo, pull, binding, enrolled = repair_event(api, value['pr'], value['head'], value['base'], root, run, {'running'})
-        receipts.require(enrolled == value, 'Repair paperwork differs from live enrollment')
+        from validation import source_gate_landing as landing
+        checked = receipts.bounded_json(Path(environment['GITHUB_EVENT_PATH']).read_bytes())['pull_request']
+        receipts.require(enrolled == value and 'PR_BODY' not in environment and 'PR_TITLE' not in environment
+                         and checked['body'] == pull['body']
+                         and landing.semantic_pr_title(checked['title']) == landing.semantic_pr_title(pull['title']),
+                         'Checked repair paperwork body or title differs from the current PR')
         complete = repair_result(api, repo, pull, binding, value, root, run)
         return {'complete': True, 'coverage': complete, 'body': pull['body']}
     binding, pull = paperwork.binding(api, value, environment, root, mode)
@@ -630,6 +764,9 @@ def verify(api, number, head, main, root, run):
 def main(operation):
     root = Path.cwd()
     env = os.environ
+    if operation == 'test':
+        execute_selected_tests(env)
+        return
     receipts.require(env.get('GITHUB_RUN_ATTEMPT') == '1' and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
                      'Repair must run as an actual first manual dispatch')
     event = receipts.bounded_json(Path(env['GITHUB_EVENT_PATH']).read_bytes())
@@ -645,10 +782,14 @@ def main(operation):
                      'Runner event differs from authenticated repair dispatch')
     if operation == 'prepare':
         reference, jvm, snapshot = prior_coverage(api, value, binding, pull, root, current_run=run)
-        repair_tests(reference['python_due'])
         stage_android(root, expected_inventory_payload(binding, jvm, snapshot))
+        selection = canonical({'head': head, 'run': run, 'due': reference['python_due']})
+        with TEST_SELECTION.open('xb') as output:
+            output.write(selection)
         with open(env['GITHUB_OUTPUT'], 'a') as output:
+            print('selection_sha256=' + retention.digest(selection), file=output)
             print('predecessor_sha=' + reference['source_commit'], file=output)
+            print('android_image_digest=' + reference['android']['compile_lint']['image_digest'], file=output)
             print('arm64_due=' + str(reference['jobs']['package_arm64']['status'] == 'failure').lower(), file=output)
         return
     receipts.require(operation == 'finish', 'Unknown source-gate repair operation')
@@ -664,6 +805,134 @@ def main(operation):
     subprocess.run([sys.executable, '-B', 'scripts/paperwork', '--base', base, '--merge-target', base, '--body-env'],
                    check=True, env=command_env)
     print('Completed source-gate repair for', head, 'against', base, flush=True)
+
+
+
+
+def android_device_coverage(api, artifacts, builder, device, build_log, device_log):
+    from validation import source_gate_landing as landing
+    artifact_name = 'android-tv-instrumentation-apks'
+    item, _, archive_digest = landing.uploaded_identity(api, artifacts, artifact_name, builder,
+                                                         'android_apks', 64 * 1024 * 1024)
+    builder_text = native.clean(build_log.decode('utf-8', 'strict'))
+    build_command = 'plurx-android-build ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest'
+    receipts.require(builder_text.count(build_command) == 1
+                     and len(re.findall(r'^BUILD SUCCESSFUL in .+$', builder_text, re.M)) == 1
+                     and '> Task :app:assembleDebug' in builder_text
+                     and '> Task :app:assembleDebugAndroidTest' in builder_text,
+                     'Historical job did not build both Android APKs')
+    text = native.clean(device_log.decode('utf-8', 'strict'))
+    downloaded = f"- {artifact_name} (ID: {item['id']}, Size: {item['size_in_bytes']})"
+    receipts.require(text.splitlines().count(downloaded) == 1, 'Android instrumentation acquired another APK artifact')
+    text = text.replace('[command]/bin/sh -c ' + native.DEVICE_COMMAND,
+                        '[command]/usr/bin/sh -c ' + native.DEVICE_COMMAND)
+    count = native.device_summary(text)
+    raw = landing.uploaded_archive(api, artifacts, 'android-instrumentation-reports', device, 'android_device')
+    report_path = 'target/validation/android-instrumentation.txt'
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        receipts.require(archive.namelist() == [report_path] and archive.infolist()[0].file_size <= receipts.MAX_BYTES,
+                         'Unexpected Android instrumentation report archive')
+        report = archive.read(report_path).decode('utf-8', 'strict')
+    receipts.require(re.findall(r'^OK \(([1-9]\d*) tests\)$', report, re.M) == [str(count)]
+                     and not re.search(r'^FAILURES!!!|^INSTRUMENTATION_FAILED:', report, re.M),
+                     'Archive contradicts the real instrumentation command outcome')
+    return {'apk_job': builder['id'], 'apk_artifact': item['id'], 'apk_sha256': archive_digest,
+            'instrumentation_job': device['id'], 'instrumentation_report_sha256': retention.digest(raw),
+            'test_count': count}
+
+
+LANE_RECEIPTS = {
+    'cluster_store_legacy': ('cluster-store-legacy-contracts', 'cluster-store', 'cluster-store-legacy',
+                             ('make cluster-store-check',)),
+    'cluster_topology': ('cluster-topology-contracts', 'cluster-topology', 'cluster-topology',
+                         ('make hiqlite-vendor-clippy', 'make cluster-harness-check')),
+    'cluster_transport_recovery': ('cluster-transport-recovery', 'cluster-transport-recovery',
+                                   'cluster-transport-recovery', ('make cluster-transport-recovery-contracts',
+                                   'make cluster-transport-recovery-voter-check',
+                                   'make cluster-transport-recovery-learner-check', 'transport-recovery-assemble')),
+}
+
+
+def cluster_contract_receipt(api, artifacts, job, key, source, root):
+    from validation import paperwork_continuation as paperwork
+    from validation import source_gate_landing as landing
+
+    artifact, prefix, lane, commands = LANE_RECEIPTS[key]
+    raw = landing.uploaded_archive(api, artifacts, artifact, job, key)
+    receipt_name, log_name = prefix + '-receipt.json', prefix + '.log'
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        items = archive.infolist()
+        receipts.require(len(items) == len({item.filename for item in items})
+                         and sum(item.file_size for item in items) <= receipts.MAX_BYTES,
+                         'Unexpected contract receipt archive layout')
+        receipt = receipts.bounded_json(archive.read(receipt_name))
+        log = archive.read(log_name)
+        receipts.require(receipt['schema'] == 1 and receipt['kind'] == 'ci-lane'
+                         and receipt['lane'] == lane and receipt['result'] == 'success'
+                         and receipt['run_id'] == str(job['run_id']) and receipt['job'] == key
+                         and receipt['run_attempt'] == '1' and receipt['repository'] == api.repository
+                         and receipt['tested_sha'] == source
+                         and receipt['tested_tree'] == paperwork.git(root, 'rev-parse', source + '^{tree}')
+                         and set(commands) <= set(receipt['commands'])
+                         and receipt['log'] == {'name': log_name, 'sha256': retention.digest(log), 'bytes': len(log)},
+                         'Contract artifact does not prove the actual required command')
+        if key == 'cluster_transport_recovery':
+            evidence = archive.read(lane + '.json')
+            receipts.require(receipt['evidence'] == {'name': lane + '.json', 'sha256': retention.digest(evidence),
+                                                     'bytes': len(evidence), 'build_sha': source},
+                             'Transport recovery aggregate did not validate its exact campaign evidence')
+    return {'artifact': artifact, 'sha256': retention.digest(raw), 'commands': receipt['commands']}
+
+
+def independent_command_coverage(api, artifacts, jobs, logs, source, root):
+    from validation import qualification_unit_continuation as commands
+    from validation import source_gate_landing as landing
+
+    evidence = {key: cluster_contract_receipt(api, artifacts, jobs[key], key, source, root) for key in LANE_RECEIPTS}
+    source_steps = native.clean(logs['scope'].decode('utf-8', 'strict'))
+    observed = re.findall(r'^\[command\]/usr/bin/git log -1 --format=%H\n([0-9a-f]{40})$', source_steps, re.M)
+    receipts.require(observed == [source], 'Predecessor validation scope checked another source')
+    for key, terminal in {
+        'mobile_version': r'^mobile versions and changed-app build counters are valid$',
+        'rust_compile': r'^\s*Finished `dev` profile .* target\(s\) in .+$',
+        'cluster_store': r'^Store verdict: mode=(?:legacy|shadow) legacy=success shards=(?:skipped|success)$',
+        'web_layout': r'^CHECK +[1-9]\d* structural facts match .+$',
+        'vod_web': r'^RESULT +([1-9]\d*)/\1 passed · outcome passed$',
+    }.items():
+        text = native.clean(logs[key].decode('utf-8', 'strict'))
+        receipts.require(len(re.findall(terminal, text, re.M)) == 1, 'Missing actual completed lane command: ' + key)
+        evidence[key] = {'terminal': re.search(terminal, text, re.M)[0].strip()}
+    rust = native.clean(logs['rust_compile'].decode('utf-8', 'strict'))
+    receipts.require(re.findall(r'^cargo (?:check|fmt).+$', rust, re.M) ==
+                     ['cargo fmt --all --check', 'cargo check --workspace --locked --all-targets'],
+                     'Rust compiler job used another command profile')
+
+    wal_recipe = commands.make_commands(retention.git_bytes(source, 'Makefile').decode('utf-8'), 'cluster-wal-check')
+    wal_cases = {match for command in wal_recipe for match in re.findall(r'([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)+)', command)}
+    wal = native.clean(logs['cluster_wal'].decode('utf-8', 'strict'))
+    receipts.require(wal_cases and all(wal.count(f'test {name} ... ok') == 1 for name in wal_cases),
+                     'Missing an exact named WAL recovery outcome')
+    evidence['cluster_wal'] = {'passed': sorted(wal_cases)}
+    daemon = native.clean(logs['cluster_daemon'].decode('utf-8', 'strict'))
+    receipts.require('--test cluster_activation -- --nocapture' in daemon
+                     and '--test cluster_activity -- --nocapture --test-threads=1' in daemon
+                     and len(re.findall(r'^test result: ok\. [1-9]\d* passed; 0 failed;', daemon, re.M)) == 2,
+                     'Missing one of the two actual daemon integration suites')
+    evidence['cluster_daemon'] = {'suites': ['cluster_activation', 'cluster_activity']}
+
+    web = native.clean(logs['web_layout'].decode('utf-8', 'strict'))
+    receipts.require('PASS no account token on capability requests; no VOD or account write from any Live TV path' in web
+                     and len(re.findall(r'^(?:#|ℹ) fail 0$', web, re.M)) >= 6,
+                     'Web layout job lacks actual browser-suite completion outputs')
+    transport = {}
+    for key, name in (('cluster_transport_recovery_contracts', 'cluster-transport-recovery-contracts'),
+                      ('cluster_transport_recovery_voter', 'cluster-transport-recovery-voter'),
+                      ('cluster_transport_recovery_learner', 'cluster-transport-recovery-learner')):
+        job = jobs[key]
+        item, _, digest = landing.uploaded_identity(api, artifacts, name, job, key, 64 * 1024 * 1024)
+        transport[key] = {'artifact_id': item['id'], 'sha256': digest}
+    evidence['cluster_transport_recovery']['required_producers'] = transport
+    return evidence
 
 
 if __name__ == '__main__':

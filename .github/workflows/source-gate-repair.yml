@@ -37,6 +37,7 @@ jobs:
     outputs:
       predecessor_sha: ${{ steps.evidence.outputs.predecessor_sha }}
       arm64_due: ${{ steps.evidence.outputs.arm64_due }}
+      android_image_digest: ${{ steps.evidence.outputs.android_image_digest }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -47,6 +48,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.source_gate_repair prepare
+      - name: Execute only the exact repair test selection
+        env:
+          SOURCE_GATE_REPAIR_SELECTION_SHA256: ${{ steps.evidence.outputs.selection_sha256 }}
+        run: |
+          unset GITHUB_TOKEN FORGEJO_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL ACTIONS_RESULTS_URL
+          python3 -m validation.source_gate_repair test
       - name: Preserve the authenticated class snapshot and proof inputs
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
@@ -77,9 +84,10 @@ jobs:
         env:
           REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+          ANDROID_IMAGE_DIGEST: ${{ needs.prepare.outputs.android_image_digest }}
         run: |
           set -eu
-          image="$REGISTRY/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          image="$REGISTRY/noirr/android-build@$ANDROID_IMAGE_DIGEST"
           printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
           docker pull "$image"
           echo "ANDROID_REPAIR_IMAGE=$image" >> "$GITHUB_ENV"
