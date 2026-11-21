@@ -3,13 +3,11 @@
 import copy
 import io
 import json
-from pathlib import Path
 import unittest
 from unittest import mock
 import zipfile
 
 from validation import paperwork_continuation as paperwork
-from validation import source_gate_landing as landing
 from validation import source_gate_repair as repair
 from validation.python_unit_receipts import ReceiptError
 
@@ -72,38 +70,40 @@ class GateRepairCase(unittest.TestCase):
         value = {'predecessor_run': 4}
         api = mock.Mock()
         api.get.return_value = original
-        self.assertEqual(repair.prior_run(api, value, binding, 6, current_run=5)[1]['head_sha'], SOURCE)
-        with self.assertRaises(ReceiptError):
-            repair.prior_run(api, value, binding, 6, current_run=4)
-        for key in event['inputs']:
-            changed = copy.deepcopy(event)
-            changed['inputs'][key] = 'foreign'
-            api.get.return_value = {**original, 'event_payload': json.dumps(changed)}
-            with self.subTest(input=key), self.assertRaises(ReceiptError):
-                repair.prior_run(api, value, binding, 6, current_run=5)
+        reviewed = {'run': 4, 'head': SOURCE, 'base': BASE}
+        with mock.patch.object(repair, 'PREDECESSOR', reviewed):
+            new_base = 'e' * 40
+            binding['base_sha'] = new_base
+            _, old, _ = repair.prior_run(api, value, binding, 6, current_run=5)
+            self.assertEqual((old['head_sha'], old['base_sha']), (SOURCE, BASE))
+            with self.assertRaises(ReceiptError):
+                repair.prior_run(api, value, binding, 6, current_run=4)
+            for key in event['inputs']:
+                changed = copy.deepcopy(event)
+                changed['inputs'][key] = 'foreign'
+                api.get.return_value = {**original, 'event_payload': json.dumps(changed)}
+                with self.subTest(input=key), self.assertRaises(ReceiptError):
+                    repair.prior_run(api, value, binding, 6, current_run=5)
 
-    def test_source_delta_refuses_any_runtime_change_even_with_the_same_workflow(self):
-        workflow = b'original pinned commands'
-        changes = repair.REPAIR_PATHS
-        corrected = 'validation/jvm_unit_discovery.py'
-        expected = repair.retention.digest(workflow)
-        with mock.patch.object(paperwork, 'ancestor', return_value=True), \
-             mock.patch.object(landing, 'WORKFLOW_SHA256', expected), \
-             mock.patch.object(repair, 'REPAIR_WORKFLOW_SHA256', expected), \
-             mock.patch.object(repair, 'REVIEWED_CORRECTIONS', {corrected: (expected, expected)}), \
-             mock.patch.object(repair.retention, 'git_bytes') as source, \
-             mock.patch.object(repair.retention, 'changed', return_value=changes) as delta:
-            old_paths = {corrected, '.github/workflows/ci.yml'}
-            source.side_effect = lambda revision, path: workflow if revision == CURRENT or path in old_paths else None
-            self.assertEqual(set(repair.source_delta(Path('.'), SOURCE, CURRENT)), changes)
-            delta.return_value = changes | {'crates/plurxd/src/lib.rs'}
+    def test_python_projection_keeps_only_applicable_positive_old_methods(self):
+        from validation import main_python_continuation as main
+
+        old = {'head_sha': SOURCE}
+        binding = {'head_sha': CURRENT}
+        same, changed, imported, new = ('case.Case.test_' + x for x in ('same','changed','imported','new'))
+        older = {'commit': 'f' * 40, 'run': 2}
+        successes = {'direct_passes': ['validation:' + changed, 'validation:' + imported],
+                     'retained_passes': {'validation:' + same: older}}
+        old_inventory = {'validation': [same, changed, imported], 'operations': []}
+        inventory = {'validation': [same, changed, imported, new], 'operations': []}
+        with mock.patch.object(main, 'origin_impacts', return_value={'validation:' + imported}), \
+             mock.patch.object(repair.receipts, 'SourceApplicability') as applicability:
+            applicability.return_value.matches.side_effect = lambda key, _: key == 'validation:' + same
+            retained, due = repair.python_selection(old, binding, successes, old_inventory, inventory, {})
+            self.assertEqual(retained, {'validation:' + same: older})
+            self.assertEqual(due, ['validation:' + changed, 'validation:' + imported, 'validation:' + new])
             with self.assertRaises(ReceiptError):
-                repair.source_delta(Path('.'), SOURCE, CURRENT)
-            delta.return_value = changes
-            source.side_effect = lambda revision, path: b'changed correction' if revision == CURRENT and path == corrected else (
-                workflow if revision == CURRENT or path in old_paths else None)
-            with self.assertRaises(ReceiptError):
-                repair.source_delta(Path('.'), SOURCE, CURRENT)
+                repair.python_selection(old, binding, {**successes, 'direct_passes': []}, old_inventory, inventory, {})
 
     def test_current_repair_framing_requires_every_selected_positive_once(self):
         selected = 'test_source_gate_repair.GateRepairCase.test_case'
@@ -124,13 +124,28 @@ class GateRepairCase(unittest.TestCase):
     def test_repair_enrollment_is_closed_and_cannot_use_the_ordinary_python_descriptor(self):
         snapshot = {'sha256': '1' * 64, 'attachment_id': 3, 'attachment_uuid': 'proof-id'}
         value = {'version': 2, 'pr': 17, 'base': BASE, 'head': CURRENT,
-                 'predecessor_run': 4, 'android_snapshot': snapshot}
+                 'predecessor_run': 4, 'android_snapshot': snapshot, 'python_impact': snapshot,
+                 'workspace_rust_evidence': snapshot}
         self.assertEqual(paperwork.enrollment(paperwork.PREFIX + json.dumps(value)), value)
-        for field in ('predecessor_run', 'android_snapshot'):
+        for field in ('predecessor_run', 'android_snapshot', 'python_impact', 'workspace_rust_evidence'):
             with self.subTest(field=field), self.assertRaises(ReceiptError):
                 paperwork.enrollment(paperwork.PREFIX + json.dumps({k: v for k, v in value.items() if k != field}))
         with self.assertRaises(ReceiptError):
             paperwork.enrollment(paperwork.PREFIX + json.dumps({**value, 'python_unit_evidence': snapshot}))
+
+
+    def test_dispatched_continuation_refuses_an_extra_provider_or_different_rust_descriptor(self):
+        descriptor = {'sha256': 'a' * 64, 'attachment_id': 2, 'attachment_uuid': 'artifact'}
+        binding = {'pull_request': 17, 'head_sha': CURRENT, 'base_sha': BASE}
+        value = {'predecessor_run': 4, 'workspace_rust_evidence': descriptor}
+        inputs = {'promotion_pr': '17', 'promotion_head_sha': CURRENT, 'promotion_base_sha': BASE,
+                  'predecessor_run': '4', 'workspace_rust_evidence': json.dumps(descriptor),
+                  'python_unit_evidence': ''}
+        repair.dispatch_inputs(inputs, binding, value)
+        for field, replacement in (('predecessor_run', ''), ('python_unit_evidence', 'another provider'),
+                                   ('workspace_rust_evidence', json.dumps({**descriptor, 'attachment_id': 7}))):
+            with self.subTest(field=field), self.assertRaises(ReceiptError):
+                repair.dispatch_inputs({**inputs, field: replacement}, binding, value)
 
 
     def test_only_the_named_bounded_fixture_diagnostic_recovers_a_split_predecessor_result(self):

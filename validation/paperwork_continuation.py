@@ -42,16 +42,20 @@ def enrollment(body):
     fields = {'version', 'pr', 'head', 'base'}
     r.require(isinstance(value, dict) and (
                   value.get('version') == 1 and set(value) == fields | {'python_unit_evidence'}
-                  or value.get('version') == 2 and set(value) == fields | {'predecessor_run', 'android_snapshot'}),
+                  or value.get('version') == 2 and set(value) == fields | {
+                      'predecessor_run', 'android_snapshot', 'python_impact', 'workspace_rust_evidence'}),
               'Unknown paperwork enrollment fields')
     r.positive(value['pr']); r.sha(value['head']); r.sha(value['base'])
+    descriptors = ('python_unit_evidence',)
     if value['version'] == 2:
         r.positive(value['predecessor_run'])
-    descriptor = value['python_unit_evidence'] if value['version'] == 1 else value['android_snapshot']
-    r.require(isinstance(descriptor, dict) and set(descriptor) == {'sha256', 'attachment_id', 'attachment_uuid'}
-              and retention.DIGEST.fullmatch(descriptor['sha256']) is not None,
-              'Unknown paperwork Python evidence descriptor')
-    r.positive(descriptor['attachment_id'])
+        descriptors = ('android_snapshot', 'python_impact', 'workspace_rust_evidence')
+    for key in descriptors:
+        descriptor = value[key]
+        r.require(isinstance(descriptor, dict) and set(descriptor) == {'sha256', 'attachment_id', 'attachment_uuid'}
+                  and retention.DIGEST.fullmatch(descriptor['sha256']) is not None,
+                  'Unknown paperwork evidence descriptor')
+        r.positive(descriptor['attachment_id'])
     return value
 
 

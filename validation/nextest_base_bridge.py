@@ -84,6 +84,10 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
                      and record['base_sha'] == binding['base_sha'] and record['repository'] == repository
                      and record['pr'] == binding['pull_request'] and record['branch'] == binding['head_ref']
                      and binding['schema'] == 2, 'Unknown nextest source bridge')
+    from validation import workspace_rust_continuation as workspace
+    workflow = retention.git_bytes(candidate, '.github/workflows/ci.yml')
+    receipts.require(workflow is not None, 'Missing current native Rust workflow')
+    workspace.check_workflow_environment(workflow.decode(), workspace.CURRENT_JOB)
     raw = retention.git_bytes(candidate, PROFILE)
     receipts.require(raw is not None and retention.digest(raw) == PROFILE_SHA256,
                      'Reviewed Rust source bridge projection bytes changed')
