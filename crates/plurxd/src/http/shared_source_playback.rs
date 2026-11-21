@@ -2119,7 +2119,10 @@ async fn own_start(
         | SourceClaimOutcome::Resolved { .. }
         | SourceClaimOutcome::Retired(_) => return Err(SourceStartFailure::Unresolved),
         // Each of these is the Store's own answer for this fresh planned
-        // incarnation, and none of them wrote a binding. Retaining the
+        // incarnation, and none of them wrote a binding for it. A replayed
+        // answer may name another incarnation's row for the same request;
+        // that row is not this Start's to release, and the planned
+        // incarnation's release could never match it. Retaining the
         // unknown-claim stage would owe a release of a row that does not
         // exist: End could never settle and the entry would hold its
         // registry slot until restart.

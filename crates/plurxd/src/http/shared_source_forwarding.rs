@@ -335,6 +335,8 @@ impl Operation {
 /// handlers return themselves is the same bare status on the wire (an
 /// unsigned 503 between members), so the stage is written down here, once,
 /// at the handler's single exit. A handler names each step before taking it.
+/// The receiver-facing route shape, logged instead of the caller's own path.
+const INGRESS_ROUTE: &str = "/sharing/v1/items/{item}/files/{file}/sessions";
 struct RefusalTrace {
     stage: &'static str,
     operation: Option<Operation>,
@@ -351,7 +353,7 @@ impl RefusalTrace {
     fn at(&mut self, stage: &'static str) {
         self.stage = stage;
     }
-    fn refuse(self, path: &str, error: ApiError) -> Response {
+    fn refuse(self, path: &'static str, error: ApiError) -> Response {
         // A typed retry (a full credit pool, a start still preparing on the
         // viewer's clock) is an answer the caller acts on, not a refusal.
         let answer = matches!(error, ApiError::TypedRetry { .. });
@@ -366,12 +368,14 @@ impl RefusalTrace {
         };
         let operation = self.operation.map_or("unknown", Operation::name);
         let request_id = self.request_id.map(|id| id.to_string()).unwrap_or_default();
-        #[cfg(test)]
-        eprintln!(
-            "Source forwarding refused path={path} stage={} error_class={error_class} operation={operation}",
-            self.stage
-        );
-        if answer {
+        // The public ingress refuses before any credential check; an
+        // unauthenticated caller must not be able to raise warn lines.
+        let pre_authentication = path == INGRESS_ROUTE
+            && matches!(
+                response.status(),
+                StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
+            );
+        if answer || pre_authentication {
             tracing::debug!(target: "plurx::sharing", stage = self.stage, error_class, operation, request_id = %request_id, path, status = response.status().as_u16(), "Source forwarding answered a retry");
         } else {
             tracing::warn!(target: "plurx::sharing", stage = self.stage, error_class, operation, request_id = %request_id, path, status = response.status().as_u16(), "Source forwarding refused");
@@ -1237,10 +1241,9 @@ pub(super) async fn route_to_owner(
         return next.run(request).await;
     }
     let mut trace = RefusalTrace::new("ingress.request");
-    let path = request.uri().path().to_owned();
     match route(state, request, next, &mut trace).await {
         Ok(response) => response,
-        Err(error) => trace.refuse(&path, error),
+        Err(error) => trace.refuse(INGRESS_ROUTE, error),
     }
 }
 async fn route(

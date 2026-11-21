@@ -1776,8 +1776,10 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
                 if !authorized(self, &guard, values.clone()).await? {
                     // The composed guard is one predicate. Read its member
                     // floors apart, on this refusal only, to say which part.
-                    let member = authorized(self, &floor, values.clone()).await;
-                    let ingress = authorized(self, &ingress_floor, values.clone()).await;
+                    // Both floors read only the member parameters $1..$3.
+                    let members = values[..3].to_vec();
+                    let member = authorized(self, &floor, members.clone()).await;
+                    let ingress = authorized(self, &ingress_floor, members).await;
                     let stage = match (member, ingress) {
                         (Ok(false), _) => "source_claim.member_floor",
                         (Ok(true), Ok(false)) => "source_claim.ingress_custody_floor",

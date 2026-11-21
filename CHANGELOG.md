@@ -74,7 +74,7 @@ bump may break compatibility and a **patch** bump never does.
 
 - A shared Start whose claim the Source refuses (sharing unavailable, at
   capacity, or in conflict) no longer leaves a cleanup that can never finish.
-  The refusal wrote nothing, so the receiver's End now settles at once instead
+  The refusal wrote nothing for that Start, so the receiver's End now settles at once instead
   of answering 503 on every retry, and the refused Start no longer holds one of
   the Source's eight start slots until the node restarts. A Dolby Vision title
   started through a Source node that forwards to another is no longer noted as

@@ -1652,7 +1652,7 @@ impl ReceiverStartActor {
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
-            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", "receiver Source status refused");
+            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", operation = "status", "receiver Source exchange refused");
             return Err(ReceiverStartError::Ending);
         }
         // Current B policy precedes the network operation; every following
@@ -1662,12 +1662,12 @@ impl ReceiverStartActor {
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unknown
             })?
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", operation = "status", "receiver Source exchange refused");
             })?;
         let received = self
             .0
@@ -1678,7 +1678,7 @@ impl ReceiverStartActor {
             .clone()
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", operation = "status", "receiver Source exchange refused");
             })?;
         let expected = plurx_core::sharing::SharingIdentity {
             server_id: self.0.intent.scope.source_server_id,
@@ -1699,7 +1699,7 @@ impl ReceiverStartActor {
         let known = received
             .lineage()
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unresolved
             })?;
         peer.file_status(
