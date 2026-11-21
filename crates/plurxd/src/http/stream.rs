@@ -1952,8 +1952,6 @@ async fn markers_for_policy(
     file: &MediaFile,
     policy: PlanningReadPolicy,
 ) -> Vec<Marker> {
-    use plurx_core::segplan::AnnotationProvenance;
-
     let identity = annotation_source_identity(file);
     let (set, verified) = match state
         .store
@@ -1969,15 +1967,8 @@ async fn markers_for_policy(
             return Vec::new();
         }
     };
-    if let Some(set) = &set {
-        if verified
-            || set
-                .annotations
-                .iter()
-                .any(|marker| marker.provenance == AnnotationProvenance::Authored)
-        {
-            return markers_from_annotation_set(set.clone());
-        }
+    if verified {
+        return set.map(markers_from_annotation_set).unwrap_or_default();
     }
     if let Some(chapters) = stored_chapters(state, file).await {
         match set {

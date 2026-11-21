@@ -107,6 +107,13 @@ impl TimelineAnnotationStore for SqliteStore {
                 None => (String::new(), 1, Vec::new(), false),
             };
 
+            // A manual edit may hide the authored marker, but the base still
+            // proves that the source's chapters were read.
+            let chapter_evidence = chapter_evidence
+                || annotations.iter().any(|annotation: &TimelineAnnotation| {
+                    annotation.provenance == AnnotationProvenance::Authored
+                });
+
             let mut statement = conn.prepare(
                 "SELECT kind, start_ticks, end_ticks, timescale, start_ms, end_ms,
                         revision, generation_id

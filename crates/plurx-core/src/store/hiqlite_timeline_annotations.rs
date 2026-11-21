@@ -200,6 +200,13 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
             }
             None => (String::new(), 1, Vec::new(), false),
         };
+        // A manual edit may hide the authored marker, but the base still
+        // proves that the source's chapters were read.
+        let chapter_evidence = chapter_evidence
+            || annotations.iter().any(|annotation: &TimelineAnnotation| {
+                annotation.provenance == AnnotationProvenance::Authored
+            });
+
         let manual = self
             .client()
             .query_consistent_map::<ManualRow, _>(

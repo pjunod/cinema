@@ -24805,6 +24805,51 @@ async fn legacy_chapter_publication_evidence_survives_manual_generation() {
             "{backend}: manual evidence alone does not verify the base"
         );
 
+        let credits = TimelineAnnotation {
+            kind: AnnotationKind::Credits,
+            start_ticks: 550_000,
+            end_ticks: 600_000,
+            timescale: 1_000,
+            start_ms: 550_000,
+            end_ms: 600_000,
+            provenance: AnnotationProvenance::Estimated,
+            confidence_millis: 250,
+            detector_version: "chapter-classifier-v1".to_owned(),
+            manual_override_revision: None,
+        };
+        store
+            .put_timeline_annotation_set(
+                file_id,
+                600_000,
+                &TimelineAnnotationSet {
+                    source_identity: identity.clone(),
+                    generation_id: "legacy-authored-chapter-generation".to_owned(),
+                    version: 1,
+                    annotations: vec![
+                        TimelineAnnotation {
+                            provenance: AnnotationProvenance::Authored,
+                            detector_version: "chapter-classifier-v1".to_owned(),
+                            manual_override_revision: None,
+                            ..manual.clone()
+                        },
+                        credits.clone(),
+                    ],
+                },
+            )
+            .await
+            .expect("store normal legacy base");
+        let (set, verified) = store
+            .timeline_annotation_set_with_evidence(file_id, &identity)
+            .await
+            .expect("read authored base evidence")
+            .expect("composed annotation");
+        assert!(
+            verified,
+            "{backend}: replacing the authored intro preserves base proof"
+        );
+        assert_eq!(set.generation_id, "manual-generation", "{backend}");
+        assert_eq!(set.annotations, vec![manual.clone(), credits], "{backend}");
+
         store
             .enqueue_analysis_request(&NewAnalysisRequest {
                 request_id: "forced-chapters".to_owned(),
@@ -25381,8 +25426,8 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 timescale: 1_000,
                 start_ms: 0,
                 end_ms: 90_000,
-                provenance: AnnotationProvenance::Authored,
-                confidence_millis: 1_000,
+                provenance: AnnotationProvenance::Estimated,
+                confidence_millis: 250,
                 detector_version: "chapter-classifier-v1".to_owned(),
                 manual_override_revision: None,
             }],
