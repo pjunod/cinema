@@ -3,7 +3,6 @@
 import copy
 import io
 import json
-from pathlib import Path
 import unittest
 from unittest import mock
 import zipfile
@@ -21,32 +20,44 @@ class GateRepairCase(unittest.TestCase):
     def test_default_manual_workflow_still_admits_exact_old_and_current_recipes(self):
         from validation import source_gate_landing as landing
 
-        original = repair.retention.git_bytes(repair.PREDECESSOR['head'], '.github/workflows/ci.yml')
-        current = (Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml').read_bytes()
-        landing.require_manual_workflow(original)
-        landing.require_manual_workflow(current)
-        altered = current.replace(b'python3 -m validation.native_python_execute prepare', b'false', 1)
-        self.assertNotEqual(altered, current)
-        with self.assertRaises(ReceiptError):
-            landing.require_manual_workflow(altered)
+        original = b'previous independently reviewed workflow'
+        current = b'current independently reviewed workflow'
+        with mock.patch.object(landing, 'WORKFLOW_SHA256', repair.retention.digest(original)), \
+             mock.patch.object(repair, 'WORKFLOW_SHA256', repair.retention.digest(current)):
+            landing.require_manual_workflow(original)
+            landing.require_manual_workflow(current)
+            with self.assertRaises(ReceiptError):
+                landing.require_manual_workflow(current + b'\nunreviewed step')
 
     def test_android_instrumentation_refuses_a_changed_emulator_action(self):
-        import subprocess
+        from validation import native_makefile_compatibility
 
-        previous = repair.PREDECESSOR['head']
-        current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-        self.assertIn('.github/actions/android-emulator-ready',
-                      repair.android_device_source_projection(previous, current))
-        identify = repair.retention.android_device_tree
+        old = (b'name: ci\non:\n  workflow_dispatch:\n    inputs:\n'
+               b'env:\n  CARGO_TERM_COLOR: always\nconcurrency:\n'
+               b'jobs:\n  android_apks:\n    if: starts\n'
+               b'  android_device:\n    if: starts\n')
+        header = (b'      predecessor_run:\n        type: string\n'
+                  b'        description: "Earlier interrupted source gate identified in the live PR enrollment"\n'
+                  b'        required: false\n        default: ""\n')
+        current = old.replace(b'env:\n', header + b'env:\n', 1).replace(
+            b'    if: starts\n', b"    if: starts && needs.preflight.outputs.android_device_retained != 'true'\n")
+        makefile = b'# CI pre-pulls the image\nrecipe: target\n.PHONY: android-instrumentation\n'
 
-        def changed(revision, path):
-            if revision == current and path == '.github/actions/android-emulator-ready':
-                return 'foreign emulator action'
-            return identify(revision, path)
+        def source(revision, path):
+            if path == '.github/workflows/ci.yml':
+                return old if revision == SOURCE else current
+            return makefile if path == 'Makefile' else b'reviewed embedded reader'
 
-        with mock.patch.object(repair.retention, 'android_device_tree', side_effect=changed):
+        with mock.patch.object(repair, 'WORKFLOW_SHA256', repair.retention.digest(current)), \
+             mock.patch.object(repair.retention, 'git_bytes', side_effect=source), \
+             mock.patch.object(native_makefile_compatibility, 'native_makefile_digest', return_value='makefile'), \
+             mock.patch.object(repair.retention, 'android_device_tree', return_value='original') as tree:
+            self.assertEqual(repair.android_device_source_projection(SOURCE, CURRENT)
+                             ['.github/actions/android-emulator-ready'], 'original')
+            tree.side_effect = lambda revision, path: ('foreign emulator action'
+                if revision == CURRENT and path == '.github/actions/android-emulator-ready' else 'original')
             with self.assertRaises(ReceiptError):
-                repair.android_device_source_projection(previous, current)
+                repair.android_device_source_projection(SOURCE, CURRENT)
 
     def test_android_compile_lint_retains_only_completed_tasks_before_the_metadata_failure(self):
         lines = [

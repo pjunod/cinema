@@ -231,7 +231,7 @@ def android_witness(api, descriptor, binding, pull, old, command, root):
                                      snapshot['attachment_uuid'], snapshot['sha256'])
     envelope = receipts.bounded_json(raw)
     original = receipts.sha(envelope['source_commit'])
-    historical = {**binding, 'head_sha': original}
+    historical = {**old, 'head_sha': original}
     paperwork.local_attestation(api, raw, snapshot, historical, original, pull)
     receipts.require(envelope['kind'] == 'android-source-gate-compiled-census'
                      and envelope['version'] == 1 and envelope['junit_discovery_count'] == unit['ids_count']
