@@ -148,6 +148,27 @@ def _resolve_manual_binding_and_pull(
     return binding, pr
 
 
+def bind_manual_scope(environment, repository):
+    binding, pull = _resolve_manual_binding_and_pull(environment, repository)
+    if binding['schema'] != 2:
+        return binding
+
+    from validation import paperwork_continuation as paperwork
+    from validation import promotion_unit_retention as retention
+    from validation.python_unit_receipts import ReceiptError
+
+    if paperwork.is_enrolled(pull.get('body')):
+        try:
+            enrollment = paperwork.enrollment(pull['body'])
+            verified, _ = paperwork.binding(
+                retention.runner_api(environment), enrollment, environment, repository, 'final')
+        except (KeyError, ValueError, TypeError, ReceiptError) as error:
+            raise QualificationError('Enrolled source gate requires its exact dispatched Python unit evidence') from error
+        if verified != binding:
+            raise QualificationError('Paperwork dispatch binding differs from live promotion scope')
+    return binding
+
+
 def _ensure_task_history_tips(environment: Mapping[str, str], repository: Path,
                               tips: tuple[str, str]) -> None:
     """Full checkout normally has both API tips. Fetch exact objects if a ref advanced."""
@@ -439,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.bind_manual:
-            binding = resolve_manual_binding(os.environ, args.repository)
+            binding = bind_manual_scope(os.environ, args.repository)
             print("promotion_binding=" + json.dumps(binding, sort_keys=True, separators=(",", ":")))
             print("promotion_pr=" + str(binding["pull_request"]))
             print("promotion_base_sha=" + str(binding["base_sha"]))

@@ -234,6 +234,47 @@ class PaperworkContinuationTests(unittest.TestCase):
                 previous_main.assert_not_called()
                 previous_native.assert_not_called()
 
+    def test_manual_scope_requires_enrolled_dispatch_python_evidence_before_selection(self):
+        from validation import qualification as q, source_gate_landing as landing
+
+        api, pull = self.facts()
+        repo = pull['head']['repo']
+        pull['head']['sha'] = 'a' * 40
+        bind = {**self.scope(), 'base_ref': 'main'}
+        api.pages.return_value[0]['commit']['id'] = 'a' * 40
+        value = self.value()
+        inputs = {'promotion_pr': str(value['pr']), 'promotion_head_sha': value['head'],
+                  'promotion_base_sha': value['base']}
+        event = {'ref': 'refs/heads/codex/work', 'inputs': inputs}
+        run = {'id': 9, 'repository': repo, 'commit_sha': bind['head_sha'], 'status': 'running',
+               'workflow_id': 'ci.yml', 'trigger_event': 'workflow_dispatch'}
+        api.get.side_effect = lambda path: {'': repo, '/pulls/17': pull, '/actions/runs/9': run,
+                                            '/branches/main': {'commit': {'id': bind['base_sha']}}}[path]
+        env = {'GITHUB_RUN_ID': '9', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_SHA': bind['head_sha']}
+        with patch.object(q, '_resolve_manual_binding_and_pull', return_value=(bind, pull)), \
+                patch.object(pc.retention, 'runner_api', return_value=api), \
+                patch.object(pc, 'git', return_value=bind['head_sha']), \
+                patch.object(pc, 'ancestor', return_value=True), \
+                patch.object(pc.retention, 'git_bytes', return_value=b'ci workflow'), \
+                patch.object(landing, 'WORKFLOW_SHA256', pc.retention.digest(b'ci workflow')):
+            run['event_payload'] = json.dumps(event)
+            with self.assertRaisesRegex(q.QualificationError, 'exact dispatched Python unit evidence'):
+                q.bind_manual_scope(env, '.')
+            for descriptor in ('', json.dumps({**value['python_unit_evidence'], 'attachment_id': 9})):
+                inputs['python_unit_evidence'] = descriptor
+                run['event_payload'] = json.dumps(event)
+                with self.subTest(descriptor=descriptor), self.assertRaises(q.QualificationError):
+                    q.bind_manual_scope(env, '.')
+            inputs['python_unit_evidence'] = json.dumps(value['python_unit_evidence'])
+            run['event_payload'] = json.dumps(event)
+            self.assertEqual(q.bind_manual_scope(env, '.'), bind)
+            pull['body'] = 'ordinary description'
+            del inputs['python_unit_evidence']
+            run['event_payload'] = json.dumps(event)
+            api.get.reset_mock()
+            self.assertEqual(q.bind_manual_scope(env, '.'), bind)
+            api.get.assert_not_called()
+
     def test_writer_reauthenticates_live_enrollment_body_title_and_direct_coverage(self):
         from validation import qualification as q, source_gate_landing as landing
 
