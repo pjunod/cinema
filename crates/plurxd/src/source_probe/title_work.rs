@@ -172,10 +172,8 @@ impl TitleTask {
             // live or maintenance, before any row is skipped.
             *after = demand.probe_revision;
             #[cfg(target_os = "linux")]
-            if playback_only {
-                if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
-                    continue;
-                }
+            if playback_only && demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
+                continue;
             }
             if !playback_only {
                 // Live work was considered independently above; an ordinary
