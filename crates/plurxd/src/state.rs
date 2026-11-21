@@ -2925,6 +2925,11 @@ impl AnalysisRetryPolicy {
 /// invalidates the memo the reopened request would otherwise short-circuit to.
 const ANALYSIS_ATTESTATION_GENERATION: &str = "source-attestation/sampled-v1";
 
+/// A census request has no copy recipe yet. Its versioned identity gives it
+/// a stable generation independent of both provisional and canonical recipes.
+/// Advance this when a new census regime must reopen historical requests.
+const HEVC_CENSUS_ANALYSIS_IDENTITY: &str = "hevc-census/v1";
+
 /// Why a cluster-job attestation did not produce a usable source.
 ///
 /// The two are different faults and the queue row shows the difference: a
@@ -9931,6 +9936,30 @@ impl JobManager {
                 continue;
             }
             attempted += 1;
+            if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    continue;
+                };
+                if plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref()) {
+                    match self
+                        .request_file_analysis_for_identity(
+                            file_id,
+                            false,
+                            "fragment_index",
+                            "background",
+                            HEVC_CENSUS_ANALYSIS_IDENTITY,
+                        )
+                        .await
+                    {
+                        Ok((_, false)) => enqueued += 1,
+                        Ok((_, true)) => {}
+                        Err(error) => {
+                            tracing::warn!(file_id, %error, "queueing background HEVC census");
+                        }
+                    }
+                    continue;
+                }
+            }
             // One request per copy-video identity this file lacks, rather
             // than one request for whichever identity happened to be first.
             //
@@ -9958,26 +9987,14 @@ impl JobManager {
                     continue;
                 }
             };
-            // A historical index may predate the census. Submit one
-            // prerequisite attempt even if that provisional key is present.
-            let census_pending = if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
-                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
-                    continue;
-                };
-                plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref())
-            } else {
-                false
-            };
-            let variants = if census_pending { 1 } else { identities.len() };
-            for (video, fingerprint) in identities.into_iter().take(variants) {
-                if !census_pending
-                    && self
-                        .store
-                        .fragment_index(file_id, &crate::fragindex::identity_for(&file, video))
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
+            for (video, fingerprint) in identities {
+                if self
+                    .store
+                    .fragment_index(file_id, &crate::fragindex::identity_for(&file, video))
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
                 {
                     continue;
                 }
@@ -11203,6 +11220,13 @@ impl JobManager {
                 charge_attempt: matches!(census, crate::hevc_census::IndexCensus::Failed),
             });
         }
+        if request.video_identity == HEVC_CENSUS_ANALYSIS_IDENTITY
+            && request.target_node_id != node_id
+        {
+            // The verdict is shared. Discovery on the target can now derive
+            // recipes from its own capabilities.
+            return Err(AnalysisResolutionError::Terminal("pipeline_superseded"));
+        }
         let video = match fragment_index_requested_video_options(
             self.store.as_ref(),
             &file,
@@ -11229,9 +11253,9 @@ impl JobManager {
                 });
             }
             Err(StoreError::Task(_)) => {
-                // A persisted census can change variant identities. Schedule
-                // the current missing variants through ordinary discovery
-                // instead of publishing the old request under a different key.
+                // A census request has no recipe, and a persisted verdict can
+                // supersede historical recipes. Queue missing canonical variants
+                // with their ordinary generations.
                 self.note_fresh_index_files(vec![file.id]);
                 let identities = fragment_index_video_identity_options(
                     self.store.as_ref(),

@@ -43,10 +43,16 @@ const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(600);
 /// for the first and then read its record.
 static IN_FLIGHT: LazyLock<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-/// A source revision: (file id, size, mtime).
-type Revision = (i64, i64, i64);
-/// Source revisions whose census recently failed.
-static FAILED: LazyLock<Mutex<HashMap<Revision, Instant>>> =
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum CensusScope {
+    Playback,
+    Index,
+}
+
+/// Successful verdicts are shared. The two admission paths have different
+/// read and execution budgets, so a failure only suppresses its own path.
+type FailedRevision = (i64, i64, i64, CensusScope);
+static FAILED: LazyLock<Mutex<HashMap<FailedRevision, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The file's stored probe, with its HEVC parameter-set census recorded first
@@ -73,7 +79,9 @@ pub(crate) async fn probe_json_for_copy_from(
     file: &MediaFile,
     probe_json: Option<String>,
 ) -> Result<Option<String>, StoreError> {
-    if !hevc_census::needs_census(file, probe_json.as_deref()) || recently_failed(file) {
+    if !hevc_census::needs_census(file, probe_json.as_deref())
+        || recently_failed(file, CensusScope::Playback)
+    {
         return Ok(probe_json);
     }
     let lock = {
@@ -109,15 +117,25 @@ async fn measure_and_record(
 ) -> Result<Option<String>, StoreError> {
     // Another request may have recorded it while this one waited.
     let probe_json = store.get_file_probe_json(file.id).await?;
-    if !hevc_census::needs_census(file, probe_json.as_deref()) || recently_failed(file) {
+    if !hevc_census::needs_census(file, probe_json.as_deref())
+        || recently_failed(file, CensusScope::Playback)
+    {
         return Ok(probe_json);
     }
     let started = Instant::now();
     let Some(census) = measure(file).await else {
-        note_failure(file);
+        note_failure(file, CensusScope::Playback);
         return Ok(probe_json);
     };
-    record_census(store, file, probe_json, census, started).await
+    record_census(
+        store,
+        file,
+        probe_json,
+        census,
+        started,
+        CensusScope::Playback,
+    )
+    .await
 }
 
 async fn record_census(
@@ -126,6 +144,7 @@ async fn record_census(
     probe_json: Option<String>,
     census: Census,
     started: Instant,
+    scope: CensusScope,
 ) -> Result<Option<String>, StoreError> {
     match store
         .merge_file_probe_hevc_parameter_sets(file.id, file.size, file.mtime, &census.to_json())
@@ -150,12 +169,12 @@ async fn record_census(
                 file_id = file.id,
                 "HEVC parameter-set census not recorded: the file changed while it was measured"
             );
-            note_failure(file);
+            note_failure(file, scope);
             Ok(probe_json)
         }
         Err(error) => {
             tracing::warn!(file_id = file.id, %error, "recording the HEVC parameter-set census");
-            note_failure(file);
+            note_failure(file, scope);
             Ok(probe_json)
         }
     }
@@ -180,7 +199,7 @@ pub(crate) async fn ensure_index_census(
     }
     // Foreground measurement may be in progress. Let it finish without
     // holding up its reader or duplicating reads under two owners.
-    if recently_failed(file) {
+    if recently_failed(file, CensusScope::Index) {
         return Ok(IndexCensus::Deferred);
     }
     let lock = {
@@ -209,10 +228,11 @@ pub(crate) async fn ensure_index_census(
             if plurx_core::process::bounded::check_cancellation().is_err() {
                 return Ok(IndexCensus::Deferred);
             }
-            note_failure(file);
+            note_failure(file, CensusScope::Index);
             return Ok(IndexCensus::Failed);
         };
-        let recorded = record_census(store, file, probe, census, started).await?;
+        let recorded =
+            record_census(store, file, probe, census, started, CensusScope::Index).await?;
         Ok(if hevc_census::needs_census(file, recorded.as_deref()) {
             IndexCensus::Failed
         } else {
@@ -351,17 +371,17 @@ async fn sample_for_index(
     hevc_census::observe(&output.stdout)
 }
 
-fn recently_failed(file: &MediaFile) -> bool {
+fn recently_failed(file: &MediaFile, scope: CensusScope) -> bool {
     let mut failed = FAILED.lock().unwrap_or_else(|poison| poison.into_inner());
     failed.retain(|_, at| at.elapsed() < RETRY_AFTER_FAILURE);
-    failed.contains_key(&(file.id, file.size, file.mtime))
+    failed.contains_key(&(file.id, file.size, file.mtime, scope))
 }
 
-fn note_failure(file: &MediaFile) {
+fn note_failure(file: &MediaFile, scope: CensusScope) {
     FAILED
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .insert((file.id, file.size, file.mtime), Instant::now());
+        .insert((file.id, file.size, file.mtime, scope), Instant::now());
 }
 
 /// Sample the film and conclude, or `None` when nothing conclusive came back.
@@ -911,12 +931,15 @@ mod tests {
         file.id = 4191;
         testfixtures::require_ffmpeg();
         assert_eq!(measure(&file).await, None);
-        note_failure(&file);
-        assert!(recently_failed(&file));
+        note_failure(&file, CensusScope::Index);
+        assert!(recently_failed(&file, CensusScope::Index));
+        assert!(!recently_failed(&file, CensusScope::Playback));
+        note_failure(&file, CensusScope::Playback);
+        assert!(recently_failed(&file, CensusScope::Playback));
         let mut replaced = file.clone();
         replaced.mtime += 1;
         assert!(
-            !recently_failed(&replaced),
+            !recently_failed(&replaced, CensusScope::Playback),
             "a new revision is measured afresh"
         );
     }
