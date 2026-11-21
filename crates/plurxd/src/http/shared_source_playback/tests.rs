@@ -1208,6 +1208,160 @@ async fn sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end() {
     ))
     .await;
 }
+/// The production web shape on one node: range caps through a receiver that
+/// affirms ranges, Dolby Vision relay and processed upgrades. The Source runs
+/// its growing copy owner, and Start, the receiver's confirming Status, the
+/// session playlist and End all answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(SourceFixtureMode::RangeCopy)).await;
+}
+/// The same for a title with text subtitles, started with native subtitles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_native_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeNativeCopy,
+    ))
+    .await;
+}
+async fn actual_source_range_delivery(mode: SourceFixtureMode) {
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let response = actual_resource_request(
+        address,
+        true,
+        &sessions,
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Start envelope");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} range Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source envelope");
+    assert!(!decoded.response().vod, "a growing copy is a bounded view");
+    assert!(receiver_presentation::response_presentable(
+        decoded.response(),
+        true,
+        true
+    ));
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"]
+        .as_str()
+        .expect("request")
+        .to_owned();
+    recipe["incarnation_id"] = json!(decoded.incarnation_id());
+    recipe["session_id"] = json!(decoded.response().session_id);
+    recipe["control_epoch"] = json!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .control_epoch
+    );
+    let operation = format!("{sessions}/{request}");
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/status"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("status body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Status envelope");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} Status after Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let confirmed = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source status envelope");
+    assert_eq!(confirmed.incarnation_id(), decoded.incarnation_id());
+    assert_eq!(
+        confirmed.response().session_id,
+        decoded.response().session_id
+    );
+    let mut playlist = recipe.clone();
+    playlist["resource"] = json!(decoded
+        .response()
+        .playlist_url
+        .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
+        .expect("session playlist"));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/resources"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&playlist).expect("playlist body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("playlist bytes");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} playlist: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(bytes.starts_with(b"#EXTM3U"));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/end"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("End body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .expect("End receipt");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} End: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let receipt: Value = serde_json::from_slice(&bytes).expect("End receipt");
+    assert_eq!(receipt["settled"], json!(true));
+    assert_eq!(receipt["incarnation_id"], json!(decoded.incarnation_id()));
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end() {
     Box::pin(actual_source_resource_delivery(

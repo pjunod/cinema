@@ -2629,6 +2629,13 @@ pub(crate) enum SourceFixtureMode {
     /// Dolby Vision decoder (every shipped client's shared path): the base
     /// strip, on a node whose FFmpeg has `dovi_rpu`.
     DolbyVisionStripped,
+    /// The production web shape: a BT.709-tagged H.264 High source whose row
+    /// carries the scan's profile, started through a receiver that affirms
+    /// bounded ranges, so the Source runs its growing copy owner.
+    RangeCopy,
+    /// [`Self::RangeCopy`] in Matroska with two embedded SubRip tracks,
+    /// started with native subtitles and the first track selected.
+    RangeNativeCopy,
 }
 
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
@@ -2753,11 +2760,12 @@ pub(crate) fn real_source_start_fixture_with_budget(
 }
 #[cfg(test)]
 fn real_source_start_fixture_at(
+    mode: SourceFixtureMode,
     listener: tokio::net::TcpListener,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
     Box::pin(build_real_source_start_fixture(
-        SourceFixtureMode::Copy,
+        mode,
         None,
         Some(listener),
         fixture_body_budget,
@@ -2900,6 +2908,12 @@ async fn build_real_source_start_fixture(
         SourceFixtureMode::NativeCopy
             | SourceFixtureMode::NativeEncoded
             | SourceFixtureMode::NativeHdr10Copy
+            | SourceFixtureMode::RangeNativeCopy
+    );
+    // The modes a range-affirming receiver starts: a growing H.264 copy.
+    let range_copy = matches!(
+        mode,
+        SourceFixtureMode::RangeCopy | SourceFixtureMode::RangeNativeCopy
     );
     let burn = matches!(
         mode,
@@ -2987,6 +3001,31 @@ async fn build_real_source_start_fixture(
             generate.args(["-tag:v", "hvc1"]);
         }
         generate.arg("-y");
+    } else if range_copy {
+        // BT.709 signalled in the frames and the bitstream, as a scanned
+        // library title carries it: the growing copy checks its head's
+        // declared transfer against the player's caps.
+        generate.arg("testsrc2=s=320x180:r=24").args([
+            "-vf",
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-t",
+            "4",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "24",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-y",
+        ]);
     } else {
         generate
             .arg("color=s=320x180:r=24")
@@ -3244,6 +3283,16 @@ async fn build_real_source_start_fixture(
             .await
             .expect("Dolby Vision scan facts");
     }
+    if range_copy {
+        // The scan's profile for the generated H.264 source.
+        client
+            .execute(
+                "UPDATE files SET video_profile='High',duration_ms=4000 WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("scanned H.264 profile");
+    }
     if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
         // A copy's head is checked against the scan's profile.
         client
@@ -3352,16 +3401,24 @@ async fn build_real_source_start_fixture(
             ..(*state.system).clone()
         });
     }
+    if range_copy {
+        // A growing copy records its range under the node's data directory,
+        // as `AppState::new` derives it for a daemon.
+        Arc::get_mut(&mut state)
+            .expect("sole State before listeners")
+            .copy_observation_dir = Some(directory.path().join("copy-ranges").join("observations"));
+    }
     let manager = manager.with_dv_strippable(strips);
-    let manager = if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
-        manager.with_cache(
-            directory.path().join("cache"),
-            "fixture".into(),
-            state.node_id.clone(),
-        )
-    } else {
-        manager
-    };
+    let manager =
+        if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy || range_copy {
+            manager.with_cache(
+                directory.path().join("cache"),
+                "fixture".into(),
+                state.node_id.clone(),
+            )
+        } else {
+            manager
+        };
     Arc::get_mut(&mut state)
         .expect("sole State before listeners")
         .transcode = Arc::new(
@@ -3443,6 +3500,28 @@ async fn build_real_source_start_fixture(
             recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[8]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls","display":{"hdr":true}});
         }
         _ => {}
+    }
+    if range_copy {
+        // What the web player and a current receiver send: the public range
+        // transport beside HLS, Dolby Vision claims on HEVC, and all three
+        // receiver affirmations on every operation.
+        recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[5,8]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["progressive","hls","hls-bounded-range-v1"],"dv_transport":"progressive"});
+        for (name, value) in [
+            (
+                receiver_presentation::RECEIVER_HEADER,
+                receiver_presentation::RECEIVER_HEADER_VALUE,
+            ),
+            (
+                receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+                receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+            ),
+            (
+                receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+            ),
+        ] {
+            headers.insert(name, value.parse().expect("receiver affirmation"));
+        }
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");
