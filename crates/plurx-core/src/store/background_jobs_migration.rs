@@ -369,15 +369,23 @@ mod tests {
         seal(&connection);
         drop(connection);
         let store = SqliteStore::open(&path).expect("new binary");
-        for _ in 0..256 {
+        let mut pending = store
+            .job_migration_status()
+            .await
+            .expect("sealed import work")
+            .awaiting_import;
+        // Pages also budget duplicated SQL bytes, so enqueue SQL growth can
+        // reduce rows per page. Bound the fill by accepted work, requiring
+        // progress until the queue reaches its reserved-headroom frontier.
+        for _ in 0..pending {
             store.import_legacy_jobs(1_000).await.expect("bounded page");
-            if store
-                .job_migration_status()
-                .await
-                .expect("progress")
-                .awaiting_import
-                <= 260
-            {
+            let progress = store.job_migration_status().await.expect("progress");
+            assert!(
+                progress.awaiting_import < pending,
+                "fill must make progress before the foreground-headroom frontier"
+            );
+            pending = progress.awaiting_import;
+            if pending <= 260 {
                 break;
             }
         }
