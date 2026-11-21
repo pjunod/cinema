@@ -2884,6 +2884,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
 /// A create body with nothing set, to be spread over.
 fn bare_create() -> CreateSession {
     CreateSession {
+        split_audio: None,
         processed_upgrade: None,
         source_telemetry: None,
         intent: None,

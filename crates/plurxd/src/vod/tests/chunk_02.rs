@@ -155,6 +155,7 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            audio_excluded: false,
             dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
@@ -255,6 +256,7 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            audio_excluded: false,
             dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
@@ -1670,6 +1672,7 @@
             crate::copy_normalization::served_init_contract_sha256(&muxer, &index.promotion)
                 .expect("the seal's init contract");
         let mut recipe = Recipe {
+            audio_excluded: false,
             dv_refit_gain: None,
             source_telemetry: false,
             retained_logical: None,

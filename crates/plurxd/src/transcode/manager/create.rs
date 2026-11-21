@@ -4431,6 +4431,69 @@ impl TranscodeManager {
         Ok(soundtrack)
     }
 
+    /// One shared AAC soundtrack per source audio stream for a split copy
+    /// presentation, each prepared exactly as the continuous family prepares
+    /// its soundtrack. Split delivery is all-or-nothing: if any soundtrack
+    /// cannot be prepared, the session stays on the ordinary muxed copy.
+    pub(crate) async fn prepare_vod_split_soundtracks(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)> {
+        if !req.split_audio
+            || encoding.is_some()
+            || !matches!(req.kind, SessionKind::Copy { .. })
+            || req.continuous_media.is_some()
+            || req.subtitle_burn.is_some()
+            || req.presentation != Presentation::Vod
+            || file.audio_streams.len() < 2
+            // The family reserves every encoded role atomically; its group
+            // admission holds at most three. Larger sets stay muxed for now.
+            || file.audio_streams.len() > 3
+        {
+            return Vec::new();
+        }
+        let height = file.height.unwrap_or(0).max(2);
+        let generation = uuid::Uuid::new_v4().to_string();
+        let mut soundtracks = Vec::with_capacity(file.audio_streams.len());
+        for stream in &file.audio_streams {
+            let mut audio = req.clone();
+            audio.split_audio = false;
+            audio.kind = SessionKind::Transcode { height };
+            audio.audio_index = Some(stream.index);
+            audio.audio_delivery = None;
+            audio.candidate_context = None;
+            audio.hdr10 = false;
+            audio.continuous_media = Some(Box::new(ContinuousMediaRequest {
+                version: 1,
+                controlled: false,
+                family_generation: generation.clone(),
+                role: ContinuousMediaRole::SharedAudio,
+                autonomous_companion: None,
+                companion_catalog: None,
+                family_descriptor: None,
+                companion_context: None,
+            }));
+            match self.prepare_vod_encoding(&audio, file).await {
+                Ok(Some(soundtrack)) if soundtrack.shared_audio.is_some() => {
+                    soundtracks.push((audio, soundtrack))
+                }
+                outcome => {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = file.id,
+                        audio_index = stream.index,
+                        refused = ?outcome.err(),
+                        "split copy soundtrack unavailable; serving the muxed copy"
+                    );
+                    return Vec::new();
+                }
+            }
+        }
+        soundtracks
+    }
+
     /// Negotiation shares native encoded preparation and the exact copy
     /// prerequisite resolver, without allocating a media session or producer.
     pub(crate) async fn preview_compatibility_vod(
@@ -4461,6 +4524,7 @@ impl TranscodeManager {
         self.vod
             .preview_recipe(
                 crate::vodserve::VodRecipeRequest {
+                    split_soundtracks: Vec::new(),
                     admission_priority: crate::admission::Priority::Live,
                     root_admission: None,
                     measured_candidate: None,
@@ -5024,6 +5088,9 @@ impl TranscodeManager {
         let soundtrack = self
             .prepare_vod_soundtrack(req, &file, encoding.as_ref())
             .await?;
+        let split_soundtracks = self
+            .prepare_vod_split_soundtracks(req, &file, encoding.as_ref())
+            .await;
         let companion = self.prepare_vod_companion(req, &file).await?;
         // A continuous family role executes a video-only or shared-AAC split of
         // its muxed catalog candidate, already verified against that catalog
@@ -5077,6 +5144,7 @@ impl TranscodeManager {
             request: req,
             encoding,
             soundtrack,
+            split_soundtracks,
         };
         // Cluster activation is make-before-break: the Store pointer CAS and
         // exact post-CAS terminal projection are the only operations allowed
@@ -6224,6 +6292,7 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        split_soundtracks: Vec::new(),
                         admission_priority: if speculative {
                             Priority::Speculative
                         } else {

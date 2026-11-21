@@ -478,6 +478,7 @@ impl TranscodeManager {
             .vod
             .prepare_encoded_output(
                 crate::vodserve::VodRecipeRequest {
+                    split_soundtracks: Vec::new(),
                     admission_priority: crate::admission::Priority::Background,
                     root_admission: None,
                     soundtrack: None,
@@ -946,6 +947,7 @@ impl TranscodeManager {
             .await?
             .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
         let prepared_request = crate::vodserve::VodRecipeRequest {
+            split_soundtracks: Vec::new(),
             admission_priority: crate::admission::Priority::Background,
             root_admission: None,
             soundtrack: None,

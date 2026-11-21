@@ -2288,6 +2288,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 "shipped-shape",
                 None,
                 Recipe {
+                    audio_excluded: false,
                     dv_refit_gain: None,
             source_telemetry:false,
                     retained_logical: None,
@@ -4334,6 +4335,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            audio_excluded: false,
             dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,

@@ -1001,6 +1001,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            audio_excluded: false,
             dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
