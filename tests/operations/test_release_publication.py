@@ -833,8 +833,6 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         ).stdout.strip()
         for name in BINARIES:
             packed_pair(export, name)
-            (export / name).chmod(0o755)
-            (export / f"{name}.dwp").chmod(0o644)
         (export / "rustc-version").write_text(
             "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
         )
@@ -926,7 +924,18 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
     def test_candidate_packager_links_correct_modes_and_copies_wrong_modes(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             fixture = Path(raw_directory)
-            source, export, artifact, commit = self.package_a_candidate(fixture)
+            source, export, _, commit = self.package_a_candidate(fixture)
+            for name in BINARIES:
+                (export / name).chmod(0o755)
+                (export / f"{name}.dwp").chmod(0o644)
+            artifact = fixture / "linked"
+            subprocess.run(
+                [str(ROOT / "scripts/release-package-candidate"), str(source),
+                 str(ROOT), str(export), str(artifact), "x86_64-unknown-linux-gnu",
+                 commit, commit],
+                check=True,
+                env=own_repository_environment(),
+            )
             for name in BINARIES:
                 self.assertTrue(os.path.samefile(export / name, artifact / name))
                 self.assertTrue(

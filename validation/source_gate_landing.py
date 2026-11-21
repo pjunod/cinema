@@ -33,6 +33,14 @@ JOB_NAMES = {
 
 
 
+def require_manual_workflow(workflow):
+    from validation import source_gate_repair as continuation
+
+    r.require(workflow is not None and hashlib.sha256(workflow).hexdigest()
+              in {WORKFLOW_SHA256, continuation.WORKFLOW_SHA256},
+              'Unreviewed manual source-gate workflow')
+
+
 def semantic_pr_title(title):
     """Only the forge's draft-control prefix is excluded from title identity."""
     r.require(isinstance(title, str), 'Missing source-gate PR title')
@@ -212,8 +220,7 @@ def verify(api, number, head, main, root, run_id):
     r.require(api.get('/branches/main')['commit']['id'] == main
               and [row['commit']['id'] for row in api.pages('/branches') if row['name'] == branch] == [head],
               'Source-gate main or branch moved')
-    r.require(retention.digest(retention.git_bytes(head, '.github/workflows/ci.yml')) == WORKFLOW_SHA256,
-              'Unreviewed manual source-gate workflow')
+    require_manual_workflow(retention.git_bytes(head, '.github/workflows/ci.yml'))
     environment = dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_RUN_ATTEMPT='1',
         GITHUB_REPOSITORY=repo['full_name'], PLURX_PROMOTION_PR=str(number),
         PLURX_PROMOTION_HEAD_SHA=head, PLURX_PROMOTION_BASE_SHA=main,

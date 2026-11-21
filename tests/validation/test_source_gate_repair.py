@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+from pathlib import Path
 import unittest
 from unittest import mock
 import zipfile
@@ -17,6 +18,36 @@ CURRENT = 'c' * 40
 
 
 class GateRepairCase(unittest.TestCase):
+    def test_default_manual_workflow_still_admits_exact_old_and_current_recipes(self):
+        from validation import source_gate_landing as landing
+
+        original = repair.retention.git_bytes(repair.PREDECESSOR['head'], '.github/workflows/ci.yml')
+        current = (Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml').read_bytes()
+        landing.require_manual_workflow(original)
+        landing.require_manual_workflow(current)
+        altered = current.replace(b'python3 -m validation.native_python_execute prepare', b'false', 1)
+        self.assertNotEqual(altered, current)
+        with self.assertRaises(ReceiptError):
+            landing.require_manual_workflow(altered)
+
+    def test_android_instrumentation_refuses_a_changed_emulator_action(self):
+        import subprocess
+
+        previous = repair.PREDECESSOR['head']
+        current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        self.assertIn('.github/actions/android-emulator-ready',
+                      repair.android_device_source_projection(previous, current))
+        identify = repair.retention.android_device_tree
+
+        def changed(revision, path):
+            if revision == current and path == '.github/actions/android-emulator-ready':
+                return 'foreign emulator action'
+            return identify(revision, path)
+
+        with mock.patch.object(repair.retention, 'android_device_tree', side_effect=changed):
+            with self.assertRaises(ReceiptError):
+                repair.android_device_source_projection(previous, current)
+
     def test_android_compile_lint_retains_only_completed_tasks_before_the_metadata_failure(self):
         lines = [
             SOURCE,

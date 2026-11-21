@@ -532,6 +532,31 @@ def store_coverage(api, artifacts, job, raw, prior, current, root):
             'retained_suites': dict(terminals), **evidence}
 
 
+def android_device_source_projection(prior, candidate):
+    header = (
+        b'      predecessor_run:\n'
+        b'        type: string\n'
+        b'        description: "Earlier interrupted source gate identified in the live PR enrollment"\n'
+        b'        required: false\n'
+        b'        default: ""\n'
+    )
+    guard = b" && needs.preflight.outputs.android_device_retained != 'true'"
+
+    def projected(source, path):
+        raw = retention.git_bytes(source, path)
+        if path == '.github/workflows/ci.yml':
+            receipts.require(raw is not None and retention.digest(raw) == WORKFLOW_SHA256
+                             and raw.count(header) == 1 and raw.count(guard) == 2,
+                             'Unknown continuation Android workflow projection')
+            return raw.replace(header, b'').replace(guard, b'')
+        return raw
+
+    before = retention.android_device_inputs(retention.git_bytes, prior)
+    current = retention.android_device_inputs(projected, candidate)
+    receipts.require(before == current, 'Android test or emulator action inputs changed')
+    return current
+
+
 def prior_coverage(api, value, binding, pull, root, current_run=None):
     from validation import main_preflight_adoption as main_commands
     from validation import paperwork_continuation as paperwork
@@ -597,6 +622,7 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
                           'attachment_uuid': inputs['retained_units_attachment_uuid']}
     android, jvm, snapshot = android_witness(api, android_descriptor,
         {**binding, 'android_snapshot': value['android_snapshot']}, pull, old, android, root)
+    device_inputs = android_device_source_projection(prior, current)
     apk_job, device_job = job_for('android_apks'), job_for('android_device')
     device = android_device_coverage(api, artifacts, apk_job, device_job,
                                      successful_job(api, apk_job, 'android_apks'),
@@ -605,7 +631,7 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
     current_root = reviewed_inputs(prior, current, (*root_custody.INPUTS, 'validation/selected_root_custody.py'))
     root_custody.coverage_shape(python['root_ownership'])
     retained_lanes = {'apple': {'native': python['apple'], 'current_build': reader, 'inputs': native_inputs},
-                      'android_device': device}
+                      'android_device': {**device, 'source_commit': prior, 'inputs': device_inputs}}
     topology = job_for('cluster_topology')
     successful_job(api, topology, 'cluster_topology')
     retained_lanes['cluster_topology'] = topology_coverage(api, artifacts, topology, prior, current,
@@ -817,9 +843,14 @@ def require_gate_pointer(pull, run):
 
 def repair_result(api, repo, pull, binding, value, root, run):
     from validation import qualification
+    from validation.publish_cinema_main import CachedReadAPI
     from validation import source_gate_landing as landing
     from validation import workspace_rust_continuation as workspace
 
+    # This cache is restricted to one proof calculation after repair_event
+    # fetched the live PR, title, body, and branch tips. Re-authenticate these
+    # through the live API before each new proof calculation.
+    api = CachedReadAPI(api)
     require_gate_pointer(pull, run)
     reference, jvm, snapshot = prior_coverage(api, value, binding, pull, root, current_run=run)
     jobs = api.pages(f'/actions/runs/{run}/jobs')

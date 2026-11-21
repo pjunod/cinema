@@ -28,6 +28,17 @@ class NextestBaseBridgeTest(unittest.TestCase):
             with self.assertRaises(ReceiptError):
                 bridge.current_projection(profile, candidate, base)
 
+    def test_external_inputs_refuse_an_unreviewed_embedded_or_executable_path(self):
+        old, current = 'a' * 40, 'b' * 40
+        rust = {'crates/plurxd/src/dv_tools.rs'}
+        allowed = rust | {'.github/workflows/ci.yml', 'tests/validation/test_nextest_base_bridge.py'}
+        with patch.object(bridge.retention, 'changed', return_value=allowed) as changes:
+            bridge.require_external_inputs(old, current, rust)
+            for extra in ('tools/dv_processing/publication.c', 'Makefile', 'tests/playback/other-fixture.json'):
+                changes.return_value = allowed | {extra}
+                with self.subTest(extra=extra), self.assertRaises(ReceiptError):
+                    bridge.require_external_inputs(old, current, rust)
+
     def test_upstream_log_without_its_original_digest_never_supplies_a_positive(self):
         authentic = b'archived source and real runner outcomes'
         profile = {'upstream_linux_log_sha256': hashlib.sha256(authentic).hexdigest()}

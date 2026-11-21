@@ -16,6 +16,22 @@ PROFILE_SHA256 = '36ef3b189bd091f2832d921ea5b010cfecfab653eaa6747226ff1b18341da8
 RUST_INPUTS = ('crates', 'vendor', 'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo', '.config',
                'rust-toolchain.toml', 'rustfmt.toml')
 
+# The candidate Rust sources are fixed below. None of these named changes is
+# consumed by that Rust execution. Everything else outside the Cargo trees,
+# including bundled DV tools, other test fixtures and scripts, stays exact.
+CONTROL_PATHS = frozenset({
+    '.github/workflows/ci.yml', '.github/workflows/publish-release.yml', 'CHANGELOG.md',
+    'scripts/release-package-candidate', 'tests/playback/rolling-producer-owners.toml',
+    'tests/operations/test_contracts.py', 'tests/operations/test_release_publication.py',
+    'tests/validation/test_nextest_base_bridge.py', 'tests/validation/test_selected_pr_jvm_discovery.py',
+    'tests/validation/test_source_gate_repair.py',
+    'validation/jvm_unit_discovery.py', 'validation/main_python_continuation.py',
+    'validation/nextest_base_bridge.py', PROFILE, 'validation/paperwork_continuation.py',
+    'validation/qualification.py', 'validation/source_gate_landing.py',
+    'validation/source_gate_repair.py', 'validation/workspace_rust_continuation.py',
+})
+
+
 
 def file_digest(revision, path):
     raw = retention.git_bytes(revision, path)
@@ -26,6 +42,12 @@ def source_range(candidate, before):
     import subprocess
     raw = subprocess.check_output(['git', 'diff', '--name-only', '-z', before, candidate, '--', *RUST_INPUTS])
     return {filename.decode() for filename in raw.split(b'\x00') if filename}
+
+
+def require_external_inputs(prior, candidate, reviewed_rust):
+    external = retention.changed(prior, candidate) - set(reviewed_rust)
+    receipts.require(external <= CONTROL_PATHS,
+                     'Historical Rust external inputs changed: ' + ', '.join(sorted(external - CONTROL_PATHS)))
 
 
 def current_projection(profile, candidate, base):
@@ -94,6 +116,7 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
     profile = receipts.bounded_json(raw)
     selection = current_projection(profile, candidate, binding['base_sha'])
     prior = profile['source_before']
+    require_external_inputs(prior, candidate, profile['changes'])
     old = {**binding, 'head_sha': prior, 'base_sha': profile['source_before_base']}
     original, repository = original_document(api, record['prior_evidence'], old)
     proof = nextest.authenticate(api, original, old, prior, repository, current_run=current_run)

@@ -106,7 +106,7 @@ def binding(api, value, environment, root, mode):
         from validation import source_gate_landing as landing
         workflow = retention.git_bytes(candidate, '.github/workflows/' + run['workflow_id'])
         if mode == 'final':
-            r.require(retention.digest(workflow) == landing.WORKFLOW_SHA256, 'Unreviewed final paperwork workflow')
+            landing.require_manual_workflow(workflow)
         else:
             landing.nextest.projected_main_workflow(workflow)
         event = r.bounded_json(run['event_payload'].encode())
