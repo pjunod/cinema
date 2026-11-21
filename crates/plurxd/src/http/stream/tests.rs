@@ -2775,20 +2775,18 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
         .expect("file");
     let pause = pause_next_marker_fallback_for_test(&path);
     let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
-    let decision = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        decision_for_source_file(
+    let decision = tokio::select! {
+        biased;
+        _ = pause.wait() => panic!("Source entered the live-probe marker fallback"),
+        decision = decision_for_source_file(
             &state,
             file.clone(),
             Caps {
                 caps_v2: Some(caps),
                 ..Default::default()
             },
-        ),
-    )
-    .await
-    .expect("Source never enters the paused live-probe fallback")
-    .expect("actual Source engine");
+        ) => decision.expect("actual Source engine"),
+    };
     assert_eq!(
         serde_json::to_value(&decision.markers).expect("markers"),
         serde_json::to_value(markers_from_chapters(&[], file.duration_ms))
@@ -2812,6 +2810,8 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
         "decision must not backfill an annotation set"
     );
     // The ordinary Local fallback still enters its existing owned seam.
+    // The Source race can cancel its barrier wait, so use a fresh barrier.
+    let pause = pause_next_marker_fallback_for_test(&path);
     let local_state = state.clone();
     let local_file = file.clone();
     let local = tokio::spawn(async move { markers_for(&local_state, &local_file).await });

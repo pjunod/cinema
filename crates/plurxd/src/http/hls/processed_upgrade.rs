@@ -831,7 +831,7 @@ where
     }
     let native_split = state
         .transcode
-        .native_split_active(&intent.session_id)
+        .native_split_owns_fel(&intent.session_id)
         .await;
     let ids = super::preparation::StagedSuccessorIds::mint();
     let recovery = crate::transcode::SessionRecoveryIdentity {

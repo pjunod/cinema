@@ -210,9 +210,44 @@ def native_class_details(raw):
     require(offset == len(raw) and source_file, 'Incomplete compiled source identity')
     return {'source_file': source_file, 'annotations': annotations, 'fields': fields, 'methods': methods}
 
-def native_junit4_inventory(classfiles):
+SELECTED_PR_DISCOVERY = 'selected-pr-junit4-robolectric-4.17-v1'
+ROBOLECTRIC_CLASS = 'tv/plurx/app/ui/SharingInvitationFileProviderTest'
+ROBOLECTRIC_CLASS_SHA256 = 'd26850c60159baf95ed0afc67846e5518982f329a09ad574777825552444cf25'
+ROBOLECTRIC_SOURCE = 'clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationFileProviderTest.kt'
+ROBOLECTRIC_SOURCE_SHA256 = 'a4cb5b8df8894743c0b875f27f7e96b0fa809f34227e6dbdc0412eee3e874a48'
+ROBOLECTRIC_JAR_SHA256 = '69e5bc128ba8d1fbb09d36bfb8a617018d6a3a418f77d44b36e7aca6747f14ea'
+ROBOLECTRIC_METHODS = {
+    'tv.plurx.app.ui.SharingInvitationFileProviderTest.laterSharesCannotReplaceTheInvitationVisibleThroughAnEarlierGrantedUri',
+    'tv.plurx.app.ui.SharingInvitationFileProviderTest.sharingPngAndDiagnosticsZipResolveThroughIndependentProvidersAndPaths',
+}
+
+
+def selected_pr_discovery_inputs(workspace, jar=None):
+    """Seal the one real runner and SDK35 source contract; never a skip."""
+    import hashlib
+    import os
+    import tomllib
+    source = workspace / ROBOLECTRIC_SOURCE
+    require(source.is_file() and not source.is_symlink()
+            and hashlib.sha256(source.read_bytes()).hexdigest() == ROBOLECTRIC_SOURCE_SHA256,
+            'Reviewed Robolectric source or SDK35 configuration differs')
+    catalog = tomllib.loads((workspace / 'clients/android/gradle/libs.versions.toml').read_text())
+    require(catalog['versions']['robolectric'] == '4.17', 'Reviewed Robolectric version differs')
+    if jar is None:
+        from pathlib import Path
+        cache = Path(os.environ.get('GRADLE_USER_HOME', str(workspace / 'clients/android/.gradle-validation')))
+        candidates = list((cache / 'caches/modules-2/files-2.1/org.robolectric/robolectric/4.17').glob('*/robolectric-4.17.jar'))
+        require(len(candidates) == 1, 'Missing or ambiguous actual Robolectric runtime JAR')
+        jar = candidates[0]
+    require(jar.is_file() and not jar.is_symlink() and jar.stat().st_size <= 8 * 1024 * 1024
+            and hashlib.sha256(jar.read_bytes()).hexdigest() == ROBOLECTRIC_JAR_SHA256,
+            'Actual Robolectric runtime JAR differs')
+
+
+def native_junit4_inventory(classfiles, *, selected_pr_contract=None):
     """Complete classfile roster; actual discovery, zero runtime outcome rows."""
     import hashlib
+    require(selected_pr_contract in (None, SELECTED_PR_DISCOVERY), 'Unknown selected JVM discovery contract')
     require(isinstance(classfiles, dict) and 0 < len(classfiles) <= 4096 and (sum(map(len, classfiles.values())) <= 16 * 1024 * 1024), 'Compiled artifact roster outside bound')
     headers = []
     details = {}
@@ -232,7 +267,14 @@ def native_junit4_inventory(classfiles):
         name = row['name']
         d = details[name]
         annotations = [a[1] for a in d['annotations']] + [a[1] for m in d['methods'] + d['fields'] for a in m['annotations']]
-        require(not forbidden.intersection(annotations), 'Unsupported JUnit runner, skip or rule')
+        allowed_runner = (selected_pr_contract == SELECTED_PR_DISCOVERY
+                          and name == ROBOLECTRIC_CLASS and sha[name] == ROBOLECTRIC_CLASS_SHA256)
+        forbidden_here = forbidden - ({'Lorg/junit/runner/RunWith;'} if allowed_runner else set())
+        require(not forbidden_here.intersection(annotations), 'Unsupported JUnit runner, skip or rule')
+        if allowed_runner:
+            require(d['annotations'].count(('RuntimeVisibleAnnotations', 'Lorg/junit/runner/RunWith;')) == 1
+                    and not any(a[1] == 'Lorg/junit/runner/RunWith;' for m in d['methods'] + d['fields'] for a in m['annotations']),
+                    'Reviewed runner annotation location differs')
         require(not any((('RuntimeInvisibleAnnotations', 'Lorg/junit/Test;') in m['annotations'] for m in d['methods'])), 'Invisible Test annotation is not JUnit runtime discovery')
         tests = [m for m in d['methods'] if ('RuntimeVisibleAnnotations', 'Lorg/junit/Test;') in m['annotations']]
         if not tests:
@@ -248,6 +290,8 @@ def native_junit4_inventory(classfiles):
             require(m['name'] and '/' not in m['name'], 'Ambiguous JUnit method identity')
             methods.append(name.replace('/', '.') + '.' + m['name'])
         require(len(methods) == len(set(methods)), 'Duplicate compiled test method')
+        if allowed_runner:
+            require(set(methods) == ROBOLECTRIC_METHODS, 'Reviewed runner method census differs')
         classes.append({'class': name.replace('/', '.'), 'source_file': d['source_file'], 'class_sha256': sha[name], 'ids': sorted(methods)})
         ids.extend(methods)
     require(ids and len(ids) == len(set(ids)), 'Empty or ambiguous compiled JUnit identity universe')
@@ -313,7 +357,11 @@ def compiled_roster(workspace):
 
 def verify_adopted(workspace, adopted):
     """Independently compare current compiled discovery with adopted membership."""
-    inventory = native_junit4_inventory(compiled_roster(workspace))
+    contract = adopted.get('selected_pr_discovery_contract')
+    if contract is not None:
+        require(contract == SELECTED_PR_DISCOVERY, 'Unknown selected JVM adoption policy')
+        selected_pr_discovery_inputs(workspace)
+    inventory = native_junit4_inventory(compiled_roster(workspace), selected_pr_contract=contract)
     ids = sorted(row['class'] + '/' + method[len(row['class']) + 1:]
                  for row in inventory['classes'] for method in row['ids'])
     import hashlib

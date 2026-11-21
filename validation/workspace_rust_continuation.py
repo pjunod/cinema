@@ -83,13 +83,44 @@ def check_changes(record, candidate, targets):
     return invalidated
 
 
+SOURCE_GATE_UPLOAD = "      - name: Retain the selected Rust source-gate completion\n        if: steps.workspace-continuation.outputs.provider == 'workspace-nextest-shards-v1'\n        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4\n        with:\n          name: selected-pr-rust-source-gate-${{ github.run_id }}\n          path: |\n            target/validation/nextest-continuation/receipt.json\n            target/validation/nextest-continuation/listing.json\n          if-no-files-found: error\n          retention-days: 14\n"
+SOURCE_GATE_PAPERWORK = "      - name: Check current ordinary-PR source-gate paperwork\n        if: github.event_name == 'workflow_dispatch' && inputs.workspace_rust_evidence != ''\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n        run: python3 -m validation.source_gate_landing paperwork\n"
+
+
+# Main's reviewed ARM64 device route is outside the Rust/Python recipes.
+# These exact blocks remain mandatory native qualification, never retained
+# device test outcomes. Any other workflow byte still fails projection.
+ANDROID_DEVICE_ROUTE_SHA256 = {'e1f5fbed22eeba3b72031a31dbdb4f4eb8aeb00e9ac2679d0bbd4d440c606953', '8a870a911c050bc33281e7986196a5bcad125131dce15cf85ea717f5ababdbd8'}
+
+
+def non_rust_device_projection(raw):
+    matches = list(re.finditer(rb'(?ms)^  android_(?:apks|device):\n.*?(?=^  package_smoke:)', raw))
+    receipts.require(len(matches) == 1 and retention.digest(matches[0].group()) in ANDROID_DEVICE_ROUTE_SHA256,
+                     'Unreviewed native Android device workflow projection')
+    return raw[:matches[0].start()] + b'  <reviewed-native-android-device-jobs>\n' + raw[matches[0].end():]
+
+
+def metadata_only_workflow(before, after):
+    if not all(before.count(block.encode()) == 0 and after.count(block.encode()) == 1
+               for block in (SOURCE_GATE_UPLOAD, SOURCE_GATE_PAPERWORK)):
+        return False
+    stripped = after.replace(SOURCE_GATE_UPLOAD.encode(), b'').replace(SOURCE_GATE_PAPERWORK.encode(), b'')
+    if stripped == before:
+        return True
+    try:
+        return non_rust_device_projection(stripped) == non_rust_device_projection(before)
+    except receipts.ReceiptError:
+        return False
+
+
 def check_workflow_environment(workflow, expected):
     commands.canonical_job_keys(workflow)
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
     roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
     accepted = expected if isinstance(expected, tuple) else (expected,)
-    receipts.require(job and retention.digest(job[0].encode()) in accepted
+    receipts.require(job and job[0].count(SOURCE_GATE_UPLOAD) <= 1
+                     and retention.digest(job[0].replace(SOURCE_GATE_UPLOAD, '').encode()) in accepted
                      and roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']
                      and global_env == ['  CARGO_TERM_COLOR: always\n']
                      and not re.search(r'(?m)^defaults:',workflow),
@@ -103,13 +134,17 @@ def require_native_inputs(inputs):
         'Historical Rust job may not adopt earlier unit outcomes')
 
 
-def authenticate(api, descriptor, binding, candidate):
+def authenticate(api, descriptor, binding, candidate, *, current_run=None):
     receipts.require(set(descriptor) == {'sha256', 'attachment_id', 'attachment_uuid'},
                      'Unknown workspace continuation descriptor')
     attachment = receipts.positive(descriptor['attachment_id'])
     uuid, digest = descriptor['attachment_uuid'], descriptor['sha256']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, digest)
     record, _, repository, _ = retention.verify_identity(api, raw, digest, binding, candidate, attachment, uuid)
+    if record.get('version') == 'workspace-nextest-shards-v1':
+        from validation import nextest_shard_continuation as nextest
+        proof = nextest.authenticate(api, record, binding, candidate, repository, current_run=current_run)
+        return {**proof, 'digest': digest}
     receipts.require(set(record) == {'version','repository','pr','branch','base_sha','source_commit',
                                     'prior','run','job','log_sha256','changes'}
                      and record['version'] == POLICY and record['source_commit'] == candidate,
@@ -183,8 +218,9 @@ def main():
                          receipts.bounded_json(os.environ['PROMOTION_BINDING'].encode()), candidate)
     destination = Path('target/validation/workspace-rust-selection.json')
     receipts.atomic_json(destination,proof)
-    print('Verified prior Rust passes for', sum(map(len, proof['retained'].values())), 'named target bodies')
+    print('Verified prior Rust passes for', (len(proof['retained_ids']) if 'retained_ids' in proof else sum(map(len, proof['retained'].values()))), 'named target bodies')
     with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+        print('provider=' + proof.get('provider', POLICY), file=output)
         print('root_retained=' + str(proof['root_ownership_passed']).lower(),file=output)
 
 

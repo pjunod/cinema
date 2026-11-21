@@ -149,7 +149,16 @@ impl TitleTask {
             }
             *after = 0;
             #[cfg(target_os = "linux")]
-            requalify_stale_fel_titles(state, &tools, &scanner).await;
+            {
+                if let Err(error) = state
+                    .transcode
+                    .queue_missing_native_fel_head(&state.node_id, &tools, &scanner, now_ms())
+                    .await
+                {
+                    tracing::debug!(target:"plurxd::dv", %error, "native FEL head request deferred");
+                }
+                requalify_stale_fel_titles(state, &tools, &scanner).await;
+            }
             return Ok(None);
         }
         #[cfg(target_os = "linux")]
@@ -166,8 +175,15 @@ impl TitleTask {
             }
             if !playback_only {
                 *after = demand.probe_revision;
-                // An ordinary turn must not acquire companion admission.
-                if demand.playback_requested {
+                // Live work was considered independently above; an ordinary
+                // turn must not acquire its more permissive companion class
+                // or claim a retained FEL head assigned to another node.
+                if demand.playback_requested
+                    || demand
+                        .fel_head_target
+                        .as_deref()
+                        .is_some_and(|node| node != state.node_id)
+                {
                     continue;
                 }
             }
@@ -591,16 +607,17 @@ async fn eligible_file(
             file.size,
             file.mtime,
         );
-        if demand.playback_requested && pending.is_empty() {
-            return Ok(None);
-        }
-        if !pending.is_empty()
-            && !pending.iter().any(|request| {
+        // Playback can only satisfy its exact attached recipe. Maintenance
+        // may measure this node's native recipe while foreign requests wait.
+        if demand.playback_requested {
+            let exact = pending.iter().any(|request| {
                 Some(request.backend_identity.as_str()) == fel_backend
-                    && (!demand.playback_requested
-                        || demand.playback_recipes.contains(&request.identity))
-            })
-        {
+                    && demand.playback_recipes.contains(&request.identity)
+            });
+            if !exact {
+                return Ok(None);
+            }
+        } else if fel_backend.is_none() && !pending.is_empty() {
             return Ok(None);
         }
     }
@@ -863,17 +880,23 @@ async fn execute(
                         checkpoint: Some(serde_json::json!({"fel_title_aggregate":output})),
                     })
                 } else {
-                    let context = super::m7_comparison::TitleContext {
-                        state: &state,
-                        file: &file,
-                        demand: &demand,
-                        tools: &tools,
-                        admission: &admission,
-                        fence: &fence,
-                        cancel: &cancel,
-                        shutdown: &shutdown,
+                    // The native_fel_head waiter reopens an already-settled
+                    // title only to rebuild that node's local prefix.
+                    let evaluation = if demand.fel_head_target.is_some() {
+                        Ok(())
+                    } else {
+                        let context = super::m7_comparison::TitleContext {
+                            state: &state,
+                            file: &file,
+                            demand: &demand,
+                            tools: &tools,
+                            admission: &admission,
+                            fence: &fence,
+                            cancel: &cancel,
+                            shutdown: &shutdown,
+                        };
+                        super::m7_title::evaluate(&context, &output.stats).await
                     };
-                    let evaluation = super::m7_title::evaluate(&context, &output.stats).await;
                     let settlement = m7_settlement(
                         &output,
                         evaluation,
@@ -981,15 +1004,38 @@ async fn qualify_owned(
                 )
                 .await
             } else {
-                super::fel_qualification::qualify_if_due(
-                    state,
-                    file,
-                    &demand.probe_json,
-                    tools,
-                    admission,
-                    &qualification,
-                )
-                .await
+                let verdict = if demand.fel_head_target.is_some() {
+                    // Same-generation rebuilds were enqueued only after proving
+                    // this title already has its admitting quality verdict.
+                    Ok(super::fel_qualification::Qualification::NotDue)
+                } else {
+                    super::fel_qualification::qualify_if_due(
+                        state,
+                        file,
+                        &demand.probe_json,
+                        tools,
+                        admission,
+                        &qualification,
+                    )
+                    .await
+                };
+                if verdict.is_ok() {
+                    if let Some(version) = source_version.as_deref() {
+                        let prepared = Box::pin(state.transcode.prepare_native_fel_head(
+                            file,
+                            version,
+                            Arc::new(tools.clone()),
+                            admission,
+                            &qualification,
+                        ))
+                        .await;
+                        if let Err(reason) = prepared {
+                            tracing::debug!(target: "plurxd::dv", file_id = file.id, %reason,
+                                "native FEL head preparation deferred");
+                        }
+                    }
+                }
+                verdict
             }
         },
     )

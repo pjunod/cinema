@@ -1,3 +1,9 @@
+# Prepared native FEL startup. One source-copy command is run and reaped by
+# the existing bounded background child owner under a source job. The one
+# startup staging task holds a scratch writer and may only offer a complete
+# batch under the current producer transition and first-publication lock.
+# Its timer limits a private wait and does not authorize publication or
+# establish process settlement. Rejected objects go through rolling retention.
 # Subtitle identity fixture: +1 time shape is the one-millisecond sleep while
 # waiting for an observable ctime mutation, bounded by a two-second assertion.
 # It runs on the existing test thread; no production work or settlement owner.
@@ -852,7 +858,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # S10 rolling retained attachment: one false initializer, not a replacement election.
 # The native FEL publisher reads the mask under the existing transition lock
 # before selecting an unpublished video object.
-expected_occurrences = 39
+expected_occurrences = 40
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -880,7 +886,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
 # The native FEL publisher shares this lock for the final exact-attempt video
 # choice.
-expected_occurrences = 21
+expected_occurrences = 22
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1217,7 +1223,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # observe_until, and an observer timeout leaves the task holding the counted
 # guard so Source retirement waits for real child/reader settlement. It decides
 # no recovery and retries nothing. +1 joined test caller in tests/source_actor.rs.
-expected_occurrences = 121
+expected_occurrences = 122
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1528,7 +1534,7 @@ pattern = "child_transition"
 # 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
 # (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
 # The native FEL publication guard is the same lock use reviewed above.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -1547,7 +1553,7 @@ pattern = "replacing_child"
 # test-only stores of the mask in the path-owner position test. No production owner added.
 # S10 retained attachment initializes false; no replacement owner is introduced.
 # The same native FEL commit checks the existing replacement fence.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -1709,7 +1715,8 @@ pattern = "response_publication_deadline_before"
 # request deadline. It neither renews that deadline nor adds a producer owner.
 # The split child playlist uses the existing response admission subdeadline of
 # its original request.
-expected_occurrences = 29
+# The prepared master playlist takes the existing response subdeadline.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
@@ -1915,7 +1922,8 @@ pattern = "DurableRouteResolution"
 # variants it reads a row from and the confirmation arms name `Absent` (+6);
 # route_view_tests.rs's fence guard classifies verdicts by variant (+6,
 # test-only). No new producer.
-expected_occurrences = 125
+# The prepared master playlist matches all five durable route outcomes.
+expected_occurrences = 130
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -4115,7 +4123,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
-expected_occurrences = 1182
+# The placeholder source fixture awaits one blocking file-lock task and
+# holds the returned lock through validation and atomic publication.
+expected_occurrences = 1184
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4371,7 +4381,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 103
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 104
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6090,6 +6102,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # The scanner deadline fixture bounds cleanup after advancing the test clock.
+# The stored-marker fixture races the decision against the explicit
+# marker fallback pause and removes its elapsed-time observer.
 expected_occurrences = 2271
 
 
@@ -6629,7 +6643,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 368
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+# The placeholder fixture replaces one encoder command with an encoder
+# and a probe command. Its test caller awaits both outputs.
+expected_occurrences = 371
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7377,7 +7395,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Removing the retired parser-floor refusal drops one HTTP status read.
 # The owned voter fixture process is joined before a collision can retry.
 # The title scanner regression awaits the isolated test process with output().
-expected_occurrences = 956
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+# The placeholder fixture adds one net awaited output() call. The
+# prepared-master relay fixture also reads one HTTP response status.
+expected_occurrences = 959
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7699,7 +7721,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 402
+# The stored-marker fixture waits on its marker fallback pause.
+expected_occurrences = 403
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7950,7 +7973,11 @@ pattern = "kill_on_drop\\s*\\("
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
 # The isolated title scanner test process uses kill-on-drop for cancellation.
-expected_occurrences = 133
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+# Both placeholder fixture commands have a kill-on-drop backstop,
+# with their normal callers awaiting output().
+expected_occurrences = 135
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
