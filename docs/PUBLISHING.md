@@ -42,7 +42,8 @@ uploads without changing store listings or submitting production releases.
 **Signing runner setup.** Register a native Forgejo runner on the signing Mac
 under the account that owns the distribution signing identity, with labels
 `self-hosted`, `macOS`, `ARM64`, and `mobile-release`. General Apple CI runners
-do not carry this last label. Install Ansible, Xcode/XcodeGen, Java, the Android
+do not carry this last label: they run as a separate service user that cannot
+see the owner's signed-in Xcode session. Install Ansible, Xcode/XcodeGen, Java, the Android
 SDK and fastlane there. Keep a durable authenticated plurx clone available:
 the publisher fetches its `origin/main`, never its working files.
 
@@ -167,6 +168,20 @@ protection on `main` forbids. Successful upload receipts let retries skip
 version/build/platform/track combinations already submitted. The receipt is
 not a live store query: after a crash between store acceptance and receipt
 writing, inspect the store before retrying.
+
+**When the publish job waits with no runner.** Read the signing runner's
+`runner.err` before changing labels. Each line below names a cause:
+
+| Log line | Cause and repair |
+|---|---|
+| `unauthenticated: unregistered runner` | Forgejo dropped the registration. Get a registration token from `GET /api/v1/repos/noirr/plurx/actions/runners/registration-token` (the web UI's runner-creation token is a different kind and is rejected). Run `forgejo-runner register` into a scratch directory with the four labels. Write the new `uuid` into the connection in `config.yaml` and the new token into the file its `token_url` names. Never add an inline `token` beside `token_url`: the runner refuses that config. |
+| `connect: no route to host` to the forge | macOS Local Network privacy is blocking the runner, which runs in the owner's login session. The approval is per binary and per user, and it appears in Settings only after macOS prompts. It cannot be added by hand. |
+
+Do not restart the signing runner while a job runs. `launchctl kickstart -k`
+ended an in-flight archive despite the runner's three-hour shutdown timeout.
+Do not add `mobile-release` to a general Apple CI runner to unblock a queue:
+the job then fails at export because that user has no Xcode account. The
+private handoff records each controller's paths and registrations.
 
 Use Forgejo's **Run workflow** action on **mobile beta channels**, from
 `main`, to retry a mobile update. Supply its original push's full before-SHA
