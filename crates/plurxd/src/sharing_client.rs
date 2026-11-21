@@ -392,6 +392,19 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    /// The receiver's own connection over an already-open fixture stream, as
+    /// though `verified_with_lifetime` had pinned `endpoint`: what a Source
+    /// fixture on loopback uses to drive the exact receiver exchanges.
+    #[cfg(test)]
+    pub(crate) async fn fixture_verified(
+        stream: tokio::net::TcpStream,
+        endpoint: Endpoint,
+    ) -> Result<Self, PeerError> {
+        let host = format!("{}:{}", endpoint.ts_fqdn, endpoint.port);
+        let mut peer = Self::from_stream(stream, host).await?;
+        peer.verified_endpoint = Some(endpoint);
+        Ok(peer)
+    }
     #[cfg(test)]
     async fn from_stream<
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,

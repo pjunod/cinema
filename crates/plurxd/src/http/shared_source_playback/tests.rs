@@ -1472,6 +1472,156 @@ async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     let _ = server.await;
     fixture.shutdown().await;
 }
+/// The receiver half of the production web Start (2026-11-21: published on
+/// the Source, never fetched, `sharing_start_unresolved` at the viewer). The
+/// receiver's own pinned-connection client sends the range Start with the
+/// viewer's start clock and all three affirmations, re-posts typed "not yet"
+/// answers as its owner does, confirms with Status on a fresh connection, and
+/// then runs the owner's acceptance and B's public projection on what came
+/// back. The bounded view is the Source's growing copy with its rolling
+/// control lease, and the reply B publishes must be one a shared client binds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_receiver_consumes_the_range_copy_start_the_source_published() {
+    use crate::sharing_client::{PeerConnection, SourcePeerLineage, SourcePeerSession, StartRetry};
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let endpoint = plurx_core::sharing::Endpoint {
+        ipv4: std::net::Ipv4Addr::LOCALHOST,
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: address.port(),
+        spki_sha256: "0".repeat(64),
+    };
+    let credential = plurx_core::secrets::Secret::from_cleartext(
+        fixture.headers["authorization"]
+            .to_str()
+            .expect("credential header")
+            .strip_prefix("CinemaShare ")
+            .expect("CinemaShare credential"),
+    );
+    let viewer = fixture.headers["cinemashare-viewer"]
+        .to_str()
+        .expect("viewer header")
+        .to_owned();
+    let wrapper = String::from_utf8(fixture.request.clone()).expect("canonical wrapper");
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    // B retains the viewer's own request; the wrapper's session is that
+    // request with B's request and playback identities.
+    let request_json = recipe["session"].to_string();
+    let connect = || async {
+        PeerConnection::fixture_verified(
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("pinned Source connection"),
+            endpoint.clone(),
+        )
+        .await
+        .expect("receiver peer connection")
+    };
+    let mut peer = connect().await;
+    let viewer_end = tokio::time::Instant::now() + Duration::from_secs(120);
+    let decoded = loop {
+        let remaining = viewer_end.saturating_duration_since(tokio::time::Instant::now());
+        match peer
+            .file_start(
+                &credential,
+                &fixture.reference,
+                &viewer,
+                &wrapper,
+                Some(remaining),
+            )
+            .await
+        {
+            Err(error) if StartRetry::from_peer(error).is_some() => {
+                let retry = StartRetry::from_peer(error).expect("typed retry");
+                assert!(
+                    tokio::time::Instant::now() < viewer_end,
+                    "the Source never published the range Start"
+                );
+                tokio::time::sleep(Duration::from_secs(retry.retry_after_secs)).await;
+            }
+            result => break result.expect("receiver Start exchange"),
+        }
+    };
+    let affirmed = peer.receiver_presentation_affirmed();
+    assert!(affirmed, "the receiver's Start affirms bounded ranges");
+    let crate::http::sharing_direct_wire::DecodedSourceStart::Hls(decoded) = decoded else {
+        panic!("an HLS range Start");
+    };
+    let (_, incarnation, response) = (*decoded).into_parts();
+    assert!(!response.vod, "a range Start runs the growing copy");
+    // The owner's acceptance of the received Start (`run_owner`).
+    let client_range = receiver_presentation::client_supports_range(&request_json);
+    assert!(receiver_presentation::response_presentable(
+        &response,
+        client_range,
+        affirmed
+    ));
+    assert!(
+        crate::http::sharing_start_decode::delivered_range_presentable(&request_json, &response)
+    );
+    let known = SourcePeerLineage::from_start(incarnation, &response).expect("Source lineage");
+    let session = SourcePeerSession::new(fixture.reference.clone(), &fixture.request)
+        .expect("receiver peer session");
+    // Status on a fresh pinned connection, as the owner's confirmation opens.
+    let status = connect()
+        .await
+        .file_status(&credential, &viewer, &session, &known)
+        .await
+        .expect("receiver Status after Start");
+    let confirmed = status.response().expect("HLS Status").clone();
+    assert_eq!(confirmed.session_id, response.session_id);
+    let source_session = Uuid::parse_str(&response.session_id).expect("Source session");
+    let receiver_session = Uuid::new_v4();
+    let receiver_incarnation = Uuid::new_v4();
+    let public = crate::http::sharing_playback_wire::project_shared_start_with_receiver(
+        confirmed,
+        source_session,
+        receiver_session,
+        receiver_incarnation,
+        1,
+        affirmed && client_range,
+    )
+    .expect("B projects the Start the Source published");
+    // What every shared client binds (web `sharedPlaybackStartContext`,
+    // Apple and Android `bindInitial`): B's session, control and lease.
+    assert!(!public.vod);
+    assert!(public.media_origin_ms.is_some());
+    assert_eq!(public.session_id, receiver_session.to_string());
+    let control = public.control.expect("B control bootstrap");
+    assert_eq!(
+        control.url,
+        format!("/api/v1/hls/{receiver_session}/control")
+    );
+    assert_eq!(control.generation, receiver_incarnation.to_string());
+    assert_eq!(control.next_exchange_ms, 5000);
+    assert_eq!(
+        control.lease_timeout_ms,
+        crate::playback_control::VOD_LEASE_TIMEOUT_MS
+    );
+    connect()
+        .await
+        .file_end(&credential, &viewer, &session, Some(&known))
+        .await
+        .expect("receiver End");
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end() {
     Box::pin(actual_source_resource_delivery(

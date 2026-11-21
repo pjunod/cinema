@@ -336,22 +336,34 @@ pub(crate) fn project_shared_start_with_receiver(
     ) {
         return Err(SharingResourceUnsupported);
     }
+    // The Source's lease is the one its producer keeps for this presentation:
+    // a finished VOD keeps the VOD lease, and the growing copy behind a bounded
+    // view keeps the rolling lease of a growing session. B relays the control
+    // exchanges that hold either one.
+    let source_lease = if response.vod {
+        crate::playback_control::VOD_LEASE_TIMEOUT_MS
+    } else {
+        crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
+    };
     if let Some(control) = &mut response.control {
         if control.url != format!("{source_prefix}control")
             || control.protocol != crate::playback_control::PROTOCOL_V1
             || control.control_epoch == 0
             || control.control_epoch > 9_007_199_254_740_991
             || control.next_exchange_ms != crate::playback_control::NEXT_EXCHANGE_MS
-            || control.lease_timeout_ms != crate::playback_control::VOD_LEASE_TIMEOUT_MS
+            || control.lease_timeout_ms != source_lease
             || Uuid::parse_str(&control.generation)
                 .ok()
                 .is_none_or(|id| !v4(id) || id.to_string() != control.generation)
         {
             return Err(SharingResourceUnsupported);
         }
+        // B's own control bootstrap: its session, incarnation and epoch, and
+        // the one lease every shared client is promised for a B session.
         control.url = format!("/api/v1/hls/{receiver_session}/control");
         control.generation = receiver_incarnation.to_string();
         control.control_epoch = receiver_owner_epoch as u64;
+        control.lease_timeout_ms = crate::playback_control::VOD_LEASE_TIMEOUT_MS;
     }
     response.playlist_url = format!("/api/v1/hls/{receiver_session}/{suffix}");
     response.session_id = receiver_session.to_string();
@@ -830,15 +842,69 @@ mod tests {
         let source = Uuid::new_v4();
         let receiver = Uuid::new_v4();
         let incarnation = Uuid::new_v4();
+        // A bounded view is the Source's growing copy, whose control bootstrap
+        // carries the rolling lease (`source_actor::growing`).
         let mut bounded = start(source);
         bounded.vod = false;
         bounded.media_origin_ms = Some(-83);
+        bounded.control = crate::playback_control::ControlBootstrap::new(
+            &source.to_string(),
+            &Uuid::new_v4().to_string(),
+            7,
+            crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+        );
         assert!(project_shared_start(bounded.clone(), source, receiver, incarnation, 9).is_err());
-        let projected =
-            project_shared_start_with_receiver(bounded, source, receiver, incarnation, 9, true)
-                .expect("affirmed bounded view");
+        let projected = project_shared_start_with_receiver(
+            bounded.clone(),
+            source,
+            receiver,
+            incarnation,
+            9,
+            true,
+        )
+        .expect("affirmed bounded view");
         assert!(!projected.vod);
         assert_eq!(projected.media_origin_ms, Some(-83));
+        // B answers its own control lease, the one every shared client binds.
+        let control = projected.control.expect("B control bootstrap");
+        assert_eq!(
+            control.lease_timeout_ms,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS
+        );
+        assert_eq!(control.url, format!("/api/v1/hls/{receiver}/control"));
+        // The lease must still be the one the Source's producer keeps for the
+        // presentation it answered: a VOD lease on a growing view, or a rolling
+        // lease on a finished VOD, is not a Source answer.
+        let mut vod_lease = bounded.clone();
+        vod_lease
+            .control
+            .as_mut()
+            .expect("control")
+            .lease_timeout_ms = crate::playback_control::VOD_LEASE_TIMEOUT_MS;
+        assert!(project_shared_start_with_receiver(
+            vod_lease,
+            source,
+            receiver,
+            incarnation,
+            9,
+            true
+        )
+        .is_err());
+        let mut rolling_vod = start(source);
+        rolling_vod
+            .control
+            .as_mut()
+            .expect("control")
+            .lease_timeout_ms = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS;
+        assert!(project_shared_start_with_receiver(
+            rolling_vod,
+            source,
+            receiver,
+            incarnation,
+            9,
+            true
+        )
+        .is_err());
     }
 
     #[test]
