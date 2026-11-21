@@ -575,6 +575,7 @@ class FirecrackerSliceChargeCase(unittest.TestCase):
         result = self.run_pass(available)
         self.assertFalse(self.started())
         self.assertEqual(result["errors"], [f"{self.name}: {message}"])
+        self.assertEqual(result["deferred"], [])
 
     def test_unset_limit_sentinels_and_zero_caps_are_not_reservations(self):
         for cap in (2**64 - 1, 2**63, 64 * watchdog.GIB, 0):
@@ -623,3 +624,26 @@ class FirecrackerSliceChargeCase(unittest.TestCase):
         for shared in ("incus.slice", "lxc.slice"):
             self.config["firecracker_slices"] = [shared]
             self.blocked("invalid reserved Firecracker slice")
+
+
+class TotalMemoryCase(unittest.TestCase):
+    def test_reads_memtotal_and_refuses_when_unreadable_or_missing(self):
+        real_read = Path.read_text
+
+        def meminfo(text=None, error=None):
+            def read(path, *args, **kwargs):
+                if path == Path("/proc/meminfo"):
+                    if error:
+                        raise error
+                    return text
+                return real_read(path, *args, **kwargs)
+            return patch.object(Path, "read_text", read)
+
+        with meminfo("MemTotal:       16384 kB\nMemAvailable:    8192 kB\n"):
+            self.assertEqual(watchdog.total_memory(), 16384 * 1024)
+        with meminfo(error=PermissionError("denied")):
+            with self.assertRaisesRegex(RuntimeError, "MemTotal unreadable"):
+                watchdog.total_memory()
+        with meminfo("MemAvailable:    8192 kB\n"):
+            with self.assertRaisesRegex(RuntimeError, "MemTotal missing"):
+                watchdog.total_memory()
