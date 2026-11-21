@@ -8925,6 +8925,14 @@ test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_quality_uses_clock_and_pause_at_commit_after_delayed_admission(self):"
 
 [[fixes]]
+id = "linux-player.cinema-quality-readmits-outrun-candidate"
+commits = ["7dce5a573a132ed33caca0de3fa091aade6a9582"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "replacement = self.create_session(position)"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_readmits_rolling_candidate_at_commit_position_beyond_its_end(self):"
+
+[[fixes]]
 id = "linux-player.cinema-queued-seek-preserves-pause"
 commits = ["cba42fd40de71ffcc46940db1c186d08558342a7"]
 source = "clients/linux-player/plurx_player/playback.py"
