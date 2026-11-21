@@ -24,6 +24,7 @@ PROTOCOL = "plurx-playback-control-v1"
 # How close to the end of what a growing session has produced a seek may land
 # before mpv would stall waiting for the encoder.
 SEEK_MARGIN_MS = 2000
+QUALITY_READY_TIMEOUT_S = 4.0
 # The mapper is whatever libplacebo reports. M5's build is expected to log
 # "plurx mapper: <name>"; a bare "CM vX" from libplacebo is also accepted.
 EXPLICIT_MAPPER = re.compile(r"plurx mapper:\s*(.+?)\s*$")
@@ -141,6 +142,7 @@ class Playback:
         self.eof_handled = False
         self.retryable = False
         self.pending_quality = None
+        self.deferred_film_seek = None
         self._seed_context = handoff.get("cinema_context")
 
     # -- the server ---------------------------------------------------------
@@ -335,16 +337,29 @@ class Playback:
 
     def on_film_seek(self, args):
         """A seek on the OSC's film timeline outside what the live stream holds."""
-        if self.session is None or self.session.get("vod") or len(args) < 2:
+        if len(args) < 2:
             return
         target = _number(_float(args[1]))
         if target is None:
             return
+        if self.started and self.loading:
+            # Cinema may have sent this from the incumbent while quality
+            # admission blocked the event loop. Let the replacement or
+            # rollback finish before seeking on the resulting media.
+            self.deferred_film_seek = target
+            return
+        self.seek_film(target)
+
+    def seek_film(self, target):
         duration = self.duration_ms()
         target_ms = max(0, round(target * 1000))
         if duration:
             target_ms = min(target_ms, max(0, duration - SEEK_MARGIN_MS))
-        self.recreate(target_ms)
+        local_ms = target_ms - self.origin_ms
+        if self.session is None or (self.session.get("vod") and local_ms >= 0):
+            self.mpv.command("seek", local_ms / 1000, "absolute+exact")
+        else:
+            self.recreate(target_ms)
 
     def on_file_loaded(self):
         if self.pending_quality is not None:
@@ -362,7 +377,9 @@ class Playback:
 
     def position_ms(self):
         """mpv time plus the session origin; the last known value when mpv has none."""
-        if not self.mpv.closed:
+        # Until replacement playback restarts, time-pos can belong to media
+        # whose origin differs from the one we are about to report.
+        if not self.mpv.closed and not (self.started and self.loading):
             seconds = _number(self.mpv.get("time-pos"))
             if seconds is not None and seconds >= 0:
                 self.last_position_ms = self.origin_ms + round(seconds * 1000)
@@ -377,18 +394,36 @@ class Playback:
 
     # -- seeking --------------------------------------------------------------
 
-    def available_end_local_ms(self):
-        ends = []
-        sid = urllib.parse.quote(str(self.session.get("session_id")), safe="")
+    def published_end_local_ms(self, session, timeout=3):
+        sid = urllib.parse.quote(str(session.get("session_id")), safe="")
         try:
-            status, body = self.http.request("GET", f"/api/v1/hls/{sid}/status", auth=False, timeout=3)
-            if status == 200 and isinstance(body, dict) and _track(body.get("published_end_ms")) is not None:
-                ends.append(body["published_end_ms"])
+            status, body = self.http.request("GET", f"/api/v1/hls/{sid}/status", auth=False, timeout=timeout)
         except ApiError:
-            pass
+            return None
+        return _track(body.get("published_end_ms")) if status == 200 and isinstance(body, dict) else None
+
+    def wait_for_quality_runway(self, replacement, origin):
+        """A newly admitted rolling session may still be publishing its first segment."""
+        deadline = self.clock() + QUALITY_READY_TIMEOUT_S
+        end = None
+        while not self.mpv.closed:
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                break
+            end = self.published_end_local_ms(replacement, timeout=min(3, remaining))
+            position = self.position_ms()
+            if position is None or position <= origin or (end is not None and position - origin < end):
+                break
+            remaining = deadline - self.clock()
+            if remaining > 0:
+                self.sleep(min(self.timing.tick_s, remaining))
+        return end
+
+    def available_end_local_ms(self):
+        published = self.published_end_local_ms(self.session)
         duration = _number(self.mpv.get("duration"))
-        if duration is not None:
-            ends.append(round(duration * 1000))
+        ends = [end for end in (published, round(duration * 1000) if duration is not None else None)
+                if end is not None]
         return max(ends) if ends else None
 
     def on_seek(self):
@@ -471,8 +506,7 @@ class Playback:
             self.chrome_error = "That quality is not available for this title"
             self.publish_chrome()
             return
-        position = self.position_ms() or 0
-        paused = bool(self.mpv.get("pause", self.paused))
+        requested_position = self.position_ms() or 0
         saved = {key: getattr(self, key) for key in (
             "quality", "decision", "delivery", "mode", "method", "sidecar", "burn", "notice",
             "audio", "subtitle", "playback_id", "session", "origin_ms", "control_binding", "sequence")}
@@ -480,24 +514,48 @@ class Playback:
         self.publish_chrome()
         self.progress("seek")
         self.quality = choice
+        replacement = None
+        frozen = False
         # Provisional creation must never supersede the incumbent on admission failure.
         self.playback_id = f"plurx-player:{uuid.uuid4()}"
         try:
             # Policy and session admission happen before the old media is detached.
             self.decide()
             self.plan_subtitle()
-            replacement = None if self.mode == "direct" else self.create_session(position)
-        except (ApiError, PlaybackError) as error:
+            replacement = None if self.mode == "direct" else self.create_session(requested_position)
+            origin = max(0, _track((replacement or {}).get("media_origin_ms")) or 0)
+            rolling = replacement is not None and not replacement.get("vod")
+            published_end = self.wait_for_quality_runway(replacement, origin) if rolling else None
+            # Admission and the status lookup may take time while mpv continues
+            # playing the incumbent. Its origin still applies to this reading.
+            paused = bool(self.mpv.get("pause", self.paused))
+            if not paused:
+                self.mpv.set("pause", True)
+                frozen = True
+            position = self.position_ms()
+            self.paused = paused
+            duration = self.duration_ms()
+            if position is None or position < origin or (duration and position >= duration) \
+                    or (rolling and position > origin
+                        and (published_end is None or position - origin >= published_end)):
+                raise PlaybackError("The new quality cannot start at the current position")
+        except (ApiError, PlaybackError, MpvError) as error:
             for key, value in saved.items():
                 setattr(self, key, value)
             self.chrome_error = str(error)
+            try:
+                if frozen:
+                    self.mpv.set("pause", False)
+            finally:
+                self.delete_session(replacement)
+            if isinstance(error, MpvError):
+                raise
         else:
             # Own both sessions before the first fallible mpv operation.
             self.pending_quality = {"saved": saved, "position": position, "paused": paused,
                                     "deadline": self.clock() + 25, "candidate": replacement, "loaded": False}
             self.session = replacement
-            self.mpv.set("pause", True)
-            self.origin_ms = max(0, _track((replacement or {}).get("media_origin_ms")) or 0)
+            self.origin_ms = origin
             self.last_position_ms = position
             # The incumbent stays alive until the new picture restarts.
             # A prior text sidecar must not remain selected after replacement.
@@ -521,10 +579,11 @@ class Playback:
             for key, value in pending["saved"].items():
                 setattr(self, key, value)
             self.last_position_ms = pending["position"]
+            self.paused = pending["paused"]
             url = self.delivery.get("url") if self.session is None else self.session["playlist_url"]
             self.load(self.http.url(url), (pending["position"] - self.origin_ms) / 1000)
             self.show_film_timeline()
-            self.mpv.set("pause", pending["paused"])
+            self.mpv.set("pause", self.paused)
             self.chrome_error = error
         else:
             self.delete_session(pending["saved"]["session"])
@@ -877,6 +936,9 @@ class Playback:
                 self.capture_facts()
             else:
                 self.progress("seek")
+            if self.deferred_film_seek is not None:
+                target, self.deferred_film_seek = self.deferred_film_seek, None
+                self.seek_film(target)
         elif name == "seek":
             self.ended = False
             self.seeking = True

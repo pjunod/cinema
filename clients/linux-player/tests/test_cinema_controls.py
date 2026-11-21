@@ -161,7 +161,7 @@ class CinemaModel(unittest.TestCase):
         player.mode = 'transcode'
         player.session = {'session_id': 'incumbent'}
         player.decision = {'quality_candidates': [{'route': 'encode', 'decoder_compatible': True, 'target_height': 1080}]}
-        candidate = {'session_id': 'candidate'}
+        candidate = {'session_id': 'candidate', 'vod': True}
         for name in ('publish_chrome', 'progress', 'decide', 'plan_subtitle', '_final_progress', '_final_mapper', '_report_failure'):
             setattr(player, name, mock.Mock())
         player.create_session = mock.Mock(return_value=candidate)
@@ -172,7 +172,7 @@ class CinemaModel(unittest.TestCase):
             player.change_quality('1080')
         player.finish()
         self.assertEqual(player.delete_session.call_args_list,
-                         [mock.call({'session_id': 'incumbent'}), mock.call(candidate)])
+                         [mock.call(candidate), mock.call({'session_id': 'incumbent'})])
 
     def test_advertised_generation_or_owner_epoch_restarts_same_session_sequence(self):
         for field, replacement in (('generation', 'new-generation'), ('control_epoch', 2)):
@@ -206,7 +206,7 @@ class CinemaModel(unittest.TestCase):
         player = Playback(http, mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
         incumbent = {'session_id': 'incumbent', 'playlist_url': '/old.m3u8',
                      'control': {'url': '/old/control', 'generation': 'old', 'control_epoch': 1}}
-        candidate = {'session_id': 'candidate', 'playlist_url': '/new.m3u8',
+        candidate = {'session_id': 'candidate', 'playlist_url': '/new.m3u8', 'vod': True,
                      'control': {'url': '/new/control', 'generation': 'new', 'control_epoch': 1}}
         player.started, player.mode, player.session = True, 'transcode', incumbent
         player.decision = {'quality_candidates': [
@@ -255,6 +255,23 @@ class CinemaControls(LauncherCase):
         self.server.decision['quality_candidates'] = [
             {'route': 'encode', 'decoder_compatible': True, 'target_height': 1080}]
 
+    def delay_quality_admission(self, **incumbent_props):
+        request = Http.request
+
+        def delay(client, method, path, body=None, **kwargs):
+            if method == 'POST' and path.endswith('/hls/sessions') and body.get('height') == 1080:
+                self.clock.sleep(5)
+                self.mpv.props(for_load=1, **incumbent_props)
+            return request(client, method, path, body, **kwargs)
+
+        return mock.patch.object(Http, 'request', delay)
+
+    def playback_commands(self, name, prop=None):
+        return [c for c in self.mpv.commands() if c[0] == name and (prop is None or c[1] == prop)]
+
+    def released_sessions(self):
+        return [r['path'].rsplit('/', 1)[-1] for r in self.server.calls('DELETE', pattern=r'/hls/[^/]+$')]
+
     def advertise_next(self):
         nxt = {'file_id': FILE_ID+1, 'item_id': ITEM_ID+1,
                'metadata': {'title': 'Second episode', 'series_title': 'Example', 'kind': 'episode',
@@ -269,22 +286,136 @@ class CinemaControls(LauncherCase):
         self.assertIn(['set_property', 'force-media-title', 'Fixture'], self.mpv.commands())
 
     def test_quality_preserves_absolute_position_pause_and_heartbeat_selection(self):
-        self.advertise_quality(); self.server.origins = [60_000, 65_000]
-        self.clock.at(5, lambda: self.mpv.props(pause=True))
-        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(12)
-        self.assertEqual(self.run_launcher(), 0)
+        self.advertise_quality(); self.server.origins = [60_000, 62_000]
+        self.clock.at(5, lambda: self.mpv.props(for_load=1, pause=True))
+        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(17)
+        with self.delay_quality_admission():
+            self.assertEqual(self.run_launcher(), 0)
         creates = self.server.calls('POST', pattern=r'/hls/sessions$')
         self.assertEqual(len(creates), 2)
         self.assertEqual([r['body']['transport'] for r in creates], ['mpv', 'mpv'])
         self.assertEqual(creates[1]['body']['start'], 65)
         self.assertEqual(creates[1]['body']['height'], 1080)
         self.assertFalse(creates[1]['body']['quality_auto'])
-        pauses = [c for c in self.mpv.commands() if c[:2] == ['set_property', 'pause']]
-        self.assertEqual(pauses[-1], ['set_property', 'pause', True])
+        self.assertEqual(self.playback_commands('set_property', 'start')[-1][2], '3.000')
+        self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], True)
         controls = self.server.calls('POST', pattern=r'/control$')
         self.assertEqual(controls[-1]['body']['selection']['quality'], {'mode': 'manual', 'height': 1080})
+        self.assertEqual(controls[-1]['body']['position_ms'], 65_000)
+        self.assertEqual(controls[-1]['body']['demand'], 'hold')
         decisions = self.server.calls('POST', pattern=r'/decision$')
         self.assertEqual(decisions[-1]['query']['force'], ['transcode'])
+        self.assertEqual(Preferences(self.config).quality, '1080')
+
+    def test_quality_uses_clock_and_pause_at_commit_after_delayed_admission(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(17)
+        with self.delay_quality_admission(time_pos=10, pause=True):
+            self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')], ['5.000', '6.000'])
+        self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], True)
+        incumbent, candidate = self.server.sessions
+        self.assertEqual(self.released_sessions(), [incumbent['session_id'], candidate['session_id']])
+        progress = [r['body']['position_ms'] for r in self.server.calls('POST', pattern=r'/progress$')]
+        self.assertIn(65_000, progress)
+        self.assertEqual(progress[-2:], [70_000, 70_000])
+        self.assertEqual(progress, sorted(progress))
+        self.assertEqual(Preferences(self.config).quality, '1080')
+
+    def test_quality_refuses_candidate_after_seek_before_its_origin(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(17)
+        with self.delay_quality_admission(time_pos=2):
+            self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(len(self.playback_commands('loadfile')), 1)
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'pause')], [True, False])
+        incumbent, candidate = self.server.sessions
+        self.assertEqual(self.released_sessions(), [candidate['session_id'], incumbent['session_id']])
+        self.assertFalse(self.server.calls('POST', prefix=candidate['control']['url']))
+        self.assertEqual(self.chrome()[-1]['quality']['selected'], 'auto')
+        self.assertIn('current position', self.chrome()[-1]['error'])
+        self.assertEqual(Preferences(self.config).quality, 'auto')
+        self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 62_000)
+
+    def test_quality_refuses_rolling_candidate_when_commit_position_is_beyond_its_end(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.server.published_end_ms = 5_000
+        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(17)
+        with self.delay_quality_admission(time_pos=10):
+            self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(len(self.playback_commands('loadfile')), 1)
+        incumbent, candidate = self.server.sessions
+        self.assertEqual(self.released_sessions(), [candidate['session_id'], incumbent['session_id']])
+        self.assertIn('current position', self.chrome()[-1]['error'])
+
+    def test_vod_quality_switch_keeps_playing_at_commit_position(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.server.vod = True
+        self.server.published_end_ms = 5_000
+        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(17)
+        with self.delay_quality_admission(time_pos=10, time_pos_when_paused=12):
+            self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')], ['5.000', '8.000'])
+        self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], False)
+        self.assertEqual(Preferences(self.config).quality, '1080')
+
+    def test_quality_admission_preserves_queued_film_seek_on_vod_success(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.clock.at(8, lambda: setattr(self.server, 'vod', True))
+        self.intent_at(6, 'cinema-quality', '1080')
+        self.intent_at(8, 'osc-film-seek', '3000.5')
+        self.close_at(20)
+        with self.delay_quality_admission(time_pos=10):
+            self.assertEqual(self.run_launcher(), 0)
+        incumbent, candidate = self.server.sessions
+        self.assertEqual(self.released_sessions(), [incumbent['session_id'], candidate['session_id']])
+        self.assertEqual(self.playback_commands('seek'), [['seek', 2936.5, 'absolute+exact']])
+        self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 3_000_500)
+        self.assertEqual(Preferences(self.config).quality, '1080')
+
+    def test_quality_admission_preserves_queued_film_seek_after_rolling_rollback(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000, 3_000_000]
+        self.mpv.props(skip_restart_on=2)
+        self.intent_at(6, 'cinema-quality', '1080')
+        self.intent_at(8, 'osc-film-seek', '3000.5')
+        self.clock.at(14, lambda: self.mpv.emit({'event': 'end-file', 'reason': 'error',
+                                               'file_error': 'fixture decode failure'}))
+        self.close_at(20)
+        with self.delay_quality_admission(time_pos=10):
+            self.assertEqual(self.run_launcher(), 0)
+        incumbent, candidate, replacement = self.server.sessions
+        self.assertEqual(self.released_sessions(),
+                         [candidate['session_id'], incumbent['session_id'], replacement['session_id']])
+        creates = self.server.calls('POST', pattern=r'/hls/sessions$')
+        deletes = self.server.calls('DELETE', pattern=r'/hls/[^/]+$')
+        self.assertEqual(creates[-1]['body']['start'], 3000.5)
+        self.assertEqual(creates[-1]['body']['playback_id'], creates[0]['body']['playback_id'])
+        self.assertGreaterEqual(creates[-1]['at'], deletes[0]['at'])
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')],
+                         ['5.000', '6.000', '10.000', '0.500'])
+        self.assertEqual(self.server.calls('POST', pattern=r'/progress$')[-1]['body']['position_ms'], 3_000_500)
+        self.assertEqual(Preferences(self.config).quality, 'auto')
+
+    def test_quality_waits_for_rolling_publication_before_freezing_incumbent(self):
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.server.published_end_ms = None
+        self.intent_at(6, 'cinema-quality', '1080')
+
+        def publish():
+            self.assertEqual(len(self.playback_commands('loadfile')), 1)
+            self.assertFalse(self.playback_commands('set_property', 'pause'))
+            self.server.published_end_ms = 20_000
+            self.mpv.props(for_load=1, time_pos=13)
+
+        self.clock.at(12.5, publish)
+        self.close_at(20)
+        with self.delay_quality_admission(time_pos=10):
+            self.assertEqual(self.run_launcher(), 0)
+        status = self.server.calls('GET', pattern=r'/status$')
+        self.assertLess(status[0]['at'], 12.5)
+        self.assertGreaterEqual(status[-1]['at'], 12.5)
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')], ['5.000', '9.000'])
+        self.assertEqual(Preferences(self.config).quality, '1080')
 
     def test_refused_or_unadvertised_quality_keeps_existing_media(self):
         self.advertise_quality(); self.server.create_status = [200, 503]
@@ -341,15 +472,38 @@ class CinemaControls(LauncherCase):
         self.assertTrue(self.chrome()[-1]['retryable'])
 
     def test_new_quality_attachment_error_restores_incumbent_and_releases_candidate(self):
-        self.advertise_quality()
-        self.clock.at(5, lambda: self.mpv.props(load_error_on=2))
-        self.intent_at(6, 'cinema-quality', '1080'); self.close_at(12)
-        self.assertEqual(self.run_launcher(), 0)
+        self.advertise_quality(); self.server.origins = [60_000, 64_000]
+        self.mpv.props(skip_restart_on=2)
+        self.mpv.props(for_load=2, time_pos=1)
+        self.intent_at(6, 'cinema-quality', '1080')
+        self.clock.at(13, lambda: self.assertEqual(Preferences(self.config).quality, 'auto'))
+        self.clock.at(14, lambda: self.mpv.emit({'event': 'end-file', 'reason': 'error',
+                                               'file_error': 'fixture decode failure'}))
+        self.close_at(20)
+        with self.delay_quality_admission(time_pos=10, pause=True):
+            self.assertEqual(self.run_launcher(), 0)
         creates = self.server.calls('POST', pattern=r'/hls/sessions$')
         self.assertNotEqual(creates[0]['body']['playback_id'], creates[1]['body']['playback_id'])
-        self.assertEqual(len([c for c in self.mpv.commands() if c[0] == 'loadfile']), 3)
+        self.assertEqual(len(self.playback_commands('loadfile')), 3)
+        self.assertEqual([c[2] for c in self.playback_commands('set_property', 'start')],
+                         ['5.000', '6.000', '10.000'])
+        self.assertIs(self.playback_commands('set_property', 'pause')[-1][2], True)
+        incumbent, candidate = self.server.sessions
+        self.assertEqual(self.released_sessions(), [candidate['session_id'], incumbent['session_id']])
+        candidate_controls = self.server.calls('POST', prefix=candidate['control']['url'])
+        self.assertTrue(candidate_controls)
+        self.assertEqual({r['body']['position_ms'] for r in candidate_controls}, {70_000})
+        incumbent_controls = self.server.calls('POST', prefix=incumbent['control']['url'])
+        self.assertGreaterEqual(len(incumbent_controls), 3)
+        self.assertEqual([r['body']['sequence'] for r in incumbent_controls],
+                         list(range(1, len(incumbent_controls) + 1)))
+        self.assertEqual(incumbent_controls[-1]['body']['position_ms'], 70_000)
+        progress = [r['body']['position_ms'] for r in self.server.calls('POST', pattern=r'/progress$')]
+        self.assertEqual(progress[-2:], [70_000, 70_000])
+        self.assertEqual(progress, sorted(progress))
         self.assertEqual(self.chrome()[-1]['quality']['selected'], 'auto')
         self.assertIn('restored', self.chrome()[-1]['error'])
+        self.assertEqual(Preferences(self.config).quality, 'auto')
 
     def test_next_accepts_another_copy_of_the_resolved_successor(self):
         self.advertise_next(); self.server.next_context['file_id'] = FILE_ID+2
