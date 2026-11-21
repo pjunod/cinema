@@ -2461,40 +2461,37 @@
     /// against a process exit, and a loaded runner lost it in about one
     /// transcode test per full run.
     ///
-    /// One frame every fifty seconds keeps the encode to 120 4K frames, about
-    /// a second with libx265 ultrafast and under a megabyte. The file lives
-    /// at one fixed, shape-named path under the system temp dir and is
-    /// reused by every later test process on the host; it is encoded to a
-    /// process-private name and renamed into place, so two processes
-    /// starting at once cannot read a half-written file, and nothing is
-    /// left behind but that one file.
+    /// Encode one independent 4K frame, then stream-copy it at 50-second
+    /// intervals. Each packet is a real keyframe, and the last packet ends
+    /// at 6,000 seconds. Nextest starts each test in its own process, so
+    /// publish one complete file without replacing a parallel winner.
     async fn placeholder_source() -> String {
         static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
         SOURCE
             .get_or_init(|| async {
                 let dir = std::fs::canonicalize(std::env::temp_dir())
                     .expect("canonical system temporary directory");
-                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s.mkv");
-                if std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
+                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s-loop.mkv");
+                if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
                     return path.to_string_lossy().into_owned();
                 }
-                let staging = dir.join(format!(
-                    "plurxd-placeholder-source-{}.mkv.part",
-                    std::process::id()
-                ));
-                let mut command = tokio::process::Command::new(
-                    std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
-                );
-                command
-                    .kill_on_drop(true)
-                    .args([
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
+
+                let seed = tempfile::NamedTempFile::new_in(&dir)
+                    .expect("unique placeholder seed path")
+                    .into_temp_path();
+                let staging = tempfile::NamedTempFile::new_in(&dir)
+                    .expect("unique placeholder staging path")
+                    .into_temp_path();
+                let ffmpeg = crate::ffmpeg::ffmpeg_bin();
+                tokio::time::timeout(std::time::Duration::from_secs(120), async {
+                    let mut encode = tokio::process::Command::new(&ffmpeg);
+                    encode.args([
                         "-f",
                         "lavfi",
                         "-i",
-                        "color=c=black:size=3840x2160:rate=0.02:duration=6000",
+                        "color=c=black:size=3840x2160:rate=1/50:duration=50",
+                        "-frames:v",
+                        "1",
                         "-pix_fmt",
                         "yuv420p",
                         "-c:v",
@@ -2503,26 +2500,50 @@
                         "ultrafast",
                         "-x265-params",
                         "log-level=none:keyint=1:pools=none",
-                        "-f",
-                        "matroska",
-                        "-y",
-                    ])
-                    .arg(&staging);
-                let output =
-                    tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
-                        .await
-                        .expect("placeholder source encode exceeded its deadline")
-                        .expect("failed to start the placeholder source encode");
-                assert!(
-                    output.status.success(),
-                    "placeholder source encode failed — this suite needs an ffmpeg with libx265: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                std::fs::rename(&staging, &path).expect("placeholder source rename");
+                    ]);
+                    run_placeholder_ffmpeg(encode, seed.as_ref(), "encode").await;
+
+                    let mut remux = tokio::process::Command::new(&ffmpeg);
+                    remux
+                        .args(["-stream_loop", "119", "-i"])
+                        .arg(&seed)
+                        .args(["-map", "0:v:0", "-c:v", "copy"]);
+                    run_placeholder_ffmpeg(remux, staging.as_ref(), "remux").await;
+                })
+                .await
+                .expect("placeholder source creation exceeded its deadline");
+
+                if let Err(error) = staging.persist_noclobber(&path) {
+                    assert!(
+                        error.error.kind() == std::io::ErrorKind::AlreadyExists
+                            && std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0),
+                        "publishing the placeholder source failed: {error}"
+                    );
+                }
                 path.to_string_lossy().into_owned()
             })
             .await
             .clone()
+    }
+
+    async fn run_placeholder_ffmpeg(
+        mut command: tokio::process::Command,
+        path: &std::path::Path,
+        stage: &str,
+    ) {
+        let output = command
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .args(["-hide_banner", "-loglevel", "error", "-f", "matroska", "-y"])
+            .arg(path)
+            .output()
+            .await
+            .unwrap_or_else(|error| panic!("starting placeholder source {stage} failed: {error}"));
+        assert!(
+            output.status.success(),
+            "placeholder source {stage} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {
