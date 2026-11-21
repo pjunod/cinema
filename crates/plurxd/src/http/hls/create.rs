@@ -2977,7 +2977,7 @@ pub async fn prepare_startup(
     tokio::spawn(async move {
         let budget = crate::media_pool::CreateStartupBudget::new(2_000);
         let plan = budget.scope(async {
-            let authority = state.serving.authority();
+            let authority = state.cluster.authority();
             let serving_generation = authority.admit()?;
             let start_plan = super::start_plan::ingress_plan(&state.applied, file_id)
                 .await
