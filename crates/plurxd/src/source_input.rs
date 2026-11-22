@@ -1086,10 +1086,12 @@ async fn read_source(
             allowed=observer.reads_allowed()=>allowed.map_err(std::io::Error::other)?,
         }
     }
+    let slot_requested_at = std::time::Instant::now();
     let read_permit = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         permit=Arc::clone(&state.read_slot).acquire_owned()=>permit.map_err(std::io::Error::other)?,
     };
+    let slot_acquired_at = std::time::Instant::now();
     // Recheck closure after acquiring the actual read slot. No new work may
     // start after close_and_wait has joined and closed the held descriptor.
     if state.close.is_cancelled() {
@@ -1104,11 +1106,13 @@ async fn read_source(
             allowed=observer.reads_allowed()=>allowed.map_err(std::io::Error::other)?,
         }
     }
+    let pause_requested_at = std::time::Instant::now();
     let pause_guard = match &state.pause {
         Some(pause) => Some(pause.enlist(&state.close).await?),
         None => None,
     };
     let read_state = Arc::clone(state);
+    let pause_enlisted_at = std::time::Instant::now();
     let activity = if let Some(observer) = observer {
         loop {
             if let Some(activity) = observer.try_active_read() {
@@ -1206,6 +1210,11 @@ async fn read_source(
         paced_to_grant_expiry,
         startup_burst = startup_burst_left > 0,
         admission_ms = admitted_at.duration_since(allowance_ready_at).as_millis() as u64,
+        allowed_ms = slot_requested_at.duration_since(allowance_ready_at).as_millis() as u64,
+        read_slot_ms = slot_acquired_at.duration_since(slot_requested_at).as_millis() as u64,
+        reallowed_ms = pause_requested_at.duration_since(slot_acquired_at).as_millis() as u64,
+        pause_ms = pause_enlisted_at.duration_since(pause_requested_at).as_millis() as u64,
+        active_ms = admitted_at.duration_since(pause_enlisted_at).as_millis() as u64,
         read_ms = read_elapsed.as_millis() as u64,
         total_ms = requested_at.elapsed().as_millis() as u64,
         "source window read"

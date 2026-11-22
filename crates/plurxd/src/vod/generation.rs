@@ -31,6 +31,7 @@ async fn spawn_generation_with_input(
     permit: Option<crate::vodencode::EncodePermit>,
     source_custody: &mut Option<crate::source_input::SourceInput>,
 ) {
+    let spawn_started = std::time::Instant::now();
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
     }
@@ -107,6 +108,7 @@ async fn spawn_generation_with_input(
             return;
         }
     };
+    let authorize_started = std::time::Instant::now();
     let source_authority = match source_dispatch.authorize_before_spawn().await {
         Ok(authority) => authority,
         Err(cause) => {
@@ -120,6 +122,7 @@ async fn spawn_generation_with_input(
             return;
         }
     };
+    let authorized_at = std::time::Instant::now();
     if !recipe_engine_is_current(&rendition.recipe).await {
         if !generation_current().await {
             return;
@@ -303,6 +306,7 @@ async fn spawn_generation_with_input(
     if let Some(work) = resume_work.as_ref().filter(|_| source_custody.is_some()) {
         work.source_opened();
     }
+    let source_opened_at = std::time::Instant::now();
     #[cfg(target_os = "linux")]
     let source_open = source_needed.then(|| source_open_started.elapsed());
     if !generation_current().await {
@@ -923,6 +927,10 @@ async fn spawn_generation_with_input(
         rendition = %spawned_key,
         start_entry = at,
         generation = epoch,
+        prelude_ms = authorize_started.duration_since(spawn_started).as_millis() as u64,
+        authorize_ms = authorized_at.duration_since(authorize_started).as_millis() as u64,
+        source_open_ms = source_opened_at.duration_since(authorized_at).as_millis() as u64,
+        launch_ms = source_opened_at.elapsed().as_millis() as u64,
         "spawned a producer generation"
     );
 }
