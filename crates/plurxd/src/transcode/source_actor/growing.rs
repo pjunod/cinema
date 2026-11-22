@@ -817,7 +817,18 @@ impl TranscodeManager {
                     deadline,
                 )
                 .await
-                .map_err(|error| SourceWorkerError::copy_failure(&error))?;
+                .map_err(|error| {
+                    // copy_failure folds nine distinct copy-clock codes into
+                    // CopyClockUnknown; keep the producer's own code, as the
+                    // census stage does ("Source copy head refused").
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        reason = %error,
+                        start_ms = (prepared.request().start_seconds * 1000.0).round() as i64,
+                        "Source copy range window refused"
+                    );
+                    SourceWorkerError::copy_failure(&error)
+                })?;
             startup_stage = "growing.source_height";
             let facts = StartInfo {
                 processed_dv_profile: None,
