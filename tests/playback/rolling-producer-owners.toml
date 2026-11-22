@@ -2038,7 +2038,11 @@ pattern = "VodPublication"
 # F1/N2 landing repair: +1 test-only VodPublication match in
 # an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere. It inspects the
 # existing owner-bearing refusal; no producer or response owner is created.
-expected_occurrences = 54
+# P49 split copy: +2 in vod/serve/split.rs. `split_copy_master_before`
+# returns the master as a VodPublication bound to the session's captured
+# ResponseOwner, beside the continuous master. It creates no producer or
+# response owner and transfers none.
+expected_occurrences = 56
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
