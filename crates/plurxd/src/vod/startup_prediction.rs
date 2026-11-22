@@ -480,6 +480,9 @@ async fn run_with_source_custody(
         settle_read_lease(&store, &owner, Some(custody), false).await;
         return;
     }
+    // Live viewer preparation outranks analysis and jobs on this source
+    // domain; wake their pressure checks so they yield now, not at a poll.
+    crate::source_custody::source_pressure_changed().notify_waiters();
     let cancel = shutdown.child_token();
     let budget =
         SourceReadBudget::from_existing_custody(Arc::clone(&store), &custody, cancel.clone());
