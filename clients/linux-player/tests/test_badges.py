@@ -3,6 +3,7 @@ import json
 import unittest
 from unittest import mock
 
+import support  # noqa: F401  (puts plurx_player on the path)
 from plurx_player.badges import renderer_facts, server_enhancement, source_facts, video_facts
 from plurx_player.api import ApiError
 from plurx_player.playback import Playback

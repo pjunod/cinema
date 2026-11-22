@@ -36,6 +36,10 @@ No colour, decoder or renderer option changes.
 Open: a renderer line (or source fact) naming the layer type and that it was
 composed would let this player claim FEL itself.
 
+Packaged as 0.5.3 (the merged source was still versioned 0.5.2, which the
+installed 0.5.2-1 package does not contain); installed on the owner's Linux
+laptop for physical acceptance.
+
 ## Session control sequence repair (0.5.1)
 
 **Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source
