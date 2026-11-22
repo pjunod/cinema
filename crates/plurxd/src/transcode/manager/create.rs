@@ -7029,6 +7029,37 @@ mod retained_recovery_tests;
 #[path = "processed_reuse_tests.rs"]
 mod processed_reuse_tests;
 
+/// A held-source verification for one split copy start's soundtracks.
+type SplitHeldProbe = (String, Option<crate::decode_facts::FreshSourceProbe>);
+type SplitHeldProbeCell = tokio::sync::OnceCell<(String, SplitHeldProbe)>;
+
+static SPLIT_HELD_PROBES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<i64, std::sync::Weak<SplitHeldProbeCell>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Held by a split copy start while its soundtracks prepare. The entry dies
+/// with the last holder, so nothing outlives one start.
+fn hold_split_held_probe(file_id: i64) -> Arc<SplitHeldProbeCell> {
+    let mut probes = SPLIT_HELD_PROBES.lock().expect("split held probe memo");
+    probes.retain(|_, cell| cell.strong_count() > 0);
+    if let Some(cell) = probes.get(&file_id).and_then(std::sync::Weak::upgrade) {
+        return cell;
+    }
+    let cell = Arc::new(SplitHeldProbeCell::new());
+    probes.insert(file_id, Arc::downgrade(&cell));
+    cell
+}
+
+/// The held start's memo, only while unset or verified for this exact source
+/// revision; any other revision probes for itself.
+fn split_held_probe(file_id: i64, version: &str) -> Option<Arc<SplitHeldProbeCell>> {
+    let probes = SPLIT_HELD_PROBES.lock().expect("split held probe memo");
+    let cell = probes.get(&file_id).and_then(std::sync::Weak::upgrade)?;
+    cell.get()
+        .is_none_or(|(verified, _)| verified == version)
+        .then_some(cell)
+}
+
 #[cfg(test)]
 mod display_target_policy_tests {
     use super::*;
@@ -7580,35 +7611,4 @@ mod exact_fel_backend_tests {
             assert!(reason.contains(&format!("{encoder:?}")));
         }
     }
-}
-
-/// A held-source verification for one split copy start's soundtracks.
-type SplitHeldProbe = (String, Option<crate::decode_facts::FreshSourceProbe>);
-type SplitHeldProbeCell = tokio::sync::OnceCell<(String, SplitHeldProbe)>;
-
-static SPLIT_HELD_PROBES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<i64, std::sync::Weak<SplitHeldProbeCell>>>,
-> = std::sync::LazyLock::new(Default::default);
-
-/// Held by a split copy start while its soundtracks prepare. The entry dies
-/// with the last holder, so nothing outlives one start.
-fn hold_split_held_probe(file_id: i64) -> Arc<SplitHeldProbeCell> {
-    let mut probes = SPLIT_HELD_PROBES.lock().expect("split held probe memo");
-    probes.retain(|_, cell| cell.strong_count() > 0);
-    if let Some(cell) = probes.get(&file_id).and_then(std::sync::Weak::upgrade) {
-        return cell;
-    }
-    let cell = Arc::new(SplitHeldProbeCell::new());
-    probes.insert(file_id, Arc::downgrade(&cell));
-    cell
-}
-
-/// The held start's memo, only while unset or verified for this exact source
-/// revision; any other revision probes for itself.
-fn split_held_probe(file_id: i64, version: &str) -> Option<Arc<SplitHeldProbeCell>> {
-    let probes = SPLIT_HELD_PROBES.lock().expect("split held probe memo");
-    let cell = probes.get(&file_id).and_then(std::sync::Weak::upgrade)?;
-    cell.get()
-        .is_none_or(|(verified, _)| verified == version)
-        .then_some(cell)
 }
