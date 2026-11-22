@@ -3650,6 +3650,12 @@ async fn build_real_source_start_fixture(
             headers.insert(name, value.parse().expect("receiver affirmation"));
         }
     }
+    if matches!(mode, SourceFixtureMode::RangeDolbyVisionConverted) {
+        // A rung below the source, as production's 4K Profile 7 plan resolved
+        // under the node's Dolby Vision transcode ceiling: the copy still
+        // carries, and reports, the source's own geometry.
+        recipe["session"]["height"] = serde_json::json!(144);
+    }
     if audio.is_some() {
         // Selected by index and with no `aac` ask, as a client whose caps name
         // no audio sinks sends it. E-AC-3 is in its decoder list and passes
