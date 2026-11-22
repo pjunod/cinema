@@ -3833,7 +3833,8 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
 
     let soundtracks = manager
         .prepare_vod_split_soundtracks(&req, &file, None)
-        .await;
+        .await
+        .expect("an eligible split copy prepares its soundtracks");
     assert_eq!(soundtracks.len(), 2, "one soundtrack per source stream");
     for (index, (request, soundtrack)) in soundtracks.iter().enumerate() {
         assert_eq!(request.audio_index, Some(index as i64), "source order");
@@ -3855,6 +3856,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
                 manager
                     .prepare_vod_split_soundtracks(&req, &file, None)
                     .await
+                    .expect("an ineligible request is not a refusal")
                     .is_empty(),
                 "{label} keeps the muxed copy"
             );
@@ -3948,6 +3950,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
     three.audio_streams.push(stream);
     let soundtracks = manager
         .prepare_vod_split_soundtracks(&req, &three, None)
-        .await;
+        .await
+        .expect("three soundtracks prepare");
     assert_eq!(soundtracks.len(), 3, "three soundtracks still split");
 }
