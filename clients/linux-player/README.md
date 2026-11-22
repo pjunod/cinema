@@ -64,6 +64,18 @@ Menu arrows or Tab choose a row; Enter activates it. Controls hide after four
 seconds while playing, except during a preview or an open menu; paused
 playback keeps them visible. Mouse movement reveals them.
 
+Beside the title, quality pills mirror the web player's: resolution of the
+decoded frame, dynamic range (the file's grade, with an arrow when mpv renders
+something else, e.g. `DV P7 → DV P8`, `DV → HDR10` or `DV P7 → HDR10-E`), the
+active Dolby Vision enhancements and the audio format. RPU and DYN mean mpv
+applied the RPU and the per-shot display mapping on this machine (RPU is not
+claimed on a Profile 7 → 8.1 delivery, where it is a pass-through). EL means
+the private build received the dual-layer Profile 7 stream and pairs its
+enhancement layer; neither plurx nor mpv says whether that layer is full or
+minimal, so FEL appears only when the server reports it (for example a
+server-reconstructed picture). Playback info adds the mapper line and why each
+enhancement is or is not active.
+
 Audio and subtitle menus list tracks mpv actually has, including loaded
 sidecars. Library metadata comes from the handoff's restricted context:
 title, series and episode identity, year, runtime, air date and synopsis.

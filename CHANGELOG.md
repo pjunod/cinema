@@ -44,6 +44,19 @@ bump may break compatibility and a **patch** bump never does.
 - Web and Apple playback information reports the attached conversion's F+
   mapping and held-out gain, or its identity reason. This metadata comes from
   the pinned rendition and adds no curve-store read to status polls.
+- plurx Player (Linux) draws the web player's quality pills beside the
+  title: resolution, dynamic range (source → what mpv renders, e.g.
+  "DV P7 → DV P8", "DV P7 → HDR10-E"), the active Dolby Vision enhancements
+  (FEL / EL / RPU / DYN) and the audio format. RPU and DYN light when mpv
+  renders Dolby Vision itself (no RPU claim on a Profile 7 → 8.1 delivery); EL
+  lights when the private build receives the dual-layer Profile 7 stream; FEL
+  is only ever the server's claim. A carried route's server pills hold only
+  while mpv renders Dolby Vision; a processed route's hold while its current
+  report does. Playback info adds the source grade, the Dolby Vision mapper
+  and one line per enhancement saying why it is or is not active. The
+  launcher now ignores VO warnings (an unmapped screenshot) and non-VO text
+  when reading the mapper line, and a failed control exchange keeps the
+  current processing report instead of clearing it.
 
 ### Changed
 
