@@ -7585,7 +7585,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Source range init check: +1 response.status() assertion on the fixture's
 # HTTP resource reply in actual_range_resource. No process launch, kill or wait.
 # Main 7df74ec6d merge: base 965, branch +2, main +14; 981.
-expected_occurrences = 981
+# Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
+# the forwarded native-readiness fixture case and one in the typed-refusal
+# test. No process launch.
+# Main eaace1f86 merge: base 979, branch +2, main +2; 983.
+expected_occurrences = 983
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
