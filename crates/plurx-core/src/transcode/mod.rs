@@ -419,6 +419,32 @@ pub fn copy_leaves_a_stale_dolby_vision_record(
     hdr == Some("dolby_vision") && !convert_dolby_vision && !preserve_dolby_vision && !have_dovi_bsf
 }
 
+/// The timescale FFmpeg's MP4 muxer gives the copied video track.
+///
+/// Every copy recipe passes `-copytb 1`, so the muxed stream keeps the
+/// source stream's time base and `movenc` takes its denominator, doubled
+/// until it reaches 10000 (a Matroska 1/1000 becomes 16000). The stream is
+/// the one `-map 0:v:0` selects: the first video stream, attached picture or
+/// not. `None` when the stored probe names no usable video time base.
+pub fn copy_mp4_video_timescale(probe_json: Option<&str>) -> Option<u32> {
+    let probe = serde_json::from_str::<serde_json::Value>(probe_json?).ok()?;
+    let stream = probe.get("streams")?.as_array()?.iter().find(|stream| {
+        stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+    })?;
+    let (num, den) = stream.get("time_base")?.as_str()?.split_once('/')?;
+    let (num, mut den) = (
+        num.trim().parse::<u32>().ok()?,
+        den.trim().parse::<u32>().ok()?,
+    );
+    if num == 0 || den == 0 {
+        return None;
+    }
+    while den < 10_000 {
+        den = den.checked_mul(2)?;
+    }
+    Some(den)
+}
+
 /// Whether the stored probe describes HEVC with the smallest legal hvcC
 /// record: the 23-byte fixed header followed by zero parameter-set arrays.
 ///
@@ -468,6 +494,7 @@ pub struct CopyVideoOptions {
     dv_convert: bool,
     dv_refit_digest: Option<[u8; 32]>,
     retain_hevc_parameter_sets: bool,
+    packet_clock_timescale: Option<u32>,
 }
 
 impl CopyVideoOptions {
@@ -479,7 +506,25 @@ impl CopyVideoOptions {
             dv_convert: false,
             dv_refit_digest: None,
             retain_hevc_parameter_sets: false,
+            packet_clock_timescale: None,
         }
+    }
+
+    /// The canonical MP4 track's timescale, in which the packet clock is
+    /// written ([`copy_pipe_args_with_index_and_packet_clock`]).
+    ///
+    /// FFmpeg rounds a timestamp it synthesizes (Matroska stores none for
+    /// decode) into each output's own time base, so a clock in the source's
+    /// 1/1000 differs from the 1/16000 MP4 by a fraction of a millisecond and
+    /// no sample can be associated with it. It is not part of the copied
+    /// bytes or of `copy_video_args`, so it leaves the argv fingerprint alone.
+    pub const fn with_packet_clock_timescale(mut self, timescale: Option<u32>) -> Self {
+        self.packet_clock_timescale = timescale;
+        self
+    }
+
+    pub const fn packet_clock_timescale(self) -> Option<u32> {
+        self.packet_clock_timescale
     }
 
     /// Keep the source's in-band VPS/SPS/PPS in the copied stream.
@@ -567,6 +612,7 @@ impl CopyVideoOptions {
             .with_parameter_set_retention(hevc_census::in_band_parameter_sets_vary(
                 source, probe_json,
             ))
+            .with_packet_clock_timescale(copy_mp4_video_timescale(probe_json))
     }
 
     pub const fn promotes_parameter_sets(self) -> bool {
@@ -3195,7 +3241,19 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
     }
     args.insert(0, "-copyts".to_owned());
     args.extend(["-map", "0:v:0?", "-an", "-sn"].map(str::to_owned));
-    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+    let mut clock_video = strip_plurx_markers(&copy_video_args(source, video));
+    if let Some(timescale) = video.packet_clock_timescale() {
+        // The clock is written in the MP4 track's own time base, so a
+        // timestamp FFmpeg synthesizes is rounded identically in both.
+        let setts = format!("setts=time_base=1/{timescale}:pts=PTS:dts=DTS");
+        match clock_video.iter().rposition(|arg| arg == "-bsf:v") {
+            Some(at) if at + 1 < clock_video.len() => {
+                clock_video[at + 1] = format!("{},{setts}", clock_video[at + 1]);
+            }
+            _ => clock_video.extend(["-bsf:v".to_owned(), setts]),
+        }
+    }
+    args.extend(clock_video);
     args.extend(
         [
             "-copytb",

@@ -426,26 +426,27 @@ impl SourceGrowingBacking {
     ) -> Result<LocalControlResult, ControlStateError> {
         let _lifecycle = self.lifecycle.lock().await;
         if control.session_id != self.session_id || !self.is_live() {
-            return Err(ControlStateError::Unavailable);
+            return Err(growing_refused("session", self.production.failed()));
         }
         authority.refresh(&control).await?;
         let target = control.snapshot.buffer_anchor_ms();
         let files = self.production.files.lock().await;
         let origin = files
             .media_origin_ms()
-            .ok_or(ControlStateError::Unavailable)?;
+            .ok_or_else(|| growing_refused("origin", None))?;
         let seconds = files
             .segments()
             .iter()
             .map(|segment| segment.seconds)
             .sum::<f64>();
         let (start, end) = super::status::growing_range_bounds(origin, seconds)
-            .map_err(|_| ControlStateError::Unavailable)?;
+            .map_err(|_| growing_refused("range_bounds", None))?;
         if target < start
             || target > end
             || (target == end && control.snapshot.seek_target_ms.is_some())
             || files.segments().is_empty()
         {
+            tracing::warn!(target: "plurxd::transcode", stage = "target_outside_range", target_ms = target, start_ms = start, end_ms = end, seeking = control.snapshot.seek_target_ms.is_some(), "Source growing control refused");
             return Err(ControlStateError::Unavailable);
         }
         drop(files);
@@ -456,7 +457,7 @@ impl SourceGrowingBacking {
             || crate::media_sessions::unix_ms() >= deadline_unix_ms
             || !self.owners.contains_live_assignment(authority.assignment())
         {
-            return Err(ControlStateError::Unavailable);
+            return Err(growing_refused("acceptance", self.production.failed()));
         }
         let (disposition, accepted_sequence, action, platform, action_suppressed) =
             state.fence.accept(
@@ -505,18 +506,18 @@ impl SourceGrowingBacking {
         if let Some(demand) = accepted_demand {
             self.observe_demand(demand)
                 .await
-                .map_err(|_| ControlStateError::Unavailable)?;
+                .map_err(|error| growing_refused("observe_demand", Some(error)))?;
         }
         if mark_rendered {
             self.production
                 .mark_rendered()
                 .await
-                .map_err(|_| ControlStateError::Unavailable)?;
+                .map_err(|error| growing_refused("mark_rendered", Some(error)))?;
         }
         let status = self
             .status_info()
             .await
-            .map_err(|_| ControlStateError::Unavailable)?;
+            .map_err(|_| growing_refused("status", None))?;
         Ok(LocalControlResult {
             disposition,
             accepted_sequence,
@@ -533,6 +534,14 @@ impl SourceGrowingBacking {
             selection,
         })
     }
+}
+
+/// The growing copy's control refusals all answer `Unavailable`; the Source
+/// log names which step and, for a stopped producer, its own failure code.
+#[cfg(unix)]
+fn growing_refused(stage: &'static str, reason: Option<String>) -> ControlStateError {
+    tracing::warn!(target: "plurxd::transcode", stage, reason = reason.as_deref().unwrap_or(""), "Source growing control refused");
+    ControlStateError::Unavailable
 }
 
 #[cfg(all(test, unix))]
