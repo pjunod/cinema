@@ -151,7 +151,9 @@ Change:
 (a) Lift what the gates and the trial read from `candidate_context` into a
 `ProcessedUpgradeAsk { caps, target_height, hdr10_grade, names_processed, fel_qualification, catalog_query }`
 with two constructors: from a candidate context (local, behaviour unchanged) and from
-a `PreparedSourcePlayback` (`copy_head_caps`, the resolved height and grade). One
+a `PreparedSourcePlayback` (its `copy_head_caps`, the plan's resolved rung as the
+upgrade's `target_height`, and its grade; the copy head itself is checked against
+the source's scanned geometry, never that rung). One
 gate function, one trial, two callers.
 (b) The first window takes its producer slot, cancel token and deadline from the
 caller. Local passes what it has today; the Source passes its owner's.

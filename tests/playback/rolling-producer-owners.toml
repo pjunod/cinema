@@ -7575,7 +7575,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # mux child. No production launch, kill or wait.
 # Source range init check: +1 response.status() assertion on the fixture's
 # HTTP resource reply in actual_range_resource. No process launch, kill or wait.
-expected_occurrences = 979
+# Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
+# the forwarded native-readiness fixture case and one in the typed-refusal
+# test. No process launch.
+expected_occurrences = 981
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

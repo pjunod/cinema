@@ -85,6 +85,28 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared Dolby Vision Profile 7 titles start again when converted to Profile
+  8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
+  first fragment against the rung its plan resolved instead of the source's own
+  size, and a 4K title, which Auto plans under the node's Dolby Vision encode
+  ceiling, was refused at `growing.copy_head_caps` with
+  `source_rescan_required` although the copy matched the scan. The check
+  compares the copy with the scanned source only. The same fix starts every
+  other shared copy whose planned rung differs from the source: 4K SDR or HDR10
+  copies from a Source whose encode ceiling is below 2160, sources taller than
+  2160 or shorter than 144 lines, and a copy started with a lower rung named,
+  which now gets the full-resolution copy over sharing as it already did
+  locally, instead of a 409.
+- Shared titles that Safari plays through its native HLS player (Dolby
+  Vision, HDR and HEVC copies, including SDR HEVC) play again. That player
+  carries the viewer's sign-in as a `token` in each playlist URL, and the
+  receiver refused every such URL, `master.m3u8` or `index.m3u8`, as an
+  unknown resource with a bare 422 ("HLS readiness returned HTTP 422") after
+  the Source had already started. The receiver now drops that one token,
+  which authorizes nothing on a shared session, and never passes it to the
+  Source. A resource it still will not relay answers a typed
+  `sharing_resource_unsupported` and logs one line naming the step. H.264
+  played through hls.js was unaffected, because hls.js signs in with a header.
 - Shared titles play again in the web player. Every web shared Start runs
   the Source's growing copy, which answered with a 60-second control lease that
   the receiver refused, so the viewer saw "The sharing host could not confirm
