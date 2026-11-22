@@ -429,6 +429,9 @@ impl SourceGrowingBacking {
             return Err(ControlStateError::Unavailable);
         }
         authority.refresh(&control).await?;
+        // The exchange is authenticated for this exact lineage: the viewer is
+        // here, whether or not its anchor is inside the produced range yet.
+        self.note_activity();
         let target = control.snapshot.buffer_anchor_ms();
         let files = self.production.files.lock().await;
         let origin = files
@@ -497,7 +500,7 @@ impl SourceGrowingBacking {
             );
             state.snapshot = Some(control.snapshot);
             state.lease_expires_at_unix_ms = crate::media_sessions::unix_ms()
-                .saturating_add(i64::from(crate::playback_control::VOD_LEASE_TIMEOUT_MS));
+                .saturating_add(i64::from(GROWING_LEASE_TIMEOUT_MS));
         }
         let mark_rendered = state.presented.presented();
         let lease_expires_at_unix_ms = state.lease_expires_at_unix_ms;
@@ -524,7 +527,7 @@ impl SourceGrowingBacking {
             action_suppressed,
             preparation_directive: None,
             lease_expires_at_unix_ms,
-            lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            lease_timeout_ms: GROWING_LEASE_TIMEOUT_MS,
             lease_state: "active",
             status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
             platform,

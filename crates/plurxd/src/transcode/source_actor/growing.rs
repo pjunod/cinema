@@ -24,13 +24,36 @@ impl SourceGrowingPreparation {
         self.source_owner.detach_and_wait().await
     }
 }
+/// The control lease a growing copy keeps: the shared session lease every
+/// shared client is promised (`lease_timeout_ms` 300 000). Its Start
+/// bootstrap advertises it, its control replies report it, and the copy
+/// retires only once that long has passed without viewer activity, so each
+/// layer names the lease that is actually honoured.
+pub(crate) const GROWING_LEASE_TIMEOUT_MS: u32 = crate::playback_control::VOD_LEASE_TIMEOUT_MS;
+
+/// When a growing copy last saw its viewer, against an explicit clock.
+pub(crate) struct GrowingActivity(std::sync::Mutex<Instant>);
+impl GrowingActivity {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self(std::sync::Mutex::new(now))
+    }
+    pub(crate) fn note_at(&self, now: Instant) {
+        let mut last = self.0.lock().expect("Source growing activity");
+        *last = (*last).max(now);
+    }
+    pub(crate) fn expired_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(*self.0.lock().expect("Source growing activity"))
+            >= Duration::from_millis(u64::from(GROWING_LEASE_TIMEOUT_MS))
+    }
+}
+
 pub(crate) struct SourceGrowingBacking {
     pub(crate) session_id: String,
     pub(crate) file: Arc<plurx_core::domain::MediaFile>,
     pub(crate) request: SessionRequest,
     pub(crate) production: Arc<CopyRangeProduction>,
     pub(crate) delivery: Arc<crate::meter::Meter>,
-    activity: std::sync::Mutex<Instant>,
+    activity: GrowingActivity,
     pub(crate) lifecycle: tokio::sync::Mutex<()>,
     pub(crate) control: tokio::sync::Mutex<super::control::GrowingControlState>,
     pub(crate) owners: Arc<SourceRenditionOwners>,
@@ -62,15 +85,14 @@ impl SourceGrowingBacking {
             && self.owners.contains_live_assignment(&self.assignment)
             && self.source.unchanged()
     }
+    /// An authenticated current-lineage exchange from the viewer B relays: a
+    /// resource fetch or a control exchange. B's own Status is not one; it
+    /// says B's owner is alive, not that anyone is watching.
     pub(crate) fn note_activity(&self) {
-        *self.activity.lock().expect("Source growing activity") = Instant::now();
+        self.activity.note_at(Instant::now());
     }
     fn activity_expired(&self) -> bool {
-        self.activity
-            .lock()
-            .expect("Source growing activity")
-            .elapsed()
-            >= Duration::from_millis(u64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS))
+        self.activity.expired_at(Instant::now())
     }
     pub(crate) async fn observe_demand(
         &self,
@@ -372,8 +394,10 @@ impl SourceViewerActor {
         {
             return Err(SourceWorkerError::Unavailable);
         }
+        // Every authenticated resource the viewer fetches is activity; only
+        // a served media segment is presentation evidence.
+        backing.note_activity();
         if kind == SharingHlsResourceKind::MediaSegment {
-            backing.note_activity();
             backing.note_media_served().await;
         }
         drop(custody);
@@ -673,7 +697,7 @@ impl TranscodeManager {
             request: prepared.request().clone(),
             production,
             delivery: Arc::new(crate::meter::Meter::for_method("copy")),
-            activity: std::sync::Mutex::new(Instant::now()),
+            activity: GrowingActivity::new(Instant::now()),
             lifecycle: tokio::sync::Mutex::new(()),
             control: Default::default(),
             owners,
@@ -808,7 +832,7 @@ impl TranscodeManager {
                 encoder: "copy",
                 grade: OutputGrade::Sdr,
                 vod: false,
-                control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+                control_lease_timeout_ms: GROWING_LEASE_TIMEOUT_MS,
             };
             startup_stage = "growing.start_response";
             let incarnation = owner.assignment.binding().incarnation_id().to_string();
@@ -1013,5 +1037,35 @@ impl TranscodeManager {
             preparations,
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    /// A copy that saw one relayed control exchange outlives the 60 s rolling
+    /// window it used to retire on, and keeps exactly the lease its Start and
+    /// control replies advertise; a later exchange extends it.
+    #[test]
+    fn growing_copy_keeps_the_lease_it_advertises_after_one_control_exchange() {
+        assert_eq!(
+            GROWING_LEASE_TIMEOUT_MS,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS
+        );
+        let start = Instant::now();
+        let activity = GrowingActivity::new(start);
+        let exchange = start + Duration::from_secs(5);
+        activity.note_at(exchange);
+        let lease = Duration::from_millis(u64::from(GROWING_LEASE_TIMEOUT_MS));
+        assert!(!activity.expired_at(exchange + Duration::from_secs(61)));
+        assert!(!activity.expired_at(exchange + lease - Duration::from_millis(1)));
+        assert!(activity.expired_at(exchange + lease));
+        // A later exchange extends it; an older reading never rewinds it.
+        let again = exchange + Duration::from_secs(250);
+        activity.note_at(again);
+        activity.note_at(exchange);
+        assert!(!activity.expired_at(exchange + lease));
+        assert!(activity.expired_at(again + lease));
     }
 }

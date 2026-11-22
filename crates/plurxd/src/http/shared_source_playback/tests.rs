@@ -1584,6 +1584,76 @@ async fn sharing_receiver_consumes_the_range_copy_start_the_source_published() {
         .await
         .expect("receiver Status after Start");
     let confirmed = status.response().expect("HLS Status").clone();
+    // The copy advertises the lease it keeps: the shared session lease.
+    let source_control = response.control.clone().expect("Source control bootstrap");
+    assert_eq!(
+        source_control.lease_timeout_ms,
+        crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS
+    );
+    // One control exchange, relayed as B relays its viewer's, on a fresh
+    // pinned connection: the Source accepts it and reports the same lease.
+    // The copy may start on the keyframe before zero; a control position is
+    // never negative, and zero is inside the produced range either way.
+    let origin = response
+        .media_origin_ms
+        .expect("signed bounded origin")
+        .max(0);
+    let exchange = {
+        use crate::playback_control as pc;
+        pc::ControlRequestV1 {
+            intent: None,
+            protocol: pc::PROTOCOL_V1.to_owned(),
+            generation: source_control.generation.clone(),
+            control_epoch: source_control.control_epoch,
+            client_instance_id: "6f1c2d1e-7f9a-4b8e-9d3c-2a1b0c9d8e7f".to_owned(),
+            sequence: 1,
+            demand: pc::PlaybackDemand::Active,
+            position_ms: origin,
+            buffered_from_ms: Some(origin),
+            buffered_through_ms: origin + 500,
+            playback_rate: 1.0,
+            render_state: pc::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: pc::ClientSelection {
+                quality: pc::QualitySelection::Original,
+                audio_track: None,
+                subtitle: pc::SubtitleSelection {
+                    mode: pc::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: pc::CodecPolicy::Auto,
+                dynamic_range: pc::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(pc::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
+                platform: pc::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![pc::CodecPolicy::H264],
+                dynamic_ranges: vec![pc::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: Some(vec!["hold".to_owned(), "retry_resource".to_owned()]),
+        }
+    };
+    let accepted = connect()
+        .await
+        .file_control(&credential, &viewer, &session, &known, &exchange)
+        .await
+        .expect("relayed control exchange")
+        .into_outcome()
+        .expect("the Source accepts the exchange");
+    assert_eq!(accepted.accepted_sequence, 1);
+    let kept = accepted.lease.expires_at_unix_ms - accepted.server_time_unix_ms;
+    let lease = i64::from(crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS);
+    assert!(
+        (lease - 5_000..=lease).contains(&kept),
+        "the copy keeps the lease it advertised: {kept} ms"
+    );
     assert_eq!(confirmed.session_id, response.session_id);
     let source_session = Uuid::parse_str(&response.session_id).expect("Source session");
     let receiver_session = Uuid::new_v4();

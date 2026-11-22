@@ -4,7 +4,9 @@ use super::*;
 #[path = "source_actor/growing.rs"]
 mod growing;
 #[cfg(unix)]
-pub(crate) use growing::{SourceGrowingBacking, SourceGrowingPreparation};
+pub(crate) use growing::{
+    SourceGrowingBacking, SourceGrowingPreparation, GROWING_LEASE_TIMEOUT_MS,
+};
 
 #[derive(Clone)]
 enum SourceBacking {

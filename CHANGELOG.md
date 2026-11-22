@@ -72,6 +72,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared titles play again in the web player. Every web shared Start runs
+  the Source's growing copy, which answered with a 60-second control lease that
+  the receiver refused, so the viewer saw "The sharing host could not confirm
+  playback preparation" and the copy expired a minute later without serving a
+  byte. The growing copy now keeps the 300-second lease every shared client is
+  promised, on its Start, its control replies and its own retirement, and
+  counts any resource fetch or authenticated control exchange the receiver
+  relays as viewer activity (the receiver's own status checks are not). The
+  web player also accepts the bounded view such a Start returns, as the Apple
+  and Android players already did. The Source and the receiver both need this
+  release: a receiver still refuses the 60-second lease an older Source sends.
 - A shared Start whose claim the Source refuses (sharing unavailable, at
   capacity, or in conflict) no longer leaves a cleanup that can never finish.
   The refusal wrote nothing for that Start, so the receiver's End now settles at once instead
@@ -88,8 +99,10 @@ bump may break compatibility and a **patch** bump never does.
   heartbeat as a future-dated clock because it was stamped after the write
   sampled its own clock. A heartbeat is now accepted up to the five seconds a
   write may use its membership observation. A clock further ahead is still
-  refused, and the 120-second staleness rule is unchanged. A viewer saw "The
-  sharing host could not confirm playback preparation".
+  refused. A heartbeat still goes stale 120 seconds after the time it carries,
+  so a member whose clock runs up to five seconds ahead stays fresh for up to
+  125 seconds. A viewer saw "The sharing host could not confirm playback
+  preparation".
 - A shared-library Source no longer refuses its catalogue, current-scope and
   content reads with `sharing_member_floor_unavailable` when a registered
   learner is offline. Serving reads require fresh heartbeats from the
