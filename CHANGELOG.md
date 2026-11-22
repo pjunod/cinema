@@ -10,6 +10,18 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- A shared title's Source copy now says where its time goes. Each published
+  segment logs one `Source copy segment published` line (incarnation, range,
+  segment, media start and end, bytes, wall time, media-per-wall-second rate,
+  and the split between waiting on FFmpeg's output, plurx's conversion and the
+  segment commit). A wait past one advertised target duration logs one
+  warning naming what it waited on, and production logs how far it got
+  when it ends. Each
+  refused Source start response names the check that refused it. The
+  receiving server logs every HLS resource it relays (status, bytes against
+  the declared length, duration, `Range`, whether it completed): at debug
+  normally, at info when it fell short or took longer than a target duration.
+  Web player beacons now carry the playhead and buffered ranges.
 - **Language changes keep the picture playing on copied titles.** A copy-VOD title with two or three soundtracks now plays in the web player as one shared video with each language as an alternate audio track, so choosing another language switches in place on the same player and session instead of reopening the stream. The video is packaged and stored once for every language and viewer. Other clients, native HLS and titles with more soundtracks keep the existing combined stream.
 
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
@@ -91,6 +103,13 @@ bump may break compatibility and a **patch** bump never does.
 - **Shared watch progress is saved and acknowledged.** Every progress beat (and every explicit watched toggle) for a shared title was written on the receiver and then answered `503`, because the receiver's catalogue-body guard refused a success that carried no Source content. The player kept resending the first beat, so only the first position of each session was ever recorded. These answers now carry the receiver's own history, marked as such for the guard.
 - **Shared playback-control refusals name their step.** The receiver logs which step refused a shared control exchange (attachment, peer, transport failure or the Source's own refusal code), and the Source logs why its growing copy refused one, instead of both collapsing into an unlogged `control_unavailable`.
 
+- 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
+  with playback instead of stalling every few seconds. Each 2-second window
+  used to start its own renderer, which re-read and re-decoded the source
+  back to the previous keyframe and restarted the GPU. One renderer now
+  produces up to eight consecutive windows, each still verified and
+  published on its own. That is about 30% less work per window and about
+  60% fewer source reads, with byte-identical output.
 - Shared Dolby Vision Profile 7 titles start again when converted to Profile
   8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
   first fragment against the rung its plan resolved instead of the source's own
