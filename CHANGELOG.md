@@ -99,6 +99,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A shared title no longer ends because its Source briefly could not answer.
+  When a healthy Source copy could not answer one Status or resource request
+  (a slow store renewal, a lost renewal race, its open-body limit, a segment
+  not yet produced), it answered the receiver as if the session had ended,
+  and the receiver retired it: playback froze once the buffer ran out (M6
+  file 6751 froze at 39 s). Each refusal now states, where its check lives,
+  whether it passes: one that does is answered with a retry the receiver
+  already keeps a session through, and one that does not (the copy died, the
+  session was retired, its route, authority or source changed) retires the
+  Source session and is answered in the same terminal shape as before, so
+  receivers and Sources of either version still agree.
 - **Shared Matroska titles start from the beginning and restart mid-title.** A shared copy of a Matroska title with reordered frames (B-frames) was refused with `copy_clock_unknown` on its first fragment: from the start for titles like *Countdown*, and on every restart after a seek for titles like *Avatar*. Matroska stores no decode times, so FFmpeg makes them up after every start and rounds each into its own output's time base. A 1/1000 packet clock never matched the 1/16000 MP4 to the tick, and a decode time FFmpeg repeated was kept by the clock but raised by one tick in the MP4. The packet clock is now written in the MP4 track's own timescale. Each sample is checked against the decode time the MP4 muxer actually writes, still exactly.
 - **Shared watch progress is saved and acknowledged.** Every progress beat (and every explicit watched toggle) for a shared title was written on the receiver and then answered `503`, because the receiver's catalogue-body guard refused a success that carried no Source content. The player kept resending the first beat, so only the first position of each session was ever recorded. These answers now carry the receiver's own history, marked as such for the guard.
 - **Shared playback-control refusals name their step.** The receiver logs which step refused a shared control exchange (attachment, peer, transport failure or the Source's own refusal code), and the Source logs why its growing copy refused one, instead of both collapsing into an unlogged `control_unavailable`.

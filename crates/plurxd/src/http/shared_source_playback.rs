@@ -1125,7 +1125,17 @@ async fn status(
         }
     }
     if current.is_ok() && !cleanup_only {
-        if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?error, "Source status refused"); }) {
+        let opened = owned.actor.open_start_response(deadline).await;
+        if let Err(refusal) = &opened {
+            tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?refusal.error, transient = refusal.is_transient(), "Source status refused");
+            // A refusal that passes on its own is answered as one: a typed
+            // retry the receiver keeps its live session through. Only a
+            // terminal one falls through to the terminal projection below.
+            if refusal.is_transient() {
+                return Err(live_refusal_retry());
+            }
+        }
+        if let Ok((response, guard)) = opened {
             ingress::publication_allowed(&state, &owned.assignment).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.publication_allowed", error_class = "operation_refused", "Source status refused"); })?;
             entry
                 .observe_published(&owned, &response)
@@ -1672,8 +1682,9 @@ async fn resources(
     if current_grant != grant {
         return Err(unavailable());
     }
-    let opened = opened.map_err(|error| {
+    let opened = opened.map_err(|refusal| {
         use crate::transcode::source_actor::SourceWorkerError;
+        let error = refusal.error;
         let native_caption = input.resource.cached_subtitle_revision().is_none()
             && matches!(
                 input.resource.kind(),
@@ -1689,6 +1700,9 @@ async fn resources(
                 message: "The shared playback resource is still preparing".into(),
                 retry_after_seconds: 1,
             }
+        } else if refusal.is_transient() {
+            // The receiver relays this as unavailable and keeps the session.
+            live_refusal_retry()
         } else {
             SourceStartFailure::from(error).response()
         }
@@ -1866,7 +1880,13 @@ async fn start(
         .actor
         .open_start_response(deadline)
         .await
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+        .map_err(|refusal| {
+            if refusal.is_transient() {
+                live_refusal_retry()
+            } else {
+                SourceStartFailure::from(refusal.error).response()
+            }
+        })?;
     let (_, current_grant) = current_reference(&state, &headers, &target).await?;
     if current_grant != grant {
         return Err(unavailable());
@@ -2299,6 +2319,21 @@ async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
     }
     Ok((hash, grant))
 }
+/// A live session's refusal that passes on its own ([`LiveRefusal`]). The
+/// receiver reads a 503 with `Retry-After` as the Source being unavailable
+/// for now (`PeerError::Unavailable`), so it keeps the session and asks again;
+/// a plain 503 would read as the Source refusing it for good.
+///
+/// [`LiveRefusal`]: crate::transcode::source_actor::LiveRefusal
+fn live_refusal_retry() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "sharing_source_retry",
+        message: "Shared playback is briefly unavailable".to_owned(),
+        retry_after_seconds: 1,
+    }
+}
+
 fn unavailable() -> ApiError {
     ApiError::typed(
         StatusCode::SERVICE_UNAVAILABLE,

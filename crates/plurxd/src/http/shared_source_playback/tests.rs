@@ -1496,6 +1496,216 @@ async fn actual_range_init(
     }
 }
 
+/// Production 2026-11-22 (M6 file 6751): a live growing copy's Status was
+/// refused once and answered with the terminal-only projection, so the
+/// receiver retired a healthy session and Safari froze when its buffer ran
+/// out. A refusal that passes on its own (here, the actor's open-body limit)
+/// must be answered as a retry the receiver keeps the session through, on
+/// Status and on resources alike, and the next Status must succeed; a dead
+/// producer must still end the session, in the projection an older receiver
+/// already reads as the end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does() {
+    use crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS;
+    use std::time::{Duration, Instant};
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let response = actual_resource_request(
+        address,
+        true,
+        &sessions,
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "range Start");
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Start envelope");
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source envelope");
+    assert!(!decoded.response().vod, "a growing copy");
+    assert_eq!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .lease_timeout_ms,
+        GROWING_LEASE_TIMEOUT_MS
+    );
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"]
+        .as_str()
+        .expect("request")
+        .to_owned();
+    recipe["incarnation_id"] = json!(decoded.incarnation_id());
+    recipe["session_id"] = json!(decoded.response().session_id);
+    recipe["control_epoch"] = json!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .control_epoch
+    );
+    let operation = format!("{sessions}/{request}");
+    let status = || {
+        let body = serde_json::to_vec(&recipe).expect("status body");
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/status");
+        async move { actual_resource_request(address, true, &url, headers, body).await }
+    };
+    let mut playlist = recipe.clone();
+    playlist["resource"] = json!(decoded
+        .response()
+        .playlist_url
+        .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
+        .expect("session playlist"));
+    let resource = || {
+        let body = serde_json::to_vec(&playlist).expect("resource body");
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/resources");
+        async move { actual_resource_request(address, true, &url, headers, body).await }
+    };
+    assert_eq!(
+        status().await.status(),
+        StatusCode::OK,
+        "Status of the live copy"
+    );
+
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("registry")
+        .first()
+        .cloned()
+        .expect("actual entry");
+    let owned = entry
+        .wait(Instant::now() + Duration::from_secs(1))
+        .await
+        .expect("actual actor");
+    // Fill the actor's open bodies, as 64 transfers still in flight do.
+    let mut bodies = Vec::new();
+    while let Ok((_, guard)) = owned
+        .actor
+        .open_start_response(Instant::now() + Duration::from_secs(5))
+        .await
+    {
+        bodies.push(guard);
+        assert!(bodies.len() <= 64, "the open-body limit holds");
+    }
+    assert!(
+        !bodies.is_empty(),
+        "the copy served bodies before its limit"
+    );
+    for (what, answer) in [("Status", status().await), ("playlist", resource().await)] {
+        assert_eq!(
+            answer.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{what} retries"
+        );
+        let retry = answer
+            .headers()
+            .contains_key(axum::http::header::RETRY_AFTER);
+        assert!(retry, "{what} names when to ask again");
+        // What the receiver reads it as: the Source unavailable for now,
+        // which its Status owner and resource relay both keep a session
+        // through (`peer_failure` maps it to `PeerUnavailable`).
+        assert!(matches!(
+            crate::sharing_client::peer_status_refusal(answer.status(), retry),
+            crate::sharing_client::PeerError::Unavailable
+        ));
+        let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+            .await
+            .expect("retry body");
+        let body: Value = serde_json::from_slice(&body).expect("typed retry");
+        assert_eq!(body["code"], "sharing_source_retry", "{what}");
+    }
+    assert_eq!(
+        owned.actor.settlement_status(),
+        None,
+        "the session is not retired"
+    );
+    drop(bodies);
+    let answer = status().await;
+    assert_eq!(answer.status(), StatusCode::OK, "the next Status succeeds");
+    let body = axum::body::to_bytes(answer.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Status envelope");
+    super::super::decode_source_start_response(&body, &fixture.reference)
+        .expect("the live Start response again");
+
+    // The producer dies. That is the session's end: no answer from here on
+    // may tell the receiver to retry, the projection is the shape an older
+    // receiver already reads as the end, and the actor settles.
+    owned
+        .actor
+        .growing_backing()
+        .expect("growing copy")
+        .retire();
+    let projected_by = Instant::now() + Duration::from_secs(20);
+    let projection = loop {
+        let answer = status().await;
+        let code = answer.status();
+        let retry = answer
+            .headers()
+            .contains_key(axum::http::header::RETRY_AFTER);
+        let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+            .await
+            .expect("terminal body");
+        assert!(!retry, "a dead copy is never answered as a retry: {code}");
+        if code == StatusCode::OK {
+            break serde_json::from_slice::<Value>(&body).expect("terminal projection");
+        }
+        // While the actor retires, its authority is already refused.
+        assert!(matches!(
+            crate::sharing_client::peer_status_refusal(code, retry),
+            crate::sharing_client::PeerError::Rejected(_)
+        ));
+        assert!(
+            Instant::now() < projected_by,
+            "the terminal projection follows"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(projection.get("response").is_none(), "{projection}");
+    for key in ["reference", "request_id", "incarnation_id", "state"] {
+        assert!(projection.get(key).is_some(), "{key} in {projection}");
+    }
+    let settle_by = Instant::now() + Duration::from_secs(20);
+    while owned.actor.settlement_status().is_none() {
+        assert!(
+            Instant::now() < settle_by,
+            "a dead copy's actor settles promptly"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
 async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     let mut fixture = real_source_start_fixture_with(mode, None).await;
     fixture.keep_fixture_membership_stable().await;
