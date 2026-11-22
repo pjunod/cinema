@@ -452,11 +452,38 @@ impl Init {
     }
 }
 
+/// The `ftyp` payload as the video track determines it: major brand, minor
+/// version, then the compatible brands as the set ISO/IEC 14496-12 defines
+/// (first occurrence kept, repeats dropped). FFmpeg's MP4 muxer adds `dby1`
+/// for an AC-3, E-AC-3 or TrueHD track as well as for a Dolby Vision record,
+/// so over a video entry with no Dolby Vision record that brand is the
+/// audio's and is dropped; [`replace_dolby_file_type_brand`]'s `iso6` stand-in
+/// for it is then a repeat and drops too. An init with neither keeps its
+/// exact payload, so existing contracts are unchanged.
+fn video_file_type_brands(payload: &[u8], dolby_vision: bool) -> Result<Vec<u8>, Fmp4Error> {
+    if payload.len() < 8 || !(payload.len() - 8).is_multiple_of(4) {
+        return malformed("copy init ftyp is malformed");
+    }
+    let mut brands = payload[..8].to_vec();
+    let mut seen: Vec<&[u8]> = Vec::new();
+    for brand in payload[8..].chunks_exact(4) {
+        if (brand == b"dby1" && !dolby_vision) || seen.contains(&brand) {
+            continue;
+        }
+        seen.push(brand);
+        brands.extend_from_slice(brand);
+    }
+    Ok(brands)
+}
+
 /// Decoder/timing identity for a copy output, independent of global muxer
 /// metadata such as `udta`'s Lavf version. Call after the shared init
 /// normalization/promotion recipe. This hashes the selected video sample
-/// entries (including codec/color/DV records), ftyp, timescale and track
-/// defaults; only the visual entry's descriptive compressor name is omitted.
+/// entries (including codec/color/DV records), the file-type brands the video
+/// determines (see [`video_file_type_brands`]), timescale and track defaults;
+/// only the visual entry's descriptive compressor name is omitted. The
+/// canonical output carries video alone and the AV output carries audio too,
+/// so nothing an audio track contributes may enter this identity.
 /// It is not a source attestation or a media-sample digest.
 pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error> {
     use sha2::{Digest, Sha256};
@@ -481,12 +508,12 @@ pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error>
     digest.update([video.nal_length_size, u8::from(video.dolby_vision_config)]);
     let (ftyp_at, ftyp) = find_child(&init.bytes, 0..init.bytes.len(), b"ftyp")?
         .ok_or_else(|| Fmp4Error::Malformed("copy init has no ftyp".into()))?;
-    let ftyp_bytes = &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size];
-    if ftyp_bytes.len() < 8 || !(ftyp_bytes.len() - 8).is_multiple_of(4) {
-        return malformed("copy init ftyp is malformed");
-    }
+    let ftyp_bytes = video_file_type_brands(
+        &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size],
+        video.dolby_vision_config,
+    )?;
     digest.update((ftyp_bytes.len() as u64).to_be_bytes());
-    digest.update(ftyp_bytes);
+    digest.update(&ftyp_bytes);
     let (moov_at, moov) = find_child(&init.bytes, 0..init.bytes.len(), b"moov")?
         .ok_or_else(|| Fmp4Error::Malformed("copy init has no moov".into()))?;
     let moov_body = moov_at.start + moov.header_len..moov_at.start + moov.size;
@@ -582,6 +609,49 @@ mod copy_init_contract_tests {
             panic!("missing init");
         };
         init
+    }
+
+    fn ftyp(brands: &[&[u8; 4]]) -> Vec<u8> {
+        let mut payload = b"iso5\0\0\x02\0".to_vec();
+        for brand in brands {
+            payload.extend_from_slice(*brand);
+        }
+        payload
+    }
+
+    /// FFmpeg's AV output of an E-AC-3 or TrueHD title adds `dby1` beside
+    /// SDR or HDR10 video, and the shared normalization rewrites it to `iso6`;
+    /// the video-only canonical output has neither. Both are one video
+    /// contract, which is what failed every such shared range Start.
+    #[test]
+    fn copy_init_contract_brands_leave_out_what_audio_adds() {
+        let head = ftyp(&[b"iso5", b"iso6", b"mp41"]);
+        let brands = |payload: &[u8], dolby_vision| {
+            video_file_type_brands(payload, dolby_vision).expect("brands")
+        };
+        assert_eq!(
+            brands(&head, false),
+            head,
+            "an init with neither keeps its exact payload"
+        );
+        assert_eq!(
+            brands(&ftyp(&[b"iso5", b"iso6", b"dby1", b"mp41"]), false),
+            head
+        );
+        assert_eq!(
+            brands(&ftyp(&[b"iso5", b"iso6", b"iso6", b"mp41"]), false),
+            head
+        );
+        // Over a Dolby Vision entry the brand is the video's own claim.
+        let dolby = ftyp(&[b"iso5", b"iso6", b"dby1", b"mp41"]);
+        assert_eq!(brands(&dolby, true), dolby);
+        // Any other brand change still changes the contract.
+        assert_ne!(brands(&ftyp(&[b"iso5", b"iso6"]), false), head);
+        assert_ne!(
+            brands(&ftyp(&[b"iso5", b"iso6", b"avc1", b"mp41"]), false),
+            head
+        );
+        assert!(video_file_type_brands(b"iso5\0\0\x02\0iso", false).is_err());
     }
 
     #[test]

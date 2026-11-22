@@ -6784,7 +6784,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
 # Cinema fixes + main 32f30addc union: main 376 plus the branch's own 4 over base 5a5e6c97a.
-expected_occurrences = 380
+# Source range audio fixture: +1 test-only FFmpeg command muxing a generated
+# E-AC-3 or TrueHD track beside the fixture video; its awaited output() joins
+# the child before the fixture continues. No production command.
+expected_occurrences = 381
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7568,7 +7571,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process launch.
 # Receiver-consume lease checks: +1 `.status()` read of the Source resource
 # reply in the fixture's playlist/init fetch helper. No process launch.
-expected_occurrences = 977
+# Source range audio fixture: +1 awaited output() joining that test-only FFmpeg
+# mux child. No production launch, kill or wait.
+expected_occurrences = 978
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

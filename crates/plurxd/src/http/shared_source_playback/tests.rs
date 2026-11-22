@@ -1334,6 +1334,22 @@ async fn sharing_source_http_range_native_copy_start_status_playlist_and_end() {
     ))
     .await;
 }
+/// A scanned remux's shape: Matroska with an E-AC-3 5.1 track.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_audio_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeAudioCopy,
+    ))
+    .await;
+}
+/// A scanned Dolby Vision Profile 7 remux with TrueHD audio.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_dolby_vision_converted_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeDolbyVisionConverted,
+    ))
+    .await;
+}
 async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     let mut fixture = real_source_start_fixture_with(mode, None).await;
     fixture.keep_fixture_membership_stable().await;

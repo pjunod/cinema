@@ -2691,6 +2691,14 @@ pub(crate) enum SourceFixtureMode {
     /// [`Self::RangeCopy`] in Matroska with two embedded SubRip tracks,
     /// started with native subtitles and the first track selected.
     RangeNativeCopy,
+    /// [`Self::RangeCopy`] as a scanned remux carries it: Matroska with an
+    /// E-AC-3 5.1 track, started with that track.
+    RangeAudioCopy,
+    /// A scanned Dolby Vision Profile 7 remux through a range-affirming
+    /// receiver: Matroska with the Profile 7 source of
+    /// [`Self::DolbyVisionConverted`] and a TrueHD 5.1 track, converted to
+    /// Profile 8.1 by the growing copy owner.
+    RangeDolbyVisionConverted,
 }
 
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
@@ -2968,8 +2976,18 @@ async fn build_real_source_start_fixture(
     // The modes a range-affirming receiver starts: a growing H.264 copy.
     let range_copy = matches!(
         mode,
-        SourceFixtureMode::RangeCopy | SourceFixtureMode::RangeNativeCopy
+        SourceFixtureMode::RangeCopy
+            | SourceFixtureMode::RangeNativeCopy
+            | SourceFixtureMode::RangeAudioCopy
+            | SourceFixtureMode::RangeDolbyVisionConverted
     );
+    // The scanned remux modes' audio: the codec FFmpeg encodes, its scanned
+    // name and channel count.
+    let audio = match mode {
+        SourceFixtureMode::RangeAudioCopy => Some(("eac3", 6)),
+        SourceFixtureMode::RangeDolbyVisionConverted => Some(("truehd", 6)),
+        _ => None,
+    };
     let burn = matches!(
         mode,
         SourceFixtureMode::BurnText | SourceFixtureMode::BurnBitmap
@@ -2979,7 +2997,9 @@ async fn build_real_source_start_fixture(
         | SourceFixtureMode::DolbyVisionCompatibleEncoded
         | SourceFixtureMode::DolbyVisionUnaffirmed
         | SourceFixtureMode::DolbyVisionStripped => Some((8u8, 1u8)),
-        SourceFixtureMode::DolbyVisionConverted => Some((7, 6)),
+        SourceFixtureMode::DolbyVisionConverted | SourceFixtureMode::RangeDolbyVisionConverted => {
+            Some((7, 6))
+        }
         SourceFixtureMode::DolbyVisionProfile5Encoded => Some((5, 0)),
         _ => None,
     };
@@ -2990,6 +3010,7 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::DolbyVisionConverted
             | SourceFixtureMode::DolbyVisionUnaffirmed
             | SourceFixtureMode::DolbyVisionStripped
+            | SourceFixtureMode::RangeDolbyVisionConverted
     );
     let hdr = matches!(
         mode,
@@ -3011,7 +3032,7 @@ async fn build_real_source_start_fixture(
     } else {
         (320, 180)
     };
-    let file = directory.path().join(if native || burn {
+    let mut file = directory.path().join(if native || burn {
         "source.mkv"
     } else {
         "source.mp4"
@@ -3140,6 +3161,44 @@ async fn build_real_source_start_fixture(
             std::fs::remove_file(base).expect("HDR10 base removed");
         }
         None => {}
+    }
+    if let Some((codec, channels)) = audio {
+        // A remux's audio beside the video built above, in Matroska.
+        let muxed = directory.path().join("source.mkv");
+        let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args(["-v", "error", "-i"])
+            .arg(&file)
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-shortest",
+                "-c:v",
+                "copy",
+                "-c:a",
+                codec,
+                "-strict",
+                "experimental",
+                "-ac",
+            ])
+            .arg(channels.to_string())
+            .arg("-y")
+            .arg(&muxed)
+            .output()
+            .await
+            .expect("actual audio mux");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::remove_file(&file).expect("video-only fixture removed");
+        file = muxed;
     }
     if native {
         let caption = directory.path().join("actual.srt");
@@ -3338,7 +3397,7 @@ async fn build_real_source_start_fixture(
             .await
             .expect("Dolby Vision scan facts");
     }
-    if range_copy {
+    if range_copy && dolby_vision.is_none() {
         // The scan's profile for the generated H.264 source.
         client
             .execute(
@@ -3347,6 +3406,17 @@ async fn build_real_source_start_fixture(
             )
             .await
             .expect("scanned H.264 profile");
+    }
+    if let Some((codec, channels)) = audio {
+        // The scan's container and audio facts for the generated remux.
+        let streams = serde_json::json!([{"index":0,"codec":codec,"channels":channels,"sample_rate":48000,"language":"eng","title":null,"default":true}]);
+        client
+            .execute(
+                "UPDATE files SET container='mkv',audio_streams=$1 WHERE id=1",
+                hiqlite::params!(streams.to_string()),
+            )
+            .await
+            .expect("scanned audio facts");
     }
     if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
         // A copy's head is checked against the scan's profile.
@@ -3548,7 +3618,8 @@ async fn build_real_source_start_fixture(
         }
         SourceFixtureMode::DolbyVisionPreserved
         | SourceFixtureMode::DolbyVisionConverted
-        | SourceFixtureMode::DolbyVisionUnaffirmed => {
+        | SourceFixtureMode::DolbyVisionUnaffirmed
+        | SourceFixtureMode::RangeDolbyVisionConverted => {
             // The ask only clamps: a player that does not ask for Dolby
             // Vision is given the compatible base whatever its caps say.
             recipe["session"]["preserve_dolby_vision"] = serde_json::json!(true);
@@ -3576,6 +3647,14 @@ async fn build_real_source_start_fixture(
             ),
         ] {
             headers.insert(name, value.parse().expect("receiver affirmation"));
+        }
+    }
+    if let Some((codec, _)) = audio {
+        recipe["session"]["audio"] = serde_json::json!(0);
+        // A client asks for the AAC conversion its decision named: these
+        // caps take AAC alone, and the decision converts TrueHD to it.
+        if codec == "truehd" {
+            recipe["session"]["aac"] = serde_json::json!(true);
         }
     }
     if matches!(mode, SourceFixtureMode::Direct) {
