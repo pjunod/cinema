@@ -499,15 +499,9 @@ over the 20 G budget *or* its filesystem is under the 20 % reserve, it resets
 it: stop the runner, delete the directory whole, start the runner. In steady
 state it decides `within budget` and deletes nothing. Then, only if the Docker
 filesystem is still under its reserve, it prunes stopped containers older than a week, images
-unused for two weeks, and the daemon's build cache older than a week. The named
-`plurx-<runner>` builders are `docker-container` buildx builders with their own
-cache, which `docker builder prune` does not reach.
-If that still leaves the filesystem under its reserve, a warm cache no longer
-buys anything, because every job held to the reserve is refused. So, provided no
-job container has appeared in the meantime, the pass finishes the operator's
-step 2 below: all build cache and dangling images. A filesystem that is still
-short afterwards counts in `still short` (`short_after` in the receipt). It used
-to report `0 still short` beside a free figure under the reserve.
+unused for two weeks, and daemon build cache older than a week. If still short
+and no job container has appeared, it finishes step 2 below (all daemon build
+cache, dangling images). Named `plurx-<runner>` buildx builders are untouched.
 
 On Linux, a cache smaller than 1 GiB is left warm unless deleting it can close
 the measured free-space gap. A Forgejo container in the created, running,
@@ -582,18 +576,9 @@ reset and says so when it did not reach the floor. A `short_after` that is
 non-zero hour after hour is a host to give more disk or fewer lanes, not a
 janitor to tune.
 
-It is only ever counted **after the janitor did everything it may** on a
-filesystem: a cache reset that actually happened, or the full Docker pass. A
-runner merely busy at the top of every hour, or a Docker pass deferred because
-a job container appeared mid-prune, is the normal condition of a working CI
-host. It is not counted, because reporting it as short would send an operator
-to re-provision a machine that is fine. `reset: 0, short_after: 1` is possible,
-and means the Docker volume is short after the full pass with no cache reset
-needed.
-
-It counts **filesystems, measured once at the end of the pass**. A runner
-volume a later Docker prune rescued is not short, and one volume shared by a
-runner and Docker is not short twice.
+It counts filesystems, measured at the end of the pass, on which the janitor
+did **everything it may** (a reset that happened, or the full Docker pass). A
+busy runner or a deferred Docker pass is not short.
 
 **`demand_dropped` non-zero means something on this host is running on the
 percentage rule rather than the reserve configured for it** — a demand larger
@@ -671,21 +656,14 @@ names and counts these exceptions, and fails if another lane copies the bar.
 
 - **Docker prunes sooner.** The Docker block calls the same `floor_kb_for`, so
   on a 78 GB host `docker image prune -af --filter until=336h` and the builder
-  prune now fire below 25 G free instead of below 15.6 G. If that leaves the
-  host under the reserve, the pass also takes the rest of the daemon's build
-  cache and dangling images (see the hourly-cost note below).
+  prune now fire below 25 G free instead of below 15.6 G, and a host still
+  short loses its daemon build cache each hour.
 - **Cache resets are less rare.** This page records ~13 G/day of accumulation
   on a 78 G disk, so with 25 G reserved rather than 15.6 G, expect the timer to
   reset caches regularly instead of almost never. That is the intent — a cold
   cache costs a few slow jobs, and the band it replaces cost the fleet the
   whole lane — but the timer's own "in steady state it deletes nothing" note is
   now less true than it was.
-- **A Docker volume pruning cannot fix loses its daemon build cache every
-  hour.** Once the week-bounded prune leaves it under the reserve, the full
-  pass runs each time, as the cache reset does on a short runner volume. The
-  named `plurx-<runner>` builders keep their own cache, so this costs the
-  daemon's default build cache only. `short_after` non-zero hour after hour
-  still means more disk or fewer lanes.
 
 ```bash
 systemctl list-timers plurx-ci-janitor.timer     # when it next runs
