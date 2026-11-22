@@ -33,6 +33,8 @@ static bool dv_frame_hashes(void) {
   return value && strcmp(value, "1") == 0;
 }
 
+// The observed runtime line, kept so each window of a window run carries it.
+static char dv_gpu_runtime_line[512];
 // Observe the actual selected device, including software Vulkan implementations.
 static bool dv_gpu_runtime(pl_vulkan vk) {
   PFN_vkGetPhysicalDeviceProperties2 get_properties =
@@ -50,12 +52,16 @@ static bool dv_gpu_runtime(pl_vulkan vk) {
     snprintf(device + 2 * i, 3, "%02x", ids.deviceUUID[i]);
     snprintf(driver + 2 * i, 3, "%02x", ids.driverUUID[i]);
   }
-  printf("{\"kind\":\"gpu_runtime\",\"api_version\":%u,\"vendor_id\":%u,"
+  int length = snprintf(dv_gpu_runtime_line, sizeof(dv_gpu_runtime_line),
+         "{\"kind\":\"gpu_runtime\",\"api_version\":%u,\"vendor_id\":%u,"
          "\"device_id\":%u,\"driver_version\":%u,\"device_type\":%u,"
          "\"device_uuid\":\"%s\",\"driver_uuid\":\"%s\"}\n",
          props.properties.apiVersion, props.properties.vendorID,
          props.properties.deviceID, props.properties.driverVersion,
          (unsigned)props.properties.deviceType, device, driver);
+  if (length <= 0 || (size_t)length >= sizeof(dv_gpu_runtime_line))
+    return false;
+  fputs(dv_gpu_runtime_line, stdout);
   return true;
 }
 #endif

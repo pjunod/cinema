@@ -1898,6 +1898,7 @@ printf '%s\n' '{}'
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
+        window_run: Default::default(),
         failure_episode: digest(b"lifecycle failure"),
         preparation_budget: Duration::from_secs(5),
         report_revision: AtomicU64::new(0),
