@@ -390,6 +390,14 @@ pub(super) async fn spawn_generation(
                     source_custody,
                     None,
                     source_open,
+                    // The entries a window run may render after this one.
+                    rendition
+                        .plan
+                        .entries
+                        .get(at as usize + 1..)
+                        .map_or(&[][..], |rest| {
+                            &rest[..rest.len().min(crate::dv_segment::RUN_MAX - 1)]
+                        }),
                 )
                 .await
                 .and_then(|outcome| match outcome {

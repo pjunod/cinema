@@ -379,6 +379,7 @@ impl TranscodeManager {
                     .map_err(|error| error.to_string())?,
             ),
             prepared: std::sync::Mutex::new(None),
+            window_run: Default::default(),
             failure_episode,
             preparation_budget: Duration::from_secs(30),
             report_revision: std::sync::atomic::AtomicU64::new(0),

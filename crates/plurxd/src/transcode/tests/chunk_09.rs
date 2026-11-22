@@ -3067,6 +3067,7 @@ async fn graph_holding(
         runtime_cache: dir.join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
+        window_run: Default::default(),
         failure_episode: digest(b"episode"),
         preparation_budget: std::time::Duration::from_secs(5),
         report_revision: std::sync::atomic::AtomicU64::new(0),
