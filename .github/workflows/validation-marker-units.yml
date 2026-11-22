@@ -6,7 +6,9 @@ on:
 jobs:
   validation-markers:
     name: Python validation marker units
-    if: ${{ github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main' && github.sha == vars.CI_FLEET_MARKER_UNITS_SHA }}
+    # CI Fleet trusts this job by the reviewed bytes of this file and its
+    # inputs at the run commit, not one commit. The switch only routes it.
+    if: ${{ github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main' && vars.CI_FLEET_MARKER_UNITS == 'firecracker' }}
     runs-on: [ci-fleet-plurx-markers-v1]
     timeout-minutes: 3
     steps:
