@@ -565,8 +565,55 @@ pub(crate) struct VerifiedWindow {
     pub(crate) receipt: Option<plurx_core::transcode::dv_processing::DvProcessingReceipt>,
 }
 
+/// Encoded media and picture evidence from a completed, verified render.
+/// Retaining it does not hold a renderer or a source reader.
+#[cfg(target_os = "linux")]
+pub(crate) struct NativeFelWindow {
+    bytes: Vec<u8>,
+    pictures: Vec<(plurx_core::transcode::dv_processing::DvFrameKey, [u8; 32])>,
+    pub(crate) receipt: plurx_core::transcode::dv_processing::DvProcessingReceipt,
+}
+
 #[cfg(target_os = "linux")]
 impl VerifiedWindow {
+    pub(crate) fn into_native_fel_window(self) -> Result<NativeFelWindow, String> {
+        if !self
+            .registration
+            .confirmed_reap()
+            .is_some_and(|reap| reap.exit_success())
+        {
+            return Err("FEL splice renderer has not completed".into());
+        }
+        let receipt = self.receipt.ok_or("FEL splice has no processing receipt")?;
+        if receipt.counts().el_accepted == 0
+            || receipt.counts().el_accepted != receipt.counts().emitted
+        {
+            return Err("FEL splice window did not apply the enhancement layer throughout".into());
+        }
+        let pictures = self
+            .observed
+            .pictures
+            .into_iter()
+            .map(|picture| {
+                let witness = picture
+                    .base_vcl_sha256
+                    .ok_or("FEL source witness unavailable")?;
+                let mut bytes = [0; 32];
+                hex::decode_to_slice(witness.as_str(), &mut bytes)
+                    .map_err(|_| "invalid FEL source witness")?;
+                Ok((picture.key, bytes))
+            })
+            .collect::<Result<_, &str>>()?;
+        Ok(NativeFelWindow {
+            bytes: self.bytes,
+            pictures,
+            receipt,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NativeFelWindow {
     fn package_splice_window(
         &self,
         format: &plurx_core::fmp4::video_splice::SpliceVideoFormat,
@@ -579,13 +626,6 @@ impl VerifiedWindow {
             track_projection::CopyTrackProjection, video_splice::SpliceBoundary, FragmentReader,
             Unit,
         };
-        let proof = self
-            .receipt
-            .as_ref()
-            .ok_or("FEL splice has no processing receipt")?;
-        if proof.counts().el_accepted == 0 || proof.counts().el_accepted != proof.counts().emitted {
-            return Err("FEL splice window did not apply the enhancement layer throughout".into());
-        }
         let media_error = |error: plurx_core::fmp4::Fmp4Error| error.to_string();
         let mut reader = FragmentReader::new();
         reader.reject_reinitialization();
@@ -633,7 +673,7 @@ impl VerifiedWindow {
 /// recipe and must recheck the producer and media sequence before publication.
 #[cfg(target_os = "linux")]
 pub(crate) fn package_fel_segment(
-    windows: &[VerifiedWindow],
+    windows: &[NativeFelWindow],
     ordinary: &plurx_core::fmp4::Fragment,
     ordinary_video: &plurx_core::fmp4::Track,
     ordinary_output_extent: &plurx_core::fmp4::Fragment,
@@ -650,9 +690,8 @@ pub(crate) fn package_fel_segment(
     let mut decode_start = copy_extent.base_decode_time;
     let mut digests = Vec::new();
     let mut previous: Option<&plurx_core::transcode::dv_processing::DvFrameKey> = None;
-    for picture in windows.iter().flat_map(|window| &window.observed.pictures) {
+    for (key, witness) in windows.iter().flat_map(|window| &window.pictures) {
         if let Some(old) = previous {
-            let key = &picture.key;
             if old.absolute_video_index != key.absolute_video_index
                 || old.continuity_epoch != key.continuity_epoch
                 || old.display_ordinal.checked_add(1) != Some(key.display_ordinal)
@@ -660,15 +699,8 @@ pub(crate) fn package_fel_segment(
                 return Err("FEL splice windows do not cover consecutive source pictures".into());
             }
         }
-        previous = Some(&picture.key);
-        let witness = picture
-            .base_vcl_sha256
-            .as_ref()
-            .ok_or("FEL source witness unavailable")?;
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(witness.as_str(), &mut bytes)
-            .map_err(|_| "invalid FEL source witness")?;
-        digests.push(bytes);
+        previous = Some(key);
+        digests.push(*witness);
     }
     if digests.len() != copy_extent.sample_count() {
         return Err("FEL windows do not cover the whole ordinary video segment".into());
@@ -679,7 +711,7 @@ pub(crate) fn package_fel_segment(
     let mut bytes = Vec::new();
     let mut consumed = 0;
     for (subwindow, window) in windows.iter().enumerate() {
-        let end = consumed + window.observed.pictures.len();
+        let end = consumed + window.pictures.len();
         let ordinal = u32::try_from(subwindow).map_err(|_| "FEL fragment sequence overflows")?;
         let fragment = window.package_splice_window(
             format,
@@ -1044,6 +1076,81 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// Render exact source intervals under an already owned admission. The
+    /// first accepted decision freezes the output for an unpublished prefix.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn render_native_fel_windows(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entries: &[plurx_core::segplan::PlanEntry],
+        executable: &Path,
+        permit: &crate::vodencode::EncodePermit,
+        cancellation: &tokio_util::sync::CancellationToken,
+        required: Option<&plurx_core::transcode::dv_processing::DvProcessingPlan>,
+    ) -> Result<
+        (
+            Vec<NativeFelWindow>,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        ),
+        String,
+    > {
+        let mut selected = required.cloned();
+        let mut windows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if cancellation.is_cancelled() || !self.source.unchanged() {
+                return Err("native splice lost its source or owner".into());
+            }
+            let worker = permit
+                .clone()
+                .try_claim_worker()
+                .ok_or("FEL worker is occupied")?;
+            let input = crate::source_input::SourceInput::open_current_held(
+                &self.source.handle,
+                "native-fel",
+            )
+            .await?
+            .ok_or("native splice has no original source custody")?;
+            let outcome = self
+                .execute_with_source_input(
+                    file,
+                    plan,
+                    options,
+                    grid,
+                    entry,
+                    executable,
+                    crate::dv_segment::SegmentAdmission::Retained(worker),
+                    Arc::new(crate::prodrun::ProducerSlot::new()),
+                    cancellation.child_token(),
+                    None,
+                    input,
+                    None,
+                    None,
+                )
+                .await?;
+            let WindowOutcome::Completed((window, decision)) = outcome else {
+                return Err("native splice render cancelled".into());
+            };
+            if let Some(frozen) = &selected {
+                if decision.semantic_digest() != frozen.semantic_digest() {
+                    return Err("native splice changed the qualified rendering recipe".into());
+                }
+            } else {
+                selected = Some(decision);
+            }
+            windows.push(window.into_native_fel_window()?);
+        }
+        if windows.is_empty() {
+            return Err("native splice produced no windows".into());
+        }
+        Ok((
+            windows,
+            selected.ok_or("native splice has no verified processing plan")?,
+        ))
+    }
+
     /// The cache key and the window encoder must use the same destination and driver policy.
     fn completed_output_for<'a>(
         &self,
@@ -1474,6 +1581,7 @@ impl RuntimeRecipe {
                 &crate::ffmpeg::ffmpeg_bin(),
             );
             let request = crate::dv_segment::StreamingSegmentRequest {
+                background: crate::background_jobs::source_budget().is_some(),
                 mode: self.mode,
                 decode: self.decode,
                 export_raster: Some(export_raster),
@@ -3353,17 +3461,27 @@ mod processed_selection_has_no_software_gates {
     fn entry_body() -> &'static str {
         let source = include_str!("transcode/manager/create.rs");
         source
-            .split_once("pub(crate) fn processed_upgrade_gates(")
+            .split_once("pub(crate) fn processed_upgrade_gates_with_ask(")
             .expect("processed upgrade gates")
             .1
-            .split_once("pub(crate) fn hold_processed_upgrade_root(")
-            .expect("entry point end")
+            .split_once("    /// Processed Dolby Vision / HDR10-E")
+            .expect("request-only gates end")
+            .0
+    }
+
+    fn trial_body() -> &'static str {
+        include_str!("transcode/manager/create.rs")
+            .split_once("async fn prepare_processed_upgrade_with_source(")
+            .expect("common local/Source trial")
+            .1
+            .split_once("    /// Hand a verified upgrade root")
+            .expect("trial end")
             .0
     }
 
     #[test]
     fn no_resolution_clamp_speed_threshold_or_auto_only_gate() {
-        let body = entry_body();
+        let body = format!("{}{}", entry_body(), trial_body());
         assert!(!body.contains(".min(720)"), "resolution clamp is back");
         assert!(
             !body.contains("milli_realtime"),
@@ -3375,19 +3493,18 @@ mod processed_selection_has_no_software_gates {
         );
         // Every decline after the setting check, to the end of the entry
         // point, is reported, never silent.
-        let (gates, trial) = body
-            .split_once("pub(crate) async fn prepare_processed_upgrade(")
-            .expect("the trial follows its gates");
+        let gates = entry_body();
+        let trial = trial_body();
         let after_setting = gates
             .split_once("// The setting is on for a DV source")
             .expect("setting check")
             .1;
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
         let after_gates = trial
-            .split_once("Self::processed_upgrade_gates(request, &planning, hdr10_intent)?")
+            .split_once("Self::processed_upgrade_gates_with_ask(")
             .expect("the trial reruns the gates")
             .1
-            .split_once("else {\n                return Ok(None);\n            };")
+            .split_once("return Ok(None);")
             .expect("the gates' own silent answer")
             .1;
         assert!(!after_gates.contains("Ok(None)"), "{after_gates}");
@@ -3400,12 +3517,12 @@ mod processed_selection_has_no_software_gates {
     fn a_converted_dv_copy_is_offered_the_reconstructed_profile81() {
         let body = entry_body();
         let silent = body
-            .split_once("let Some(original) = request.candidate_context")
+            .split_once("let Some(original) = ask")
             .expect("candidate context read")
             .0;
         assert!(silent.contains("convert_dolby_vision: false"), "{silent}");
         assert!(
-            silent.contains("processed_qualification_destination(request)?"),
+            silent.contains("processed_qualification_destination_with_ask("),
             "{silent}"
         );
         assert!(include_str!("transcode/manager/candidates.rs")

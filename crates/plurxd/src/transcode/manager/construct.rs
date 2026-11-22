@@ -66,6 +66,14 @@ impl TranscodeManager {
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
+            #[cfg(target_os = "linux")]
+            native_fel_head: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            native_fel_target: std::sync::Mutex::new(
+                super::manager_native_fel::FelHeadTarget::load(&runtime_cache),
+            ),
+            #[cfg(target_os = "linux")]
+            native_fel_backend: std::sync::Mutex::new(None),
             runtime_cache,
             subtitle_cache,
             subtitle_calls: None,
@@ -156,6 +164,7 @@ impl TranscodeManager {
             dv_strippable: false,
             dv_convertible: false,
             dovi_reshape: false,
+            dovi_reshape_hardware: Vec::new(),
             dovi_passthrough: false,
             dovi_passthrough_qsv: false,
             hdr10_passthrough: false,
@@ -257,6 +266,14 @@ impl TranscodeManager {
 
     pub fn with_dovi_reshape(mut self, dovi_reshape: bool) -> Self {
         self.dovi_reshape = dovi_reshape;
+        self
+    }
+
+    pub fn with_dovi_reshape_hardware(
+        mut self,
+        proved: Vec<plurx_core::transcode::Encoder>,
+    ) -> Self {
+        self.dovi_reshape_hardware = proved;
         self
     }
 
@@ -1679,7 +1696,7 @@ impl TranscodeManager {
         admission: &FragmentAdmission,
         resources: &TranscodeResourceEstimate,
         software_threads: Option<u32>,
-    ) -> Result<(), String> {
+    ) -> Result<crate::vodencode::EncodePermit, String> {
         if !self.fragment_worker_idle(admission) {
             return Err("foreground work is waiting for this node's capacity".into());
         }
@@ -1697,10 +1714,9 @@ impl TranscodeManager {
             None,
         )
         .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
-        if !admission.install_extension(permit) {
-            return Err("this job already holds an extended admission".into());
-        }
-        Ok(())
+        admission
+            .install_extension(permit)
+            .ok_or_else(|| "this job already holds an extended admission".into())
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented
@@ -1841,7 +1857,7 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    #[cfg(all(target_os = "linux", test))]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {

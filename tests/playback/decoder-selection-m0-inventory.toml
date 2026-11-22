@@ -241,7 +241,7 @@ obligation = "keep FFprobe timeline evidence distinct from decoded-video health"
 id = "process.chapter_probe"
 kind = "support_process"
 source = "crates/plurxd/src/http/stream.rs"
-anchor = "async fn run_chapter_probe("
+anchor = "pub(crate) async fn probe_chapters_until("
 obligation = "keep bounded FFprobe chapter discovery outside producer qualification"
 
 [[surfaces]]

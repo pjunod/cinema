@@ -1741,6 +1741,8 @@ impl MediaPool {
         request: QualityCatalogRequest,
     ) -> QualityCatalogResult {
         let result = self.quality_catalog_answer(state, request).await;
+        #[cfg(test)]
+        crate::transcode::TranscodeManager::note_catalog_result(&result);
         note_create_catalog(&result);
         result
     }

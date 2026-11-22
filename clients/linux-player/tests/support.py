@@ -271,8 +271,10 @@ class MpvFiles:
             json.dump(self.state, handle)
         os.replace(temp, os.path.join(self.dir, "state.json"))
 
-    def props(self, **values):
-        self.state.setdefault("props", {}).update({k.replace("_", "-"): v for k, v in values.items()})
+    def props(self, *, for_load=None, **values):
+        props = (self.state.setdefault("props", {}) if for_load is None else
+                 self.state.setdefault("props_by_load", {}).setdefault(str(for_load), {}))
+        props.update({k.replace("_", "-"): v for k, v in values.items()})
         self._write_state()
 
     def seek(self, seconds):

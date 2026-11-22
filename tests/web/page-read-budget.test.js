@@ -205,7 +205,7 @@ test("Activity detail response keeps the shared header indicator current", () =>
   harness.paintActivity(harness.detailActivitySummary(detail, []));
   assert.match(activity.innerHTML, /Fetching metadata/);
   assert.doesNotMatch(activity.innerHTML, /Scanning library/);
-  assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,dels,recording\)\)/);
+  assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,watching,recording\)\)/);
 
   harness.paintActivity([]);
   assert.equal(working.at(-1), false);

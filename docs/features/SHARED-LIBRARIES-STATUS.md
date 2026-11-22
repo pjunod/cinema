@@ -19,7 +19,7 @@ is authorized; the inherited hold was lifted on 2026-10-06.
 | Surface | Implemented behavior |
 |---|---|
 | Catalogue and identity | Authenticated pairing, grants, catalogue/history/assets and original-account refusal recovery |
-| Playback | Source-owned direct/HLS preparation, subtitles, HDR decisions and typed unsupported Dolby Vision refusal |
+| Playback | Source-owned direct/HLS preparation, subtitles, HDR and Dolby Vision decisions; typed refusal only for Profile 5 encodes |
 | Handoff | Receiver-owned prepared successors across web, Apple and Android; frame evidence before history; bounded Apple preparation |
 | Cleanup | Exact retained g0/g1 ownership, receiver orphan recovery, approved endpoint/pin refresh and bounded physical transport retirement |
 | Cluster custody | Actual accepted-driver identity and closure, independent receiver admission, sealed ledgers and authenticated exact member receipts |

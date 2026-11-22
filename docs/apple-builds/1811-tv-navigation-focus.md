@@ -1,6 +1,6 @@
 # Keep TV recording-rule actions inside native remote focus
 
-Build: 309
+Build: 311
 Issue: #1811
 
 Series-rule options receive native remote focus when the panel opens.

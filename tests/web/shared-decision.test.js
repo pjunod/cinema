@@ -82,14 +82,13 @@ test("synthetic complete B Start retains original caps resume and explicit null 
  assert.equal(r._sharedContext.session_id,sid);assert.equal(r._sharedContext.source_file_id,'9007199254740993');assert.equal(r._sharedContext.source_ref.item_id,ref.item_id);assert.ok(!Object.keys(r).includes('_sharedContext'));
  for(const field of ['previous_session_id','control_sequence','reopen_reason','intent']){const before=h.requests.length;await assert.rejects(h.start(c,{...b,[field]:field==='control_sequence'?0:'unsupported'}),e=>e.code==='sharing_start_unsupported');assert.equal(h.requests.length,before);}
 });
-test("synthetic B Start carries a burn and an HDR10 ask unchanged and refuses Dolby Vision before sending",async()=>{
+test("synthetic B Start carries a burn, an HDR10 ask and a Dolby Vision ask unchanged",async()=>{
  const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),c=(await h.details(ref)).files[0].context;
- for(const extra of [{subtitle_burn:0},{hdr10:true},{subtitle_burn:3,hdr10:false}]){
+ for(const extra of [{subtitle_burn:0},{hdr10:true},{subtitle_burn:3,hdr10:false},{copy:true,preserve_dolby_vision:true}]){
   const b={...startBody(h),force:"transcode",height:720,...extra},before=h.requests.length;await h.start(c,b);
   assert.equal(h.requests.length,before+1);assert.deepEqual(JSON.parse(h.requests.at(-1).options.body),JSON.parse(JSON.stringify(b)));
  }
  const before=h.requests.length;
- await assert.rejects(h.start(c,{...startBody(h),preserve_dolby_vision:true}),e=>e.code==='sharing_start_dolby_vision_unsupported');
  for(const bad of [{subtitle_burn:0,native_subtitles:true},{subtitle_burn:-1},{subtitle_burn:4096},{subtitle_burn:"0"},{hdr10:"yes"},{subtitle_burn:0,presentation:"direct"}])
   await assert.rejects(h.start(c,{...startBody(h),...bad}),e=>e.code==='sharing_start_unsupported');
  assert.equal(h.requests.length,before);
@@ -287,9 +286,23 @@ test("HLS HEVC requires selected MSE transport and every claimed profile",async(
  assert.ok(queries.some(c=>c.video.transferFunction==="pq"));
  for(const override of [{nativeHls:true},{hlsJsSupported:false},{mediaSource:{isTypeSupported:()=>false}},{mediaCapabilities:{decodingInfo:async()=>({supported:false})}}])
   assert.deepEqual(Array.from(await probe([true,true,false,true,false],null,{...injected,...override})),[]);
- const native={nativeHls:true,userAgent:"Mozilla/5.0 (Macintosh) Version/27.2 Safari/605.1.15",videoElement:{canPlayType:type=>type.includes("hev1")?"probably":""}};
- assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],native)),["hvc1","hev1"]);
- assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],{...native,userAgent:"Mozilla/5.0 (Macintosh) Version/26.4 Safari/605.1.15"})),[]);
+});
+test("qualified macOS Safari claims native HEVC HLS despite a negative standalone hev1 probe",async()=>{
+ const probe=hlsHevcHarness();
+ const tiers=[true,true,true,true,true], pq=[false,false,false,true,true];
+ const videoElement={canPlayType:type=>type==="application/vnd.apple.mpegurl"?"maybe":""};
+ const native={nativeHls:true,userAgent:"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/27.2 Safari/605.1.15",maxTouchPoints:0,videoElement};
+ assert.equal(videoElement.canPlayType('video/mp4; codecs="hev1.2.4.L153.B0"'),"");
+ assert.deepEqual(Array.from(await probe(tiers,pq,native)),["hvc1","hev1"]);
+ assert.deepEqual(Array.from(await probe(tiers,null,native)),[]);
+ for(const override of [
+  {nativeHls:false,hlsJsSupported:false},
+  {maxTouchPoints:5},
+  {videoElement:{canPlayType:()=>""}},
+  {userAgent:"Mozilla/5.0 (Macintosh) Version/26.4 Safari/605.1.15"},
+  {userAgent:"Mozilla/5.0 (iPhone) Version/27.2 Safari/605.1.15"},
+  {userAgent:"Mozilla/5.0 (Macintosh) Chrome/147.0.0.0 Safari/537.36"},
+ ]) assert.deepEqual(Array.from(await probe(tiers,pq,{...native,...override})),[]);
 });
 
 

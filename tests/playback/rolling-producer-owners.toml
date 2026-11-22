@@ -1,3 +1,37 @@
+# Current PR #1732 + Main 9c9faf631 source union: 195 existing ownership counts
+# across 550 Rust files. Structural census only.
+
+# Historical source census notes from both merge parents.
+# PR #1732 and main f45c8d14e source union: 195 unchanged ownership rules
+# measured over 549 Rust files in their existing scopes.
+# After merging #1727, the inventory contains 1188 namespaced task spawns,
+# 2283 namespaced time constructors and 958 process-capable methods.
+# Q3 integration source union: pure unchanged structural scan measures 1178
+# namespaced task spawns, 2273 timers, 953 broad launch-shaped methods and 401
+# lifecycle shapes. Q3 adds one joined request task, two fixture bounds, one
+# HTTP status read and one Source-factory wait; no matcher/scope/zero change.
+# Static inventory only; no runtime/acceptance claim.
+# PR #1803 + Main f45c8d14 conflict resolution: measured the actual merged
+# source with the existing structural census over 549 Rust files, preserving
+# both parents' owner families, patterns, roots and historical explanations.
+# Task/method-spawn/timer/Command/launch-method/kill-on-drop counts are
+# 1188/107/2288/369/951/132. These are source shapes, not runtime settlement.
+
+# Native FEL Resume clock. The optional reader drains the rolling producer's
+# bounded picture records and keeps draining discarded data until its inherited
+# descriptor closes. It owns only the read endpoint and observation channel.
+# The existing admitted producer owner still reaps FFmpeg and settles source
+# custody. A 50 ms wait caps startup's demand for complete clock records;
+# expiry declines the layout and neither stops the child nor proves settlement.
+# The shape counter adds one Tokio task, its production and test wrapper calls,
+# and the wrapper declaration. There is no additional FFmpeg launch.
+
+# Prepared native FEL startup. One source-copy command is run and reaped by
+# the existing bounded background child owner under a source job. The one
+# startup staging task holds a scratch writer and may only offer a complete
+# batch under the current producer transition and first-publication lock.
+# Its timer limits a private wait and does not authorize publication or
+# establish process settlement. Rejected objects go through rolling retention.
 # Subtitle identity fixture: +1 time shape is the one-millisecond sleep while
 # waiting for an observable ctime mutation, bounded by a two-second assertion.
 # It runs on the existing test thread; no production work or settlement owner.
@@ -18,6 +52,10 @@
 # thread and one scoped controller thread are both joined. The controller's
 # five-second acknowledgement bound fails observation only; raw custody remains
 # held until actual worker join. Production accounting adds no task, process or timer.
+# RootQ B6 source union: measured 1177 namespaced spawns, 105 method spawns,
+# 363 command constructors and 952 broad process-capable shapes. The extra
+# broad shape is the joined scoped controller's spawn, not another child.
+# Patterns, roots, test inclusion and forbidden-zeroes remain unchanged.
 
 # HDR source-lifetime/admission and capture-boundary fixture audit (2026-11-16).
 # Authored static comparison of f83484653 with fbe197ed9, using the unchanged
@@ -769,6 +807,49 @@
 # Command and kill-on-drop sites, and five bounded timeout observations.
 # No inherited production owner or pattern/scope/equality exception is added.
 
+# Corrected predecessor809be33c integration: the unchanged structural scanner
+# over the unchanged module roots measures1176 namespaced task shapes,104
+# method spawns,2271 timer shapes,361 Command constructors and951 launch-shaped
+# methods. These combine the separately reviewed predecessor/effort owners;
+# patterns and source scopes are unchanged. Counts are lexical ownership
+# inventory evidence, not process execution or playback qualification.
+# M4 Source processed-upgrade integration census (2026-11-16), measured with
+# the inventory's pure structural scanner over module_roots and source scopes.
+# Structural deltas from the prior ledger: detached tokio tasks 121->126,
+# task shapes 1161->1166, timers 2236->2251, method-spawn 99->102, Command
+# constructors 356->359, and launch-shaped methods 934->943. The new
+# SourceProcessedOperation owns one detached operation task for the actual
+# Source assignment: its sole trial deadline cancels the token and the owner
+# joins the closure before publishing settlement or releasing the preparation
+# slot. The two test-only `sleep` children and two reader tasks are gated until
+# real child retirement/EOF and reader release; they test joined physical
+# settlement, not a new production process owner. The signed Activity/Stop
+# requests and HTTP assertions are control-plane operations, not subprocesses.
+# Exact Source processed-root attachment adds one keyed rendition_build_gate
+# occurrence (34->35), rechecking the captured physical graph before reuse.
+# B suppresses retries only for its processed successor after decline/failure,
+# preserving the ordinary retry path. Counts are source shape
+# only, not test execution or physical qualification.
+# The Linux-only `admin_stop_of_a_source_processed_session_settles_and_ends_the_start`
+# fixture adds two joined tasks (processed reader and admin-Stop caller), four
+# finite fixture bounds, and one real `sleep` child attached to the existing
+# Source `ProducerSlot`. Stop retains the activity and Source owner while the
+# actual reader is gated after EOF, then joins settlement; this is test-only
+# lifecycle evidence, not a new production process or timer owner. One added
+# HTTP `Response::status()` assertion is a protocol observation. No matcher,
+# source scope, or ownership allowance changed.
+
+# Final-review source-shape recount (2026-11-16), after authenticated
+# Activity/Stop route hardening. Structural recount only; not test, runtime,
+# or subprocess qualification. The full-router learner fixture owns one
+# `tokio::spawn` gateway task and aborts/awaits its handle during teardown,
+# adding one joined task shape. Its three `.status()` reads inspect in-process
+# HTTP responses (including signed absent-owner behavior), not child processes.
+# The Source Stop fixture still uses the actual ProducerSlot and joins reader
+# and Stop tasks through physical settlement. Exact-count rows below are
+# refreshed from the pure inventory scanner. No matcher, source scope,
+# forbidden-zero rule, or ownership allowance changed.
+
 version = 1
 source = "crates/plurxd/src/transcode.rs"
 module_roots = [
@@ -852,7 +933,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # S10 rolling retained attachment: one false initializer, not a replacement election.
 # The native FEL publisher reads the mask under the existing transition lock
 # before selecting an unpublished video object.
-expected_occurrences = 39
+expected_occurrences = 40
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -880,7 +961,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
 # The native FEL publisher shares this lock for the final exact-attempt video
 # choice.
-expected_occurrences = 21
+expected_occurrences = 22
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1217,7 +1298,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # observe_until, and an observer timeout leaves the task holding the counted
 # guard so Source retirement waits for real child/reader settlement. It decides
 # no recovery and retries nothing. +1 joined test caller in tests/source_actor.rs.
-expected_occurrences = 121
+expected_occurrences = 127
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1528,7 +1609,7 @@ pattern = "child_transition"
 # 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
 # (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
 # The native FEL publication guard is the same lock use reviewed above.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -1547,7 +1628,7 @@ pattern = "replacing_child"
 # test-only stores of the mask in the path-owner position test. No production owner added.
 # S10 retained attachment initializes false; no replacement owner is introduced.
 # The same native FEL commit checks the existing replacement fence.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -2836,7 +2917,7 @@ pattern = "rendition_build_gate"
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
 # Shared cache eviction takes this same keyed gate before retiring a title.
-expected_occurrences = 34
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -4120,6 +4201,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
 # sharing.rs's idle-loop test spawns run and claim_loop. No production
 # task owner is added.
+# Recovery fixture union: +1 request task held at Source preparation.
+# The fixture awaits this exact task before inspecting its Direct response.
+# Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
+expected_occurrences = 1197
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -4141,11 +4226,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # cluster.rs starts its stalled-response TCP fixture and aborts it after the
 # bounded request; serving_fence.rs stops and joins its monitor fixture.
 # Neither site adds a production owner or supplies settlement authority.
-expected_occurrences = 1186
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
 # Main f771 integration: measured combined task count 1185 + 1 = 1186.
 # The same fixture adds one bounded cleanup timeout: 2290 + 1 = 2291.
 # Patterns, roots, exclusions and physical ownership requirements are unchanged.
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4205,9 +4290,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +4 M5b: the JoinSet-owned leased file worker and three bounded subprocess or
 # blocking-I/O owners. Each is awaited, cancellation-bound, or deliberately
 # retains a node-local permit if an operating-system read cannot be stopped.
-# +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
-# cancellation token and deadline; the child is kill-on-drop and always reaped
-# on the explicit oversize and ordinary completion paths.
+# +1: `probe_chapters_until` spawns one bounded ffprobe child under the
+# analysis worker. Its caller owns a cancellation token and deadline. After
+# spawn, the probe waits for the child or kills and reaps it on failure.
 # 41 -> 43 with M4: planned-outage and cache-revocation Drop each hand an exact
 # replicated cleanup claim plus its process gate to the node runtime. Retry is
 # shutdown-aware and bounded; the gate remains owned until cleanup is definitive.
@@ -4405,7 +4490,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Merged effort and main: both moved 99 -> 102 with different spawns (3 from
 # learner discovery, 3 from main), so the identical text merged cleanly; 99 + 3 + 3 = 105.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 106
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 110
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4433,11 +4520,14 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # declared_background_spawn calls `spawn()` after recording the escape tick.
 # F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
 # configured-policy regression, not a new task or process owner.
-expected_occurrences = 26
+expected_occurrences = 27
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Cinema chapter enrichment: two deadline branches bound one worker-owned
+# child before and after spawn. One obsolete state-layer deadline wait was
+# removed, and the affected regression waits have no net change.
 # Four test-only timers wait for the artwork fixture identity and the offline
 # worker result. Each pair uses a bounded timeout around the positive condition.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
@@ -6102,6 +6192,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # an applied-view read with timeout on the caller's task (+2); the rest are
 # test-only waits in live_tv/tests.rs (5) and sharing.rs (2). No new task or
 # timer owner.
+# Recovery fixture union: +2, the Store-wall lease-expiry sleep and bounded
+# Source-factory retirement observation. These matches are test-only; the
+# actual Instant::now credit samples do not match this constructor pattern.
+# Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
 # F+ (#1565) on main 59022fd2a: main's 2251 plus 9 F+-only timer shapes, none a new owner:
 #  +1 background_jobs.rs: publish_dv_refit's bounded backoff sleep between store retries,
 #     on the job's own task while its lease holds.
@@ -6142,7 +6236,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # publication loop in transcode/manager/publication.rs observes cancellation,
 # inventory changes or one second of lifecycle silence on its existing owned
 # task. Expiry wakes observation; it never proves child or permit settlement.
-expected_occurrences = 2291
 # Developer tab cleanup (2026-11-18): -4 test timers. Network priors are
 # always on, so the priors-off client-log barriers and their timeouts in
 # link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
@@ -6152,6 +6245,7 @@ expected_occurrences = 2291
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # The scanner deadline fixture bounds cleanup after advancing the test clock.
+# The embedded placeholder source removes one test-only encoder setup site.
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6172,6 +6266,10 @@ expected_occurrences = 2291
 # Each asserts actual generation-owned settlement; timeout supplies no reap,
 # publication or admission-release evidence and starts no recovery owner.
 
+
+# The merged source inventories 2286 occurrences.
+# Cinema fixes + main 32f30addc union: main 2305 plus the branch's own 1 over base 5a5e6c97a.
+expected_occurrences = 2310
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -6208,6 +6306,9 @@ expected_occurrences = 8
 
 [[module_structures]]
 id = "process-command-construction"
+# Cinema regression fixtures add four FFmpeg command shapes for the cover,
+# source media, decoded output frames, and embedded chapter fixture. The
+# synchronous helpers wait for the children to exit.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +4 test-only commands. The
 # manifest generator's synchronous output() joins its Python child. Two shell
 # fixtures are owned by Group/QualificationStage and explicitly reaped; the
@@ -6676,6 +6777,23 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
+# Shared Dolby Vision M1 (T1.6): +2 test-only commands in
+# `dolby_vision_fixture_source`. Two finite synchronous FFmpeg remuxes (to a
+# fragmented pipe and back to an ordinary MP4) build the Dolby Vision fixture
+# source; testfixtures::run waits for and reaps each before the fixture reads
+# its output, and neither runs in a shipped binary.
+# FFmpeg 8 fixture fix: +1 test-only command in
+# `build_real_source_start_fixture`, a finite FFprobe of the generated HDR
+# base (awaited with `.output()`), asserting it is really PQ/BT.2020-tagged.
+# Shared Dolby Vision M3 (T3.1): +1 production command in
+# `ffmpeg::source_dovi_pixel_probe_command`, the Source's Profile 5 pixel
+# proof run. It reads the Source's held descriptor as fd 3 and is spawned
+# only through `source_preparation::run_authorized_child` (as
+# `SOURCE_DOVI_PIXEL_PROOF`, listed in Activity with Stop), under the
+# SourceProbeOperation's copy permit, held fence, preparation authority,
+# start deadline and cancellation; that operation reaps the child and joins
+# both pipes before its settlement, which `SourcePreparationSettlements`
+# already joins on retirement. The local proof's command is unchanged.
 # F+ (#1565) on main 59022fd2a: main's 352 plus 11 F+-only command constructors:
 #  +1 process/bounded.rs: test-only isolated test-executable policy subprocess.
 #  +1 fragindex.rs: the scanner command for the FEL aggregate, launched through the
@@ -6689,12 +6807,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source_probe/title_work_tests.rs +1.
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
+# Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 368
+# The embedded placeholder source removes one test-only encoder setup site.
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+# Cinema fixes + main 32f30addc union: main 376 plus the branch's own 4 over base 5a5e6c97a.
+expected_occurrences = 380
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# The Cinema remux regression adds a status() assertion on the Axum response.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +3 broad lexical matches.
 # One output() synchronously joins the manifest-generator fixture child.
 # Two status() matches inspect reqwest HTTP responses; they launch no process.
@@ -7432,10 +7556,17 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 927 -> 926 with cluster7c: one MembershipManager.status observation moves
 # from the daemon facade to its core administrative service. This removes one
 # lexical .status() match from these roots, not a process or task owner.
-# Prepared delivery (#1736): +1 test-only `.vod.status()` observation in
-# processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
+# Prepared delivery (#1736, baseline repair #1752): +1 test-only
+# `.vod.status()` observation in
+# processed_reuse_tests.rs::processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
+# launch, lease renewal, or ownership transfer. Together with this effort's
+# twelve additional shapes and the corrected predecessor's two observations,
+# plus B6's joined scoped controller, the pre-Q3 count was 952. Matcher unchanged.
 # launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
+# Recovery fixture union: +1 Direct-start HTTP Response::status() read.
+# This observes the returned response and launches no process.
+# Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
 # F+ (#1565) contributes five awaited test-only launches beyond current main:
 # dv_disk/tests.rs +1, fragindex/refit_acceptance_tests.rs +1,
 # fragindex/tests.rs +1, and source_probe/dv_refit.rs +2.
@@ -7457,15 +7588,24 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # retired parser-floor refusal test drops one status read. No process starts.
 # Main pins 955; the facade peer-auth router regression retained from this
 # effort adds one HTTP status assertion, explaining the combined count 956.
-expected_occurrences = 956
 # Developer tab cleanup (2026-11-18): +3 net lexical `.status(` matches in
 # the retain-output route tests (HTTP response status reads); no process.
 # Main 945 + 3 = 948.
 # PR #1802 adds two relay response status reads and five route-test status reads.
 # All seven matches inspect HTTP replies and launch no processes.
 # Removing the retired parser-floor refusal drops one HTTP status read.
+# The merged source inventories 951 occurrences.
+# The embedded placeholder source removes one test-only encoder setup site.
 # The owned voter fixture process is joined before a collision can retry.
 
+# The merged source inventories 968 occurrences.
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+# Cinema fixes + main 32f30addc union: main 964 plus the branch's own 1 over base 5a5e6c97a.
+# Cluster remainder + Main d01e9a303 union: the combined source measures 970
+# broad launch-shaped occurrences with the matcher unchanged. Counts here and in
+# the task, timer and lifecycle rows are lexical inventory, not process execution.
+expected_occurrences = 970
 [[module_structures]]
 id = "process-command-ufcs-launch"
 pattern = "(?:[A-Za-z_]\\w*::)*Command::(?:spawn|output|status)\\s*\\("
@@ -7785,11 +7925,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
+# Recovery fixture union: +1 retained Source factory entry.wait() observer.
+# It observes the actual factory owner, not a new OS-child reaper.
 # The owned voter fixture process is joined before a collision can retry.
 # Final cluster/main union: +1 cluster.rs Barrier.wait() in the concurrent
 # refusal-isolation regression. Both requests are joined; this is not a process
 # wait, reap acknowledgement or new production lifecycle owner.
-expected_occurrences = 403
+expected_occurrences = 404
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -8038,7 +8180,11 @@ pattern = "kill_on_drop\\s*\\("
 # sleep child, killed and waited before the successor takes the lane).
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
+# Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
 # The owned voter fixture process is joined before a collision can retry.
+# The embedded placeholder source removes one test-only encoder setup site.
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
 expected_occurrences = 132
 # Promotion union: final count is measured after architectural conflict resolution.
 

@@ -220,6 +220,7 @@ async fn actual_nonowner_forwarding(
     })
     .await
     .expect("Source worker production passive/quorum placement readiness");
+    worker.keep_fixture_membership_stable().await;
     assert_ne!(worker.state.node_id, ingress.node_id);
     assert_ne!(
         worker.state.sharing.accepted_drivers.boot_id(),
@@ -464,4 +465,35 @@ async fn actual_nonowner_forwarding(
         .await
         .expect("second actual voter shutdown");
     worker.shutdown().await;
+}
+
+#[test]
+fn sharing_source_forwarding_carries_the_dolby_vision_affirmation() {
+    use super::receiver_presentation::{internal_range, normalize_wire, select_persisted_recipe};
+    let raw = serde_json::to_vec(&json!({"session":{"caps":{"transports":["hls","hls-bounded-range-v1"],"video":[{"codec":"hevc","dv_profiles":[8]}]}}}))
+        .expect("raw");
+    // The ingress applies the affirmation to the canonical body every
+    // forwarded owner plans from: the affirmed recipe keeps its Dolby Vision
+    // caps, the unaffirmed one has none, and neither carries a token an owner
+    // of any version would refuse.
+    for ready in [false, true] {
+        for dolby_vision in [false, true] {
+            let effective = normalize_wire(&raw, ready, dolby_vision).expect("effective");
+            assert_eq!(internal_range(&effective).expect("closed tokens"), ready);
+            let value: serde_json::Value = serde_json::from_slice(&effective).expect("json");
+            assert_eq!(
+                value["session"]["caps"]["video"][0]
+                    .get("dv_profiles")
+                    .is_some(),
+                dolby_vision
+            );
+            // A later operation re-posts the raw public recipe; the retained
+            // route's fingerprint selects the recipe it was planned with.
+            let stored = super::ingress::fingerprint_recipe(&effective, ready);
+            assert_eq!(
+                select_persisted_recipe(&raw, &stored, false).expect("retained route"),
+                effective
+            );
+        }
+    }
 }

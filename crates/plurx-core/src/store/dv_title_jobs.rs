@@ -34,7 +34,64 @@ pub struct TitleDemand {
     pub playback_recipes: Vec<String>,
     #[serde(default)]
     pub scanner_digest: Option<String>,
+    #[serde(default)]
+    pub fel_head_target: Option<String>,
 }
+/// Node-local maintenance discovery. A source may become admissible after
+/// this worker has passed it, while new revisions keep the forward walk busy.
+#[derive(Default)]
+pub struct TitleMaintenanceCursor {
+    forward_after: i64,
+    revisit_after: i64,
+    revisit_through: i64,
+    revisit_next: bool,
+}
+
+impl TitleMaintenanceCursor {
+    /// Return one page and its position. Advance the position for each row
+    /// examined: the worker may accept a job partway through either page.
+    pub async fn next_page(
+        &mut self,
+        store: &dyn super::BackgroundJobStore,
+        scanner: &str,
+        now_ms: i64,
+    ) -> Result<(Vec<TitleDemand>, &mut i64), StoreError> {
+        if self.revisit_next {
+            // Freeze the end of each revisit. Even a continually growing
+            // outbox cannot postpone the next trip back to the oldest rows.
+            if self.revisit_after >= self.revisit_through {
+                self.revisit_after = 0;
+                self.revisit_through = self.forward_after;
+            }
+            // The next poll must advance independently even if this prefix
+            // contains an observation this worker cannot decode or read.
+            self.revisit_next = false;
+            let rows = store
+                .dv_title_demands_through(scanner, self.revisit_after, self.revisit_through, now_ms)
+                .await?;
+            if !rows.is_empty() {
+                return Ok((rows, &mut self.revisit_after));
+            }
+            // Everything else below the fence settled or disappeared.
+            self.revisit_after = 0;
+            self.revisit_through = 0;
+        }
+
+        // A failed newer page also leaves the previously observed prefix
+        // eligible for its turn. At startup that prefix is still empty.
+        self.revisit_next = self.forward_after > 0;
+        let rows = store
+            .dv_title_demands(scanner, self.forward_after, now_ms)
+            .await?;
+        if rows.is_empty() {
+            *self = Self::default();
+        } else {
+            self.revisit_next = true;
+        }
+        Ok((rows, &mut self.forward_after))
+    }
+}
+
 /// Bounded viewer interest in one already registered exact quality recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleViewerRequest {
@@ -44,6 +101,17 @@ pub struct TitleViewerRequest {
     pub scanner_digest: String,
     pub deadline_ms: i64,
     pub now_ms: i64,
+}
+
+/// Rebuild already admitted output on a worker with a missing local head.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FelHeadRequest {
+    pub file_id: i64,
+    pub node: String,
+    pub scanner_digest: String,
+    pub request: crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    pub now_ms: i64,
+    pub deadline_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +179,14 @@ SELECT json_object('file_id',file.id,'probe_revision',file.revision,
  'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
  'scanner_digest',file.scanner_digest,'playback_recipes',json(file.playback_recipes),
  'playback_requested',json(CASE WHEN json_array_length(file.playback_recipes)>0 THEN 'true' ELSE 'false' END),
+ 'fel_head_target',(SELECT w.target_node_id FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
+  WHERE w.consumer_kind='native_fel_head' AND w.deadline_ms>json_extract($1,'$.now')
+    AND w.state IN ('pending','awaiting_hydration')
+    AND j.kind='dv_title_scan' AND j.state IN ('queued','running')
+    AND json_extract(j.payload_json,'$.file_id')=file.id
+    AND json_extract(j.payload_json,'$.probe_revision')=file.revision
+    AND json_extract(j.payload_json,'$.scanner_digest')=file.scanner_digest
+  ORDER BY w.created_at_ms,w.request_id LIMIT 1),
  'active_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
   AND json_extract(j.payload_json,'$.file_id')=file.id AND json_extract(j.payload_json,'$.probe_revision')=file.revision
   AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
@@ -124,30 +200,34 @@ SELECT json_object('file_id',file.id,'probe_revision',file.revision,
 FROM candidates file
 "#;
 
+fn maintenance_demands_sql() -> String {
+    format!(
+        "{DEMAND_ROWS} {}",
+        r#"
+WHERE file.revision>json_extract($1,'$.after') AND file.revision<=json_extract($1,'$.through')
+ AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
+ AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+ THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
+ OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND (j.state='cancelling' OR (j.state='running' AND j.lease_expires_ms>json_extract($1,'$.now')))
+  AND json_extract(j.payload_json,'$.file_id')=file.id))
+ORDER BY file.revision LIMIT 128"#
+    )
+}
+
 pub(super) async fn demands<T: QueueSql>(
     store: &T,
     scanner: &str,
     after: i64,
+    through: i64,
     now_ms: i64,
 ) -> Result<Vec<TitleDemand>, StoreError> {
-    if !digest(scanner) || after < 0 || now_ms < 0 {
+    if !digest(scanner) || after < 0 || through < after || now_ms < 0 {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
-    let sql = format!(
-        "{DEMAND_ROWS} {}",
-        r#"
-WHERE file.revision>json_extract($1,'$.after')
- AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
- AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
- THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
- OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('running','cancelling')
-  AND json_extract(j.payload_json,'$.file_id')=file.id))
-ORDER BY file.revision LIMIT 128"#
-    );
     let rows = store
         .queue_sql(
-            sql,
-            encode(&serde_json::json!({"scanner":scanner,"after":after,"now":now_ms}))?,
+            maintenance_demands_sql(),
+            encode(&serde_json::json!({"scanner":scanner,"after":after,"through":through,"now":now_ms}))?,
             false,
             true,
         )
@@ -594,6 +674,109 @@ WHERE d.file_id=json_extract($1,'$.file_id')
     Ok(bind(store, revision, binding).await?.is_some())
 }
 
+/// Reopen the same generation only when a complete title scan and its
+/// current admitting verdict already exist. A fresh ordinary episode works
+/// after a previously succeeded generation's request receipt is retained.
+pub(super) async fn request_fel_head<T: QueueSql>(
+    store: &T,
+    input: FelHeadRequest,
+) -> Result<bool, StoreError> {
+    use super::background_jobs::{
+        enqueue_body, BackgroundJobStore, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL,
+    };
+    if input.file_id <= 0
+        || input.node.is_empty()
+        || input.node.len() > 128
+        || input.node.chars().any(char::is_control)
+        || !digest(&input.scanner_digest)
+        || !input.request.valid()
+        || input.now_ms < 0
+        || !(1..=30 * 60 * 1000).contains(&input.deadline_ms.saturating_sub(input.now_ms))
+    {
+        return Err(StoreError::Task("invalid native FEL head demand".into()));
+    }
+    #[derive(Deserialize)]
+    struct Revision {
+        revision: i64,
+    }
+    let rows = store
+        .queue_sql(
+            r#"
+SELECT json_object('revision',revision) AS result_json FROM dv_title_jobs_demand
+WHERE file_id=json_extract($1,'$.file_id')
+ AND scanner_digest=json_extract($1,'$.scanner_digest') AND terminal=1
+"#
+            .into(),
+            encode(&input)?,
+            false,
+            true,
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let revision = decode::<Revision>(row)?.revision;
+    let episode = uuid::Uuid::new_v4().to_string();
+    let enqueue = EnqueueJob {
+        id: episode.clone(),
+        payload: JobPayload::DvTitleScan {
+            file_id: input.file_id,
+            source_size: input.request.source_size,
+            source_mtime: input.request.source_mtime,
+            probe_revision: revision,
+            scanner_digest: input.scanner_digest.clone(),
+        },
+        dedupe_key: format!(
+            "dv-title-generation:{}:{}:{}",
+            input.file_id, revision, input.scanner_digest
+        ),
+        priority: 0,
+        not_before_ms: input.now_ms,
+        now_ms: input.now_ms,
+        request: JobRequest {
+            scope: "dv-native-fel-head".into(),
+            request_id: episode.clone(),
+            request_digest: input.request.identity,
+            consumer_kind: "native_fel_head".into(),
+            consumer_ref: input.file_id.to_string(),
+            target_node_id: Some(input.node),
+            deadline_ms: Some(input.deadline_ms),
+            retain_identity: false,
+        },
+    };
+    enqueue.validate()?;
+    let mut body = enqueue_body(store, &enqueue).await?;
+    body["native_fel_head_reopen"] = 1.into();
+    let body = encode(&body)?;
+    // Enqueue may admit this exact settled title within the transaction. Only
+    // the resulting job and waiter authorize reopening it. A refusal leaves
+    // the title settled and no worker can observe a job before it reopens.
+    store
+        .queue_transaction(vec![
+            (ENQUEUE_SQL.to_owned(), body.clone()),
+            (
+                r#"
+UPDATE dv_title_jobs_demand AS d SET terminal=0
+WHERE d.file_id=json_extract($1,'$.payload.file_id')
+ AND d.revision=json_extract($1,'$.payload.probe_revision')
+ AND d.scanner_digest=json_extract($1,'$.payload.scanner_digest') AND d.terminal=1
+ AND EXISTS(SELECT 1 FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
+  WHERE j.id=json_extract($1,'$.id') AND j.kind='dv_title_scan' AND j.payload_version=1
+   AND j.payload_json=json_extract($1,'$.payload') AND j.state='queued'
+   AND w.request_scope='dv-native-fel-head' AND w.request_id=json_extract($1,'$.request.request_id')
+   AND w.request_digest=json_extract($1,'$.request.request_digest') AND w.consumer_kind='native_fel_head'
+   AND w.consumer_ref=json_extract($1,'$.request.consumer_ref') AND w.state='pending'
+   AND w.target_node_id=json_extract($1,'$.request.target_node_id')
+   AND w.deadline_ms=json_extract($1,'$.request.deadline_ms'))
+"#
+                .to_owned(),
+                body,
+            ),
+        ])
+        .await?;
+    Ok(store.background_job(&episode).await?.is_some())
+}
+
 /// Settled Profile 7 FEL titles whose stored verdict was measured under
 /// another FEL identity (renderer, recipe or encoder), with no title job in
 /// flight: what a renderer change has to re-qualify. Bounded, oldest
@@ -958,4 +1141,30 @@ WHERE job.id=json_extract($1,'$.candidate') AND job.kind='dv_title_scan' AND job
   OR EXISTS(SELECT 1 FROM analysis_source_reservations h WHERE h.resource_key=r.resource_key AND h.expires_at_ms>json_extract($1,'$.now'))))
 "#.into(),encode(&serde_json::json!({"candidate":candidate_id,"current":current_id,"node":node,"now":now}))?,false,true).await?;
     Ok(!rows.is_empty())
+}
+
+#[cfg(test)]
+mod maintenance_query_tests {
+    #[test]
+    fn title_revisit_uses_both_revision_bounds_in_the_store() {
+        use crate::store::sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
+        let db = rusqlite::Connection::open_in_memory().expect("fixture");
+        SqliteStore::apply_migrations_for_test(&db, SQLITE_SCHEMA_VERSION).expect("schema");
+        let sql = format!("EXPLAIN QUERY PLAN {}", super::maintenance_demands_sql());
+        let mut statement = db.prepare(&sql).expect("query plan");
+        let plan = statement
+            .query_map(
+                [r#"{"after":7,"through":135,"now":1000,"scanner":"scanner"}"#],
+                |row| row.get::<_, String>(3),
+            )
+            .expect("plan rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("plan details");
+        assert!(
+            plan.iter()
+                .any(|line| line
+                    .contains("SEARCH d USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)")),
+            "{plan:?}"
+        );
+    }
 }

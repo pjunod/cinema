@@ -6,7 +6,7 @@ mod census;
 #[cfg(unix)]
 pub(crate) use census::{run_source_census, CopyClockCensus};
 #[cfg(unix)]
-mod pipes;
+pub(crate) mod pipes;
 #[cfg(unix)]
 pub(crate) use pipes::{spawn_source_generation, CopyGenerationOwner, RunningCopyGeneration};
 #[cfg(all(test, target_os = "linux"))]

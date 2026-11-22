@@ -61,6 +61,8 @@ const BORROWED = [
   "activityStreamDetails",
   "activityStreamCell",
   "activityWatchingHtml",
+  "activitySourceProcessedHtml",
+  "activityReceiverProcessedHtml",
   // Live TV rows are drawn by the same painter and name their owner node
   // through the same roster map, so they are borrowed rather than stubbed.
   "liveTvActivityRows",
@@ -402,11 +404,14 @@ test("a live FEL reconstruction names its picture, its GPU work and why, beside 
     fel_composed: true,
     live_rendering: true,
   };
-  const html = paint(streaming({ presentation: "vod", vod_observation: { processing } }, { presentation: "vod", node_id: NODE_A }));
+  const detail = streaming({ presentation: "vod", vod_observation: { processing } }, { presentation: "vod", node_id: NODE_A });
+  detail.retained_output_node = NODE_A;
+  const html = paint(detail);
   assert.match(html, /<div class="stream-processing" data-processing="Reconstructed Dolby Vision Profile 8.1"><b>Reconstructed Dolby Vision Profile 8.1<\/b> <span class="sub">· VA-API decode, base and full enhancement layers composed on the GPU, hevc_vaapi Main10 encode, a rewritten 8.1 RPU per frame<\/span>/);
   assert.match(html, /Why: Dolby Vision client playing a Profile 7 FEL title; FEL re-encode is on in Settings → Developer · live rendering · FEL composed/);
   assert.match(html, /<dt>Serving node<\/dt>/);
   assert.match(html, /stopSession\(&quot;75813686-9927-41d0-97e0-18d152f9efa2&quot;\)|stopSession\("75813686-9927-41d0-97e0-18d152f9efa2"\)/);
+  assert.doesNotMatch(paint({ ...detail, retained_output_node: NODE_B }), /stopSession\(/, "ordinary Stop cannot target another node's retained owner");
   assert.doesNotMatch(paint(streaming()), /stream-processing/);
 });
 
@@ -595,15 +600,17 @@ test("expired durable leases do not masquerade as live executions", () => {
   const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
     priority:0,age_ms:1427*60000,not_before_ms:0,supported:true,
     lease_expires_ms:now-3600000,observed_at_ms:now};
-  Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],
+  Object.assign(painter.durable,{observed:now,rows:[job],counts:[{kind:"subtitle_extract",state:"running",count:6,expired_leases:5}],detail:{job,waiters:[],
     attempts:[{node_id:"owner-id",started_at_ms:job.lease_expires_ms-120000,outcome:null}]}});
   const html=paint(snapshot({node_hostnames:{"owner-id":"<lab6>"}}));
   assert.match(html, /Lease expired · awaiting recovery/);
   assert.match(html, /previous owner/);
+  assert.match(html, /1 running · 5 awaiting recovery/);
+  assert.match(html, /running \(6, 5 expired\)/);
   painter.view.inspector={kind:"job",id:"expired"};painter.view.detailTab="history";
   assert.match(painter.inspect(), /&lt;lab6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
   assert.doesNotMatch(html, /<lab6>/);
-  Object.assign(painter.durable,{rows:[],detail:null});
+  Object.assign(painter.durable,{rows:[],counts:[],detail:null});
 });
 
 function refreshingQueue(q,api){

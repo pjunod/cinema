@@ -300,37 +300,42 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
         vec![
             (
                 "node-b".to_owned(),
-                PeerActivityOutcome::Answered(crate::http::internal_activity::ActivitySnapshot {
-                    workers: None,
-                    node_id: "node-b".to_owned(),
-                    deliveries: vec![ActivityDelivery {
-                        vod_observation: None,
-                        method: "direct".to_owned(),
-                        presentation: None,
-                        user: "viewer".to_owned(),
-                        file_id: 2,
-                        item_id: 102,
-                        title: "Remote title".to_owned(),
-                        started_unix: 2,
-                        idle_seconds: 1,
-                        delivered_bytes: None,
-                        delivered_bps: None,
-                    }],
-                    analysis: Vec::new(),
-                    live_tv: vec![crate::live_tv::LiveTvActivity {
-                        channel_number: "7.1".into(),
-                        channel_name: "Remote TV".into(),
-                        user: "viewer".into(),
-                        owner_node_id: "node-b".into(),
-                        encoder: "software".into(),
-                        age_seconds: 1,
-                        output_height: 720,
-                        state: "active".into(),
-                        programme_title: Some("City Beat".into()),
-                        delivery: None,
-                    }],
-                    dvr: None,
-                }),
+                PeerActivityOutcome::Answered(Box::new(
+                    crate::http::internal_activity::ActivitySnapshot {
+                        workers: None,
+                        node_id: "node-b".to_owned(),
+                        deliveries: vec![ActivityDelivery {
+                            vod_observation: None,
+                            method: "direct".to_owned(),
+                            presentation: None,
+                            user: "viewer".to_owned(),
+                            file_id: 2,
+                            item_id: 102,
+                            title: "Remote title".to_owned(),
+                            session_id: None,
+                            started_unix: 2,
+                            idle_seconds: 1,
+                            delivered_bytes: None,
+                            delivered_bps: None,
+                        }],
+                        source_processed: Vec::new(),
+                        receiver_processed: Vec::new(),
+                        analysis: Vec::new(),
+                        live_tv: vec![crate::live_tv::LiveTvActivity {
+                            channel_number: "7.1".into(),
+                            channel_name: "Remote TV".into(),
+                            user: "viewer".into(),
+                            owner_node_id: "node-b".into(),
+                            encoder: "software".into(),
+                            age_seconds: 1,
+                            output_height: 720,
+                            state: "active".into(),
+                            programme_title: Some("City Beat".into()),
+                            delivery: None,
+                        }],
+                        dvr: None,
+                    },
+                )),
             ),
             ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
             ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
@@ -381,6 +386,98 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
         "bounded summary must not name its fourth missing node: {missing}"
     );
     assert!(missing.ends_with("did not answer"), "{missing}");
+}
+
+#[test]
+fn source_processed_stop_selects_only_the_answered_owner() {
+    let id = format!("source-s-{}", "a".repeat(64));
+    let snapshot: crate::http::internal_activity::ActivitySnapshot =
+        serde_json::from_value(serde_json::json!({
+            "node_id": "source-node",
+            "deliveries": [],
+            "source_processed": [{
+                "stop_id": id, "session_id": null, "node_id": "source-node",
+                "title": "The film", "viewer": "share:grant-a:viewer-a",
+                "grant": "grant-a", "file_id": 7, "item_id": 9,
+                "started_unix": 100, "reason": "processed Dolby Vision upgrade"
+            }]
+        }))
+        .expect("Source activity snapshot");
+    let peers = PeerActivityRead::Peers(
+        vec![(
+            "source-node".into(),
+            PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
+        )]
+        .into(),
+    );
+    assert_eq!(source_processed_owner(&peers, &id), Ok(Some("source-node")));
+    assert_eq!(source_processed_owner(&peers, "source-s-other"), Ok(None));
+    let duplicate = PeerActivityRead::Peers(
+        vec![
+            (
+                "source-node".into(),
+                PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
+            ),
+            (
+                "another-node".into(),
+                PeerActivityOutcome::Answered(Box::new(snapshot)),
+            ),
+        ]
+        .into(),
+    );
+    assert!(source_processed_owner(&duplicate, &id).is_err());
+    let missing =
+        PeerActivityRead::Peers(vec![("source-node".into(), PeerActivityOutcome::TimedOut)].into());
+    assert!(source_processed_owner(&missing, &id).is_err());
+}
+
+#[test]
+fn receiver_processed_stop_selects_only_the_answered_b_owner() {
+    let id = format!("receiver-s-{}", "a".repeat(64));
+    let snapshot: crate::http::internal_activity::ActivitySnapshot =
+        serde_json::from_value(serde_json::json!({
+            "node_id": "receiver-node", "deliveries": [],
+            "receiver_processed": [{
+                "stop_id": id, "receiver_node_id": "receiver-node",
+                "source_server_id": uuid::Uuid::new_v4().to_string(),
+                "source_name": "Source", "title": "Shared item 100",
+                "viewer": "User #7", "reason": "Processed Dolby Vision upgrade runs on Source"
+            }]
+        }))
+        .expect("B activity snapshot");
+    let peers = PeerActivityRead::Peers(
+        vec![(
+            "receiver-node".into(),
+            PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
+        )]
+        .into(),
+    );
+    assert_eq!(
+        receiver_processed_owner(&peers, &id),
+        Ok(Some("receiver-node"))
+    );
+    assert_eq!(
+        receiver_processed_owner(&peers, "receiver-s-other"),
+        Ok(None)
+    );
+    let duplicate = PeerActivityRead::Peers(
+        vec![
+            (
+                "receiver-node".into(),
+                PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
+            ),
+            (
+                "another-node".into(),
+                PeerActivityOutcome::Answered(Box::new(snapshot)),
+            ),
+        ]
+        .into(),
+    );
+    assert!(receiver_processed_owner(&duplicate, &id).is_err());
+    let missing = PeerActivityRead::Peers(
+        vec![("receiver-node".into(), PeerActivityOutcome::TimedOut)].into(),
+    );
+    assert!(receiver_processed_owner(&missing, &id).is_err());
 }
 
 #[test]
@@ -560,42 +657,83 @@ fn machine_names_reach_the_activity_page_only_for_an_admin() {
         .split_once("\n/// DELETE /api/v1/activity/producer")
         .expect("handler after activity_detail")
         .0;
-    // `GET /api/v1/cluster/nodes` is `AdminUser`. This page is `AuthUser`,
-    // so an ungated map here would make the activity page the one place an
-    // ordinary household member can read the fleet's hostnames.
-    //
-    // Asserted as "every use of the map value", not "the text near the
-    // publication I happen to know about". An earlier form of this test
-    // found the publication by its key and checked the branch above it,
-    // and a second publication under a *different* key from an ungated
-    // `if clustered {` satisfied it while leaking to every signed-in
-    // household member.
-    let names = handler
-        .match_indices("hostnames")
-        // `node_hostnames` is the reader's name, not the value's.
-        .filter(|(at, _)| !handler[..*at].ends_with("node_"))
-        .map(|(at, _)| at)
-        .collect::<Vec<_>>();
-    let bound = names.first().copied().expect("the map is read at all");
+    // `GET /api/v1/cluster/nodes` is `AdminUser`. This page accepts any
+    // authenticated household member, so roster values may be carried through
+    // the concurrent join but must not be serialized into a non-admin response.
     let gate = handler
         .find("if clustered && user.0.is_admin {")
-        .expect("machine names are gated on the admin the roster is gated on");
-    for at in &names {
+        .expect("machine-name publication is under the admin gate");
+    let publication = "response[\"node_hostnames\"] = serde_json::to_value(&hostnames)";
+    assert_eq!(
+        handler.matches("serde_json::to_value(&hostnames)").count(),
+        1,
+        "the roster map is serialized exactly once"
+    );
+    assert_eq!(
+        handler.matches(publication).count(),
+        1,
+        "the serialized roster uses only the machine-name response field"
+    );
+    let admin_branch = handler[gate..]
+        .split_once("\n    }")
+        .expect("admin publication branch closes")
+        .0;
+    assert_eq!(
+        admin_branch.matches(publication).count(),
+        1,
+        "the sole roster publication is inside the clustered-admin branch"
+    );
+    // Count every standalone use of the map value, not just its current
+    // serializer. These three pre-gate occurrences only bind/transport the
+    // map through the concurrent join; any additional use must be the one
+    // admin-gated response publication above.
+    let transport_snippets = [
+        "let ((sessions, deliveries), peers, hostnames, source_processed",
+        "let (local, peers, hostnames, source_processed",
+        "\n                hostnames,\n",
+    ];
+    let mut allowed_uses = transport_snippets
+        .iter()
+        .map(|snippet| {
+            let start = handler.find(snippet).expect("known roster transport");
+            start
+                + snippet
+                    .find("hostnames")
+                    .expect("roster value in transport")
+        })
+        .collect::<Vec<_>>();
+    let publication_use = handler
+        .find("serde_json::to_value(&hostnames)")
+        .expect("admin-gated roster serialization")
+        + "serde_json::to_value(&".len();
+    allowed_uses.push(publication_use);
+    let roster_uses = handler
+        .match_indices("hostnames")
+        .filter_map(|(at, _)| {
+            let before_is_identifier = handler[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+            let after_is_identifier = handler[at + "hostnames".len()..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+            (!before_is_identifier && !after_is_identifier).then_some(at)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roster_uses.len(),
+        4,
+        "all roster-value uses are accounted for"
+    );
+    for at in roster_uses {
         assert!(
-            *at <= bound || handler[..*at].ends_with("(local, peers, ") || *at > gate,
-            "the roster map is used outside the admin branch at byte {at}: {}",
-            &handler[at.saturating_sub(80)..*at + 40]
+            allowed_uses.contains(&at),
+            "unexpected roster-value use outside tuple transport/publication at byte {at}"
         );
     }
-    // …and the one use past the gate is the publication itself.
-    assert_eq!(
-        handler[gate..]
-            .matches("response[\"node_hostnames\"] = serde_json::to_value(&hostnames)")
-            .count(),
-        1
-    );
-    // The reader itself is asked for the map exactly once, with this
-    // reader's own admin flag and not a literal.
+    // The reader itself receives this request's authorization decision; its
+    // non-admin path returns an empty map, and the handler omits the field.
     assert_eq!(
         handler
             .matches("node_hostnames(&state, user.0.is_admin)")
@@ -1926,6 +2064,13 @@ fn writer_abandoned_replies_render_by_request_and_outcome() {
     ] {
         assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
     }
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("plurx_hiqlite_writer_abandoned_replies_total{"))
+            .count(),
+        4,
+    );
     let facade = crate::cluster::Cluster::compose(crate::cluster::ClusterParts::standalone(), None);
     assert_eq!(
         facade.observations().writer_replies().len(),

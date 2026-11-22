@@ -2307,6 +2307,26 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
         if source.hdr.as_deref() == Some("dolby_vision") && options.preserve_dolby_vision {
             args.push("-strict".into());
             args.push("unofficial".into());
+            // FFmpeg 8 drops dvcC/dvvC when the muxer's colour tags conflict
+            // with the record's compatible base. The scanned compatibility
+            // id defines that base even when container colour tags are absent
+            // or wrong. Freeze the same output tags in every copy recipe so
+            // cold/indexed/local/shared copies and their identities agree.
+            let transfer = match source.dolby_vision.bl_compat_id {
+                Some(1 | 6) => Some("smpte2084"),
+                Some(4) => Some("arib-std-b67"),
+                _ => None,
+            };
+            if let Some(transfer) = transfer {
+                args.extend([
+                    "-color_primaries".into(),
+                    "bt2020".into(),
+                    "-color_trc".into(),
+                    transfer.into(),
+                    "-colorspace".into(),
+                    "bt2020nc".into(),
+                ]);
+            }
         }
         // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
         // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the
@@ -2952,6 +2972,75 @@ pub fn copy_pipe_args_with_audio_delivery(
     args
 }
 
+/// Keep the ordinary muxed playback output and observe only a bounded
+/// prefix of the selected video on a second, inherited pipe. The SHA-256
+/// output removes non-picture NALs so the receiver can identify the same
+/// picture after the MP4 mux changes HEVC framing or parameter sets.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_picture_clock(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    clock_url: &str,
+    picture_limit: std::num::NonZeroUsize,
+) -> Result<Vec<String>, &'static str> {
+    if inherited_copy_pipe_descriptor(clock_url).is_none() {
+        return Err("picture clock requires an inherited pipe descriptor >= 3");
+    }
+    if !matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        return Err("picture clock requires selected HEVC video");
+    }
+    let mut args = copy_pipe_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+    );
+    if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
+        return Err("picture clock requires a single production input");
+    }
+    args.insert(0, "-copyts".to_owned());
+    args.extend(
+        [
+            "-map",
+            "0:v:0?",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "filter_units=pass_types=0-31",
+            "-copytb",
+            "1",
+            "-avoid_negative_ts",
+            "disabled",
+            "-f",
+            "framehash",
+            "-hash",
+            "sha256",
+            "-frames:v",
+        ]
+        .map(str::to_owned),
+    );
+    args.push(picture_limit.to_string());
+    args.push(clock_url.to_owned());
+    Ok(args)
+}
+
+fn inherited_copy_pipe_descriptor(url: &str) -> Option<i32> {
+    url.strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3)
+}
+
 /// One production playback output plus canonical video-only measurement,
 /// sharing the input and selected video recipe. The caller must inherit and
 /// concurrently drain `measurement_url` (a `pipe:N` descriptor with N >= 3).
@@ -2996,12 +3085,7 @@ fn copy_pipe_args_with_index_measurement_timeline(
     measurement_url: &str,
     timeline: CopyMp4Timeline,
 ) -> Result<Vec<String>, &'static str> {
-    let descriptor = measurement_url
-        .strip_prefix("pipe:")
-        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|descriptor| *descriptor >= 3);
-    if descriptor.is_none() {
+    if inherited_copy_pipe_descriptor(measurement_url).is_none() {
         return Err("index measurement requires an inherited pipe descriptor >= 3");
     }
     let mut args = copy_input_args_with_offset_mode(
@@ -3058,11 +3142,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
     measurement_url: &str,
     clock_url: &str,
 ) -> Result<Vec<String>, &'static str> {
-    let clock_descriptor = clock_url
-        .strip_prefix("pipe:")
-        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|descriptor| *descriptor >= 3)
+    let clock_descriptor = inherited_copy_pipe_descriptor(clock_url)
         .ok_or("packet clock requires an inherited pipe descriptor >= 3")?;
     let mut args = copy_pipe_args_with_index_measurement_timeline(
         source,

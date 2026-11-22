@@ -1067,7 +1067,7 @@ fn replace_inputs_with_attested_descriptor(args: &mut [String]) {
 /// Every later reader — the rendition's generation, its playlist facts, its
 /// index pass — asks these options rather than carrying a second copy of the
 /// answer, which is why this is the one place the two flags meet.
-pub(super) fn copy_video_pipeline(
+pub(crate) fn copy_video_pipeline(
     file: &MediaFile,
     probe_json: Option<&str>,
     have_dovi: bool,
