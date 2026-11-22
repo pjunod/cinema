@@ -4231,7 +4231,7 @@ impl TranscodeManager {
                         runtime_cache: self.runtime_cache.clone(),
                         shader_cache: Arc::new(tempfile::Builder::new().prefix("dv-shader-cache-")
                             .tempdir_in(&self.runtime_cache).map_err(|e| e.to_string())?),
-                        prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
+                        prepared: std::sync::Mutex::new(None), window_run: Default::default(), failure_episode, preparation_budget,
                         report_revision: std::sync::atomic::AtomicU64::new(0),
                         published_receipt: std::sync::Mutex::new(None) };
                     let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode, renderer_decode);
@@ -4282,7 +4282,7 @@ impl TranscodeManager {
                         entry, &executable.path, admission,
                         processed_work.map_or_else(|| Arc::new(crate::prodrun::ProducerSlot::new()), |work| Arc::clone(&work.producer)),
                         processed_work.map_or_else(tokio_util::sync::CancellationToken::new, |work| work.cancel.clone()), None,
-                        input, if processed_work.is_some() { None } else { processing_deadline }, Some(source_open_started.elapsed())).await {
+                        input, if processed_work.is_some() { None } else { processing_deadline }, Some(source_open_started.elapsed()), &[]).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
