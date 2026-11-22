@@ -1006,7 +1006,7 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
 
 #[test]
 fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
-    use super::super::dv_title::scanner_verdict;
+    use super::super::dv_title::{scanner_verdict, SourceRead};
     use std::os::unix::process::ExitStatusExt;
     let output = |raw: i32, stdout: &[u8], stderr: &[u8]| {
         Ok(plurx_core::process::bounded::Output {
@@ -1017,13 +1017,13 @@ fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
     };
     // Readable input: success returns the aggregate bytes.
     assert_eq!(
-        scanner_verdict(output(0, b"{}", b""), false).expect("aggregate"),
+        scanner_verdict(output(0, b"{}", b""), SourceRead::Clean).expect("aggregate"),
         b"{}".to_vec()
     );
     // A genuine refusal keeps its exit status and the end of stderr.
     let long = format!("{}\nfatal: no RPU in frame 9\n", "noise ".repeat(400));
     let Err(TitleScanError::Failed(reason)) =
-        scanner_verdict(output(256, b"", long.as_bytes()), false)
+        scanner_verdict(output(256, b"", long.as_bytes()), SourceRead::Clean)
     else {
         panic!("a non-zero exit over readable input is a file verdict");
     };
@@ -1031,26 +1031,49 @@ fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
     assert!(reason.contains("fatal: no RPU in frame 9"), "{reason}");
     assert!(!reason.contains('\n'));
     assert!(reason.len() < 700, "stderr is bounded: {}", reason.len());
+    // The bridge's private capability URL never reaches a log line.
+    let Err(TitleScanError::Failed(reason)) = scanner_verdict(
+        output(
+            256,
+            b"",
+            b"http://127.0.0.1:41234/0123456789abcdef0123456789abcdef: I/O error",
+        ),
+        SourceRead::Clean,
+    ) else {
+        panic!("refusal");
+    };
+    assert!(
+        !reason.contains("0123456789abcdef0123456789abcdef"),
+        "{reason}"
+    );
     // A failed served read outranks the scanner's own exit, including a
     // success: an aggregate over truncated input must never be trusted.
+    // The storage class and the service class stay distinct.
     for raw in [256, 0] {
         assert!(matches!(
-            scanner_verdict(output(raw, b"{}", b"short read"), true),
+            scanner_verdict(output(raw, b"{}", b"short read"), SourceRead::Interrupted),
             Err(TitleScanError::SourceInterrupted(reason)) if reason.contains("short read")
+        ));
+        assert!(matches!(
+            scanner_verdict(output(raw, b"{}", b"short read"), SourceRead::StorageFailed),
+            Err(TitleScanError::SourceReadFailed(reason)) if reason.contains("short read")
         ));
     }
     assert!(matches!(
-        scanner_verdict(Err(std::io::Error::other("deadline")), true),
+        scanner_verdict(
+            Err(std::io::Error::other("deadline")),
+            SourceRead::Interrupted
+        ),
         Err(TitleScanError::SourceInterrupted(_))
     ));
     assert!(matches!(
-        scanner_verdict(Err(std::io::Error::other("deadline")), false),
+        scanner_verdict(Err(std::io::Error::other("deadline")), SourceRead::Clean),
         Err(TitleScanError::Failed(reason)) if reason.contains("deadline")
     ));
 }
 
 #[tokio::test]
-async fn interrupted_title_scan_yields_without_charging_and_refusal_still_charges() {
+async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_charge() {
     use plurx_core::store::background_jobs::{JobState, SettleJob};
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
     let start = now_ms();
@@ -1155,6 +1178,32 @@ async fn interrupted_title_scan_yields_without_charging_and_refusal_still_charge
     assert_eq!(
         charged.last_error_code.as_deref(),
         Some("title_scan_failed")
+    );
+
+    // A storage read failure (a bad sector) must stay bounded by the attempt
+    // limit, so it is charged too, under its own code.
+    let third_at = charged.not_before_ms;
+    let third = claimed(
+        store
+            .claim_job(claim(charged.revision, third_at))
+            .await
+            .expect("third claim"),
+    );
+    let storage = scan_failure_settlement(
+        &TitleScanError::SourceReadFailed("source storage read failed".into()),
+        &id,
+        third.failed_attempts,
+    );
+    assert!(matches!(storage, JobSettlement::Retry { .. }));
+    assert!(store
+        .settle_job(settle(third.token.expect("token"), storage, third_at))
+        .await
+        .expect("storage retry"));
+    let bounded = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(bounded.failed_attempts, 2, "a storage failure is charged");
+    assert_eq!(
+        bounded.last_error_code.as_deref(),
+        Some("title_source_read_failed")
     );
 }
 

@@ -8,11 +8,14 @@ use plurx_core::{
 /// Why a complete-title scan produced no aggregate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TitleScanError {
-    /// A served source read failed (EIO, a changed source, lost authority, a
-    /// revoked budget) while the scanner was reading. It saw truncated input,
-    /// so whatever it concluded is not a verdict on the file — the same
-    /// contract the ordinary probe applies through `source_read_failed`.
+    /// The source service withdrew a read the scanner was waiting on (an
+    /// exhausted pause, a revoked or unavailable budget grant). The storage
+    /// was not at fault, so this is contention, like a scheduler preemption.
     SourceInterrupted(String),
+    /// The storage itself failed a read (an I/O error, or the object ended
+    /// early). The scanner saw truncated input, so its result is not a
+    /// verdict on the content, but rereading may fail the same way.
+    SourceReadFailed(String),
     /// The scanner, its aggregate or its prerequisites refused readable input.
     Failed(String),
 }
@@ -20,7 +23,9 @@ pub(super) enum TitleScanError {
 impl std::fmt::Display for TitleScanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SourceInterrupted(reason) | Self::Failed(reason) => f.write_str(reason),
+            Self::SourceInterrupted(reason)
+            | Self::SourceReadFailed(reason)
+            | Self::Failed(reason) => f.write_str(reason),
         }
     }
 }
@@ -37,16 +42,38 @@ impl From<&str> for TitleScanError {
     }
 }
 
+/// What the source bridge observed while the scanner read through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceRead {
+    /// Every served read succeeded, or there was no bridge.
+    Clean,
+    /// A served read failed for a service reason: budget, grant or pause.
+    Interrupted,
+    /// A served read failed in the storage itself.
+    StorageFailed,
+}
+
+#[cfg(unix)]
+fn source_read(input: Option<&crate::source_input::SourceInput>) -> SourceRead {
+    match input {
+        Some(input) if input.source_physical_read_failed() => SourceRead::StorageFailed,
+        Some(input) if input.source_read_failed() => SourceRead::Interrupted,
+        _ => SourceRead::Clean,
+    }
+}
+
 /// Bounded stderr carried into a failure reason: the final bytes, where a
-/// scanner prints its fatal error, on one line.
+/// scanner prints its fatal error, on one line, with the bridge's private
+/// capability URL redacted.
 const STDERR_TAIL_BYTES: usize = 512;
 
 fn stderr_tail(stderr: &[u8]) -> String {
     let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
-    String::from_utf8_lossy(&stderr[start..])
+    let line = String::from_utf8_lossy(&stderr[start..])
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    crate::scratch_put::redact(&line)
 }
 
 /// Classify the scanner's exit before its aggregate is trusted. A failed
@@ -54,7 +81,7 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// success: an aggregate computed over truncated input is never published.
 pub(super) fn scanner_verdict(
     output: std::io::Result<plurx_core::process::bounded::Output>,
-    source_read_failed: bool,
+    read: SourceRead,
 ) -> Result<Vec<u8>, TitleScanError> {
     let describe = |output: &std::io::Result<plurx_core::process::bounded::Output>| match output {
         Ok(output) => {
@@ -67,18 +94,22 @@ pub(super) fn scanner_verdict(
         }
         Err(error) => error.to_string(),
     };
-    if source_read_failed {
-        return Err(TitleScanError::SourceInterrupted(format!(
-            "source read failed during title scan ({})",
+    match read {
+        SourceRead::StorageFailed => Err(TitleScanError::SourceReadFailed(format!(
+            "source storage read failed during title scan ({})",
             describe(&output)
-        )));
-    }
-    match output {
-        Ok(output) if output.status.success() => Ok(output.stdout),
-        failed => Err(TitleScanError::Failed(format!(
-            "complete-title DV scan failed ({})",
-            describe(&failed)
         ))),
+        SourceRead::Interrupted => Err(TitleScanError::SourceInterrupted(format!(
+            "source service interrupted the title scan ({})",
+            describe(&output)
+        ))),
+        SourceRead::Clean => match output {
+            Ok(output) if output.status.success() => Ok(output.stdout),
+            failed => Err(TitleScanError::Failed(format!(
+                "complete-title DV scan failed ({})",
+                describe(&failed)
+            ))),
+        },
     }
 }
 
@@ -139,16 +170,14 @@ pub(super) async fn scan(
     };
     // Read the bridge's verdict before it is closed: the scanner has exited,
     // so every served read that could fail has already been observed.
-    let source_read_failed = input
-        .as_ref()
-        .is_some_and(crate::source_input::SourceInput::source_read_failed);
+    let read = source_read(input.as_ref());
     if let Some(input) = input {
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining title source input: {error}"))?;
     }
-    let stdout = scanner_verdict(output, source_read_failed)?;
+    let stdout = scanner_verdict(output, read)?;
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
     }

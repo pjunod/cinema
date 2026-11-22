@@ -951,11 +951,15 @@ enum TitleAcquisition {
 
 /// Settle a complete-title scan that produced no aggregate.
 ///
-/// A source interruption is not a verdict on the file, so it yields without
-/// charging the attempt budget: charging it would let ordinary contention for
-/// the source permanently fail a readable title after five interruptions. It
-/// keeps the charged retry's backoff so a whole-title read is not restarted
-/// in a tight loop. A genuine scanner refusal stays a charged retry.
+/// A service interruption (pause, budget or grant) is contention, not a fault
+/// in the title, so it yields without charging the attempt budget, as a
+/// scheduler preemption does; charging it would let source contention
+/// permanently fail a readable title. A storage read failure is charged like
+/// any other transient read failure (the probe and subtitle paths do the
+/// same), so a bad sector stays bounded by the attempt limit, but under its own
+/// code. A scanner refusal of readable input stays `title_scan_failed`. Every
+/// case keeps the retry backoff, so a whole-title read never restarts in a
+/// tight loop.
 fn scan_failure_settlement(
     error: &TitleScanError,
     job_id: &str,
@@ -972,6 +976,13 @@ fn scan_failure_settlement(
                 error_code: Some("title_source_interrupted".into()),
                 not_before_ms,
                 checkpoint: None,
+            }
+        }
+        TitleScanError::SourceReadFailed(_) => {
+            tracing::warn!(%error, job = job_id, "complete-title scan source read failed");
+            JobSettlement::Retry {
+                error_code: "title_source_read_failed".into(),
+                not_before_ms,
             }
         }
         TitleScanError::Failed(_) => {
