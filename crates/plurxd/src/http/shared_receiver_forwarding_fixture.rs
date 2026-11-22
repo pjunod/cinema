@@ -381,6 +381,33 @@ async fn actual_nonowner_b(
         .await
         .expect("protected bytes");
     assert!(bytes.starts_with(b"#EXTM3U"));
+    // The native readiness shape through the non-owner ingress: the login
+    // token is dropped there and the forwarded resource is the playlist.
+    let native = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "http://{second_address}{playlist}{}token={}",
+            if playlist.contains('?') { '&' } else { '?' },
+            fixture.original_login
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", fixture.original_login),
+        )
+        .body(Body::empty())
+        .expect("native readiness resource");
+    let response = sender
+        .send_request(native)
+        .await
+        .expect("forwarded native readiness resource");
+    assert_eq!(response.status(), StatusCode::OK);
+    let native_bytes = axum::body::to_bytes(Body::new(response.into_body()), 1024 * 1024)
+        .await
+        .expect("native readiness bytes");
+    assert!(
+        native_bytes.starts_with(b"#EXTM3U"),
+        "the playlist, without the token"
+    );
     assert!(
         ingress
             .sharing

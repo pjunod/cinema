@@ -256,7 +256,7 @@ function fullOpenHarness() {
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("naturalBoundaryQualityCandidate"),
-    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),
+    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("splitAudioTrackFor"),shippedSource("requestSplitAudio"),shippedSource("splitAudioSwitched"),shippedSource("splitAudioRefused"), shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"),
     shippedSource("playerWantsPlayback"), transportTelemetrySources(),shippedSource("resumeQualityBoundary"),shippedSource("togglePlay"),
     shippedSource("playerInputSurface"), shippedSource("watchRouteInput"),
@@ -1323,7 +1323,7 @@ async function main() {
       // retained branch reads the staged-successor slot before Apply.
       shippedSource("preparedState"),
       shippedSource("setQuality"),shippedSource("setSync"),
-      shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),shippedSource("switchAudio"),
+      shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),shippedSource("switchAudio"),shippedSource("splitAudioTrackFor"),shippedSource("requestSplitAudio"),shippedSource("splitAudioSwitched"),shippedSource("splitAudioRefused"),
       // A directed change settles a promise chain rather than reopening
       // inline, so the harness hands back a form the cases can await.
       "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();if(retainedQualityChange(PLAYER))applyQualityWithRestart();}",

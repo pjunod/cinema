@@ -773,7 +773,7 @@ impl CopyObservationSet {
     }
 
     fn merge(&mut self, observed: ObservedRows<'_>) -> Result<(), CopyObservationError> {
-        if observed.source_origin != self.source_origin
+        if !observed.source_origin.same_instant(self.source_origin)
             || observed.canonical_title_start != self.canonical_title_start
             || observed.timescale != self.rows.timescale()
             || observed.promotion != &self.promotion

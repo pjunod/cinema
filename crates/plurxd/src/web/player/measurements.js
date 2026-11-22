@@ -19,6 +19,19 @@ function bufferRunway(v){
   }catch(e){}
   return 0;
 }
+// The playhead and the buffered ranges themselves: a runway says how much was
+// ahead, these say where. A presentation stall with media buffered ahead and a
+// playhead that never moves is a different bug from a hole in the ranges.
+// Bounded to eight ranges so the beacon stays one line.
+function bufferedRanges(v){
+  try{
+    const out=[];
+    for(let i=0;i<v.buffered.length&&i<8;i++){
+      out.push(v.buffered.start(i).toFixed(2)+"-"+v.buffered.end(i).toFixed(2));
+    }
+    return out.join(",");
+  }catch(e){return null;}
+}
 // Every stream start gets an identity and a stated reason. Without them a
 // seek's numbers and a cold start's land in the same bucket, and "time to
 // first frame" stops meaning anything — the restart paths (seek, audio
@@ -171,6 +184,8 @@ function playbackContext(){
     // alias of its typed `session_id`, so old and native clients stay additive.
     session:p.sessionId||null,
     runway:v?bufferRunway(v):null,
+    position:v&&Number.isFinite(v.currentTime)?+v.currentTime.toFixed(2):null,
+    buffered:v?bufferedRanges(v):null,
     attempt:p.attemptId||null,
     reason:p.attemptReason||null,
     // hls.js's EWMA over real segment downloads. On a just-in-time server this

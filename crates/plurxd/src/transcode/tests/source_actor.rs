@@ -1142,6 +1142,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
@@ -4364,6 +4365,7 @@ async fn source_sparse_input_reserves_before_write_and_releases_only_after_close
 
 fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> SessionRequest {
     SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
