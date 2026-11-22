@@ -77,6 +77,77 @@ fn an_upgrade_is_scheduled_only_by_its_own_sessions_first_frame() {
     assert!(!is_running(&session) && !is_waiting(&session));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_busy_reconstruction_slot_holds_the_waiting_upgrade_without_running_it() {
+    let (_, session, incarnation) = waiting(81);
+    // Another viewer or generation proves nothing about this session.
+    assert!(!hold_while_reconstruction_busy(82, &session, &incarnation));
+    assert!(!hold_while_reconstruction_busy(
+        81,
+        &session,
+        &uuid::Uuid::new_v4().to_string()
+    ));
+    // Its own exchange keeps it waiting; nothing starts.
+    assert!(hold_while_reconstruction_busy(81, &session, &incarnation));
+    assert!(is_waiting(&session) && !is_running(&session));
+    // Once the slot frees, the next exchange takes it as before.
+    let (_, run) = take_on_rendering(81, &session, &incarnation).expect("slot freed");
+    // A running upgrade is not held.
+    assert!(!hold_while_reconstruction_busy(81, &session, &incarnation));
+    drop(run);
+
+    // An HDR10 upgrade never takes the reconstruction slot, so it is not held.
+    let playback = uuid::Uuid::new_v4().to_string();
+    let hdr10 = uuid::Uuid::new_v4().to_string();
+    let hdr10_incarnation = uuid::Uuid::new_v4().to_string();
+    register(UpgradeIntent {
+        user_id: 81,
+        playback_id: playback.clone(),
+        session_id: hdr10.clone(),
+        incarnation_id: hdr10_incarnation.clone(),
+        request: ordinary_request(&playback),
+        hdr10_intent: true,
+        auto_policy: true,
+        network: None,
+        network_prior: None,
+        incumbent_receipt: None,
+    });
+    assert!(!hold_while_reconstruction_busy(
+        81,
+        &hdr10,
+        &hdr10_incarnation
+    ));
+}
+
+#[test]
+fn the_trial_and_release_paths_keep_their_reconstruction_contracts() {
+    // A trial refused for another play's slot must reach the upgrade
+    // recognisably, not wrapped as a terminal "processed window refused".
+    let create = include_str!("../../transcode/manager/create.rs");
+    let arm = create
+        .find("if pending_fel_qualification(&reason).is_some()")
+        .expect("the trial's refusal arm");
+    let wrapped = arm
+        + create[arm..]
+            .find("processed window refused")
+            .expect("the trial's wrapped refusal");
+    assert!(create[arm..wrapped].contains("Self::is_reconstruction_slot_busy(&reason)"));
+    // Releasing a session retires the successor staged to replace it, after
+    // its terminal is published and before any remote stop await.
+    let release = include_str!("release.rs");
+    let terminal = release
+        .find(".begin_session_terminal(&session, projected_terminal, projected_reason)")
+        .expect("terminal publication");
+    let retire = release
+        .find("super::preparation::cancel_preparations_for_released_incumbent(&route.incarnation_id);")
+        .expect("released incumbent retirement");
+    let stop = release
+        .find(".complete_release_with_route(")
+        .expect("durable release");
+    assert!(terminal < retire && retire < stop);
+}
+
 #[test]
 fn a_recovered_session_without_ttff_is_upgraded_by_its_own_rendering_exchange() {
     // 2026-11-12: Safari's Twilight play stalled, reconnected and resumed.

@@ -664,6 +664,117 @@ async fn cached_wait_watcher_fixture(watcher_revocation: Option<&str>) {
         .contains_key(&incarnation));
 }
 
+#[tokio::test]
+async fn released_incumbent_retires_only_the_successor_staged_to_replace_it() {
+    let (_output_dir, serve, facts, output_request) =
+        crate::vodserve::retained::test_post_attachment_output_facts().await;
+    let work = crate::test_tempdir().expect("control fixture");
+    let fixture =
+        crate::transcode::HlsDeliveryFixture::publish(work.path(), "waiting-incumbent").await;
+    let mut state = fixture.state.clone();
+    state.transcode = Arc::new(
+        crate::transcode::TranscodeManager::new(
+            state.store.clone(),
+            work.path().join("cached-recovery"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        )
+        .with_copy_test_vod(serve.clone()),
+    );
+    let playback = uuid::Uuid::new_v4().to_string();
+    let mut route = crate::media_sessions::takeover_eligible_route(
+        "incumbent",
+        &uuid::Uuid::new_v4().to_string(),
+    );
+    route.playback_id = playback.clone();
+    route.owner_node_id = state.node_id.clone();
+    let mut request = cached_wait_request(route.incarnation_id.clone());
+    let candidate = plurx_core::playback::candidate::CandidateId::for_recipe_digest([42; 32]);
+    request.selection.quality = crate::playback_control::QualitySelection::Auto {
+        height: Some(360),
+        candidate_id: Some(candidate),
+    };
+    request.render_state = crate::playback_control::RenderState::Waiting;
+    request.intent = Some(plurx_core::playback::MediaIntentEnvelope {
+        lifetime_id: "cached-pressure-viewer".into(),
+        recipe_revision: 3,
+        destination_revision: 1,
+        transport_revision: 1,
+        selection: request.selection.desired(),
+    });
+    let pending = PendingCandidateGuard::begin_control(&state, &route, &request);
+    pending
+        .registered
+        .store(true, std::sync::atomic::Ordering::Release);
+    let id = "00000000-0000-4000-8000-00000000cace";
+    let incarnation = uuid::Uuid::new_v4().to_string();
+    serve.mark_prepared_incarnation(id, &incarnation).await;
+    let output = facts
+        .response_owner
+        .retained_output_facts()
+        .expect("real sealed complete artifact");
+    let owner = serve
+        .cached_prepared_reader_owner(id, &incarnation, &output)
+        .await
+        .expect("exact retained speculative reader");
+    let mut recipe: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("fixture recipe");
+    recipe.request.file_id = output_request.file_id;
+    recipe.request.kind = crate::transcode::SessionKind::Transcode { height: 360 };
+    recipe.candidate_id = Some(candidate);
+    let preparation = plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: None,
+        incarnation_id: incarnation.clone(),
+        session_id: id.into(),
+        principal: route.principal.clone(),
+        playback_id: playback.clone(),
+        expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+        expected_predecessor_owner_node_id: route.owner_node_id.clone(),
+        expected_predecessor_owner_epoch: route.owner_epoch,
+        request_fingerprint: "exact-cached-reader".into(),
+        owner_node_id: state.node_id.clone(),
+        recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+        response_json: "{}".into(),
+        media_origin_ms: 0,
+        now_ms: unix_ms(),
+        expected_desired_revision: None,
+        deadline_ms: unix_ms() + 30_000,
+    };
+    let active = ActivePreparedSuccessor {
+        state: state.clone(),
+        executor: crate::playback_control::PreparationExecutor::new(
+            state.store.clone(),
+            state
+                .transcode
+                .session_preparation_gate(id)
+                .await
+                .expect("exact cached gate"),
+            route.principal.clone(),
+            route.playback_id.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
+        ),
+        preparation,
+        purpose: PreparationPurpose::SelectionChange,
+        cached_recovery_owner: None,
+        cached_accepted_wait: None,
+        planning_registration: Some(Arc::clone(&pending.registered)),
+        quality_intent: QualityIntentIdentity::from_control(&request),
+        cancelled: pending.cancellation_token(),
+    };
+    let _ = &owner;
+    register_active_preparation(active.clone());
+    // Another session ending leaves this successor staged.
+    cancel_preparations_for_released_incumbent(&uuid::Uuid::new_v4().to_string());
+    assert!(active_preparation(&incarnation).is_some());
+    assert!(!active.cancelled.is_cancelled());
+    // Its own incumbent ending means it can never commit: retire it now,
+    // not at its deadline.
+    cancel_preparations_for_released_incumbent(&route.incarnation_id);
+    assert!(active_preparation(&incarnation).is_none());
+    assert!(active.cancelled.is_cancelled());
+}
+
 #[test]
 fn cached_recovery_wait_keeps_only_the_current_accepted_intent() {
     let admitted = QualityIntentIdentity {

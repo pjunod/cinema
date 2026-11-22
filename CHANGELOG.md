@@ -87,6 +87,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Dolby Vision FEL upgrade staged for a session that the viewer then closed no longer keeps
+  rendering for nobody until its deadline. Releasing the session retires its staged successor,
+  which frees the worker's reconstruction slot for the viewer's next session. An upgrade that
+  finds the slot busy now waits for the next rendering exchange instead of being declined for
+  good. Copy sessions now log why a native split layout was declined or never reserved.
 - Shared Dolby Vision Profile 7 titles start again when converted to Profile
   8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
   first fragment against the rung its plan resolved instead of the source's own
