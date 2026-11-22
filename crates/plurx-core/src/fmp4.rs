@@ -3009,8 +3009,8 @@ pub struct CopyVideoSampleEntryFacts {
 }
 
 /// Read actual container declarations, not catalog tags or encoder arguments.
-/// High-profile AVC needs its explicit avcC depth/chroma extension; this API
-/// does not infer missing extension fields from an unparsed SPS. In-band
+/// High-profile AVC reads its avcC depth/chroma extension, or the SPS's own
+/// depth and chroma fields when an avcC omits that optional extension. In-band
 /// parameter-set changes require an independent bitstream inspection.
 pub fn copy_video_sample_entry_facts(init: &Init) -> Result<CopyVideoSampleEntryFacts, Fmp4Error> {
     let video = init
@@ -3228,11 +3228,13 @@ fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8
     if sps_count == 0 {
         return Err(Fmp4Error::Unsupported("avcC has no SPS declaration".into()));
     }
+    let mut first_sps = None;
     for _ in 0..sps_count {
         let nal = copy_avcc_nal(record, &mut pos, 7)?;
         if nal.len() < 4 || nal[1..4] != record[1..4] {
             return malformed("avcC SPS profile disagrees with header");
         }
+        first_sps.get_or_insert(nal);
     }
     let count = *record
         .get(pos)
@@ -3255,24 +3257,35 @@ fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8
                 "unknown AVC profile depth/chroma semantics".into(),
             ));
         }
-        let ext = record
-            .get(pos..pos + 4)
-            .ok_or_else(|| Fmp4Error::Unsupported("AVC depth/chroma extension absent".into()))?;
-        if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
-            return malformed("invalid AVC depth/chroma extension");
+        // The High-profile extension is optional in practice: an avcC copied
+        // from a Matroska CodecPrivate often ends after its PPS. Then the SPS
+        // itself is the declaration, read with the same depth rules.
+        if pos == record.len() {
+            let sps = first_sps
+                .ok_or_else(|| Fmp4Error::Unsupported("avcC has no SPS declaration".into()))?;
+            video_splice_format::avc_sps_depth_chroma(sps).ok_or_else(|| {
+                Fmp4Error::Unsupported("unequal or unsupported AVC bit depths".into())
+            })?
+        } else {
+            let ext = record.get(pos..pos + 4).ok_or_else(|| {
+                Fmp4Error::Malformed("truncated AVC depth/chroma extension".into())
+            })?;
+            if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
+                return malformed("invalid AVC depth/chroma extension");
+            }
+            if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
+                return Err(Fmp4Error::Unsupported(
+                    "unequal or unsupported AVC bit depths".into(),
+                ));
+            }
+            let facts = (8 + (ext[1] & 7), ext[0] & 3);
+            let count = ext[3];
+            pos += 4;
+            for _ in 0..count {
+                copy_avcc_nal(record, &mut pos, 13)?;
+            }
+            facts
         }
-        if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
-            return Err(Fmp4Error::Unsupported(
-                "unequal or unsupported AVC bit depths".into(),
-            ));
-        }
-        let facts = (8 + (ext[1] & 7), ext[0] & 3);
-        let count = ext[3];
-        pos += 4;
-        for _ in 0..count {
-            copy_avcc_nal(record, &mut pos, 13)?;
-        }
-        facts
     };
     if pos != record.len() {
         return malformed("trailing copy avcC bytes");
