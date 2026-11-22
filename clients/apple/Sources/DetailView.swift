@@ -3,71 +3,6 @@ import SwiftUI
 import UIKit
 #endif
 
-#if os(tvOS)
-/// The player is presented as a full-screen cover in this same window.
-private struct TVFullscreenTargetProbe: UIViewRepresentable {
-    let report: (PresentationTarget?) -> Void
-
-    final class ProbeView: UIView {
-        var report: ((PresentationTarget?) -> Void)?
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            let notifications = NotificationCenter.default
-            notifications.removeObserver(self)
-            if let window {
-                for name in [UIWindow.didBecomeKeyNotification, UIWindow.didResignKeyNotification] {
-                    notifications.addObserver(self, selector: #selector(windowStateChanged(_:)),
-                                              name: name, object: window)
-                }
-                if let scene = window.windowScene {
-                    for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification] {
-                        notifications.addObserver(self, selector: #selector(windowStateChanged(_:)),
-                                                  name: name, object: scene)
-                    }
-                }
-            }
-            measure()
-        }
-
-        @objc private func windowStateChanged(_ notification: Notification) {
-            measure()
-        }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            measure()
-        }
-
-        func measure() {
-            let target: PresentationTarget?
-            if let window, window.isKeyWindow,
-               window.windowScene?.activationState == .foregroundActive,
-               window.bounds.size == window.screen.bounds.size,
-               let size = backingPresentationSize(window.bounds.size, scale: window.screen.scale) {
-                target = PresentationTarget(widthPx: Int(size.width.rounded()),
-                    heightPx: Int(size.height.rounded()), revision: 1)
-            } else {
-                target = nil
-            }
-            // Layout can run during SwiftUI view updates.
-            Task { @MainActor [weak self] in self?.report?(target) }
-        }
-    }
-
-    func makeUIView(context: Context) -> ProbeView {
-        let view = ProbeView()
-        view.isUserInteractionEnabled = false
-        return view
-    }
-
-    func updateUIView(_ view: ProbeView, context: Context) {
-        view.report = report
-        view.measure()
-    }
-}
-#endif
-
 struct ItemMetadataBadge: Equatable, Identifiable {
     enum Kind: String, Equatable {
         case series
@@ -731,18 +666,6 @@ struct DetailView: View {
     #if os(tvOS)
     private enum TVDetailFocus: Hashable { case primaryAction }
 
-    private struct TVStartupPreparation: Equatable {
-        let itemId: Int
-        let fileId: Int
-        let startMs: Int
-        let selection: PrePlaySelection
-        let quality: PlaybackQuality
-        let authorizationGeneration: UInt64
-        let presentationTarget: PresentationTarget?
-        let routeV1: Bool
-        let deviceSubtitlesOff: Bool
-        let subtitleReadiness: SubtitleReadiness
-    }
     #endif
 
     @EnvironmentObject var model: AppModel
@@ -1772,28 +1695,7 @@ struct DetailView: View {
             }
         }
         .task(id: preparation) {
-            guard let preparation, !Task.isCancelled,
-                  Session.shared.playbackAuthorization.generation == preparation.authorizationGeneration else { return }
-            do {
-                let preview = try await Caps.PresentationContext.$target.withValue(preparation.presentationTarget) {
-                    try await model.playbackDecision(
-                        fileId: preparation.fileId, selection: preparation.selection,
-                        quality: preparation.quality, speculative: true
-                    )
-                }
-                guard !Task.isCancelled,
-                      Session.shared.playbackAuthorization.generation == preparation.authorizationGeneration,
-                      let body = PlayerController.startupPreparationRequest(
-                        decision: preview.decision, caps: preview.caps, selection: preparation.selection,
-                        quality: preparation.quality, startMs: preparation.startMs,
-                        deviceSubtitlesOff: preparation.deviceSubtitlesOff,
-                        subtitleReadiness: preparation.subtitleReadiness, routeV1: preparation.routeV1,
-                        playbackId: UUID().uuidString
-                      ) else { return }
-                try await model.prepareHlsStartup(fileId: preparation.fileId, body: body)
-            } catch {
-                // Preparation is opportunistic. Play still requests a current decision.
-            }
+            await preparation?.run(using: model)
         }
     }
 

@@ -290,6 +290,10 @@ private struct HomeDashboard: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var featurePresentation = HomeFeaturePresentation()
     @AppStorage("plurx.tvHomeLayout") private var tvHomeLayoutRaw = TvHomeLayout.classic.rawValue
+    #if os(tvOS)
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var featureTarget: PresentationTarget?
+    #endif
 
     private var theaterFeature: TvTheaterFeature? {
         #if os(tvOS)
@@ -303,6 +307,44 @@ private struct HomeDashboard: View {
             recentlyAdded: model.hubs.recentlyAdded ?? []
         )
     }
+
+    #if os(tvOS)
+    /// What the theater feature's direct Resume depends on; a change re-offers
+    /// preparation for the window that Resume will now request.
+    private struct FeaturePreparationKey: Equatable {
+        let itemId: Int
+        let positionMs: Int
+        let target: PresentationTarget?
+        let quality: PlaybackQuality
+        let authorizationGeneration: UInt64
+        let active: Bool
+    }
+
+    private func featurePreparationKey(_ feature: TvTheaterFeature) -> FeaturePreparationKey? {
+        guard feature.isContinueWatching else { return nil }
+        return FeaturePreparationKey(
+            itemId: feature.item.id, positionMs: feature.item.watch?.positionMs ?? 0,
+            target: featureTarget, quality: model.playbackQuality,
+            authorizationGeneration: Session.shared.playbackAuthorization.generation,
+            active: scenePhase == .active
+        )
+    }
+
+    /// The theater feature plays Continue Watching without title detail, so it
+    /// offers the same startup preparation title detail does for that Resume.
+    private func prepareFeature(_ feature: TvTheaterFeature) async {
+        guard let key = featurePreparationKey(feature), key.active,
+              featurePresentation.play == nil,
+              let detail = try? await model.itemDetail(feature.item.id),
+              !Task.isCancelled,
+              let context = TvHomeLayoutPolicy.playbackContext(detail),
+              context.startMs > 0,
+              let preparation = TVStartupPreparation.offer(
+                for: context, model: model, presentationTarget: featureTarget
+              ) else { return }
+        await preparation.run(using: model)
+    }
+    #endif
 
     private var featured: Item? {
         (model.hubs.continueWatching ?? []).first
@@ -425,6 +467,18 @@ private struct HomeDashboard: View {
         if let theaterFeature {
             TvTheaterHero(feature: theaterFeature, presentation: featurePresentation)
                 .padding(.bottom, 12)
+                #if os(tvOS)
+                .background {
+                    if model.displayAwareAuto, scenePhase == .active {
+                        TVFullscreenTargetProbe { target in
+                            if featureTarget != target { featureTarget = target }
+                        }
+                    }
+                }
+                .task(id: featurePreparationKey(theaterFeature)) {
+                    await prepareFeature(theaterFeature)
+                }
+                #endif
         }
         if model.layout == .standard && HomeLayoutPolicy.usesFeaturedHero, let featured {
             FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)

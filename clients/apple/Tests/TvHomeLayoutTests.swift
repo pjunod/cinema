@@ -105,6 +105,36 @@ final class TvHomeLayoutTests: XCTestCase {
         )?.fileId, 43)
     }
 
+    /// The theater feature resumes without title detail, so it must offer the
+    /// same startup preparation title detail does, for exactly the window and
+    /// file its Resume will play, and nothing while signed out or not ready.
+    @MainActor
+    func testTheaterContinueWatchingOffersPreparationForItsResumeWindow() throws {
+        var item = Item(id: 7, kind: "movie", title: "Movie")
+        item.watch = Watch(positionMs: 1_424_363, watched: false)
+        var file = MediaFile(id: 42)
+        file.durationMs = 7_000_000
+        let context = try XCTUnwrap(
+            TvHomeLayoutPolicy.playbackContext(ItemDetail(item: item, files: [file]))
+        )
+        let model = AppModel(startServices: false)
+        Session.shared.setCredentials(origin: "https://home.test", token: nil)
+        XCTAssertNil(TVStartupPreparation.offer(for: context, model: model, presentationTarget: nil))
+        Session.shared.setCredentials(origin: "https://home.test", token: "home-bearer")
+        defer { Session.shared.setCredentials(origin: "", token: nil) }
+        model.phase = .loading
+        XCTAssertNil(TVStartupPreparation.offer(for: context, model: model, presentationTarget: nil))
+        model.phase = .ready
+        let offer = try XCTUnwrap(
+            TVStartupPreparation.offer(for: context, model: model, presentationTarget: nil)
+        )
+        XCTAssertEqual(offer.itemId, 7)
+        XCTAssertEqual(offer.fileId, 42)
+        XCTAssertEqual(offer.startMs, context.startMs)
+        XCTAssertEqual(offer.selection, context.selection)
+        XCTAssertEqual(offer.authorizationGeneration, Session.shared.playbackAuthorization.generation)
+    }
+
     @MainActor
     func testTheaterPlaybackUsesFreshDetailAndSharedResumeThresholds() throws {
         var item = Item(id: 7, kind: "episode", title: "Episode", showTitle: "Series")
