@@ -2,6 +2,7 @@
 //! The Source actor retains grant/assignment/lease authority; this owner only
 //! joins the child and outputs and commits the verified physical observations.
 use super::{
+    meter::{await_reporting_stall, ProductionMeter},
     CopyClockCensus, CopyMuxEvent, CopyRangeFiles, CopyRangePublisher, ObservedCopyMux,
     RunningCopyGeneration,
 };
@@ -252,8 +253,11 @@ impl CopyRangeProduction {
         events: Vec<CopyMuxEvent>,
         census: &CopyClockCensus,
         canonical_title_start: u64,
+        meter: &mut ProductionMeter,
     ) -> Result<(), String> {
         for event in events {
+            let committing = tokio::time::Instant::now();
+            let mut published = None;
             let mut files = self.files.lock().await;
             match event {
                 CopyMuxEvent::Init { canonical, av } => {
@@ -275,12 +279,31 @@ impl CopyRangeProduction {
                     self.seek_bootstrap.verified_landing();
                 }
                 CopyMuxEvent::Segment(output) => {
+                    let index = output.segment.output_index;
+                    let seconds = output.segment.seconds;
+                    let bytes = output.segment.media.bytes.len() as u64;
+                    let media_start_ms = files.media_origin_ms().unwrap_or(0) as f64
+                        + files
+                            .segments()
+                            .iter()
+                            .map(|segment| segment.seconds * 1000.0)
+                            .sum::<f64>();
                     files.commit_segment(output, &self.stop).await?;
+                    published = Some((
+                        index,
+                        media_start_ms,
+                        media_start_ms + seconds * 1000.0,
+                        bytes,
+                    ));
                 }
             }
             drop(files);
             self.refresh_read_bank_inner(false).await?;
             self.changed.notify_waiters();
+            meter.commit(committing.elapsed());
+            if let Some((index, start, end, bytes)) = published {
+                meter.segment(tokio::time::Instant::now(), index, start, end, bytes);
+            }
         }
         Ok(())
     }
@@ -291,12 +314,28 @@ impl CopyRangeProduction {
         census: Arc<CopyClockCensus>,
         canonical_title_start: u64,
     ) {
+        let (incarnation, range_id) = self.files.lock().await.log_identity();
+        let mut meter = ProductionMeter::new(incarnation, range_id, tokio::time::Instant::now());
+        // The advertised target duration: a wait longer than one segment's
+        // worth of wall time is worth a line, whatever the cause.
+        let target = std::time::Duration::from_secs(u64::from(
+            plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
+        ));
         let observed=async{
             loop {
                 let pipes=running.pipes.as_mut().ok_or("copy_output_readers_missing")?;
-                let event=tokio::select!{biased;()=self.stop.cancelled()=>return Err("copy_range_cancelled".to_owned()),event=pipes.next()=>event.ok_or("copy_output_readers_lost")?};
+                let waiting=tokio::time::Instant::now();
+                let next=await_reporting_stall(pipes.next(),target,|waited|{
+                    let held=self.bank.try_lock().is_ok_and(|bank|bank.held);
+                    meter.stalled("child_output",waited,held);
+                });
+                let event=tokio::select!{biased;()=self.stop.cancelled()=>return Err("copy_range_cancelled".to_owned()),event=next=>event.ok_or("copy_output_readers_lost")?};
+                meter.child(waiting.elapsed());
                 let eof=pipes.all_eof();
-                self.apply(mux.feed(event)?,&census,canonical_title_start).await?;
+                let converting=tokio::time::Instant::now();
+                let events=mux.feed(event)?;
+                meter.convert(converting.elapsed());
+                self.apply(events,&census,canonical_title_start,&mut meter).await?;
                 if eof{break;}
             }
             running.slot.request_registered_completion(&running.registration).await.map_err(|_|"copy_reap_unavailable".to_owned())?;
@@ -304,7 +343,7 @@ impl CopyRangeProduction {
             if !status.success(){return Err("copy_child_failed".into());}
             running.join_completed_outputs().await?;
             let (tail,inspection)=mux.finish()?;
-            self.apply(tail,&census,canonical_title_start).await?;
+            self.apply(tail,&census,canonical_title_start,&mut meter).await?;
             // The child is successful and every output task/parser is joined
             // before EOF publication. The registered writer remains retained
             // until after this final atomic commit acknowledges below.
@@ -323,6 +362,7 @@ impl CopyRangeProduction {
             (Ok(()), Ok(receipt)) if !receipt.exit_success() => Err("copy_child_failed".into()),
             (Ok(()), Ok(_)) => Ok(()),
         };
+        meter.finished(tokio::time::Instant::now(), &result);
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();
     }

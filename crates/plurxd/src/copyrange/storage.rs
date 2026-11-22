@@ -320,6 +320,14 @@ impl CopyRangeFiles {
     pub(crate) fn media_origin_ms(&self) -> Option<i64> {
         self.origin
     }
+    /// The Source incarnation and range this production belongs to, for its
+    /// log lines.
+    pub(crate) fn log_identity(&self) -> (String, uuid::Uuid) {
+        (
+            self.assignment.binding().incarnation_id().to_string(),
+            self.range_id,
+        )
+    }
     pub(crate) fn complete(&self) -> bool {
         self.committed_eof
     }
