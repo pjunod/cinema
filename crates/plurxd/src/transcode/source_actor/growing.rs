@@ -69,18 +69,17 @@ pub(crate) struct SourceGrowingBacking {
 impl SourceGrowingBacking {
     /// The path is independently reopened and checked against this range's
     /// held object, so a replacement cannot authorize cached old AV bytes.
-    /// A copy that is no longer live is the session's end; a reopen that
-    /// failed is the file system not answering this once.
+    /// A copy that is no longer live, or an object that cannot be re-proven
+    /// the one this range holds, is the session's end: a retry could only
+    /// keep failing against a replaced file.
     pub(crate) async fn physical_fence(
         &self,
     ) -> Result<crate::fragment_index_cluster::SourceFence, super::LiveRefusal> {
+        let ended = super::LiveRefusal::terminal(SourceWorkerError::Unavailable);
         if !self.is_live() {
-            return Err(super::LiveRefusal::terminal(SourceWorkerError::Unavailable));
+            return Err(ended);
         }
-        self.source
-            .reopen(&self.file)
-            .await
-            .map_err(|_| super::LiveRefusal::transient(SourceWorkerError::Unavailable))
+        self.source.reopen(&self.file).await.map_err(|_| ended)
     }
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
@@ -1068,7 +1067,12 @@ impl TranscodeManager {
                     ()=physical=>{},
                     _=renewal.tick()=>{
                         if backing.activity_expired() || backing.production.refresh_read_bank().await.is_err() || backing.physical_fence().await.is_err(){break;}
-                        match owner.gate.current_owned(&owner.assignment).await {Ok(proof) if owner.gate.renew_with(&owner.assignment,&proof).await.is_ok()=>{},_=>{owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;break;}}
+                        // Only a refusal that does not pass ends the owner; the
+                        // Store lease bounds how long transient ones may last.
+                        if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
+                            owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
+                            break;
+                        }
                     },
                 }
             }

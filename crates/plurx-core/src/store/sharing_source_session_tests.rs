@@ -1954,7 +1954,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
                 .prepare_source_owned_route_authority(&assignment, &key, &proof())
                 .await
                 .expect("unresolved mint"),
-            SourceOwnedRouteAuthorityRead::Unavailable
+            SourceOwnedRouteAuthorityRead::Unavailable(SourceRouteUnavailable::NotPublished)
         ));
         // Fixture-only published state: this test qualifies current-owner
         // renewal, not a producer or a production readiness transition.
@@ -2044,7 +2044,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
                 .prepare_source_owned_route_authority(&assignment, &key, &proof())
                 .await
                 .expect("foreign lease mint refusal"),
-            SourceOwnedRouteAuthorityRead::Unavailable
+            SourceOwnedRouteAuthorityRead::Unavailable(SourceRouteUnavailable::Refused)
         ));
         let rows=store.sharing_read("SELECT json_object('node',owner_node_id,'expiry',expires_at_ms) AS payload FROM job_leases WHERE resource=$1",vec![format!("session:{}",binding.incarnation_id).into()]).await.expect("foreign unchanged");
         let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("row");

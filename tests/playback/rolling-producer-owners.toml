@@ -6263,10 +6263,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # a_wait_past_the_target_duration_is_reported_once_and_not_cut_short and the
 # 5 s + 5 s + 30 s wait in a_hold_during_the_wait_makes_the_stall_back_pressure
 # _not_a_warning. No wait, deadline or retry changes; no new task.
-# Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +2 test-only 50 ms tokio::time::sleep polls,
-# each bounded by a 20 s deadline, while a dead copy's projection and its
-# actor's settlement arrive. No production timer.
-expected_occurrences = 2326
+# Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only tokio::time::timeout (20 s)
+# around a dead copy's actor settling; the test awaits settlement, it does not
+# poll. No production timer.
+expected_occurrences = 2325
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7610,9 +7610,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Shared private history guard: +1 `response.status()` read of an HTTP reply
 # in sharing_private_history_answers_pass_the_receiver_content_guard. No
 # process launch.
-# Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +6 response.status() reads on the
+# Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +7 response.status() reads on the
 # fixture's HTTP answers. No process launch, kill or wait.
-expected_occurrences = 988
+expected_occurrences = 989
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7939,8 +7939,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
 # owner whose kill cancels the helper's existing stage owner and waits for its
 # reap and the run's source/lane/reservation settlement. No new process launch.
-# Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only .retire() on the growing
-# backing, standing in for a producer that died. No production lifecycle call.
+# Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only entry.wait(...) for the
+# fixture's Source owner, bounded by its 1 s deadline. No production lifecycle
+# call.
 expected_occurrences = 409
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.

@@ -35,21 +35,18 @@ impl SourceDirectFile {
             recipe_json,
         }
     }
-    async fn fence(&self) -> Result<crate::fragment_index_cluster::SourceFence, SourceWorkerError> {
+    /// An object that cannot be re-proven the one this session admitted is
+    /// its end: a retry could only keep failing against a replaced file.
+    async fn fence(&self) -> Result<crate::fragment_index_cluster::SourceFence, LiveRefusal> {
+        let changed = LiveRefusal::terminal(SourceWorkerError::Unavailable);
         let fence = crate::fragment_index_cluster::open_source_playback_fence(
             &self.file,
             Some(&self.object_version),
         )
         .await
-        .map_err(|_| SourceWorkerError::Unavailable)?;
-        if fence
-            .handle
-            .metadata()
-            .map_err(|_| SourceWorkerError::Unavailable)?
-            .len()
-            != self.length
-        {
-            return Err(SourceWorkerError::Unavailable);
+        .map_err(|_| changed)?;
+        if fence.handle.metadata().map_err(|_| changed)?.len() != self.length {
+            return Err(changed);
         }
         Ok(fence)
     }
@@ -105,17 +102,20 @@ impl SourceViewerActor {
     fn reserve_direct_body(
         &self,
         start: &SourceDirectStart,
-    ) -> Result<SourceResponseGuard, SourceWorkerError> {
+    ) -> Result<SourceResponseGuard, LiveRefusal> {
         let mut state = self.0.state.lock().expect("Source worker state");
         if state.retirement_requested
-            || state.bodies >= 64
             || state
                 .direct_start
                 .as_ref()
                 .and_then(|current| current.as_ref().ok())
                 != Some(start)
         {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(LiveRefusal::terminal(SourceWorkerError::Unavailable));
+        }
+        // Bodies close as their transfers end.
+        if state.bodies >= 64 {
+            return Err(LiveRefusal::transient(SourceWorkerError::Unavailable));
         }
         state.bodies += 1;
         drop(state);
@@ -128,31 +128,36 @@ impl SourceViewerActor {
     /// The published direct session for Start replay and status. It renews
     /// the Source lease under fresh owned-route authority and re-proves the
     /// file, but is never viewer activity.
+    /// Every refusal states whether it passes ([`LiveRefusal`]), decided at
+    /// its check, so Status answers a passing one as a retry.
     pub(crate) async fn open_direct_start(
         &self,
         deadline: Instant,
-    ) -> Result<(SourceDirectStart, SourceResponseGuard), SourceWorkerError> {
-        let start = self.wait_direct_ready(deadline).await?;
+    ) -> Result<(SourceDirectStart, SourceResponseGuard), LiveRefusal> {
+        let ended = LiveRefusal::terminal(SourceWorkerError::Unavailable);
+        let start = self
+            .wait_direct_ready(deadline)
+            .await
+            .map_err(super::wait_ready_refusal)?;
         let direct = self
             .0
             .direct
             .clone()
-            .ok_or(SourceWorkerError::Unsupported)?;
+            .ok_or(LiveRefusal::terminal(SourceWorkerError::Unsupported))?;
         let mut guard = self.reserve_direct_body(&start)?;
         guard.source = Some(direct.fence().await?);
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != start.session_id
             || route.publication_ready_at_ms != 0
-            || route.response_json
-                != serde_json::to_string(&start).map_err(|_| SourceWorkerError::Unavailable)?
+            || route.response_json != serde_json::to_string(&start).map_err(|_| ended)?
             || self.retirement_requested()
             || guard
                 .source
                 .as_ref()
                 .is_none_or(|source| !source.unchanged())
         {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(ended);
         }
         Ok((start, guard))
     }
@@ -521,9 +526,13 @@ impl TranscodeManager {
                         if idle {
                             break;
                         }
-                        match owner.gate.current_owned(&owner.assignment).await {
-                            Ok(proof) if owner.gate.renew_with(&owner.assignment, &proof).await.is_ok() => {},
-                            _ => {owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;break},
+                        // Only a refusal that does not pass ends the owner. A
+                        // transient one is retried at the next tick, bounded by
+                        // the Store lease itself: renewals that keep failing let
+                        // it expire, and the next read is then refused.
+                        if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
+                            owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
+                            break;
                         }
                     }
                 }

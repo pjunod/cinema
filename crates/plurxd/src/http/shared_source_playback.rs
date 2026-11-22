@@ -1085,7 +1085,7 @@ async fn status(
         .store
         .source_ingress_custody(&owned.assignment)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", "Source status refused"); unavailable() })?
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", "Source status refused"); live_refusal_retry() })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "absent", "Source status refused"); unavailable() })?;
     let cleanup_only = headers.cleanup_only()
         || current.is_err()
@@ -1105,7 +1105,7 @@ async fn status(
     if let (Ok((_, current_grant)), true) =
         (current.as_ref(), owned.actor.is_direct() && !cleanup_only)
     {
-        if let Ok(response) = direct::published_reply(
+        match direct::published_reply(
             &state,
             &headers,
             &entry,
@@ -1114,17 +1114,28 @@ async fn status(
             *current_grant,
             deadline,
         )
-        .await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", error_class = "operation_refused", "Source status refused"); })
+        .await
         {
-            return Ok(super::shared_library::guard_source_response(
-                state,
-                connection.map(|c| c.0),
-                response,
-            )
-            .await);
+            Ok(response) => {
+                return Ok(super::shared_library::guard_source_response(
+                    state,
+                    connection.map(|c| c.0),
+                    response,
+                )
+                .await)
+            }
+            // A direct owner has no HLS Start response to open: a refusal
+            // that passes is answered as a retry, any other with the
+            // terminal projection below.
+            Err(refusal) => {
+                tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", transient = refusal.transient, "Source status refused");
+                if refusal.transient {
+                    return Err(refusal.answer);
+                }
+            }
         }
     }
-    if current.is_ok() && !cleanup_only {
+    if current.is_ok() && !cleanup_only && !owned.actor.is_direct() {
         let opened = owned.actor.open_start_response(deadline).await;
         if let Err(refusal) = &opened {
             tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?refusal.error, transient = refusal.is_transient(), "Source status refused");
@@ -1867,7 +1878,8 @@ async fn start(
         .map_err(SourceStartFailure::response)?;
     if owned.actor.is_direct() {
         return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
-            .await;
+            .await
+            .map_err(|refusal| refusal.answer);
     }
     // Wait for the first publication on the viewer's clock alone, then open
     // the response under the owner's: opening reserves a body and is not
@@ -2328,7 +2340,7 @@ async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
 fn live_refusal_retry() -> ApiError {
     ApiError::TypedRetry {
         status: StatusCode::SERVICE_UNAVAILABLE,
-        code: "sharing_source_retry",
+        code: crate::sharing_client::SOURCE_LIVE_RETRY_CODE,
         message: "Shared playback is briefly unavailable".to_owned(),
         retry_after_seconds: 1,
     }

@@ -1496,6 +1496,33 @@ async fn actual_range_init(
     }
 }
 
+/// A publication the ingress admission refused for now is answered as the
+/// typed retry; one it refused outright keeps its old plain answer.
+#[test]
+fn publication_refusals_answer_by_their_persistence() {
+    use crate::transcode::source_actor::RefusalPersistence;
+    match ApiError::from(super::ingress::PublicationRefusal(
+        RefusalPersistence::Transient,
+    )) {
+        ApiError::TypedRetry {
+            status,
+            code,
+            retry_after_seconds,
+            ..
+        } => {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(code, crate::sharing_client::SOURCE_LIVE_RETRY_CODE);
+            assert!(retry_after_seconds > 0);
+        }
+        other => panic!("a transient publication refusal retries: {other:?}"),
+    }
+    assert!(!matches!(
+        ApiError::from(super::ingress::PublicationRefusal(
+            RefusalPersistence::Terminal
+        )),
+        ApiError::TypedRetry { .. }
+    ));
+}
 /// Production 2026-11-22 (M6 file 6751): a live growing copy's Status was
 /// refused once and answered with the terminal-only projection, so the
 /// receiver retired a healthy session and Safari froze when its buffer ran
@@ -1657,51 +1684,59 @@ async fn sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_th
     super::super::decode_source_start_response(&body, &fixture.reference)
         .expect("the live Start response again");
 
-    // The producer dies. That is the session's end: no answer from here on
-    // may tell the receiver to retry, the projection is the shape an older
-    // receiver already reads as the end, and the actor settles.
+    // The producer dies. That is the session's end: the first Status after
+    // it is terminal to the receiver and itself retires the actor; once the
+    // actor settles, Status answers the projection, in the shape every
+    // receiver's own parse reads as no live response.
     owned
         .actor
         .growing_backing()
         .expect("growing copy")
         .retire();
-    let projected_by = Instant::now() + Duration::from_secs(20);
-    let projection = loop {
-        let answer = status().await;
-        let code = answer.status();
-        let retry = answer
-            .headers()
-            .contains_key(axum::http::header::RETRY_AFTER);
-        let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
-            .await
-            .expect("terminal body");
-        assert!(!retry, "a dead copy is never answered as a retry: {code}");
-        if code == StatusCode::OK {
-            break serde_json::from_slice::<Value>(&body).expect("terminal projection");
-        }
-        // While the actor retires, its authority is already refused.
-        assert!(matches!(
-            crate::sharing_client::peer_status_refusal(code, retry),
-            crate::sharing_client::PeerError::Rejected(_)
-        ));
-        assert!(
-            Instant::now() < projected_by,
-            "the terminal projection follows"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    assert!(!owned.actor.retirement_requested_for_test());
+    let answer = status().await;
+    let code = answer.status();
+    let retry = answer
+        .headers()
+        .contains_key(axum::http::header::RETRY_AFTER);
+    assert!(!retry, "a dead copy is never answered as a retry: {code}");
+    assert!(
+        owned.actor.retirement_requested_for_test(),
+        "the terminal refusal retires the actor"
+    );
+    tokio::time::timeout(Duration::from_secs(20), owned.actor.settled_for_test())
+        .await
+        .expect("a dead copy's actor settles promptly")
+        .expect("settled cleanly");
+    let answer = status().await;
+    assert_eq!(answer.status(), StatusCode::OK, "the terminal projection");
+    assert!(!answer
+        .headers()
+        .contains_key(axum::http::header::RETRY_AFTER));
+    let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+        .await
+        .expect("terminal body");
+    let projection: Value = serde_json::from_slice(&body).expect("terminal projection");
     assert!(projection.get("response").is_none(), "{projection}");
     for key in ["reference", "request_id", "incarnation_id", "state"] {
         assert!(projection.get(key).is_some(), "{key} in {projection}");
     }
-    let settle_by = Instant::now() + Duration::from_secs(20);
-    while owned.actor.settlement_status().is_none() {
-        assert!(
-            Instant::now() < settle_by,
-            "a dead copy's actor settles promptly"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let session =
+        crate::sharing_client::SourcePeerSession::new(fixture.reference.clone(), &fixture.request)
+            .expect("receiver peer session");
+    let known = crate::sharing_client::SourcePeerLineage::from_start(
+        decoded.incarnation_id(),
+        decoded.response(),
+    )
+    .expect("Source lineage");
+    let parsed =
+        crate::sharing_client::SourceStatusReceipt::parse_for_test(&body, &session, &known);
+    assert!(
+        parsed
+            .as_ref()
+            .map_or(true, |receipt| receipt.response().is_none()),
+        "the receiver reads the projection as no live session"
+    );
     let _ = stop.send(());
     let _ = server.await;
     fixture.shutdown().await;
