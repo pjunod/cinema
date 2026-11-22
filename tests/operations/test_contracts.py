@@ -3234,7 +3234,10 @@ assert.equal(context.ACT_TIMER, null);
             if " snapshot_metrics --lib -- --test-threads=1" in command
         ]
         self.assertEqual(len(snapshot_metrics), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=13", snapshot_metrics[0])
+        # 13 snapshot-metrics regressions, plus the two snapshot-builder cleanup
+        # contracts from the dead-Raft-core exit (10af9426b) and the two
+        # generation-odd restore/install contracts from patch 27 (88b29a2fc).
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=17", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
