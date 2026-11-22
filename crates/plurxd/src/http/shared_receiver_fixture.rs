@@ -76,7 +76,9 @@ async fn build_receiver_fixture(
     } else {
         "localhost".to_owned()
     };
-    drop((raft, api));
+    // Keep the bound sockets: the voter serves on them, so no other socket
+    // can take either port before it starts.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
     let mut selected = if let Some(clock) = &startup_clock {

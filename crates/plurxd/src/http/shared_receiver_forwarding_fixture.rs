@@ -197,9 +197,13 @@ async fn actual_nonowner_b(
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = address.to_string();
-    drop((raft, api));
-    drop(second_listener);
-    let observation = Arc::new(crate::StartupObservationHttp::new(second_address));
+    // Keep the bound sockets: the voter and the startup observation serve on
+    // them, so no other socket can take any of these ports before they start.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    let observation = Arc::new(
+        crate::StartupObservationHttp::from_listener(second_listener)
+            .expect("owned B ingress observation listener"),
+    );
     let mut selected = Box::pin(select_daemon_store_observing(
         &config,
         Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),

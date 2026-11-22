@@ -85,6 +85,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cluster test fixtures no longer lose their reserved ports. They read a port
+  from a listener, dropped it, and the voter bound the port later, so a
+  parallel test could take it first and the start failed with "Address
+  already in use" (hosted run 8904). Fixtures now keep their sockets and lend
+  them to every voter they start, through a new optional listener handoff in
+  vendored Hiqlite; daemon startup binds exactly as before.
+
 - Shared titles play again in the web player. Every web shared Start runs
   the Source's growing copy, which answered with a 60-second control lease that
   the receiver refused, so the viewer saw "The sharing host could not confirm
