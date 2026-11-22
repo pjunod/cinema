@@ -6254,11 +6254,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the idle-rest bound, the run backstop deadline, and two 20 ms polls (FIFO
 # readiness, next-window marker), each inside a select! with the window's own
 # deadline and cancellation. Five are test sleeps under paused time.
-# Source copy production meter: +2 tokio::time constructors in the growing
-# copy's production loop (a tokio::time::sleep bounding the one stall report in
-# copyrange::meter::await_reporting_stall, and the observation Instants). They
-# only time and report; no wait, deadline or retry changes. No new task.
-expected_occurrences = 2321
+# Source copy production meter: +5 tokio::time::sleep shapes in
+# copyrange::meter. One is production: the sleep that bounds the single stall
+# report in await_reporting_stall, raced against the child's next output it
+# never cuts short. Four are test-only paused sleeps: the 40 s wait in
+# a_wait_past_the_target_duration_is_reported_once_and_not_cut_short and the
+# 5 s + 5 s + 30 s wait in a_hold_during_the_wait_makes_the_stall_back_pressure
+# _not_a_warning. No wait, deadline or retry changes; no new task.
+expected_occurrences = 2324
 
 [[module_structures]]
 id = "bare-time-constructor"
