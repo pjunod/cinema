@@ -940,8 +940,6 @@ impl TranscodeManager {
         // Every growing start that does not publish ends here with its stage,
         // once, exactly as the indexed owner's does.
         if let Err(error) = &start {
-            #[cfg(test)]
-            eprintln!("Source growing startup failed stage={startup_stage} error={error:?}");
             tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
