@@ -178,11 +178,27 @@ impl SourceFileAuthority {
     }
 }
 
+/// The caps a shared decision is planned with. The decision a receiver shows
+/// must be the Start it will get: for a receiver that did not affirm Dolby
+/// Vision relay, plan without Dolby Vision, as the Start ingress does.
+pub(super) fn receiver_decision_caps(
+    headers: &HeaderMap,
+    mut caps: plurx_core::playback::DeviceCaps,
+) -> plurx_core::playback::DeviceCaps {
+    if !super::shared_source_playback::receiver_presentation::authenticated_receiver_dolby_vision(
+        headers,
+    ) {
+        super::shared_source_playback::receiver_presentation::withhold_dolby_vision(&mut caps);
+    }
+    caps
+}
+
 pub(super) async fn source_decision(
     state: &AppState,
     headers: &HeaderMap,
-    input: SourceDecisionRequest,
+    mut input: SourceDecisionRequest,
 ) -> Result<Response, ApiError> {
+    input.caps = receiver_decision_caps(headers, input.caps);
     let target = input.reference;
     if input.caps.v != plurx_core::playback::DeviceCaps::VERSION || input.caps.is_empty() {
         return Err(refused());

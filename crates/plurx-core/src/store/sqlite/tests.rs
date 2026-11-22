@@ -870,9 +870,9 @@ async fn v6_rebuild_preserves_everything() {
     // retention that keeps a charged source custody's owner job; v130 offloaded titles;
     // v131 saved storage-domain changes; v132 exact FEL demand continuity;
     // v133 optional scoped application login (delegation); v134 F+ curve fits;
-    // v135 library curation (custom tags, saved rows, Home layouts).
+    // v135 library curation; v136 live title qualification in dispatch turns.
     assert_eq!(
-        version, 135,
+        version, 136,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

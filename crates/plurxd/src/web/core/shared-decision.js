@@ -20,7 +20,9 @@ const SHARED_DECISION=(()=>{
       sharing_start_capacity:"The sharing host is busy. Try again shortly.",
       sharing_start_conflict:"This shared playback request changed. Reopen the item and try again.",
       sharing_start_unsupported:"This shared playback change is not available yet.",
-      sharing_start_dolby_vision_unsupported:"Dolby Vision is not available for shared playback yet.",
+      // An older sharing host, or a Profile 5 title it would have to
+      // re-encode, still answers this; every other Dolby Vision title plays.
+      sharing_start_dolby_vision_unsupported:"The sharing host cannot prepare this Dolby Vision title yet.",
       sharing_decision_unavailable:"The sharing host could not determine how to play this file.",
       // A local create's retryable "not yet" codes, which B answers only to a
       // Start that sent its start clock.
@@ -87,9 +89,6 @@ const SHARED_DECISION=(()=>{
     if(watch!=null)state.sequence=Math.max(state.sequence,integer(watch.sequence));return state;
   }
   function unsupported(){throw Object.assign(new Error("This shared playback change is not available yet."),{code:"sharing_start_unsupported"});}
-  // Shared Dolby Vision delivery is not built yet; the Source and B refuse it
-  // with this same typed reason, so the viewer is told why before any Start.
-  function dolbyVisionUnsupported(){throw Object.assign(new Error("Dolby Vision is not available for shared playback yet."),{code:"sharing_start_dolby_vision_unsupported"});}
   // A started session is never replaced in place: the Source stages no
   // successor. A fresh Start from a bound context -- a directed quality, audio
   // or subtitle change B declined with `preparation: none`, an expired direct
@@ -104,9 +103,9 @@ const SHARED_DECISION=(()=>{
     if(!c||!base||base.session_id||(restart?!authorized(c):!current(c)))fail();playbackFileContext(base);
     if(!body||typeof body!=="object"||Array.isArray(body))fail();
     for(const field of ["previous_session_id","control_sequence","reopen_reason","intent","candidate_id"])if(body[field]!=null)unsupported();
-    // A burn and an HDR10 ask ride the ordinary Start: the Source owns the
-    // burn's sidecar and fonts and decides the grade from these caps itself.
-    if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();
+    // A burn, an HDR10 ask and a Dolby Vision preservation ask ride the
+    // ordinary Start: the Source owns the burn's sidecar and fonts and plans
+    // the grade from these caps itself, clamped to this ask as Local is.
     if(body.subtitle_burn!=null&&(!Number.isSafeInteger(body.subtitle_burn)||body.subtitle_burn<0||body.subtitle_burn>4095||body.native_subtitles===true))unsupported();
     if(body.hdr10!=null&&typeof body.hdr10!=="boolean")unsupported();
     const direct=body.presentation==="direct";

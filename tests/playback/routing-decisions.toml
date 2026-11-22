@@ -222,7 +222,7 @@ test_anchor = "macos_processing_selects_only_proved_sdr_and_hdr10_surfaces"
 [[decisions]]
 id = "server.dv-processing-destination"
 source = "crates/plurxd/src/transcode/manager/candidates.rs"
-source_anchor = "pub(super) fn processed_qualification_destination("
+source_anchor = "pub(super) fn processed_qualification_destination_with_ask("
 test = "crates/plurxd/src/http/hls/tests/chunk_06.rs"
 test_anchor = "reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection"
 

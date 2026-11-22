@@ -78,6 +78,37 @@ bump may break compatibility and a **patch** bump never does.
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
   admission checks still run before execution.
+- A shared-library Source no longer refuses its catalogue, current-scope and
+  content reads with `sharing_member_floor_unavailable` when a registered
+  learner is offline. Serving reads require fresh heartbeats from the
+  committed voters and the serving member only. Capability proofs, the
+  committed roster, joins and removals in flight, and quorum remain required.
+  Every replicated write and transition still requires every member to be
+  fresh. Before this, a receiver showed `sharing source unavailable` under
+  Assign viewers and `sharing body authority unavailable` under Shared
+  Libraries, even though Check connection passed.
+- Source playback Start observes membership at its claim boundary after pure
+  preparation. Slow filesystem or planning work no longer consumes the
+  five-second authority proof before it is used; claim expiry, file and grant
+  checks, and overlapping playback ownership are preserved.
+
+- Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
+  Resume. Resume binds the renderer to the actual source pictures observed by
+  the rolling copy, and the original AAC rendition continues across the switch.
+
+- Safari 27.2 on macOS can select the verified native Dolby Vision HLS splice
+  when the browser supports native HLS and PQ Main10 playback.
+
+- Native HLS can start with a verified cached FEL prefix from the existing title job even when ordinary VOD is available, with continuous original audio and ordinary startup when the prefix cannot be used. Rebuilding a missing prefix reuses the current scan and quality verdict.
+
+- Background Dolby Vision FEL measurement can qualify the current renderer
+  while requests for an older renderer remain pending.
+
+- Revisit older Dolby Vision title scans after a busy source becomes available,
+  while continuing to discover work on other sources.
+- Recover expired Dolby Vision title attempts after physical source custody clears.
+  Activity distinguishes expired leases from live owners. Analysis requests report
+  the admission failure, and reconciliation preserves copy coordinator requests.
 
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses

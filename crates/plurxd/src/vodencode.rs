@@ -4,9 +4,6 @@
 #[path = "dv_runtime.rs"]
 pub(crate) mod dv_runtime;
 
-#[path = "disk_refit_tools.rs"]
-pub(crate) mod disk_refit_tools;
-
 #[cfg(any(target_os = "linux", test))]
 #[path = "dv_report_lifetime.rs"]
 pub(crate) mod dv_report_lifetime;
@@ -192,12 +189,7 @@ pub(crate) fn try_admit_frozen_bundle(
 /// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
 #[derive(Default)]
 pub(crate) struct ProcessedTrialAdmission {
-    #[cfg(any(target_os = "linux", test))]
-    claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
-    // Keep the same claim ownership until this scope drops even when the
-    // platform has no native admission path that reads the reservation.
-    #[cfg(not(any(target_os = "linux", test)))]
-    _retained_claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
+    _claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
     needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
 }
 
@@ -208,10 +200,7 @@ tokio::task_local! {
 impl ProcessedTrialAdmission {
     pub(crate) fn with_claim(claim: Arc<crate::vodserve::TrialClaim>) -> Self {
         Self {
-            #[cfg(any(target_os = "linux", test))]
-            claim: std::sync::Mutex::new(Some(claim)),
-            #[cfg(not(any(target_os = "linux", test)))]
-            _retained_claim: std::sync::Mutex::new(Some(claim)),
+            _claim: std::sync::Mutex::new(Some(claim)),
             needed: std::sync::Mutex::new(None),
         }
     }
@@ -228,7 +217,7 @@ impl ProcessedTrialAdmission {
 
     #[cfg(any(target_os = "linux", test))]
     fn claim(&self) -> Option<Arc<crate::vodserve::TrialClaim>> {
-        self.claim.lock().expect("trial admission").clone()
+        self._claim.lock().expect("trial admission").clone()
     }
 }
 

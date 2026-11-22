@@ -1776,6 +1776,8 @@ mod tests {
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
             // v133: the empty delegation tail is removed first by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
+            // v136: the test rewind restores the exact v124 dispatch definitions.
+            "DROP TRIGGER dispatch_turn_job",
             // v135: remove the exact empty curation extension before the F+ tail.
             "CREATE TABLE library_curation_schema",
             // v134: the shared title rewind removes the exact empty F+ curve extension.

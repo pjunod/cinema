@@ -1098,6 +1098,7 @@
             },
         };
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -2034,6 +2035,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -2304,6 +2306,7 @@
             },
         };
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -2587,6 +2590,7 @@
                 },
             };
             let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
                 delivered_audio: None,

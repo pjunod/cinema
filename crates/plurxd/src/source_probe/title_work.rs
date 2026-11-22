@@ -14,7 +14,7 @@ use plurx_core::{
             CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
             JobKind, JobPayload, JobRequest, JobSettlement,
         },
-        dv_title_jobs::{TitleDemand, TitleOutput},
+        dv_title_jobs::{TitleDemand, TitleMaintenanceCursor, TitleOutput},
     },
 };
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -42,7 +42,7 @@ impl TitleTask {
     pub(super) async fn start(
         state: &AppState,
         boot: &str,
-        after: &mut i64,
+        maintenance: &mut TitleMaintenanceCursor,
         live_after: &mut i64,
         playback_only: bool,
     ) -> Result<Option<Self>, StoreError> {
@@ -122,12 +122,14 @@ impl TitleTask {
             pipeline
         };
         let scanner = tools.title_scanner_digest();
-        let demands = match live_demands {
-            Some(demands) => demands,
+        let fel = fel_backend(state, &tools).await;
+        #[cfg(target_os = "linux")]
+        state.transcode.observe_native_fel_backend(fel.clone());
+        let (demands, after) = match live_demands {
+            Some(demands) => (demands, live_after),
             None => {
-                state
-                    .store
-                    .dv_title_demands(&scanner, *after, now_ms())
+                maintenance
+                    .next_page(state.store.as_ref(), &scanner, now_ms())
                     .await?
             }
         };
@@ -135,23 +137,34 @@ impl TitleTask {
             if playback_only {
                 return Ok(None);
             }
-            *after = 0;
             #[cfg(target_os = "linux")]
-            requalify_stale_fel_titles(state, &tools, &scanner).await;
+            {
+                if let Err(error) = state
+                    .transcode
+                    .queue_missing_native_fel_head(&state.node_id, &tools, &scanner, now_ms())
+                    .await
+                {
+                    tracing::debug!(target:"plurxd::dv", %error, "native FEL head request deferred");
+                }
+                requalify_stale_fel_titles(state, &tools, &scanner).await;
+            }
             return Ok(None);
         }
-        let fel = fel_backend(state, &tools).await;
         for mut demand in demands {
+            *after = demand.probe_revision;
             if playback_only {
-                *live_after = demand.probe_revision;
                 if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
                     continue;
                 }
             } else {
-                *after = demand.probe_revision;
                 // Live work was considered independently above; an ordinary
                 // turn must not acquire its more permissive companion class.
-                if demand.playback_requested {
+                if demand.playback_requested
+                    || demand
+                        .fel_head_target
+                        .as_deref()
+                        .is_some_and(|node| node != state.node_id)
+                {
                     continue;
                 }
             }
@@ -529,6 +542,19 @@ pub(super) async fn probe_preempts(
 /// or for the backend able to satisfy its exact pending FEL recipe.
 /// FEL verdicts measure the renderer, so its key is read only to form the FEL
 /// identity; title demand itself is keyed by the scanner alone.
+// The catalogue may already have an exact title verdict when the daemon
+// starts. Make the installed backend available to routing before waiting for
+// a new title job or for the ordinary source-probe lane to become idle.
+pub(super) async fn initialize_native_fel_backend(state: &AppState) {
+    if state.transcode.fel_qualification_capable() {
+        let identity = match ToolSet::capture().await {
+            Ok(Some(tools)) => fel_backend(state, &tools).await,
+            _ => None,
+        };
+        state.transcode.observe_native_fel_backend(identity);
+    }
+}
+
 async fn fel_backend(state: &AppState, tools: &ToolSet) -> Option<String> {
     state
         .transcode
@@ -559,16 +585,17 @@ async fn eligible_file(
             file.size,
             file.mtime,
         );
-        if demand.playback_requested && pending.is_empty() {
-            return Ok(None);
-        }
-        if !pending.is_empty()
-            && !pending.iter().any(|request| {
+        // Playback can only satisfy its exact attached recipe. Maintenance
+        // may measure this node's native recipe while foreign requests wait.
+        if demand.playback_requested {
+            let exact = pending.iter().any(|request| {
                 Some(request.backend_identity.as_str()) == fel_backend
-                    && (!demand.playback_requested
-                        || demand.playback_recipes.contains(&request.identity))
-            })
-        {
+                    && demand.playback_recipes.contains(&request.identity)
+            });
+            if !exact {
+                return Ok(None);
+            }
+        } else if fel_backend.is_none() && !pending.is_empty() {
             return Ok(None);
         }
     }
@@ -869,15 +896,38 @@ async fn qualify_owned(
                 )
                 .await
             } else {
-                super::fel_qualification::qualify_if_due(
-                    state,
-                    file,
-                    &demand.probe_json,
-                    tools,
-                    admission,
-                    &qualification,
-                )
-                .await
+                let verdict = if demand.fel_head_target.is_some() {
+                    // Same-generation rebuilds were enqueued only after proving
+                    // this title already has its admitting quality verdict.
+                    Ok(super::fel_qualification::Qualification::NotDue)
+                } else {
+                    super::fel_qualification::qualify_if_due(
+                        state,
+                        file,
+                        &demand.probe_json,
+                        tools,
+                        admission,
+                        &qualification,
+                    )
+                    .await
+                };
+                if verdict.is_ok() {
+                    if let Some(version) = source_version.as_deref() {
+                        let prepared = Box::pin(state.transcode.prepare_native_fel_head(
+                            file,
+                            version,
+                            Arc::new(tools.clone()),
+                            admission,
+                            &qualification,
+                        ))
+                        .await;
+                        if let Err(reason) = prepared {
+                            tracing::debug!(target: "plurxd::dv", file_id = file.id, %reason,
+                                "native FEL head preparation deferred");
+                        }
+                    }
+                }
+                verdict
             }
         },
     )

@@ -37,6 +37,8 @@ pub(crate) struct SourceStartRegistry {
     settled: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<SourceStartEntry>>>,
     #[cfg(test)]
     discovery_pause: crate::seam_hooks::PauseSlot,
+    #[cfg(test)]
+    preparation_finished_pause: crate::seam_hooks::PauseSlot,
 }
 struct SourceStartEntry {
     identity: SourceStartIdentity,
@@ -279,13 +281,15 @@ struct SourceStartIdentity {
     recipe: Vec<u8>,
     receiver_range: bool,
 }
-/// The typed refusal of a shared Dolby Vision delivery, on the Source and on
-/// B's own Start validation alike.
+/// The typed refusal an older Source answers a Dolby Vision delivery it did
+/// not build with. This Source never sends it (every shape local delivers is
+/// planned and built); B keeps decoding it for older peers.
 pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
     "sharing_start_dolby_vision_unsupported";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceStartFailure {
     Unavailable,
+    NotYet,
     RescanRequired,
     CopyTargetExceeded,
     CopyInitContractChanged,
@@ -295,9 +299,6 @@ enum SourceStartFailure {
     Conflict,
     Unresolved,
     Unsupported,
-    /// A Dolby Vision delivery this Source does not build yet: refused with
-    /// its own typed code after a fresh invocation claim, before admission.
-    DolbyVisionUnsupported,
     Deadline,
     /// Only the Store's exact atomic no-claim proof constructs this result.
     RetargetUnassigned,
@@ -1191,6 +1192,7 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
         use crate::transcode::source_actor::SourceWorkerError as E;
         match value {
             E::Unavailable => Self::Unavailable,
+            E::NotYet => Self::NotYet,
             E::RescanRequired => Self::RescanRequired,
             E::CopyTargetExceeded => Self::CopyTargetExceeded,
             E::CopyInitContractChanged => Self::CopyInitContractChanged,
@@ -1219,12 +1221,16 @@ impl SourceStartFailure {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "sharing_start_unsupported",
             ),
-            Self::DolbyVisionUnsupported => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                SHARING_START_DOLBY_VISION_UNSUPPORTED,
-            ),
             Self::Unresolved => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
+            Self::NotYet => {
+                return ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "sharing_source_not_prepared",
+                    message: "Source title qualification is pending".to_owned(),
+                    retry_after_seconds: 1,
+                }
+            }
             Self::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
         };
         #[cfg(test)]
@@ -2020,6 +2026,50 @@ async fn own_start(
         planned_incarnation,
         _intent: (*intent).clone(),
     });
+    // Pure planning precedes owner designation; the claim rechecks the exact
+    // catalog file revision atomically. No producer or Source I/O custody is
+    // admitted by this preparation. Capture the claim's short-lived member
+    // proof afterward so filesystem or Store planning waits cannot age it.
+    let source_presentation = if receiver_presentation::range_bound(&input) {
+        super::hls::SourceCopyPresentation::BoundedRange
+    } else {
+        super::hls::SourceCopyPresentation::FullVod
+    };
+    validate_initial_source_start(&input.session)?;
+    // The FEL / RPU / DYN rows go only to a receiver known to decode them,
+    // one that affirmed Dolby Vision relay: its own headers say so here, and
+    // a recipe whose caps still claim Dolby Vision passed an ingress that
+    // withholds those claims from every receiver that did not. An older
+    // receiver round-trips the Start through a `StartResponse` that never
+    // deserializes the rows, and would refuse it.
+    let relays_enhancement = (headers.forwarded_ingress().is_none()
+        && receiver_presentation::authenticated_receiver_dolby_vision(&headers))
+        || input
+            .session
+            .caps
+            .as_ref()
+            .is_some_and(|caps| caps.video.iter().any(|video| !video.dv_profiles.is_empty()));
+    let mut prepared = Box::pin(direct::prepare_source_start(
+        &state,
+        &headers,
+        reference.clone(),
+        input.session,
+        // The ingress already withheld Dolby Vision from this recipe for a
+        // receiver that did not affirm relay; a Start taken here with the
+        // receiver's own headers can also say so. A forwarded owner cannot
+        // tell a withheld recipe from one that never claimed Dolby Vision.
+        headers.forwarded_ingress().is_none()
+            && !receiver_presentation::authenticated_receiver_dolby_vision(&headers),
+        relays_enhancement,
+    ))
+    .await?;
+    #[cfg(test)]
+    state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .hold()
+        .await;
     let members = state
         .cluster
         .source_members()
@@ -2027,22 +2077,6 @@ async fn own_start(
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
-    // Pure planning precedes owner designation; the claim rechecks the exact
-    // catalog file revision atomically. No producer or Source I/O custody is
-    // admitted by this preparation.
-    let source_presentation = if receiver_presentation::range_bound(&input) {
-        super::hls::SourceCopyPresentation::BoundedRange
-    } else {
-        super::hls::SourceCopyPresentation::FullVod
-    };
-    validate_initial_source_start(&input.session)?;
-    let mut prepared = Box::pin(direct::prepare_source_start(
-        &state,
-        &headers,
-        reference.clone(),
-        input.session,
-    ))
-    .await?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
         intent: (*intent).clone(),
@@ -2572,8 +2606,128 @@ pub(crate) enum SourceFixtureMode {
     /// PQ on HEVC Main10 and asks HDR10, on a node with the HDR10 passthrough
     /// proof: the Source encodes Main10 PQ.
     Hdr10,
-    /// The Encoded fixture scanned as Dolby Vision: refused before a claim.
-    DolbyVisionEncoded,
+    /// The committed Profile 5 control (`strict_p5_fresh.mp4`, real P5 RPUs,
+    /// no compatible base) started as an encode by an SDR-only player on a
+    /// node with the boot-proved RPU renderer: the Source runs the per-source
+    /// pixel proof as its own work and tone-maps through the RPU renderer.
+    DolbyVisionProfile5Encoded,
+    /// A Dolby Vision Profile 8.1 source (see [`dolby_vision_fixture_source`])
+    /// started as a copy by a player that enumerates Profile 8: preserved.
+    DolbyVisionPreserved,
+    /// A Dolby Vision Profile 7 source with an HDR10 base started as a copy
+    /// by a player that enumerates 8 but not 7: converted to 8.1.
+    DolbyVisionConverted,
+    /// The PQ-tagged HEVC Main10 source with two embedded SubRip tracks,
+    /// started as a copy with native subtitles by an HDR10 player.
+    NativeHdr10Copy,
+    /// A Dolby Vision Profile 8.1 source started as a 144-row encode by an
+    /// SDR player: the Source encodes the compatible base and tone-maps it.
+    DolbyVisionCompatibleEncoded,
+    /// The Profile 8.1 source asked as Dolby Vision by a Dolby Vision player
+    /// through a receiver that does not affirm Dolby Vision relay: the Source
+    /// plans the HDR10 base.
+    DolbyVisionUnaffirmed,
+    /// The Profile 8.1 source started as a copy by an HDR10 player with no
+    /// Dolby Vision decoder (every shipped client's shared path): the base
+    /// strip, on a node whose FFmpeg has `dovi_rpu`.
+    DolbyVisionStripped,
+}
+
+/// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
+/// source: the real Profile 7 RPU from `plurx_core::testfixtures` appended to
+/// every sample (rewritten to Profile 8.1 for `profile == 8`) under a
+/// configuration record for `profile` and `compatibility`, then remuxed to an
+/// ordinary MP4 so the scan and the Source read it like any library file.
+///
+/// No fixture encoder writes Dolby Vision, so this is the closest honest
+/// source; the delivered init and samples are inspected by the tests that
+/// use it, which is what makes it evidence of the wiring, not of a disc's
+/// picture.
+#[cfg(test)]
+fn dolby_vision_fixture_source(
+    hdr10: &std::path::Path,
+    target: &std::path::Path,
+    profile: u8,
+    compatibility: u8,
+) {
+    use plurx_core::fmp4::{self, FragmentReader, Unit};
+    // Built with the FFmpeg under test. FFmpeg 8 reads back and remuxes the
+    // record inserted here once the base is really PQ-tagged (see the base's
+    // probe in `build_real_source_start_fixture`); an untagged base was what
+    // made its muxer drop the record.
+    let fixture_ffmpeg = crate::ffmpeg::ffmpeg_bin();
+    let mut fragmented = std::process::Command::new(&fixture_ffmpeg);
+    fragmented
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(hdr10)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+    let feed = plurx_core::testfixtures::with_dolby_vision_rpus(&plurx_core::testfixtures::run(
+        &mut fragmented,
+    ));
+    let mut reader = FragmentReader::new();
+    reader.push(&feed);
+    let Some(Unit::Init(mut init)) = reader.next_unit().expect("Dolby Vision fixture init") else {
+        panic!("the fixture stream begins with an init");
+    };
+    let video = init.video().expect("fixture video track");
+    let (video_id, nal_length_size) = (video.id, video.nal_length_size);
+    let record = fmp4::DolbyVisionRecord::new(profile, 6, false, true, true, compatibility)
+        .expect("fixture Dolby Vision record");
+    fmp4::set_dolby_vision_record(&mut init, &record).expect("write fixture Dolby Vision record");
+    let mut bytes = init.bytes.clone();
+    while let Some(unit) = reader.next_unit().expect("fixture media") {
+        if let Unit::Fragment(mut fragment) = unit {
+            if profile == 8 {
+                fmp4::rewrite_video_samples(&mut fragment, &init.tracks, video_id, |sample| {
+                    let mut converted = Vec::new();
+                    plurx_core::transcode::dvconvert::convert_length_prefixed(
+                        sample,
+                        nal_length_size,
+                        None,
+                        &mut converted,
+                    )
+                    .expect("Profile 8.1 fixture RPUs");
+                    Ok(converted)
+                })
+                .expect("rewrite fixture samples");
+            }
+            bytes.extend_from_slice(&fragment.bytes);
+        }
+    }
+    let staged = target.with_extension("dv-fragmented.mp4");
+    std::fs::write(&staged, bytes).expect("stage the Dolby Vision fixture");
+    let mut remux = std::process::Command::new(&fixture_ffmpeg);
+    remux
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&staged)
+        .args([
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-strict",
+            "unofficial",
+            "-y",
+        ])
+        .arg(target);
+    plurx_core::testfixtures::run(&mut remux);
+    std::fs::remove_file(staged).expect("staged fixture removed");
 }
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture_with(
@@ -2745,13 +2899,35 @@ async fn build_real_source_start_fixture(
         .expect("item");
     let native = matches!(
         mode,
-        SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+        SourceFixtureMode::NativeCopy
+            | SourceFixtureMode::NativeEncoded
+            | SourceFixtureMode::NativeHdr10Copy
     );
     let burn = matches!(
         mode,
         SourceFixtureMode::BurnText | SourceFixtureMode::BurnBitmap
     );
-    let hdr = matches!(mode, SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::Hdr10);
+    let dolby_vision = match mode {
+        SourceFixtureMode::DolbyVisionPreserved
+        | SourceFixtureMode::DolbyVisionCompatibleEncoded
+        | SourceFixtureMode::DolbyVisionUnaffirmed
+        | SourceFixtureMode::DolbyVisionStripped => Some((8u8, 1u8)),
+        SourceFixtureMode::DolbyVisionConverted => Some((7, 6)),
+        SourceFixtureMode::DolbyVisionProfile5Encoded => Some((5, 0)),
+        _ => None,
+    };
+    // The modes whose Dolby Vision copy is a growing HEVC copy.
+    let dolby_vision_copy = matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved
+            | SourceFixtureMode::DolbyVisionConverted
+            | SourceFixtureMode::DolbyVisionUnaffirmed
+            | SourceFixtureMode::DolbyVisionStripped
+    );
+    let hdr = matches!(
+        mode,
+        SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::Hdr10 | SourceFixtureMode::NativeHdr10Copy
+    ) || dolby_vision.is_some();
     let encoded = matches!(
         mode,
         SourceFixtureMode::Encoded
@@ -2760,7 +2936,8 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::BurnBitmap
             | SourceFixtureMode::Hdr10Sdr
             | SourceFixtureMode::Hdr10
-            | SourceFixtureMode::DolbyVisionEncoded
+            | SourceFixtureMode::DolbyVisionProfile5Encoded
+            | SourceFixtureMode::DolbyVisionCompatibleEncoded
     );
     let (width, height) = if matches!(mode, SourceFixtureMode::Hdr10) {
         (1920, 1080)
@@ -2783,7 +2960,11 @@ async fn build_real_source_start_fixture(
         // scan, the held probe and the Source's grade all read actual facts.
         generate
             .arg(format!("testsrc2=s={width}x{height}:r=24"))
+            // Matroska's stream colour metadata follows the input frames.
+            // The x265 VUI alone leaves these fields absent with FFmpeg 8.
             .args([
+                "-vf",
+                "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
                 "-t",
                 "2",
                 "-c:v",
@@ -2799,12 +2980,15 @@ async fn build_real_source_start_fixture(
                 "-colorspace",
                 "bt2020nc",
                 "-x265-params",
-                // Encode the same PQ/BT.2020 description in the HEVC VUI.
+                // Keep the bitstream VUI explicit too, matching the frame
+                // metadata the container muxer receives.
                 "log-level=error:hdr10=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
-                "-tag:v",
-                "hvc1",
-                "-y",
             ]);
+        if !native {
+            // Matroska has no sample-entry tag to set.
+            generate.args(["-tag:v", "hvc1"]);
+        }
+        generate.arg("-y");
     } else {
         generate
             .arg("color=s=320x180:r=24")
@@ -2816,6 +3000,55 @@ async fn build_real_source_start_fixture(
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
+    if hdr {
+        // The generated base must really be PQ/BT.2020, on every FFmpeg the
+        // fixture runs under. FFmpeg 8 ignores `-color_*` for an untagged
+        // lavfi encode; a base that is not PQ makes its compatibility-1 Dolby
+        // Vision record a contradiction, which FFmpeg 8's muxer drops on copy,
+        // and the failure then surfaces far away as a missing `dvvC`.
+        let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_transfer,color_primaries",
+                "-of",
+                "json",
+            ])
+            .arg(&file)
+            .output()
+            .await
+            .expect("actual FFprobe");
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("HDR fixture probe JSON");
+        assert_eq!(document["streams"][0]["color_transfer"], "smpte2084");
+        assert_eq!(document["streams"][0]["color_primaries"], "bt2020");
+    }
+    match dolby_vision {
+        // A real Profile 5 stream: the committed CC0 control and its RPUs.
+        Some((5, _)) => {
+            std::fs::copy(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/macos-processing/strict_p5_fresh.mp4"),
+                &file,
+            )
+            .expect("Profile 5 control");
+        }
+        Some((profile, compatibility)) => {
+            let base = file.with_extension("base.mp4");
+            std::fs::rename(&file, &base).expect("HDR10 base for the Dolby Vision fixture");
+            dolby_vision_fixture_source(&base, &file, profile, compatibility);
+            std::fs::remove_file(base).expect("HDR10 base removed");
+        }
+        None => {}
+    }
     if native {
         let caption = directory.path().join("actual.srt");
         std::fs::write(
@@ -2967,14 +3200,61 @@ async fn build_real_source_start_fixture(
             .await
             .expect("actual scanned HDR10 facts");
     }
-    if matches!(mode, SourceFixtureMode::DolbyVisionEncoded) {
+    if let Some((profile, compatibility)) = dolby_vision {
+        // The generated file is what the scan would have recorded: inspect
+        // the record ffprobe reads back before trusting the row.
+        let observed: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(1)
+                .await
+                .expect("stored scan")
+                .expect("scan JSON"),
+        )
+        .expect("Dolby Vision scan JSON");
+        let video = observed["streams"]
+            .as_array()
+            .and_then(|streams| {
+                streams
+                    .iter()
+                    .find(|stream| stream["codec_type"] == "video")
+            })
+            .unwrap_or_else(|| panic!("the fixture has a video stream: {observed}"));
+        let record = video["side_data_list"]
+            .as_array()
+            .and_then(|list| list.iter().find(|entry| entry["dv_profile"].is_number()))
+            .unwrap_or_else(|| panic!("the fixture carries a Dolby Vision record: {observed}"));
+        assert_eq!(record["dv_profile"], i64::from(profile));
+        assert_eq!(
+            record["dv_bl_signal_compatibility_id"],
+            i64::from(compatibility)
+        );
+        let level = record["dv_level"].as_i64().expect("Dolby Vision level");
+        let label = match profile {
+            8 => "Dolby Vision · Profile 8.1 (HDR10-compatible)",
+            7 => "Dolby Vision · Profile 7 (HDR10-compatible)",
+            _ => "Dolby Vision · Profile 5",
+        };
+        let (scanned_width, scanned_height) = (
+            video["width"].as_i64().expect("width"),
+            video["height"].as_i64().expect("height"),
+        );
         client
             .execute(
-                "UPDATE files SET hdr='dolby_vision' WHERE id=1",
-                hiqlite::params!(),
+                "UPDATE files SET hdr='dolby_vision',hdr_format=$1,dv_profile=$2,dv_level=$3,dv_bl_compat_id=$4,dv_el_present=0,dv_rpu_present=1,width=$5,height=$6 WHERE id=1",
+                hiqlite::params!(label, i64::from(profile), level, i64::from(compatibility), scanned_width, scanned_height),
             )
             .await
             .expect("Dolby Vision scan facts");
+    }
+    if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
+        // A copy's head is checked against the scan's profile.
+        client
+            .execute(
+                "UPDATE files SET video_profile='Main 10' WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("scanned HEVC profile");
     }
     let now = crate::state::clock_ms();
     let grant = Uuid::new_v4();
@@ -3037,7 +3317,9 @@ async fn build_real_source_start_fixture(
         file_id: SourceId::parse("1").expect("file"),
         revision: key.file_revision(&witness).expect("actual revision"),
     };
-    if !native && !encoded && !matches!(mode, SourceFixtureMode::ColdCopy) {
+    // A Dolby Vision copy has no pre-built index: the Source indexes it.
+    if !native && !encoded && dolby_vision.is_none() && !matches!(mode, SourceFixtureMode::ColdCopy)
+    {
         let media = store.get_file(1).await.expect("file read").expect("file");
         let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
             &media,
@@ -3054,23 +3336,52 @@ async fn build_real_source_start_fixture(
             .await
             .expect("actual fragment scan committed");
     }
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store),
+        directory.path().join("workers"),
+        plurx_core::transcode::EncoderCaps::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    );
+    // An HEVC copy binds the cold index's original-header proof to this
+    // node, which the VOD side reads from its own cluster node identity.
+    // The base strip needs this node's measured `dovi_rpu`, as a real
+    // node's boot probe would report it.
+    let strips = matches!(mode, SourceFixtureMode::DolbyVisionStripped);
+    if strips {
+        let state = Arc::get_mut(&mut state).expect("sole State before listeners");
+        state.system = Arc::new(crate::state::SystemInfo {
+            dovi_rpu: true,
+            ..(*state.system).clone()
+        });
+    }
+    let manager = manager.with_dv_strippable(strips);
+    let manager = if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
+        manager.with_cache(
+            directory.path().join("cache"),
+            "fixture".into(),
+            state.node_id.clone(),
+        )
+    } else {
+        manager
+    };
     Arc::get_mut(&mut state)
         .expect("sole State before listeners")
         .transcode = Arc::new(
-        crate::transcode::TranscodeManager::new(
-            Arc::clone(&store),
-            directory.path().join("workers"),
-            plurx_core::transcode::EncoderCaps::default(),
-            plurx_core::transcode::Pipeline::Cpu,
-        )
-        .with_source_identity(
-            state.node_id.clone(),
-            state.sharing.accepted_drivers.boot_id(),
-        )
-        .with_subtitle_jobs(Arc::clone(&state.jobs))
-        // The boot proof the HDR10 rung needs; the planner still decides the
-        // grade from the player's caps.
-        .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),
+        manager
+            .with_source_identity(
+                state.node_id.clone(),
+                state.sharing.accepted_drivers.boot_id(),
+            )
+            .with_subtitle_jobs(Arc::clone(&state.jobs))
+            // The boot proof the HDR10 rung needs; the planner still decides the
+            // grade from the player's caps.
+            .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10))
+            // The boot proof a Profile 5 encode needs; the per-source pixel
+            // proof is still the Source's own work.
+            .with_dovi_reshape(matches!(
+                mode,
+                SourceFixtureMode::DolbyVisionProfile5Encoded
+            )),
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -3083,6 +3394,16 @@ async fn build_real_source_start_fixture(
         "cinemashare-viewer",
         "c".repeat(64).parse().expect("viewer"),
     );
+    if dolby_vision.is_some() && !matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed) {
+        // A receiver that relays a Dolby Vision Start says so; the Source
+        // plans every other receiver's session without Dolby Vision.
+        headers.insert(
+            receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+            receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE
+                .parse()
+                .expect("Dolby Vision affirmation"),
+        );
+    }
     let request=serde_json::to_vec(&serde_json::json!({"reference":reference,"session":{"playback_id":"actual-http-client","request_id":Uuid::new_v4(),"copy":true,"height":180,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}}})).expect("canonical complete recipe");
     let mut recipe: serde_json::Value =
         serde_json::from_slice(&request).expect("full fixture recipe");
@@ -3108,6 +3429,20 @@ async fn build_real_source_start_fixture(
             recipe["session"]["height"] = serde_json::json!(1080);
             recipe["session"]["hdr10"] = serde_json::json!(true);
             recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"display":{"hdr":true}});
+        }
+        SourceFixtureMode::NativeHdr10Copy => {
+            recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"hls_hevc_sample_entries":["hvc1"],"display":{"hdr":true}});
+        }
+        SourceFixtureMode::DolbyVisionStripped => {
+            recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"hls_hevc_sample_entries":["hvc1"],"display":{"hdr":true}});
+        }
+        SourceFixtureMode::DolbyVisionPreserved
+        | SourceFixtureMode::DolbyVisionConverted
+        | SourceFixtureMode::DolbyVisionUnaffirmed => {
+            // The ask only clamps: a player that does not ask for Dolby
+            // Vision is given the compatible base whatever its caps say.
+            recipe["session"]["preserve_dolby_vision"] = serde_json::json!(true);
+            recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[8]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls","display":{"hdr":true}});
         }
         _ => {}
     }

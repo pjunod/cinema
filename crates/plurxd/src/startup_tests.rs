@@ -3143,36 +3143,35 @@ fn split_children_log_under_their_parent_target() {
             files.len() > 1,
             "{directory}: the walk reached no child modules"
         );
-        let pinned = format!("target: \"{target}\",");
+        let pinned = format!("\"{target}\",");
         for path in files {
             let source = std::fs::read_to_string(&path).expect("a readable child");
             for level in ["trace", "debug", "info", "warn", "error"] {
                 let call = format!("tracing::{level}!(");
                 for (at, _) in source.match_indices(&call) {
                     let arguments = source[at + call.len()..].trim_start();
-                    // Three diagnostic channels are deliberately separate from
-                    // their parent target so an operator can enable them
-                    // alone: the hashed retained-output reuse facts
-                    // (CONTINUOUS-QUALITY-BUILD) and the typed Auto
-                    // preparation outcomes (2ed23494f), and source-fenced FEL
-                    // qualification (681d628f6d). Each is admitted
-                    // only in the files that own it, and still requires an
-                    // explicit target, never a child default.
+                    let explicit = arguments.strip_prefix("target:").unwrap_or("").trim_start();
+                    // These files also emit explicitly routed diagnostic events.
+                    // Native FEL qualification uses the DV channel. Segment
+                    // publication and confirmed presentation use the HLS channel.
                     let relative = path.strip_prefix(&src).expect("split child under src");
                     let dedicated = [
                         ("plurxd::retained_reuse", "transcode/manager/create.rs"),
                         ("plurxd::retained_reuse", "vod/retained.rs"),
                         ("plurxd::dv", "transcode/manager/create.rs"),
+                        ("plurxd::dv", "transcode/manager/native_fel.rs"),
+                        ("plurxd::http::hls", "transcode/manager/describe.rs"),
+                        ("plurxd::http::hls", "transcode/manager/publication.rs"),
                         ("plurxd::auto_prepare", "http/hls/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/preparation.rs"),
                     ]
                     .iter()
                     .any(|(channel, owner)| {
                         relative == std::path::Path::new(owner)
-                            && arguments.starts_with(&format!("target: \"{channel}\","))
+                            && explicit.starts_with(&format!("\"{channel}\","))
                     });
                     assert!(
-                        arguments.starts_with(&pinned) || dedicated,
+                        explicit.starts_with(&pinned) || dedicated,
                         "{}: the `{call}` at byte {at} logs under its own module path, \
                              not `{target}`",
                         path.display()
@@ -3811,6 +3810,7 @@ fn the_system_record_reports_the_encoder_the_probe_selected() {
             },
             dovi_rpu: true,
             dovi_reshape: true,
+            dovi_reshape_hardware: Vec::new(),
             dovi_passthrough: true,
             dovi_passthrough_qsv: true,
             hdr10_passthrough: true,

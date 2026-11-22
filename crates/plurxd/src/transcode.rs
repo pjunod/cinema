@@ -617,6 +617,53 @@ pub(crate) struct LiveReconstructionFacts {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
 
+/// Descriptive inputs to the one processed-upgrade planner. A shared copy
+/// has no Auto candidate context; its Source derives these from its accepted
+/// capabilities, selected rendition, and current planning snapshot instead.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone)]
+pub(crate) struct ProcessedUpgradeAsk {
+    pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
+    pub(crate) target_height: u32,
+    pub(crate) grade: plurx_core::transcode::OutputGrade,
+    pub(crate) names_processed: bool,
+    pub(crate) route: plurx_core::playback::candidate::CandidateRoute,
+    pub(crate) average_bps: Option<u64>,
+    pub(crate) peak_bps: Option<u64>,
+    pub(crate) recipe_digest: [u8; 32],
+    pub(crate) required_fel_qualification: Option<PendingFelQualification>,
+    pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display_target_note: Option<String>,
+}
+impl ProcessedUpgradeAsk {
+    pub(crate) fn from_candidate(context: &CandidateExecutionContext) -> Self {
+        Self {
+            canonical_caps: context.canonical_caps.clone(),
+            target_height: context.selected_candidate.target_height,
+            grade: context.selected_candidate.grade,
+            names_processed: context.selected_candidate.processed_dv,
+            route: context.selected_candidate.route,
+            average_bps: context.selected_candidate.average_bps,
+            peak_bps: context.selected_candidate.peak_bps,
+            recipe_digest: context.recipe_digest,
+            required_fel_qualification: context.required_fel_qualification.clone(),
+            catalog_query: context.catalog_query.clone(),
+            display_target: context.display_target,
+            display_target_note: context.display_target_note.clone(),
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct SourceProcessedWork {
+    pub(crate) ask: ProcessedUpgradeAsk,
+    pub(crate) authority: Arc<source_actor::SourceProducerAuthority>,
+    pub(crate) assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    pub(crate) producer: Arc<crate::prodrun::ProducerSlot>,
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+}
+
 /// One verified processed upgrade: the successor request (its incarnation
 /// already the staged successor's), the candidate it plays, and the exact
 /// prepared root its first window was produced on.
@@ -669,6 +716,12 @@ pub struct TranscodeManager {
     pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
+    #[cfg(target_os = "linux")]
+    native_fel_head: Mutex<Option<Arc<manager_native_fel::NativeFelHead>>>,
+    #[cfg(target_os = "linux")]
+    native_fel_target: std::sync::Mutex<Option<manager_native_fel::FelHeadTarget>>,
+    #[cfg(target_os = "linux")]
+    native_fel_backend: std::sync::Mutex<Option<String>>,
     /// The VOD presentation's serving runtime (plan §2). Sessions created
     /// under `presentation:"vod"` live here rather than in `sessions`; every
     /// serving entry point dispatches to it first and falls through when the
@@ -908,6 +961,10 @@ pub struct TranscodeManager {
     /// Whether boot proved the exact software/tonemapx/software renderer used
     /// for non-backward-compatible Dolby Vision.
     dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape with
+    /// ([`crate::ffmpeg::measure_dovi_reshape_hardware`]). A session reads
+    /// this record; it never probes a pairing itself.
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this daemon's ffmpeg proved the HDR10 passthrough renderer at
     /// boot ([`crate::ffmpeg::has_dovi_passthrough`]). Its own field, and its
     /// own probe: the SDR reshape graph proves nothing about a PQ output.
@@ -1198,6 +1255,9 @@ mod manager_create;
 mod manager_describe;
 #[path = "transcode/manager/maintenance.rs"]
 mod manager_maintenance;
+#[cfg(target_os = "linux")]
+#[path = "transcode/manager/native_fel.rs"]
+mod manager_native_fel;
 #[path = "transcode/manager/plan.rs"]
 mod manager_plan;
 #[path = "transcode/manager/produce.rs"]

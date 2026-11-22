@@ -42,6 +42,34 @@ pub struct PlaybackEnhancement {
     pub requires_effective_processing: bool,
 }
 
+impl PlaybackEnhancement {
+    /// Whether a decoded value has the shape [`playback_enhancement`] builds:
+    /// at most one detail per badge, each with one bounded sentence, and
+    /// `active` exactly the active details' badges in order. A receiver
+    /// relays a Source's rows only when they hold.
+    pub fn is_well_formed(&self) -> bool {
+        const MAX_TEXT: usize = 1024;
+        let mut seen = Vec::with_capacity(3);
+        for detail in &self.details {
+            if seen.contains(&detail.badge)
+                || detail.text.trim().is_empty()
+                || detail.text.len() > MAX_TEXT
+                || detail.text.chars().any(char::is_control)
+            {
+                return false;
+            }
+            seen.push(detail.badge);
+        }
+        self.details.len() <= 3
+            && self
+                .details
+                .iter()
+                .filter(|detail| detail.active)
+                .map(|detail| detail.badge)
+                .eq(self.active.iter().copied())
+    }
+}
+
 /// How many of the served frames' display mappings applied the title's creative trims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CreativeTrims {
@@ -501,6 +529,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_built_enhancement_is_well_formed_for_a_receiver_to_relay() {
+        let mut routes = vec![
+            EnhancementRoute::NativeDolbyVision,
+            EnhancementRoute::ConvertedProfile81,
+            EnhancementRoute::Hdr10Base,
+            EnhancementRoute::ToneMappedSdr,
+        ];
+        for fel_contributed in [false, true] {
+            routes.push(EnhancementRoute::ReconstructedProfile81 { fel_contributed });
+            for creative_trims in [
+                CreativeTrims::None,
+                CreativeTrims::Partial,
+                CreativeTrims::All,
+            ] {
+                for display_target in [None, Some(1000)] {
+                    routes.push(EnhancementRoute::ProcessedHdr10 {
+                        fel_contributed,
+                        display_target,
+                        creative_trims,
+                    });
+                    routes.push(EnhancementRoute::ProcessedSdr {
+                        fel_contributed,
+                        display_target,
+                        creative_trims,
+                    });
+                }
+            }
+        }
+        let mut built = 0;
+        for route in routes {
+            for profile in [5, 7, 8] {
+                for el in [false, true] {
+                    for decline in [None, Some("the display does not take Dolby Vision")] {
+                        let mut facts = facts(route.clone());
+                        facts.source_profile = Some(profile);
+                        facts.source_el_present = Some(el);
+                        facts.decline_reason = decline;
+                        if let Some(shown) = playback_enhancement(&facts) {
+                            assert!(shown.is_well_formed(), "{route:?}: {shown:?}");
+                            built += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(built > 0);
+        let mut reordered =
+            playback_enhancement(&facts(EnhancementRoute::NativeDolbyVision)).expect("DV source");
+        reordered.active.reverse();
+        reordered.active.push(Fel);
+        assert!(!reordered.is_well_formed());
+    }
     #[test]
     fn wire_names_are_the_badge_labels() {
         assert_eq!(
