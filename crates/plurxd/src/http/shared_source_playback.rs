@@ -3231,29 +3231,42 @@ async fn build_real_source_start_fixture(
             .arg(&caption)
             .arg("-i")
             .arg(&alternative)
-            .args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a?",
-                "-map",
-                "1:s:0",
-                "-map",
-                "2:s:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "copy",
-                "-c:s",
-                "subrip",
-                "-metadata:s:s:0",
-                "language=eng",
-                "-metadata:s:s:0",
-                "title=English (SDH)",
-                "-metadata:s:s:1",
-                "language=eng",
-                "-y",
-            ])
+            .args(
+                if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+                    // File 3122's shape: its audio beside two English SubRip
+                    // tracks, the first titled "English (SDH)".
+                    &[
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a",
+                        "-map",
+                        "1:s:0",
+                        "-map",
+                        "2:s:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "copy",
+                        "-c:s",
+                        "subrip",
+                        "-metadata:s:s:0",
+                        "language=eng",
+                        "-metadata:s:s:0",
+                        "title=English (SDH)",
+                        "-metadata:s:s:1",
+                        "language=eng",
+                        "-y",
+                    ][..]
+                } else {
+                    // The other native modes keep their original video-only,
+                    // untagged two-track shape.
+                    &[
+                        "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
+                        "subrip", "-y",
+                    ][..]
+                },
+            )
             .arg(&muxed)
             .output()
             .await
