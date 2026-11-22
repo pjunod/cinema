@@ -662,7 +662,9 @@
                     mode: SubtitleMode::Off,
                     track: None,
                 },
-                audio_offset_ms: 0,
+                // Copy to copy is not a rung (the same source bytes), so the
+                // accepted handoff is an audio-offset change on the fitted copy.
+                audio_offset_ms: 250,
                 codec: CodecPolicy::Auto,
                 dynamic_range: DynamicRangePolicy::Auto,
             };
