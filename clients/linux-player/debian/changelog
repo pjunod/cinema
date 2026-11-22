@@ -7,7 +7,7 @@ plurx-player (0.5.3-1) stonking; urgency=medium
   * Read the mapper only from VO info lines, and keep the current server
     processing report across a failed control exchange.
 
- -- Claude Agent <noreply@anthropic.com>  Sat, 21 Nov 2026 20:30:00 -0800
+ -- Claude Agent <noreply@anthropic.com>  Sat, 21 Nov 2026 22:41:14 -0500
 
 plurx-player (0.5.2-1) stonking; urgency=medium
 
