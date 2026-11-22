@@ -429,9 +429,6 @@ impl SourceGrowingBacking {
             return Err(ControlStateError::Unavailable);
         }
         authority.refresh(&control).await?;
-        // The exchange is authenticated for this exact lineage: the viewer is
-        // here, whether or not its anchor is inside the produced range yet.
-        self.note_activity();
         let target = control.snapshot.buffer_anchor_ms();
         let files = self.production.files.lock().await;
         let origin = files

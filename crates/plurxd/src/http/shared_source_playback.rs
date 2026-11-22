@@ -696,6 +696,19 @@ impl SourceStartRegistry {
             .filter(|entry| !entry.actual_finished())
             .count()
     }
+    /// The growing copy a started request is served from, while it has one.
+    #[cfg(unix)]
+    pub(crate) fn growing_backing(
+        &self,
+        request_id: Uuid,
+    ) -> Option<std::sync::Arc<crate::transcode::source_actor::SourceGrowingBacking>> {
+        let entries = self.entries.lock().expect("Source HTTP starts");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.identity.request_id == request_id)?;
+        let result = entry.result.lock().expect("Source start result");
+        result.as_ref()?.as_ref().ok()?.actor.growing_backing()
+    }
 }
 impl SourceStartRegistry {
     fn current_entry(

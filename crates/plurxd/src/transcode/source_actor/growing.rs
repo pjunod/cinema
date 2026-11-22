@@ -85,14 +85,21 @@ impl SourceGrowingBacking {
             && self.owners.contains_live_assignment(&self.assignment)
             && self.source.unchanged()
     }
-    /// An authenticated current-lineage exchange from the viewer B relays: a
-    /// resource fetch or a control exchange. B's own Status is not one; it
+    /// Viewer activity: the first publication, an authenticated resource
+    /// fetch, or a control exchange the fence accepted. A refused exchange is
+    /// not, or a viewer whose anchor never reaches the produced range would
+    /// hold this copy without being served; neither is B's own Status, which
     /// says B's owner is alive, not that anyone is watching.
     pub(crate) fn note_activity(&self) {
         self.activity.note_at(Instant::now());
     }
+    /// Whether the lease has run out at `now`: one lease after the last
+    /// viewer activity. The retirement loop asks it for the current instant.
+    pub(crate) fn activity_expired_at(&self, now: Instant) -> bool {
+        self.activity.expired_at(now)
+    }
     fn activity_expired(&self) -> bool {
-        self.activity.expired_at(Instant::now())
+        self.activity_expired_at(Instant::now())
     }
     pub(crate) async fn observe_demand(
         &self,

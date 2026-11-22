@@ -1640,6 +1640,26 @@ async fn sharing_receiver_consumes_the_range_copy_start_the_source_published() {
             supported_actions: Some(vec!["hold".to_owned(), "retry_resource".to_owned()]),
         }
     };
+    // The live copy's own expiry, read at chosen instants: a renewal at or
+    // after `before` keeps it alive one lease past `before`; without one, it
+    // has expired by then. No wall-clock wait or tolerance is involved.
+    let request_id = Uuid::parse_str(
+        recipe["session"]["request_id"]
+            .as_str()
+            .expect("Source request"),
+    )
+    .expect("Source request id");
+    let backing = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .growing_backing(request_id)
+        .expect("the range Start is served from a growing copy");
+    let lease = Duration::from_millis(u64::from(
+        crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS,
+    ));
+    let renewed_since = |before: std::time::Instant| !backing.activity_expired_at(before + lease);
+    let before = std::time::Instant::now();
     let accepted = connect()
         .await
         .file_control(&credential, &viewer, &session, &known, &exchange)
@@ -1648,11 +1668,116 @@ async fn sharing_receiver_consumes_the_range_copy_start_the_source_published() {
         .into_outcome()
         .expect("the Source accepts the exchange");
     assert_eq!(accepted.accepted_sequence, 1);
-    let kept = accepted.lease.expires_at_unix_ms - accepted.server_time_unix_ms;
-    let lease = i64::from(crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS);
     assert!(
-        (lease - 5_000..=lease).contains(&kept),
-        "the copy keeps the lease it advertised: {kept} ms"
+        renewed_since(before),
+        "an accepted exchange renews the copy"
+    );
+    let kept = accepted.lease.expires_at_unix_ms - accepted.server_time_unix_ms;
+    let advertised = i64::from(crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS);
+    assert!(
+        kept > i64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS) && kept <= advertised,
+        "the copy reports the lease it advertised, not the rolling one: {kept} ms"
+    );
+    // (d) B's own Status says B's owner is alive, not that anyone watches.
+    let before = std::time::Instant::now();
+    connect()
+        .await
+        .file_status(&credential, &viewer, &session, &known)
+        .await
+        .expect("receiver Status");
+    assert!(!renewed_since(before), "Status does not renew the copy");
+    // (c) Every resource the viewer fetches renews it: the playlist, and the
+    // initialization segment it names.
+    let operation = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions/{request_id}",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let mut lineage = recipe.clone();
+    lineage["incarnation_id"] = json!(incarnation);
+    lineage["session_id"] = json!(response.session_id);
+    lineage["control_epoch"] = json!(source_control.control_epoch);
+    let prefix = format!("/api/v1/hls/{}/", response.session_id);
+    let fetch = |resource: String| {
+        let mut body = lineage.clone();
+        body["resource"] = json!(resource);
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/resources");
+        async move {
+            let response = actual_resource_request(
+                address,
+                true,
+                &url,
+                headers,
+                serde_json::to_vec(&body).expect("resource body"),
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("resource bytes");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            bytes
+        }
+    };
+    let before = std::time::Instant::now();
+    let playlist = fetch(
+        response
+            .playlist_url
+            .strip_prefix(&prefix)
+            .expect("session playlist")
+            .to_owned(),
+    )
+    .await;
+    assert!(renewed_since(before), "a playlist fetch renews the copy");
+    let playlist = String::from_utf8(playlist.to_vec()).expect("playlist text");
+    let init = playlist
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the copy's playlist names its initialization segment")
+        .to_owned();
+    let before = std::time::Instant::now();
+    fetch(init).await;
+    assert!(renewed_since(before), "an init fetch renews the copy");
+    // (a) Exchanges whose anchor is past everything produced are refused,
+    // as B's 500 ms retries of one would be, and renew nothing. (b) So the
+    // copy that serves nothing more retires one lease after it last served,
+    // yet still outlives the old 60 s window.
+    let last_served = std::time::Instant::now();
+    let beyond = response.duration_ms.expect("fixture duration") + 1_000;
+    for sequence in 2..=4 {
+        let mut refused = exchange.clone();
+        refused.sequence = sequence;
+        refused.position_ms = beyond;
+        refused.buffered_from_ms = Some(beyond);
+        refused.buffered_through_ms = beyond;
+        let answer = connect()
+            .await
+            .file_control(&credential, &viewer, &session, &known, &refused)
+            .await
+            .map(|receipt| receipt.into_outcome());
+        assert!(
+            !matches!(answer, Ok(Ok(_))),
+            "an anchor past the produced range is refused"
+        );
+    }
+    assert!(
+        !renewed_since(last_served),
+        "refusals do not renew the copy"
+    );
+    assert!(
+        !backing.activity_expired_at(last_served + Duration::from_secs(61)),
+        "the copy outlives 60 s after it last served"
+    );
+    assert!(
+        backing.activity_expired_at(last_served + lease),
+        "it retires one lease after it last served"
     );
     assert_eq!(confirmed.session_id, response.session_id);
     let source_session = Uuid::parse_str(&response.session_id).expect("Source session");
