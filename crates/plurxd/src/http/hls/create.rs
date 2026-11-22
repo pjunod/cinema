@@ -6553,6 +6553,11 @@ impl PreparedSourcePlayback {
     pub(crate) fn processed_upgrade_ask(&self) -> &crate::transcode::ProcessedUpgradeAsk {
         &self.processed_upgrade_ask
     }
+    /// The rung this plan resolved; a copy's output is still the source's.
+    #[cfg(test)]
+    pub(crate) fn resolved_height(&self) -> i64 {
+        self.resolved.height
+    }
     pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
         &self.resolved.request
     }
@@ -6618,13 +6623,16 @@ impl PreparedSourcePlayback {
     /// against the exact prepared recipe and client. This does not certify
     /// the whole elementary stream; the common kernel/Trace check each range.
     pub(crate) fn validate_copy_head(&self, init: &plurx_core::fmp4::Init) -> Result<(), ApiError> {
-        let refused = || {
-            ApiError::typed(
-                StatusCode::CONFLICT,
-                "vod_source_rescan_required",
-                "The held Source copy head differs from its prepared playback facts",
-            )
-        };
+        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init)
+            .map_err(|_| copy_head_rescan_required())?;
+        self.validate_copy_head_facts(&facts)
+    }
+    /// [`Self::validate_copy_head`] over the head's parsed sample-entry facts.
+    pub(crate) fn validate_copy_head_facts(
+        &self,
+        facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
+    ) -> Result<(), ApiError> {
+        let refused = copy_head_rescan_required;
         let crate::transcode::SessionKind::Copy {
             preserve_dolby_vision,
             convert_dolby_vision,
@@ -6633,12 +6641,11 @@ impl PreparedSourcePlayback {
         else {
             return Err(refused());
         };
-        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init).map_err(|_| refused())?;
         validate_prepared_copy_head(
             &self.file,
             &self.copy_head_caps,
             (preserve_dolby_vision, convert_dolby_vision),
-            &facts,
+            facts,
         )
         .map_err(|()| refused())
     }
@@ -7122,6 +7129,14 @@ pub(crate) async fn prepare_source_playback<
 /// transfer is accepted as is. A `dvh1`/`dvhe` sample entry is admitted by
 /// that same Dolby Vision claim: `hls_hevc_sample_entries` can only name the
 /// plain `hvc1`/`hev1` entries.
+fn copy_head_rescan_required() -> ApiError {
+    ApiError::typed(
+        StatusCode::CONFLICT,
+        "vod_source_rescan_required",
+        "The held Source copy head differs from its prepared playback facts",
+    )
+}
+
 fn validate_prepared_copy_head(
     file: &MediaFile,
     caps: &plurx_core::playback::DeviceCaps,
@@ -7466,6 +7481,9 @@ mod source_copy_head_tests {
         assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_ok());
         let mut changed = good.clone();
         changed.width = 1280;
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
+        let mut changed = good.clone();
+        changed.height = 720;
         assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.profile_idc = 77;

@@ -85,6 +85,18 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared Dolby Vision Profile 7 titles start again when converted to Profile
+  8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
+  first fragment against the rung its plan resolved instead of the source's own
+  size, and a 4K title, which Auto plans under the node's Dolby Vision encode
+  ceiling, was refused at `growing.copy_head_caps` with
+  `source_rescan_required` although the copy matched the scan. The check
+  compares the copy with the scanned source only. The same fix starts every
+  other shared copy whose planned rung differs from the source: 4K SDR or HDR10
+  copies from a Source whose encode ceiling is below 2160, sources taller than
+  2160 or shorter than 144 lines, and a copy started with a lower rung named,
+  which now gets the full-resolution copy over sharing as it already did
+  locally, instead of a 409.
 - Shared titles that Safari plays through its native HLS player (Dolby
   Vision, HDR and HEVC copies, including SDR HEVC) play again. That player
   carries the viewer's sign-in as a `token` in each playlist URL, and the

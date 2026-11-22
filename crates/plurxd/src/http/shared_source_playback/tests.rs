@@ -1351,6 +1351,72 @@ async fn sharing_source_http_range_dolby_vision_converted_start_status_playlist_
     ))
     .await;
 }
+/// Production 2026-11-22 (M6 file 6751): a 3840x2160 Dolby Vision Profile 7
+/// remux started Auto by a client enumerating Profile 8 resolves a rung under
+/// this node's Dolby Vision transcode ceiling and is still a Profile 8.1 Copy.
+/// A head that matches the scan must pass `growing.copy_head_caps`; comparing
+/// it with the resolved rung refused every such shared Start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_auto_profile7_copy_head_is_judged_by_the_source_not_the_rung() {
+    use super::super::hls::{prepare_source_playback, CreateSession};
+    let mut fixture =
+        real_source_start_fixture_with(SourceFixtureMode::RangeDolbyVisionScanned4k, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let session = recipe["session"].as_object_mut().expect("session");
+    session.remove("height");
+    session.insert("quality_auto".into(), json!(true));
+    let body: CreateSession =
+        serde_json::from_value(recipe["session"].clone()).expect("complete session");
+    let prepared = Box::pin(prepare_source_playback(
+        &fixture.state,
+        &fixture.headers,
+        fixture.reference.clone(),
+        body,
+    ))
+    .await
+    .expect("Auto Profile 7 Source preparation");
+    assert!(
+        matches!(
+            prepared.request().kind,
+            crate::transcode::SessionKind::Copy {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+                ..
+            }
+        ),
+        "still a Profile 8.1 copy: {:?}",
+        prepared.request().kind
+    );
+    assert!(
+        prepared.resolved_height() < 2160,
+        "Auto resolved {} under the Dolby Vision ceiling",
+        prepared.resolved_height()
+    );
+    // The converted head as the real title's copy writes it.
+    let head = plurx_core::fmp4::CopyVideoSampleEntryFacts {
+        codec: plurx_core::fmp4::VideoCodec::Hevc,
+        sample_entry: *b"hvc1",
+        width: 3840,
+        height: 2160,
+        profile_idc: 2,
+        level_idc: 153,
+        bit_depth: 10,
+        chroma_format_idc: 1,
+        color: Some((9, 16, 9, false)),
+        dolby_vision_config: true,
+    };
+    prepared
+        .validate_copy_head_facts(&head)
+        .expect("a head matching the scan passes whatever rung Auto resolved");
+    let mut smaller = head.clone();
+    smaller.height = 1080;
+    assert!(
+        prepared.validate_copy_head_facts(&smaller).is_err(),
+        "a head that differs from the scan still refuses"
+    );
+    fixture.shutdown().await;
+}
 /// One resource of the range session, named relative to `base`'s resource.
 async fn actual_range_resource(
     address: std::net::SocketAddr,
@@ -1462,6 +1528,13 @@ async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
         .expect("strict Source envelope");
     assert!(!decoded.response().vod, "a growing copy is a bounded view");
+    // A copy's output is the source's own geometry, whatever rung its plan
+    // resolved (the Profile 7 fixture asks for a lower one).
+    assert_eq!(
+        decoded.response().height,
+        180,
+        "{mode:?}: the source's height"
+    );
     assert!(receiver_presentation::response_presentable(
         decoded.response(),
         true,

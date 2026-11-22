@@ -2700,6 +2700,10 @@ pub(crate) enum SourceFixtureMode {
     /// [`Self::DolbyVisionConverted`] and a TrueHD 5.1 track, converted to
     /// Profile 8.1 by the growing copy owner.
     RangeDolbyVisionConverted,
+    /// [`Self::RangeDolbyVisionConverted`] whose scan records a 3840x2160
+    /// remux, as M6 file 6751's does. For preparation only: the generated
+    /// source itself stays small, so no copy of it is started.
+    RangeDolbyVisionScanned4k,
 }
 
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
@@ -2981,12 +2985,14 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::RangeNativeCopy
             | SourceFixtureMode::RangeAudioCopy
             | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeDolbyVisionScanned4k
     );
     // The scanned remux modes' audio: the codec FFmpeg encodes, its scanned
     // name and channel count.
     let audio = match mode {
         SourceFixtureMode::RangeAudioCopy => Some(("eac3", 6)),
-        SourceFixtureMode::RangeDolbyVisionConverted => Some(("truehd", 6)),
+        SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => Some(("truehd", 6)),
         _ => None,
     };
     let burn = matches!(
@@ -2998,9 +3004,9 @@ async fn build_real_source_start_fixture(
         | SourceFixtureMode::DolbyVisionCompatibleEncoded
         | SourceFixtureMode::DolbyVisionUnaffirmed
         | SourceFixtureMode::DolbyVisionStripped => Some((8u8, 1u8)),
-        SourceFixtureMode::DolbyVisionConverted | SourceFixtureMode::RangeDolbyVisionConverted => {
-            Some((7, 6))
-        }
+        SourceFixtureMode::DolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => Some((7, 6)),
         SourceFixtureMode::DolbyVisionProfile5Encoded => Some((5, 0)),
         _ => None,
     };
@@ -3012,6 +3018,7 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::DolbyVisionUnaffirmed
             | SourceFixtureMode::DolbyVisionStripped
             | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeDolbyVisionScanned4k
     );
     let hdr = matches!(
         mode,
@@ -3386,10 +3393,15 @@ async fn build_real_source_start_fixture(
             7 => "Dolby Vision · Profile 7 (HDR10-compatible)",
             _ => "Dolby Vision · Profile 5",
         };
-        let (scanned_width, scanned_height) = (
-            video["width"].as_i64().expect("width"),
-            video["height"].as_i64().expect("height"),
-        );
+        let (scanned_width, scanned_height) =
+            if matches!(mode, SourceFixtureMode::RangeDolbyVisionScanned4k) {
+                (3840, 2160)
+            } else {
+                (
+                    video["width"].as_i64().expect("width"),
+                    video["height"].as_i64().expect("height"),
+                )
+            };
         client
             .execute(
                 "UPDATE files SET hdr='dolby_vision',hdr_format=$1,dv_profile=$2,dv_level=$3,dv_bl_compat_id=$4,dv_el_present=0,dv_rpu_present=1,width=$5,height=$6 WHERE id=1",
@@ -3620,7 +3632,8 @@ async fn build_real_source_start_fixture(
         SourceFixtureMode::DolbyVisionPreserved
         | SourceFixtureMode::DolbyVisionConverted
         | SourceFixtureMode::DolbyVisionUnaffirmed
-        | SourceFixtureMode::RangeDolbyVisionConverted => {
+        | SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => {
             // The ask only clamps: a player that does not ask for Dolby
             // Vision is given the compatible base whatever its caps say.
             recipe["session"]["preserve_dolby_vision"] = serde_json::json!(true);
