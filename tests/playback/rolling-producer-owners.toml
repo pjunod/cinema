@@ -7612,7 +7612,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # the forwarded native-readiness fixture case and one in the typed-refusal
 # test. No process launch.
 # Main eaace1f86 merge: base 979, branch +2, main +2; 983.
-expected_occurrences = 983
+# Shared private history guard: +1 `response.status()` read of an HTTP reply
+# in sharing_private_history_answers_pass_the_receiver_content_guard. No
+# process launch.
+# Main c516dd678 merge: base 981, branch +2, main +1; 984.
+expected_occurrences = 984
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
