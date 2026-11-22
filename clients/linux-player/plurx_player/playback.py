@@ -18,6 +18,7 @@ from threading import Thread
 from .caps import control_capabilities
 from .api import ApiError, error_text
 from .mpv import CLOSED, MpvError
+from .badges import NATIVE_MAPPER, video_facts
 from .cinema import context as cinema_context, display_title, quality_choices
 
 PROTOCOL = "plurx-playback-control-v1"
@@ -37,7 +38,6 @@ NATIVE_TARGET = re.compile(
     rf"encoding {_DV_NUMBER}\.\.{_DV_NUMBER}; reference {_DV_NUMBER}; "
     rf"PQ transport gain {_DV_NUMBER} -> signal {_DV_NUMBER}\.\.{_DV_NUMBER}; "
     r"generation (?P<generation>\d{1,20})")
-NATIVE_MAPPER = "shared native Dolby renderer"
 NATIVE_TARGET_STATE = "native-dovi-target-state"
 
 
@@ -117,6 +117,7 @@ class Playback:
         self.seeking = False
         self.last_position_ms = None
         self.mapper = None
+        self._video_published = None
         self.physical_target_nits = None
         self.physical_target_generation = None
         self.tone_mapping_session = None
@@ -263,6 +264,24 @@ class Playback:
     def reset_renderer_facts(self):
         self.mapper = self.physical_target_nits = self.facts = None
         self.physical_target_generation = None
+        self.publish_video()
+
+    def publish_video(self):
+        """Cinema's quality pills: whitelisted source, enhancement and renderer facts (badges.py).
+
+        A separate property from user-data/cinema, whose every update releases
+        the overlay's request fence: a renderer line arriving mid-request must
+        not. Unchanged facts are not re-sent.
+        """
+        report = (self.session or {}).get("effective_processing") if self.effective_tone_mapping() else None
+        value = video_facts(self.decision, self.session, self.mapper, self.physical_target_nits, report)
+        if value == self._video_published:
+            return
+        try:
+            self.mpv.set("user-data/cinema-video", value)
+        except MpvError:
+            return
+        self._video_published = value
 
     def read_native_target_state(self):
         state = self.mpv.get(NATIVE_TARGET_STATE)
@@ -458,6 +477,7 @@ class Playback:
         self.publish_chrome()
 
     def publish_chrome(self):
+        self.publish_video()
         self.chrome_revision += 1
         data = self.context or {}
         info = data.get("metadata") or {}
@@ -777,6 +797,8 @@ class Playback:
         if active != self.tone_mapping_session:
             self.tone_mapping_session = active
             self.publish_chrome()
+        else:
+            self.publish_video()  # A new report can change the processed pills.
 
     def heartbeat(self):
         control = (self.session or {}).get("control")
@@ -836,6 +858,7 @@ class Playback:
                 if state == (True, generation):
                     self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak
                     self.physical_target_generation = generation
+                    self.publish_video()
                 return
         if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
                 and text.startswith("Error opening/initializing the"):
@@ -845,6 +868,7 @@ class Playback:
             match = BARE_MAPPER.search(text)
         if match:
             self.mapper = match.group(1)[:80]
+            self.publish_video()
 
     def capture_facts(self):
         if self.mpv.closed:

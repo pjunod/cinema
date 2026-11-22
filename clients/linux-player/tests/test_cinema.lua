@@ -28,7 +28,7 @@ package.preload['mp.assdraw'] = function() return {ass_new=function()
     local a={text=''}
     a.new_event=function(self) self.text=self.text..'\n' end
     a.append=function(self,s) self.text=self.text..s end
-    a.draw_start=function() end; a.draw_stop=function() end; a.rect_cw=function() end
+    a.draw_start=function() end; a.draw_stop=function() end; a.rect_cw=function() end; a.round_rect_cw=function() end
     return a
 end} end
 P={['time-pos']=5,duration=30,pause=false,['user-data/osc/film']={origin=60,duration=7200},
@@ -284,4 +284,47 @@ update('user-data/cinema',original);click(930,681);press('down');press('enter')
 eq(#commands,0);assert(not overlay.data:find('Playback quality',1,true))
 click(1035,681);for i=1,9 do press('down') end;press('enter')
 eq(last()[2],'cinema-autoplay');eq(last()[3],'no')
-print('Cinema overlay: 32 control scenarios and 3 live playback Info regressions passed')
+-- Quality pills: what is playing, the web player's fact badges, beside the title.
+local function pills_case(video, renderer, source, enhancement)
+    P['video-params']=video
+    P['track-list']={{type='video',id=1,selected=true,['dolby-vision-profile']=video.profile},
+        {type='audio',id=2,selected=true,codec='truehd',title='TrueHD Atmos 7.1',['demux-channel-count']=8}}
+    width=1280;reset()
+    update('user-data/cinema-video',{source=source or {hdr='dolby_vision',dv_profile=7,dv_el_present=true},
+        renderer=renderer,enhancement=enhancement})
+    return overlay.data
+end
+local function has(data,value) return data:find(value,1,true)~=nil end
+local native={kind='native',label='shared native Dolby renderer',target_nits=1000}
+local dv={w=3840,h=2160,colormatrix='dolbyvision',profile=7}
+-- Profile 7 FEL through the private build: every enhancement applied on this device.
+local data=pills_case(dv,native)
+for _,value in ipairs({'2160p','DV P7','FEL','RPU','DYN','ATMOS 7.1'}) do assert(has(data,value),value) end
+assert(not has(data,'→'))
+-- A Profile 7 → 8.1 delivery is named, and its dropped enhancement layer is not claimed.
+data=pills_case({w=3840,h=2160,colormatrix='dolbyvision',profile=8},native)
+assert(has(data,'DV P7 → DV P8'));assert(not has(data,'FEL'));assert(has(data,'RPU'))
+-- Dolby Vision removed on the way: an HDR10 picture claims no Dolby enhancement.
+data=pills_case({w=3840,h=2160,colormatrix='bt.2020-ncl',gamma='pq',profile=7},native)
+assert(has(data,'DV P7 → HDR10'));assert(not has(data,'RPU'));assert(not has(data,'DYN'))
+-- The private build saying the frame had no RPU wins over mpv's matrix.
+data=pills_case(dv,{kind='none',label='none (no Dolby Vision RPU)'})
+assert(not has(data,'RPU'));assert(not has(data,'FEL'))
+-- A system mpv (no renderer line) still applies the RPU, but FEL is not claimed.
+data=pills_case(dv,nil);assert(has(data,'RPU'));assert(has(data,'DYN'));assert(not has(data,'FEL'))
+-- A server enhancement for an HLS session is shown as the server states it.
+data=pills_case({w=1920,h=1080,gamma='pq',profile=nil},nil,{hdr='dolby_vision',dv_profile=8},
+    {active={'DYN'},details={{badge='DYN',active=true,text='DYN: dynamic metadata reaches the display'}}})
+assert(has(data,'1080p'));assert(has(data,'DV P8 → HDR10'));assert(has(data,'DYN'));assert(not has(data,'RPU'))
+-- An SDR source has no range pill; audio-only tracks still get theirs.
+data=pills_case({w=1280,h=720,gamma='bt.1886'},nil,{})
+assert(has(data,'720p'));assert(not has(data,'SDR'));assert(has(data,'ATMOS 7.1'))
+-- Playback info names the mapper and says why each enhancement is or is not active.
+pills_case(dv,native);click(1125,681)
+for i=1,60 do if overlay.data:find('Dolby Vision mapper:',1,true) then break end; press('down') end
+assert(has(overlay.data,'Dolby Vision mapper: shared native Dolby renderer'))
+for i=1,4 do press('down') end
+assert(has(overlay.data,'Dolby Vision enhancements: FEL · RPU · DYN'))
+assert(has(overlay.data,'● FEL: enhancement layer composed'));assert(has(overlay.data,'1000-nit'))
+update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 8 quality pill cases passed')

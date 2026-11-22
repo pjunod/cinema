@@ -3,13 +3,32 @@
 **Status:** open: 0.5.0 frontend source, package and system-renderer interfaces
 qualified; merge, coordinated installation and physical acceptance pending.
 The 0.4.0 installation and owner acceptance below remain earlier evidence. ·
-**Updated:** 2026-11-09 · **Written:** 2026-10-28
+**Updated:** 2026-11-21 · **Written:** 2026-10-28
 
 Companion to [the Linux player plan](LINUX-PLAYER-PLAN.md) (the playback/render
 contract) and [the launcher README](../../clients/linux-player/README.md)
 (controls and package commands). This ledger separates source evidence,
 package qualification, installation and physical acceptance. It does not
 qualify a different Dolby Vision processor or change the display stack.
+
+## Quality pills (unreleased source)
+
+**Owner:** Claude (Opus 5.5). **State:** source and overlay/launcher unit
+tests; package qualification and physical acceptance pending.
+
+Cinema draws the web player's fact badges (`playerFactBadges`) beside the
+title, so a viewer can confirm Dolby Vision, its profile and enhancements
+without opening Playback info. The launcher (`plurx_player/badges.py`)
+publishes `user-data/cinema-video`: the decision's source grade, the HLS
+session's server-computed enhancement (a processed delivery only while its
+generation-matched effective-processing report holds) and the private build's
+renderer line. The overlay reads the picture itself from mpv: resolution from
+decoded `video-params`, delivered range from its colour matrix and transfer,
+delivered profile from the selected track. RPU and DYN are claimed while mpv
+renders Dolby Vision, unless the private build said the frame had no RPU. FEL
+is claimed only for a Profile 7 track whose source has an enhancement layer,
+with the private build's renderer line present. No colour, decoder or renderer
+option changes.
 
 ## Session control sequence repair (0.5.1)
 
