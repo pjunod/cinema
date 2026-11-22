@@ -14,7 +14,7 @@ plurx-player (0.5.2-1) stonking; urgency=medium
   * Identify mpv as the session consumer on initial playback, seek recreation
     and quality replacement so the server can select its startup contract.
 
- -- Codex Agent <codex-agent@invalid>  Tue, 17 Nov 2026 16:38:25 +0000
+ -- Codex Agent <codex-agent@plurx.invalid>  Tue, 17 Nov 2026 16:38:25 +0000
 
 plurx-player (0.5.1-1) stonking; urgency=medium
 
@@ -22,7 +22,7 @@ plurx-player (0.5.1-1) stonking; urgency=medium
     owner epoch, including seek, retry and next-episode replacement.
   * Preserve the incumbent counter when a provisional quality change rolls back.
 
- -- Codex Agent <codex-agent@invalid>  Fri, 13 Nov 2026 19:40:00 +0000
+ -- Codex Agent <codex-agent@plurx.invalid>  Fri, 13 Nov 2026 19:40:00 +0000
 
 plurx-player (0.5.0-1) stonking; urgency=medium
 
