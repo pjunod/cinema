@@ -266,6 +266,11 @@ pub struct CreateSession {
     pub copy: Option<bool>,
     /// With `copy`: re-encode the audio the client can't take.
     pub aac: Option<bool>,
+    /// With `copy`: this client selects soundtracks itself (hls.js alternate
+    /// audio). The server may answer with one shared video-only rendition and
+    /// every soundtrack as an alternate audio rendition; the session response
+    /// says which presentation it chose. Absent keeps the muxed copy.
+    pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
     pub preserve_dolby_vision: Option<bool>,
@@ -711,6 +716,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -6691,6 +6697,8 @@ impl PreparedSourcePlayback {
             || info.start_seconds < 0.0
             || info.duration_ms.is_some_and(|duration| duration < 0)
             || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
+                && !(self.resolved.request.split_audio
+                    && info.playlist_url == format!("/api/v1/hls/{}/master.m3u8", info.session_id))
         {
             return Err(refused());
         }

@@ -110,6 +110,7 @@ fn response(request: &ControlRequestV1) -> ControlResponseV1 {
             owner_epoch: request.control_epoch,
         },
         effective_selection: EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 720,

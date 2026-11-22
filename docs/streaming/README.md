@@ -6,6 +6,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [One video for two VOD soundtracks](SHARED-VIDEO-MULTILINGUAL-VOD.md) | How to share indexed copy video across language tracks and prove continuous pictures and a single stored video. | open |
 | [MPV startup](MPV-LIVE-STARTUP.md) | MPV admission. | open |
 | [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour runs and attribution. | done |
 | [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Gamut hue and L8 controls. | built |

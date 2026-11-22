@@ -385,6 +385,12 @@ instances=0
 over_budget=0
 reset_count=0
 short_after=0
+# Filesystems on which this pass did everything it may -- a cache reset, or the
+# whole Docker pass -- as `path|floor_kb|what`. They are measured once, at the
+# end, so `short_after` counts final shortfalls per filesystem: a runner volume
+# a later Docker prune rescued is not short, and one volume shared by a runner
+# and Docker is not short twice.
+exhausted=()
 
 while IFS= read -r unit; do
   [ -n "$unit" ] || continue
@@ -448,11 +454,7 @@ while IFS= read -r unit; do
     # filesystem and runner root are healthy. Probe the surviving parent: it
     # is necessarily the same filesystem because the validated cache path is
     # an immediate child of that runner root.
-    available_kb=$(available_kb_for "$(dirname -- "$dir")")
-    if [ "$available_kb" -lt "$floor_kb" ]; then
-      say "$unit: still $((available_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve after resetting what it may — this host cannot reach it by pruning" >&2
-      short_after=$((short_after + 1))
-    fi
+    exhausted+=("$(dirname -- "$dir")|$floor_kb|$unit")
   fi
 done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*' |
   awk '{ print $1 }')
@@ -461,8 +463,8 @@ done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*'
 # packaging job loads a new `plurx/plurxd:ci-<arch>`, and media1 was carrying
 # 101G of images with four of a hundred and thirty-one in use. The named
 # BuildKit builders are bounded per job, so only cache older than a week is
-# taken here — pruning it wholesale would throw away exactly the state the
-# packaging lane keeps warm on purpose.
+# taken here first. Only when that leaves the host below the reserve does the
+# pass go further (see below).
 docker_pruned=false
 # The prune deletes across the whole host, so it needs the guard at least as
 # much as a cache reset does. `docker container prune -f` removes containers
@@ -495,6 +497,32 @@ elif command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; the
         "$DOCKER" builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
         docker_pruned=true
         after_kb=$(available_kb_for "$root")
+        # On a busy runner every build record is younger than a week, so the
+        # bounded prune reclaims nothing: `gha-lab1-plurx-heavy-01` sat at 24G
+        # against the 25G every heavy job requires on 2026-11-22 with 8.7G of
+        # build cache this pass was not allowed to touch, refusing plurx#1857
+        # and #1864 while this script reported it pruned. Below the reserve
+        # every job is refused anyway, so finish the operator's pass from
+        # docs/ci/RUNNER-DISK.md: all of the daemon's own build cache and
+        # dangling images. That is not the packaging lane's warm state -- the
+        # named `plurx-<runner>` builders are `docker-container` buildx builders
+        # (the workflows refuse any other driver), whose cache lives in their
+        # own containers and which `docker builder prune` does not reach.
+        # In-use BuildKit records and images a container uses are never pruned.
+        # Re-checked first: a job may have been created since the guard above.
+        if [ "$after_kb" -lt "$floor_kb" ]; then
+          if containerised_job_running; then
+            # Deferred, not exhausted: this is a host whose pass was cut short,
+            # not one pruning cannot fix, so it is not counted as short.
+            say "a containerised job started during the prune; Docker stays $((after_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve until the next pass"
+          else
+            say "still short after the age-bounded prune ($((after_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G); pruning all build cache and dangling images"
+            "$DOCKER" builder prune -af >/dev/null || true
+            "$DOCKER" image prune -f >/dev/null || true
+            after_kb=$(available_kb_for "$root")
+            exhausted+=("$root|$floor_kb|Docker")
+          fi
+        fi
         reclaimed_kb=$((reclaimed_kb + after_kb - available_kb))
         say "Docker pruned, $((after_kb / 1024 / 1024))G free"
       fi
@@ -503,6 +531,25 @@ elif command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; the
     fi
   fi
 fi
+
+# Every filesystem this pass exhausted, measured once now that nothing more
+# will be freed: a volume left under its reserve after everything the janitor
+# may delete refuses every job held to it, which is what `short_after` counts.
+# Same filesystem, same device: counted once, with the first floor seen (the
+# floor is a function of the filesystem, so they agree).
+device_of() { stat -c %d -- "$1" 2>/dev/null || stat -f %d -- "$1" 2>/dev/null || echo "$1"; }
+seen_devices=" "
+for row in "${exhausted[@]+"${exhausted[@]}"}"; do
+  IFS='|' read -r path floor what <<<"$row"
+  device=$(device_of "$path")
+  case "$seen_devices" in *" $device "*) continue ;; esac
+  seen_devices="$seen_devices$device "
+  available_kb=$(available_kb_for "$path")
+  if [ "$available_kb" -lt "$floor" ]; then
+    say "$what: still $((available_kb / 1024 / 1024))G free against a $((floor / 1024 / 1024))G reserve after pruning what it may — this host cannot reach it by pruning" >&2
+    short_after=$((short_after + 1))
+  fi
+done
 
 # The run is attributable afterwards, not only in the journal: what it looked
 # at, what it decided, and what that cost.

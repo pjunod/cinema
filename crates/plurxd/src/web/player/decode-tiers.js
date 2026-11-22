@@ -1614,7 +1614,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
   try{
     const fileId=PLAYER.fileId, options={copy:true,aac,
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
-      audio_offset_ms:PLAYER.aoffset||0};
+      audio_offset_ms:PLAYER.aoffset||0,
+      // hls.js can select soundtracks itself; native HLS keeps the muxed copy.
+      ...(!native&&!hevcCopy&&!PLAYER.preserveDolbyVision&&(PLAYER.audio||[]).length>1?{split_audio:true}:{})};
     // `vod_index_pending` has a better answer than waiting on this path — the
     // progressive remux below — so it is answered locally instead of retried.
     const retry={context:playbackCreateRetryContext(),preparation,
@@ -1631,7 +1633,14 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       new Error("A copy-HLS open needs a preparation owner to bound and cancel it."),
       {name:"TypeError"});
     info=await preparation.run(
-      signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),options,signal,retry),
+      signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),options,signal,retry)
+        .catch(error=>{
+          // Soundtrack alternates need encoder capacity a plain copy does not;
+          // when the encoders are busy, keep the copy without alternates.
+          if(!options.split_audio||!error||error.code!=="vod_family_capacity") throw error;
+          const {split_audio,...muxed}=options;
+          return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);
+        }),
       late=>releaseSession(late&&late.session_id));
   }catch(error){
     if(live && !live()) return false;

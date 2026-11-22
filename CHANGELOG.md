@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Language changes keep the picture playing on copied titles.** A copy-VOD title with two or three soundtracks now plays in the web player as one shared video with each language as an alternate audio track, so choosing another language switches in place on the same player and session instead of reopening the stream. The video is packaged and stored once for every language and viewer. Other clients, native HLS and titles with more soundtracks keep the existing combined stream.
+
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
   FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
   conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,

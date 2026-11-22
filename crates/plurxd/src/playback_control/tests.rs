@@ -164,6 +164,7 @@ async fn terminal_commit_success_completion_and_waiter_cannot_cross_exact_expiry
                 owner_epoch: 1,
             },
             effective_selection: EffectiveSelection {
+                audio_alternates: false,
                 candidate_id: None,
                 quality_auto: true,
                 height: 720,
@@ -342,6 +343,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
     let action_id = uuid::Uuid::new_v4().to_string();
     let staged = uuid::Uuid::new_v4().to_string();
     let selection = EffectiveSelection {
+        audio_alternates: false,
         candidate_id: None,
         quality_auto: true,
         height: 1080,
@@ -1650,6 +1652,7 @@ fn a_delivery_view_tolerates_a_field_from_a_newer_node() {
         },
         delivery: delivery_with_hold(Some("demand")),
         effective_selection: EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 720,
@@ -2349,6 +2352,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
                     playlist_url: "/hls/session/index.m3u8".to_owned(),
                     media_origin_ms: offered_origin_ms,
                     effective_selection: EffectiveSelection {
+                        audio_alternates: false,
                         candidate_id: None,
                         quality_auto: true,
                         height: 1080,
@@ -2368,6 +2372,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
                     playlist_url: "/hls/session/index.m3u8".to_owned(),
                     media_origin_ms: offered_origin_ms,
                     effective_selection: EffectiveSelection {
+                        audio_alternates: false,
                         candidate_id: None,
                         quality_auto: true,
                         height: 1080,
@@ -3442,6 +3447,7 @@ fn a_successor_staged_without_a_recorded_ask_still_commits() {
 
 fn prepared_selection() -> EffectiveSelection {
     EffectiveSelection {
+        audio_alternates: false,
         candidate_id: None,
         quality_auto: false,
         height: 1080,
@@ -4753,6 +4759,7 @@ fn relay_pair() -> (ControlResponseV1, ControlRelayRequest) {
             owner_epoch: 1,
         },
         effective_selection: EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 1080,
@@ -9129,6 +9136,7 @@ fn relay_answers_are_schema_bounded_and_tuple_bound() {
             owner_epoch: 1,
         },
         effective_selection: EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 1080,
@@ -9795,6 +9803,7 @@ async fn durable_authority_fences_generation_owner_expiry_and_end() {
 
 fn playing(height: i64) -> EffectiveSelection {
     EffectiveSelection {
+        audio_alternates: false,
         candidate_id: None,
         quality_auto: false,
         height,
@@ -10134,6 +10143,7 @@ fn every_axis_is_prepared_and_names_itself() {
 
 fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -10754,6 +10764,7 @@ fn a_grade_intent_comes_off_the_request() {
 
     fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
         SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -17974,4 +17985,82 @@ fn prepared_delivery_profile_survives_wire_and_legacy_absence() {
         .is_none());
     wire["delivered_dolby_vision_profile"] = serde_json::json!("8");
     assert!(serde_json::from_value::<ControlAction>(wire).is_err());
+}
+
+/// A split copy serves every soundtrack as an alternate on one attachment:
+/// selecting another is not a successor recipe, but an offset still is, and
+/// a muxed session on either side keeps today's audio crossing.
+#[test]
+fn split_copy_soundtrack_changes_are_served_in_place_but_offsets_still_prepare() {
+    let caps = can_prepare(true);
+    let mut delivered = playing(1080);
+    delivered.codec = "source".to_owned();
+    delivered.audio_track = Some(0);
+    delivered.audio_alternates = true;
+    let mut french = delivered.clone();
+    french.audio_track = Some(1);
+    assert_eq!(
+        decide_preparation(view(&delivered), view(&french), Some(&caps), roomy()),
+        PreparationDecision::Unchanged,
+    );
+    let mut offset = french.clone();
+    offset.audio_offset_ms = 250;
+    assert_eq!(
+        decide_preparation(view(&delivered), view(&offset), Some(&caps), roomy()),
+        PreparationDecision::Prepare {
+            axis: PreparationAxis::AudioTrackOrOffset
+        },
+    );
+    let mut muxed = french.clone();
+    muxed.audio_alternates = false;
+    assert_eq!(
+        decide_preparation(view(&delivered), view(&muxed), Some(&caps), roomy()),
+        PreparationDecision::Prepare {
+            axis: PreparationAxis::AudioTrackOrOffset
+        },
+    );
+}
+
+#[test]
+fn only_a_copy_that_negotiated_split_audio_delivers_alternates() {
+    let mut request = session_request(SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    });
+    assert!(!EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
+    request.split_audio = true;
+    assert!(EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
+    // Delivered alternates follow the presentation the start actually named:
+    // a negotiated split admitted as the muxed copy delivers none.
+    let started =
+        |url: &str| EffectiveSelection::from_request(&request, 1080, None).started_as(url);
+    assert!(started("/api/v1/hls/s/master.m3u8").audio_alternates);
+    assert!(!started("/api/v1/hls/s/index.m3u8").audio_alternates);
+    request.kind = SessionKind::Transcode { height: 1080 };
+    assert!(!EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
+}
+
+/// Auto and Original both deliver the copy's own bytes: copy to copy is no
+/// resolution crossing, while leaving the copy for a rung still is.
+#[test]
+fn a_copy_is_not_a_rung_for_auto_or_original() {
+    let caps = can_prepare(true);
+    let mut copy = playing(1080);
+    copy.codec = "source".to_owned();
+    copy.quality_auto = true;
+    let mut original = copy.clone();
+    original.quality_auto = false;
+    assert_eq!(
+        decide_preparation(view(&copy), view(&original), Some(&caps), roomy()),
+        PreparationDecision::Unchanged,
+    );
+    let mut rung = original.clone();
+    rung.codec = "server_selected".to_owned();
+    rung.height = 720;
+    assert_ne!(
+        decide_preparation(view(&copy), view(&rung), Some(&caps), roomy()),
+        PreparationDecision::Unchanged,
+    );
 }
