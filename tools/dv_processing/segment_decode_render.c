@@ -99,6 +99,10 @@ static const char *run_nuts[RUN_MAX], *run_dir_paths[RUN_MAX];
 static uint64_t run_bytes_base;
 static struct coded_input coded_sets[RUN_MAX][64];
 static unsigned coded_counts[RUN_MAX], coded_printed[RUN_MAX];
+// Demux reads ahead into later run windows. A coded AU a single-window helper
+// for the current window would never inspect cannot refuse it: the first
+// refusal of each later window is kept and applied when that window begins.
+static const char *run_refusals[RUN_MAX];
 #define coded_window coded_sets[run_current]
 #define coded_count coded_counts[run_current]
 
@@ -512,6 +516,18 @@ static void print_coded_inputs(void) {
            input->rpu_sha, input->base_sha);
   }
 }
+// Inside inspect_coded: refuse the current window exactly as before, or
+// record a later run window's refusal and skip this AU.
+#define CODED_NEED(ok, reason)                                                 \
+  do {                                                                         \
+    if (!(ok)) {                                                               \
+      need(run_window > run_current, reason);                                  \
+      if (!run_refusals[run_window])                                           \
+        run_refusals[run_window] = reason;                                     \
+      av_free(base_sha);                                                       \
+      return;                                                                  \
+    }                                                                          \
+  } while (0)
 // Four-byte hvcC packet framing, one first slice per BL/EL picture and one
 // fresh RPU. This independent coded-stage trace predates either decoder or GPU.
 static void inspect_coded(AVPacket *packet) {
@@ -535,18 +551,18 @@ static void inspect_coded(AVPacket *packet) {
   const uint8_t *rpu_bytes = NULL;
   size_t rpu_len = 0;
   while (at < (size_t)packet->size) {
-    need((size_t)packet->size - at >= 4, "coded NAL length prefix");
+    CODED_NEED((size_t)packet->size - at >= 4, "coded NAL length prefix");
     const uint8_t *p = packet->data + at;
     uint32_t n = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
                  (uint32_t)p[2] << 8 | p[3];
     at += 4;
-    need(n >= 2 && n <= (size_t)packet->size - at, "coded NAL bounds");
+    CODED_NEED(n >= 2 && n <= (size_t)packet->size - at, "coded NAL bounds");
     p = packet->data + at;
     int type = (p[0] >> 1) & 63;
-    need(((p[0] & 1) << 5 | (p[1] >> 3)) == 0 && (p[1] & 7) != 0,
-         "coded layer/temporal header");
+    CODED_NEED(((p[0] & 1) << 5 | (p[1] >> 3)) == 0 && (p[1] & 7) != 0,
+               "coded layer/temporal header");
     if (type < 32) {
-      need(n >= 3, "base slice header");
+      CODED_NEED(n >= 3, "base slice header");
       bl += (p[2] & 128) != 0;
       // The live P8 copy preserves these base-layer VCL units verbatim.
       // Include each original four-byte length so boundaries are unambiguous.
@@ -554,12 +570,12 @@ static void inspect_coded(AVPacket *packet) {
         av_sha_update(base_sha, p - 4, (size_t)n + 4);
     }
     if (type == 63) {
-      need(n >= 4, "enhancement wrapper");
+      CODED_NEED(n >= 4, "enhancement wrapper");
       int inner = (p[2] >> 1) & 63;
-      need(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
-           "enhancement layer/temporal header");
+      CODED_NEED(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
+                 "enhancement layer/temporal header");
       if (inner < 32) {
-        need(n >= 5, "enhancement slice header");
+        CODED_NEED(n >= 5, "enhancement slice header");
         el += (p[4] & 128) != 0;
       }
     }
@@ -570,16 +586,17 @@ static void inspect_coded(AVPacket *packet) {
     }
     at += n;
   }
-  need(bl == 1 && rpu == 1 &&
-           (base_only ? (source_profile == 7 ? el <= 1 : el == 0) : el == 1),
-       "one required source picture and fresh RPU per coded AU");
+  CODED_NEED(bl == 1 && rpu == 1 &&
+                 (base_only ? (source_profile == 7 ? el <= 1 : el == 0)
+                            : el == 1),
+             "one required source picture and fresh RPU per coded AU");
   if (in_window) {
     unsigned *count = &coded_counts[run_window];
     struct coded_input *set = coded_sets[run_window];
-    need(*count < (unsigned)frame_cap && *count < 64,
-         "coded window frame cap exhausted");
+    CODED_NEED(*count < (unsigned)frame_cap && *count < 64,
+               "coded window frame cap exhausted");
     for (unsigned i = 0; i < *count; i++)
-      need(set[i].pts != packet->pts, "duplicate coded window PTS");
+      CODED_NEED(set[i].pts != packet->pts, "duplicate coded window PTS");
     struct coded_input *input = &set[(*count)++];
     input->pts = packet->pts;
     input->duration = packet->duration;
@@ -598,6 +615,7 @@ static void inspect_coded(AVPacket *packet) {
       print_coded_inputs();
   }
 }
+#undef CODED_NEED
 static const char *current_decoder_mode(void) {
   return !hw_device       ? "software"
          : hw_fell_back    ? "vaapi-software-fallback"
@@ -684,6 +702,10 @@ static bool run_advance(int64_t boundary) {
   need(timing_output && events >= 0, "exclusive private output files");
   need(dup2(events, STDOUT_FILENO) == STDOUT_FILENO && close(events) == 0,
        "next window observations");
+  // This window's renderer.jsonl now exists, which tells the daemon the
+  // previous window is complete; only then refuse what was read ahead here.
+  need(!run_refusals[run_current],
+       run_refusals[run_current] ? run_refusals[run_current] : "");
   need(fputs(dv_gpu_runtime_line, stdout) >= 0, "window GPU runtime line");
   print_coded_inputs();
   open_nut(run_nuts[run_current]);
@@ -1096,7 +1118,8 @@ int main(int argc, char **argv) {
     run_dirs[0] = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     need(run_dirs[0] >= 0, "private output directory");
     for (int w = 1; w < run_windows; w++) {
-      run_dirs[w] = open(run_dir_paths[w], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      run_dirs[w] =
+          open(run_dir_paths[w], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
       need(run_dirs[w] >= 0, "private run window output directory");
     }
     // Every window of a run, the first included, writes its observations to
