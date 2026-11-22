@@ -8957,3 +8957,12 @@ source = "clients/linux-player/debian/changelog"
 source_anchor = "<codex-agent@plurx.invalid>"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_every_changelog_trailer_names_a_mail_host_lintian_accepts(self):"
+
+# A future-dated changelog entry made every package build differ.
+[[fixes]]
+id = "linux-player.changelog-date-reproducible-build"
+commits = ["8a49785fd268c80af8b40375fe67813015a10392"]
+source = "clients/linux-player/debian/changelog"
+source_anchor = "Sat, 21 Nov 2026 22:41:14 -0500"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_no_changelog_entry_is_dated_in_the_future(self):"
