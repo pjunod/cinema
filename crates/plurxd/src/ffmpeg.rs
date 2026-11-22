@@ -4554,10 +4554,10 @@ pub async fn has_hdr10_passthrough_vaapi(
 /// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
 /// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
 /// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a shipped
-/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into
-/// `scale_vaapi`, which accepts only VA-API surfaces: a decoder that fell back
-/// to software hands it system-memory frames and the graph fails, so success
-/// means the GPU decoded it. The pictures stay on the GPU, as they do in the
+/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into a
+/// `scale_vaapi` render, which accepts only VA-API surfaces: a decoder that
+/// fell back to software hands it system-memory frames and the graph fails,
+/// so success means the GPU decoded it. The pictures stay on the GPU, as they do in the
 /// renderer, which maps its VA-API surfaces into Vulkan and never copies them
 /// to system memory (see [`hevc_main10_decode_probe_args`]).
 ///
@@ -4616,15 +4616,19 @@ fn main10_probe_backoff(failures: u32) -> Duration {
 /// The Main10 decode probe's FFmpeg arguments.
 ///
 /// The decoded picture goes to `scale_vaapi`, never to `hwdownload`. The
-/// probe used to download it to system memory, which the renderer never
-/// does, and on an Intel iHD node the shipped FFmpeg crashed in that
-/// download (SIGSEGV, sometimes abort) in 14 of 100 runs and in 18 of 60
-/// with one decoder thread. Each crash left Main10 decode unproved, and
-/// until a later probe passed every Dolby Vision window was admitted for a
-/// software decode: 2.0-3.3 s of work for each 2.002 s 4K window, against
-/// 1.3-1.6 s on the GPU, so the player's runway drained. The same node
-/// passed this graph 175 times in 175, alone and beside other GPU work,
-/// and it still fails without a decode device.
+/// half-size scale makes it a real VA-API video-processing render (at the
+/// same size and format the filter passes the surface through untouched),
+/// so the GPU must finish decoding the picture and read it, and the picture
+/// stays on the GPU as it does in the renderer, which maps its surfaces into
+/// Vulkan. The probe used to download the picture to system memory, which
+/// the renderer never does, and on an Intel iHD node the shipped FFmpeg
+/// crashed in that download (SIGSEGV, sometimes abort) in 28 of 260 runs,
+/// about one in nine, with or without frame threads. Each crash left Main10
+/// decode unproved, and until a later probe passed every Dolby Vision window
+/// was admitted for a software decode: 2.0-3.3 s of work for each 2.002 s 4K
+/// window, against 1.3-1.6 s on the GPU, so the player's runway drained. The
+/// same node passed this graph 240 times in 240, alone and beside other GPU
+/// work, and it still fails on software frames and without a decode device.
 fn hevc_main10_decode_probe_args(device: &str, clip: &std::path::Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = [
         "-hide_banner",
@@ -4645,7 +4649,7 @@ fn hevc_main10_decode_probe_args(device: &str, clip: &std::path::Path) -> Vec<st
     args.extend(
         [
             "-vf",
-            "scale_vaapi=format=p010",
+            "scale_vaapi=w=iw/2:h=ih/2:format=p010",
             "-frames:v",
             "1",
             "-f",

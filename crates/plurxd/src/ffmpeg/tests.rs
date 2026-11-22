@@ -2837,7 +2837,7 @@ fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
 /// The Main10 decode probe proves the GPU decoded the clip by handing the
 /// picture to a filter that accepts only VA-API surfaces. It must never
 /// download the picture to system memory: that copy, which the renderer
-/// never makes, crashed the shipped FFmpeg in about one probe in seven, and
+/// never makes, crashed the shipped FFmpeg in about one probe in nine, and
 /// every crash sent the node's Dolby Vision windows to software decode.
 #[test]
 fn the_main10_decode_probe_keeps_the_picture_on_the_gpu() {
@@ -2863,7 +2863,9 @@ fn the_main10_decode_probe_keeps_the_picture_on_the_gpu() {
     }
     let filter = args.iter().position(|arg| arg == "-vf").expect("filter");
     assert!(filter > input, "{args:?}");
-    assert_eq!(args[filter + 1], "scale_vaapi=format=p010");
+    // A real VA-API render: a same-size, same-format scale_vaapi is a
+    // passthrough that never waits for the decoded surface.
+    assert_eq!(args[filter + 1], "scale_vaapi=w=iw/2:h=ih/2:format=p010");
     assert!(
         !args
             .iter()

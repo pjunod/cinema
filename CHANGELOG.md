@@ -75,7 +75,7 @@ bump may break compatibility and a **patch** bump never does.
 - 4K Dolby Vision titles played as HDR10-E or with display mapping no
   longer stall in the browser on Intel nodes. The node's Main10 GPU decode
   probe copied its test picture to system memory, which crashed the shipped
-  FFmpeg in about one run in seven; each crash sent every Dolby Vision
+  FFmpeg in about one run in nine; each crash sent every Dolby Vision
   window to software decode, which needs 2-3 s for each 2 s window. The probe
   now keeps the picture on the GPU, as the renderer does.
 - A shared-library Source no longer refuses its catalogue, current-scope and
