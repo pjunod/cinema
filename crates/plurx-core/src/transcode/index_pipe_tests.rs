@@ -1132,7 +1132,7 @@ fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
 fn the_packet_clock_is_written_in_the_mp4_tracks_own_timescale() {
     let probe = |time_base: &str| {
         format!(
-            r#"{{"streams":[{{"codec_type":"video","time_base":"1/90000","disposition":{{"attached_pic":1}}}},{{"codec_type":"video","time_base":"{time_base}"}}]}}"#
+            r#"{{"streams":[{{"codec_type":"audio","time_base":"1/48000"}},{{"codec_type":"video","time_base":"{time_base}"}},{{"codec_type":"video","time_base":"1/90000","disposition":{{"attached_pic":1}}}}]}}"#
         )
     };
     for (time_base, timescale) in [
@@ -1150,6 +1150,13 @@ fn the_packet_clock_is_written_in_the_mp4_tracks_own_timescale() {
             "{time_base}"
         );
     }
+    // `-map 0:v:0` takes the first video stream, a cover picture included.
+    assert_eq!(
+        copy_mp4_video_timescale(Some(
+            r#"{"streams":[{"codec_type":"video","time_base":"1/90000","disposition":{"attached_pic":1}},{"codec_type":"video","time_base":"1/1000"}]}"#
+        )),
+        Some(90000)
+    );
     assert_eq!(copy_mp4_video_timescale(None), None);
     assert_eq!(copy_mp4_video_timescale(Some("{}")), None);
 

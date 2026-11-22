@@ -774,6 +774,21 @@ mod association_tests {
             associate_fragment_clock(&fragment, &init, &packets, 0, Some(0), origin, 0),
             Err(PacketClockError::FragmentMismatch)
         );
+        // A fragment whose first packet the clock stamps with its
+        // predecessor's last decode time (2000) is written at 2001 by the
+        // MP4, and its row begins there.
+        let next_clock = [(2000, 2000), (2000, 3344), (2672, 4672)];
+        let next_table = [(1, 0), (670, 1342), (672, 2000)];
+        let (init, fragment, packets) = retimed(&next_table, &next_clock);
+        let timing = associate_fragment_clock(&fragment, &init, &packets, 0, Some(2000), origin, 0)
+            .expect("a run that crosses a fragment boundary");
+        assert_eq!(timing.canonical_dts, 2001);
+        assert_eq!(timing.last_muxed_dts, 2672);
+        assert_eq!(
+            associate_fragment_clock(&fragment, &init, &packets, 0, None, origin, 0),
+            Err(PacketClockError::FragmentMismatch),
+            "without its predecessor the fragment is not what the MP4 wrote"
+        );
     }
 
     /// Regression (Countdown restarted at 18.493 s, and the 'Avatar' recovery

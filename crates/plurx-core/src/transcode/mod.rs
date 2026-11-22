@@ -423,17 +423,13 @@ pub fn copy_leaves_a_stale_dolby_vision_record(
 ///
 /// Every copy recipe passes `-copytb 1`, so the muxed stream keeps the
 /// source stream's time base and `movenc` takes its denominator, doubled
-/// until it reaches 10000 (a Matroska 1/1000 becomes 16000). `None` when the
-/// stored probe names no usable video time base.
+/// until it reaches 10000 (a Matroska 1/1000 becomes 16000). The stream is
+/// the one `-map 0:v:0` selects: the first video stream, attached picture or
+/// not. `None` when the stored probe names no usable video time base.
 pub fn copy_mp4_video_timescale(probe_json: Option<&str>) -> Option<u32> {
     let probe = serde_json::from_str::<serde_json::Value>(probe_json?).ok()?;
     let stream = probe.get("streams")?.as_array()?.iter().find(|stream| {
         stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
-            && stream
-                .get("disposition")
-                .and_then(|value| value.get("attached_pic"))
-                .and_then(serde_json::Value::as_i64)
-                != Some(1)
     })?;
     let (num, den) = stream.get("time_base")?.as_str()?.split_once('/')?;
     let (num, mut den) = (

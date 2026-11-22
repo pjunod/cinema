@@ -177,8 +177,8 @@ impl ReceiverStartActor {
         request: &ControlRequestV1,
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<SharedControlAnswer, ReceiverStartError> {
-        // Every refusal below reaches the viewer as one `control_unavailable`;
-        // each names its own step here, as Start and status already do.
+        // The Source-facing steps below that answer `control_unavailable`
+        // name themselves here, as Start and status already do.
         let refused = |stage: &'static str| {
             move |error: &ReceiverStartError| {
                 tracing::warn!(target: "plurx::sharing", operation = "control", stage, error_class = ?error, "receiver Source exchange refused");
@@ -237,7 +237,19 @@ impl ReceiverStartActor {
                     .ok_or(ReceiverStartError::Unresolved)?,
             )),
             Err(refusal) => {
-                tracing::warn!(target: "plurx::sharing", operation = "control", stage = "source_refusal", code = ?refusal.code, "receiver Source exchange refused");
+                // Fences and rate limits are the protocol working; the rest
+                // say the Source could not serve control at all.
+                if matches!(
+                    refusal.code,
+                    SharedControlRefusalCode::StaleControl
+                        | SharedControlRefusalCode::OwnerChanged
+                        | SharedControlRefusalCode::RateLimited
+                        | SharedControlRefusalCode::SessionEnded
+                ) {
+                    tracing::debug!(target: "plurx::sharing", operation = "control", stage = "source_refusal", code = ?refusal.code, "receiver Source exchange refused");
+                } else {
+                    tracing::warn!(target: "plurx::sharing", operation = "control", stage = "source_refusal", code = ?refusal.code, "receiver Source exchange refused");
+                }
                 SharedControlAnswer::Refused(refusal)
             }
         })
