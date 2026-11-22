@@ -298,6 +298,13 @@ function splitAudioRefused(me,hls,trackId){
 async function switchAudio(idx){
   closeMenu();
   const me=PLAYER, v=document.getElementById("video");
+  if(me&&me.requestedAudio&&idx===me.curAudio){
+    // Back to the incumbent before the pending choice confirmed.
+    const incumbent=splitAudioTrackFor(me,idx);
+    me.requestedAudio=null;
+    if(incumbent>=0&&me.hls.audioTrack!==incumbent) me.hls.audioTrack=incumbent;
+    return;
+  }
   if(!me||!v||idx===me.curAudio) return;
   const alternate=splitAudioTrackFor(me,idx);
   if(alternate>=0){ requestSplitAudio(me,idx,alternate); return; }

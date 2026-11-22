@@ -2656,6 +2656,7 @@ mod tests {
                 .expect("verified incoming cached attachment")
         };
         let session = Session {
+            requested_audio_index: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,

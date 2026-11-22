@@ -18032,6 +18032,12 @@ fn only_a_copy_that_negotiated_split_audio_delivers_alternates() {
     assert!(!EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
     request.split_audio = true;
     assert!(EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
+    // Delivered alternates follow the presentation the start actually named:
+    // a negotiated split admitted as the muxed copy delivers none.
+    let started =
+        |url: &str| EffectiveSelection::from_request(&request, 1080, None).started_as(url);
+    assert!(started("/api/v1/hls/s/master.m3u8").audio_alternates);
+    assert!(!started("/api/v1/hls/s/index.m3u8").audio_alternates);
     request.kind = SessionKind::Transcode { height: 1080 };
     assert!(!EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
 }

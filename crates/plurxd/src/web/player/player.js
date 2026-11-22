@@ -26,6 +26,7 @@
  * @property {string} [decidedMethod]      the DECISION's method; never mutated (sessionHeight)
  * @property {any} [capsSnapshot]          the capability document the decision was asked with
  * @property {boolean} [requiresHls]       the delivery can only be served as HLS
+ * @property {{index:number,track:number,hls:any}|null} [requestedAudio] a pending in-place soundtrack switch, until hls.js confirms it
  * @property {any} [decodeRetest]          a learned decode limit this open is re-testing
  * @property {any} [learnedLimit]          the learned decode-limit view the decision was rerouted by
  * @property {string[]} [reasons]          the decision's reasons, for the stats panel

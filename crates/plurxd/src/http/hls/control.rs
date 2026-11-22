@@ -386,7 +386,8 @@ fn local_control_response(
             recipe,
             start.height,
             start.delivered_dynamic_range.clone(),
-        ),
+        )
+        .started_as(&start.playlist_url),
         request,
         result,
         server_time_unix_ms,
@@ -416,7 +417,8 @@ pub(crate) fn source_control_response(
             recipe,
             start.height,
             start.delivered_dynamic_range.clone(),
-        ),
+        )
+        .started_as(&start.playlist_url),
         request,
         result,
         server_time_unix_ms,
@@ -2270,14 +2272,15 @@ async fn staged_successor_action(
         staged_incarnation_id: staged.staged_incarnation_id,
         deadline_ms: staged.deadline_ms,
         session_id: successor.session_id,
-        playlist_url: start.playlist_url,
+        playlist_url: start.playlist_url.clone(),
         control: start.control.map(Box::new),
         media_origin_ms: successor.media_origin_ms,
         effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
             &recipe,
             start.height,
             start.delivered_dynamic_range,
-        ),
+        )
+        .started_as(&start.playlist_url),
         enhancement,
         delivered_dolby_vision_profile: start.delivered_dolby_vision_profile,
     };

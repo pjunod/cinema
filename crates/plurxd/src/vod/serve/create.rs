@@ -1602,6 +1602,7 @@ impl VodServe {
         }
         let mut replacement = Session {
             children: Vec::new(),
+            requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: processed_reuse_scope
@@ -2588,6 +2589,7 @@ impl VodServe {
             .transpose()?;
         let replacement = Session {
             children: Vec::new(),
+            requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: None,
@@ -3129,7 +3131,9 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
-            audio_excluded: !prepared.split_soundtracks.is_empty() && prepared.encoding.is_none(),
+            // A Source rendition serves a remote receiver's muxed copy; it
+            // attaches no split soundtracks, so it never excludes audio.
+            audio_excluded: false,
             video,
             dv_refit_gain,
             source_object_version,

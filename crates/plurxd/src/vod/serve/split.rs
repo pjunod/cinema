@@ -33,7 +33,7 @@ impl VodServe {
         let owner = publication.owner;
         let result = async {
             let (_, _, _) = publication.result?;
-            let (primary, children) = {
+            let (primary, children, requested_audio) = {
                 let sessions = self.shared.sessions.lock().await;
                 let Some(session) = sessions.get(session_id) else {
                     return Ok(None);
@@ -53,6 +53,7 @@ impl VodServe {
                         .iter()
                         .map(|child| Arc::clone(&child.rendition))
                         .collect::<Vec<_>>(),
+                    session.requested_audio_index,
                 )
             };
             // The shared video first: it bounds the request for every soundtrack.
@@ -151,10 +152,7 @@ impl VodServe {
                         .unwrap_or_else(|| format!("Track {}", soundtracks.len() + 1)),
                 });
             }
-            let default = video
-                .rendition
-                .recipe
-                .audio_index
+            let default = requested_audio
                 .filter(|index| soundtracks.iter().any(|track| track.source_index == *index))
                 .or_else(|| soundtracks.first().map(|track| track.source_index))
                 .ok_or_else(|| VodError::ProducerFailed("split copy has no soundtrack".into()))?;

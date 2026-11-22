@@ -1482,6 +1482,19 @@ impl EffectiveSelection {
         effective
     }
 
+    /// Bind `audio_alternates` to the presentation this start actually
+    /// served. A request may negotiate split audio and still be admitted as
+    /// the muxed copy (too many soundtracks, a refused soundtrack); only a
+    /// start whose entry point is its family master delivers alternates.
+    pub(crate) fn started_as(mut self, playlist_url: &str) -> Self {
+        let path = playlist_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(playlist_url);
+        self.audio_alternates &= path.ends_with("/master.m3u8");
+        self
+    }
+
     /// The same view, from the request alone.
     ///
     /// A *candidate* recipe has no `RemoteStartRequest` — that carries the

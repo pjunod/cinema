@@ -3614,13 +3614,21 @@ impl TranscodeManager {
                 .then(|| split_held_probe(file.id, source.object_version()))
                 .flatten();
             match shared {
-                Some(cell) => cell
-                    .get_or_try_init(|| async {
-                        probe.await.map(|held| (source.object_version().to_owned(), held))
-                    })
-                    .await?
-                    .1
-                    .clone(),
+                Some(cell) => {
+                    let (verified, held) = cell
+                        .get_or_try_init(|| async {
+                            probe.await.map(|held| (source.object_version().to_owned(), held))
+                        })
+                        .await?;
+                    if verified != source.object_version() {
+                        // Another start verified a different revision first.
+                        return Err(vod_refusal_error(
+                            "vod_source_rescan_required",
+                            "the source changed while its soundtracks were being prepared",
+                        ));
+                    }
+                    held.clone()
+                }
                 None => probe.await?,
             }
         };
@@ -4463,7 +4471,17 @@ impl TranscodeManager {
     ) -> Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)> {
         if !req.split_audio
             || encoding.is_some()
-            || !matches!(req.kind, SessionKind::Copy { .. })
+            // The split master describes an AVC copy; HEVC and Dolby Vision
+            // copies keep the muxed presentation they already qualify.
+            || !matches!(
+                req.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                    ..
+                }
+            )
+            || !matches!(file.video_codec.as_deref(), Some("h264" | "avc" | "avc1"))
             || req.continuous_media.is_some()
             || req.subtitle_burn.is_some()
             || req.presentation != Presentation::Vod

@@ -784,6 +784,7 @@ async fn insert_control_session(
     serve.shared.sessions.lock().await.insert(
         session_id.to_owned(),
         Session {
+            requested_audio_index: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -917,6 +918,7 @@ async fn insert_terminal_session(
     serve.shared.sessions.lock().await.insert(
         session_id.to_owned(),
         Session {
+            requested_audio_index: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
