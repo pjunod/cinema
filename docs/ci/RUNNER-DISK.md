@@ -499,8 +499,9 @@ over the 20 G budget *or* its filesystem is under the 20 % reserve, it resets
 it: stop the runner, delete the directory whole, start the runner. In steady
 state it decides `within budget` and deletes nothing. Then, only if the Docker
 filesystem is still under its reserve, it prunes stopped containers older than a week, images
-unused for two weeks, and build cache older than a week — not all build cache,
-because the named `plurx-<runner>` builders are kept warm on purpose.
+unused for two weeks, and the daemon's build cache older than a week. The named
+`plurx-<runner>` builders are `docker-container` buildx builders with their own
+cache, which `docker builder prune` does not reach.
 If that still leaves the filesystem under its reserve, a warm cache no longer
 buys anything, because every job held to the reserve is refused. So, provided no
 job container has appeared in the meantime, the pass finishes the operator's
@@ -670,8 +671,9 @@ names and counts these exceptions, and fails if another lane copies the bar.
 
 - **Docker prunes sooner.** The Docker block calls the same `floor_kb_for`, so
   on a 78 GB host `docker image prune -af --filter until=336h` and the builder
-  prune now fire below 25 G free instead of below 15.6 G. Nothing new is
-  deleted; an existing deleter fires across a wider range.
+  prune now fire below 25 G free instead of below 15.6 G. If that leaves the
+  host under the reserve, the pass also takes the rest of the daemon's build
+  cache and dangling images (see the hourly-cost note below).
 - **Cache resets are less rare.** This page records ~13 G/day of accumulation
   on a 78 G disk, so with 25 G reserved rather than 15.6 G, expect the timer to
   reset caches regularly instead of almost never. That is the intent — a cold
