@@ -27,9 +27,10 @@ pub struct CopyCompanionVerifier {
 
 impl CopyCompanionVerifier {
     pub fn new(canonical_init: Init, av_init: Init) -> Result<Self, CompanionError> {
-        let canonical = fmp4::copy_video_init_contract_sha256(&canonical_init)
+        // The companion form: the AV output's audio may add file-type brands.
+        let canonical = fmp4::copy_video_companion_init_sha256(&canonical_init)
             .map_err(|_| CompanionError::InitContract)?;
-        let av = fmp4::copy_video_init_contract_sha256(&av_init)
+        let av = fmp4::copy_video_companion_init_sha256(&av_init)
             .map_err(|_| CompanionError::InitContract)?;
         if canonical != av || canonical_init.tracks.len() != 1 {
             return Err(CompanionError::InitContract);

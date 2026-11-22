@@ -638,7 +638,17 @@ impl CreateSession {
             audio_delivery: None,
             copy_contract: copy_scope.map(|(preserve, convert)| {
                 (
-                    copy_audio.map_or(self.aac == Some(true), |delivery| delivery.transcodes()),
+                    copy_audio.map_or_else(
+                        || {
+                            claimless_copy_converts_audio(
+                                source,
+                                &plurx_core::playback::DeviceProfile::from_caps_v2(caps),
+                                self.audio,
+                                self.aac == Some(true),
+                            )
+                        },
+                        |delivery| delivery.transcodes(),
+                    ),
                     preserve,
                     convert,
                 )
@@ -991,6 +1001,56 @@ pub(crate) fn reconcile_request_audio(
             request.audio_delivery = Some(delivery);
         }
     }
+}
+
+/// Whether a copy for caps that name no audio sinks converts its audio. With
+/// no claim for [`reconcile_request_audio`] to resolve, the client's `aac` ask
+/// stood alone; the caps' decoder list still bounds what the copy may pass
+/// through, as the plan derived from the same caps says, and the copy's MP4
+/// output must be able to carry the track at all. Either refusal converts.
+/// This only raises the conversion; a client may always ask for it. The
+/// quality catalog's copy contract and the built request both answer here, so
+/// the candidate a selection names is the recipe the copy runs.
+pub(crate) fn claimless_copy_converts_audio(
+    source: &MediaFile,
+    caps: &plurx_core::playback::DeviceProfile,
+    audio_index: Option<i64>,
+    asked: bool,
+) -> bool {
+    // The track the copy's `-map 0:a:N?` takes: the selected one, else the first.
+    let selected = audio_index.map_or_else(
+        || source.audio_streams.first(),
+        |index| {
+            source
+                .audio_streams
+                .iter()
+                .find(|stream| stream.index == index)
+        },
+    );
+    asked
+        || selected.is_some_and(|stream| {
+            !caps.allows_audio_stream(stream)
+                || !plurx_core::transcode::copy_mp4_carries_audio_codec(&stream.codec)
+        })
+}
+
+/// [`claimless_copy_converts_audio`] applied to a built Copy request that has
+/// no audio claim.
+pub(crate) fn reconcile_claimless_copy_audio(
+    source: Option<&MediaFile>,
+    caps: Option<&plurx_core::playback::DeviceProfile>,
+    request: &mut crate::transcode::SessionRequest,
+) {
+    if request.audio_claim.is_some() {
+        return;
+    }
+    let (Some(file), Some(caps)) = (source, caps) else {
+        return;
+    };
+    let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind else {
+        return;
+    };
+    *aac = claimless_copy_converts_audio(file, caps, request.audio_index, *aac);
 }
 
 /// The plan for a build that sends no caps document: its echo, plus the one
@@ -2516,6 +2576,10 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
+    let caps_profile = body
+        .caps
+        .as_ref()
+        .map(plurx_core::playback::DeviceProfile::from_caps_v2);
     let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
@@ -2562,6 +2626,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
+    reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
             Some(previous) => state.transcode.refit_platform_for_session(previous).await,
@@ -7107,7 +7172,10 @@ fn validate_prepared_copy_head(
     {
         return Err(());
     }
-    let (_, transfer, _, _) = facts.color.ok_or(())?;
+    // `None`: the copied sample entry carries no `colr` box. A stream copy
+    // writes one only when the source's colour is specified; otherwise the
+    // colour stays in the original SPS (see the Source copy tests).
+    let transfer = facts.color.map(|(_, transfer, _, _)| transfer);
     let range = plurx_core::playback::delivered_dynamic_range(
         file,
         PlaybackMethod::Remux,
@@ -7115,9 +7183,9 @@ fn validate_prepared_copy_head(
         OutputGrade::Sdr,
     );
     let actual_transfer = match transfer {
-        16 => Some(Transfer::Pq),
-        18 => Some(Transfer::Hlg),
-        1 | 6 | 13 | 14 | 15 => Some(Transfer::Sdr),
+        Some(16) => Some(Transfer::Pq),
+        Some(18) => Some(Transfer::Hlg),
+        Some(1 | 6 | 13 | 14 | 15) => Some(Transfer::Sdr),
         _ => None,
     };
     // The Dolby Vision profile the delivered bytes carry; `None` for every
@@ -7140,6 +7208,17 @@ fn validate_prepared_copy_head(
         "sdr" => Some(Transfer::Sdr),
         "dolby_vision" => dolby_vision_base_transfer(file),
         _ => return Err(()),
+    };
+    // A head that makes no transfer claim: no `colr` box at all, or H.273
+    // code 2 ("unspecified"). Many SDR encodes ship this way (an HDTV H.264
+    // with only a BT.709 matrix copies with no `colr`). When the scan found
+    // no HDR or Dolby Vision signalling, the prepared delivery is SDR, and the
+    // copied bytes are exactly what Local plays as SDR. An HDR, HLG or Dolby
+    // Vision expectation still needs its explicit code, and a reserved or
+    // unknown code still refuses.
+    let actual_transfer = match (actual_transfer, transfer) {
+        (None, None | Some(2)) if expected_transfer == Some(Transfer::Sdr) => Some(Transfer::Sdr),
+        (actual, _) => actual,
     };
     match (expected_transfer, actual_transfer) {
         (Some(expected), Some(actual)) if expected == actual => {}
@@ -7402,12 +7481,43 @@ mod source_copy_head_tests {
         assert!(
             validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
         );
-        let mut changed = good.clone();
-        changed.color = None;
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
-        );
         assert!(validate_prepared_copy_head(&source, 720, &caps, (false, false), &good).is_err());
+    }
+    /// Production 2026-11-22: an HDTV-720p H.264 ("Kiss Kiss, Cam Cam", M6
+    /// file 3057) declares a BT.709 matrix but transfer and primaries 2
+    /// ("unspecified"), and its stream copy writes no `colr` box. Every shared
+    /// growing start refused it as `vod_source_rescan_required` at
+    /// `growing.copy_head_caps`.
+    #[test]
+    fn prepared_copy_head_accepts_an_unspecified_transfer_for_an_sdr_delivery() {
+        let source = file();
+        let caps = caps();
+        let mut unspecified = facts();
+        unspecified.color = Some((2, 2, 1, false));
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &unspecified).is_ok()
+        );
+        // The real copy of that file writes no `colr` box at all.
+        let mut absent = facts();
+        absent.color = None;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &absent).is_ok());
+        // A reserved or unknown code still makes no admissible claim.
+        let mut reserved = facts();
+        reserved.color = Some((1, 3, 1, false));
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &reserved).is_err()
+        );
+        // An SDR head is not admitted to an HDR-only decoder claim.
+        let mut hdr_only = caps.clone();
+        hdr_only.video[0].present = vec![plurx_core::playback::Transfer::Pq];
+        assert!(validate_prepared_copy_head(
+            &source,
+            1080,
+            &hdr_only,
+            (false, false),
+            &unspecified
+        )
+        .is_err());
     }
     #[test]
     fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {

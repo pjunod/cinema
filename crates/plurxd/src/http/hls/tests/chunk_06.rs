@@ -6112,6 +6112,74 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
     }
 }
 
+/// Caps that name no audio sinks judge the copy's selected track: an allowed
+/// codec keeps the client's ask, a codec the caps or the copy's MP4 cannot take
+/// converts, a missing selection maps nothing and converts nothing, and a claim
+/// or a Transcode keeps its own resolution. The quality catalog's copy contract
+/// names the same audio as the built request every time.
+#[test]
+fn claimless_copy_audio_converts_what_the_caps_or_copy_mp4_cannot_take() {
+    use crate::transcode::SessionKind;
+    let stream = |index, codec: &str, channels| plurx_core::domain::AudioStream {
+        index, codec: codec.into(), channels: Some(channels), sample_rate: Some(48_000),
+        channel_layout: None, language: None, title: None, default: index == 1,
+    };
+    let mut file = dolby_vision_p7_file();
+    file.audio_streams = vec![stream(1, "aac", 2), stream(3, "truehd", 6), stream(5, "eac3", 6)];
+    let caps = |audio: &str| caps_v2(&format!(
+        r#"{{"v":2,"video":[{{"codec":"hevc","present":["hdr10"]}}],"audio":{audio},"transports":["hls"]}}"#
+    ));
+    for (audio, decoders, aac, expected) in [
+        (None, r#"["aac"]"#, None, false),              // allowed first track
+        (Some(1), r#"["aac"]"#, Some(true), true),      // an ask is kept
+        (Some(5), r#"["aac"]"#, None, true),            // decoder list refuses
+        (Some(5), r#"["aac","eac3"]"#, Some(false), false), // passthrough
+        (Some(3), r#"["aac","truehd"]"#, None, true),   // copy MP4 refuses
+        (Some(9), r#"["aac"]"#, None, false),           // selects no track
+    ] {
+        let caps = caps(decoders);
+        let body = CreateSession {
+            processed_upgrade: None, copy: Some(true), aac, audio, ..bare_create() };
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert!(query.audio_claim.is_none());
+        let mut request = body.into_request(file.id, 2160);
+        reconcile_request_audio(Some(&file), &mut request);
+        reconcile_claimless_copy_audio(
+            Some(&file),
+            Some(&plurx_core::playback::DeviceProfile::from_caps_v2(&caps)),
+            &mut request,
+        );
+        let SessionKind::Copy { aac: built, .. } = request.kind else {
+            panic!("a Copy request stays Copy");
+        };
+        assert_eq!(built, expected, "track {audio:?} with {decoders}");
+        assert_eq!(
+            query.copy_contract.expect("Copy contract").0,
+            built,
+            "the catalog names the audio the copy runs: track {audio:?} with {decoders}"
+        );
+    }
+    // A claim resolves the full delivery; the claimless rule never overrides it.
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]}"#);
+    let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
+    let body = CreateSession {
+        processed_upgrade: None, copy: Some(true), aac: Some(false), audio: Some(5), ..bare_create() };
+    let mut request = body.into_request(file.id, 2160);
+    request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+    assert!(request.audio_claim.is_some());
+    let before = request.kind;
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before, "a claim is left to reconcile_request_audio");
+    // A Transcode has no copied audio to judge.
+    let body = CreateSession { processed_upgrade: None, audio: Some(3), ..bare_create() };
+    let mut request = body.into_request(file.id, 1080);
+    let before = request.kind;
+    assert!(matches!(before, SessionKind::Transcode { .. }));
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before);
+}
+
 /// Compare actual emitted IDs across decision discovery (no retained Copy
 /// contract) and create discovery, not two digests of a manufactured tuple.
 #[tokio::test]
@@ -6974,4 +7042,199 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
             assert!(matches!(result.request.kind,crate::transcode::SessionKind::Transcode { .. }));
         }
     }
+}
+
+
+#[tokio::test]
+async fn qualified_auto_copy_rebinds_the_incumbent_with_muxed_hls() {
+    use super::preparation;
+    use crate::playback_control::{
+        ClientSelection, CodecPolicy, DynamicRangePolicy, EffectiveSelection, QualitySelection,
+        SubtitleMode, SubtitleSelection,
+    };
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::playback::candidate::CandidateRoute;
+
+    prepare_catalog_test_encoder().await;
+    let state = resolver_state();
+    let dir = crate::test_tempdir().expect("source dir");
+    let path = dir.path().join("ordinary.mkv");
+    std::fs::write(&path, [0_u8; 4096]).expect("candidate source");
+    let mtime = std::fs::metadata(&path)
+        .expect("metadata")
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs() as i64;
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Qualified copy".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Qualified copy".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let id = state
+        .store
+        .upsert_file(
+            item,
+            path.to_str().expect("source path"),
+            4096,
+            mtime,
+            &ProbeResult {
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(3840),
+                height: Some(2160),
+                bit_depth: Some(8),
+                raw_json: Some(
+                    serde_json::json!({"streams":[{
+                        "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                        "width":3840,"height":2160,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1",
+                        "avg_frame_rate":"24/1","r_frame_rate":"24/1"
+                    }]})
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let source = state
+        .store
+        .get_file(id)
+        .await
+        .expect("read")
+        .expect("source");
+    let caps = caps_v2(
+        r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls"]}"#,
+    );
+    let create = CreateSession {
+        playback_id: "qualified-auto-copy".into(),
+        quality_auto: Some(true),
+        copy: Some(true),
+        height: Some(2160),
+        caps: Some(caps.clone()),
+        presentation: Some("vod".into()),
+        transport: Some("native".into()),
+        ..bare_create()
+    };
+    let query = create.selection_catalog_request(&source, &caps, create.reviewed_copy_scope(None));
+    let catalog = state
+        .media_pool
+        .quality_catalog(&state, query.clone())
+        .await;
+    let row = catalog
+        .candidates
+        .iter()
+        .find(|row| {
+            row.node_id == state.node_id
+                && row.candidate.route == CandidateRoute::Remux
+                && row.candidate.target_height == 2160
+                && row.candidate.playable()
+        })
+        .expect("ordinary copy row");
+    let candidate = &row.candidate;
+    let mut route = crate::media_sessions::takeover_eligible_route(
+        "qualified-muxed",
+        "00000000-0000-4000-8000-0000000000a1",
+    );
+    route.owner_node_id = state.node_id.clone();
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.source_mtime = mtime;
+    predecessor.request = create.into_request(id, 2160);
+    reconcile_request_audio(Some(&source), &mut predecessor.request);
+    predecessor.candidate_id = Some(candidate.id);
+    predecessor.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
+        catalog_query: Some(query),
+        candidate: candidate.clone(),
+        caps: caps.clone(),
+        binding: row.binding.clone().expect("authoritative copy binding"),
+    });
+    predecessor.decoder_caps = Some(
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+            .expect("retained playback decoder"),
+    );
+    route.recipe_json = serde_json::to_string(&predecessor).expect("durable worker recipe");
+    route.response_json = serde_json::json!({"planning_caps":caps}).to_string();
+    let predecessor: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("parse durable route");
+    assert!(predecessor.request.candidate_context.is_none());
+    let delivered = EffectiveSelection::from_recipe(&predecessor, 2160, None);
+    let mut selection = ClientSelection {
+        quality: QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        },
+        codec: CodecPolicy::Auto,
+        dynamic_range: DynamicRangePolicy::Auto,
+        audio_track: None,
+        subtitle: SubtitleSelection {
+            mode: SubtitleMode::Off,
+            track: None,
+        },
+        audio_offset_ms: 0,
+    };
+    let fresh = preparation::replan_qualified_upgrade(
+        &state,
+        &route,
+        &predecessor,
+        &selection,
+        &delivered,
+        None,
+        &source,
+        2160,
+    )
+    .await
+    .unwrap_or_else(|error| match error {
+        preparation::QualifiedUpgradeReplanError::Retry => panic!("candidate unavailable"),
+        preparation::QualifiedUpgradeReplanError::Terminal(reason) => panic!("{reason}"),
+    });
+    let bound = fresh
+        .candidate_context
+        .expect("fresh copy binding after qualification");
+    assert_eq!(bound.candidate_id, candidate.id);
+    assert_eq!(bound.recipe_digest, candidate.recipe_digest);
+    assert_eq!(
+        fresh.kind.copy_contract(),
+        predecessor.request.kind.copy_contract()
+    );
+    assert_eq!(fresh.transport, predecessor.request.transport);
+    selection.quality = QualitySelection::Auto {
+        height: Some(2160),
+        candidate_id: Some(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([17; 32]),
+        ),
+    };
+    assert!(matches!(
+        preparation::replan_qualified_upgrade(
+            &state,
+            &route,
+            &predecessor,
+            &selection,
+            &delivered,
+            None,
+            &source,
+            2160,
+        )
+        .await,
+        Err(preparation::QualifiedUpgradeReplanError::Terminal(_))
+    ));
 }

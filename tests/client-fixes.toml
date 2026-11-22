@@ -8629,7 +8629,7 @@ test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
 id = "linux-player.shared-native-physical-target"
 commits = ["3cb2b008d0c2ca48680d63c1cd8aa9121533574a"]
 source = "clients/linux-player/plurx_player/playback.py"
-source_anchor = "NATIVE_MAPPER = \"shared native Dolby renderer\""
+source_anchor = "self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_authoritative_success_reports_physical_peak_in_existing_fact_fields(self):"
 
@@ -8939,3 +8939,30 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "self.seek_film(target, preserve_pause=True)"
 test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_quality_admission_preserves_paused_film_seek_on_rolling_success(self):"
+
+# Cinema's quality pills claim only what mpv and the server prove.
+[[fixes]]
+id = "linux-player.quality-pills-claim-only-what-is-true"
+commits = ["2356e657232716201add448ded8d0c4288eaf83c"]
+source = "clients/linux-player/plurx_player/badges.py"
+source_anchor = "def current_report(session):"
+test = "clients/linux-player/tests/test_badges.py"
+test_anchor = "def test_failed_control_exchange_keeps_the_current_report(self):"
+
+# A dotless changelog mail host stopped every package verification at lintian.
+[[fixes]]
+id = "linux-player.changelog-mail-host-lintian"
+commits = ["ea87b71612be8b23abe5d44d194e5995e3755083"]
+source = "clients/linux-player/debian/changelog"
+source_anchor = "<codex-agent@plurx.invalid>"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_changelog_trailer_names_a_mail_host_lintian_accepts(self):"
+
+# A future-dated changelog entry made every package build differ.
+[[fixes]]
+id = "linux-player.changelog-date-reproducible-build"
+commits = ["8a49785fd268c80af8b40375fe67813015a10392"]
+source = "clients/linux-player/debian/changelog"
+source_anchor = "Sat, 21 Nov 2026 22:41:14 -0500"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_no_changelog_entry_is_dated_in_the_future(self):"

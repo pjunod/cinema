@@ -28,7 +28,7 @@ package.preload['mp.assdraw'] = function() return {ass_new=function()
     local a={text=''}
     a.new_event=function(self) self.text=self.text..'\n' end
     a.append=function(self,s) self.text=self.text..s end
-    a.draw_start=function() end; a.draw_stop=function() end; a.rect_cw=function() end
+    a.draw_start=function() end; a.draw_stop=function() end; a.rect_cw=function() end; a.round_rect_cw=function() end
     return a
 end} end
 P={['time-pos']=5,duration=30,pause=false,['user-data/osc/film']={origin=60,duration=7200},
@@ -284,4 +284,65 @@ update('user-data/cinema',original);click(930,681);press('down');press('enter')
 eq(#commands,0);assert(not overlay.data:find('Playback quality',1,true))
 click(1035,681);for i=1,9 do press('down') end;press('enter')
 eq(last()[2],'cinema-autoplay');eq(last()[3],'no')
-print('Cinema overlay: 32 control scenarios and 3 live playback Info regressions passed')
+-- Quality pills: what is playing, the web player's fact badges, beside the title.
+local function pills_case(video, renderer, source, enhancement)
+    P['video-params']=video
+    P['track-list']={{type='video',id=1,selected=true,['dolby-vision-profile']=video.profile},
+        {type='audio',id=2,selected=true,codec='truehd',title='TrueHD Atmos 7.1',['demux-channel-count']=8}}
+    reset()
+    update('user-data/cinema-video',{source=source or {hdr='dolby_vision',dv_profile=7,dv_el_present=true},
+        renderer=renderer,enhancement=enhancement})
+    return overlay.data
+end
+-- A pill is its own ASS event: the escaped text right after the override block.
+local function has(data,value) return data:find('}'..value..'\n',1,true)~=nil end
+local native={kind='native',label='shared native Dolby renderer',target_nits=1000}
+local dv={w=3840,h=2160,colormatrix='dolbyvision',profile=7}
+width=1280
+-- Profile 7 through the private build: EL, RPU and DYN applied on this device;
+-- FEL is never claimed locally, since full and minimal layers are not told apart.
+local data=pills_case(dv,native)
+for _,value in ipairs({'2160p','DV P7','EL','RPU','DYN','ATMOS 7.1'}) do assert(has(data,value),value) end
+assert(not has(data,'FEL'));assert(not data:find('→',1,true))
+-- A Profile 7 → 8.1 delivery is named; its pass-through RPU and dropped EL are not claimed.
+data=pills_case({w=3840,h=2160,colormatrix='dolbyvision',profile=8},native)
+assert(has(data,'DV P7 → DV P8'));assert(not has(data,'EL'));assert(not has(data,'RPU'));assert(has(data,'DYN'))
+-- Dolby Vision removed on the way: an HDR10 picture claims no Dolby enhancement.
+data=pills_case({w=3840,h=2160,colormatrix='bt.2020-ncl',gamma='pq',profile=7},native)
+assert(has(data,'DV P7 → HDR10'));assert(not has(data,'RPU'));assert(not has(data,'DYN'))
+-- The private build saying the frame had no RPU wins over mpv's matrix.
+data=pills_case(dv,{kind='none',label='none (no Dolby Vision RPU)'})
+assert(not has(data,'RPU'));assert(not has(data,'EL'))
+-- A system mpv (no renderer line) still applies the RPU, but EL is not claimed.
+data=pills_case(dv,nil);assert(has(data,'RPU'));assert(has(data,'DYN'));assert(not has(data,'EL'))
+-- A carried route's server pill holds only while mpv renders Dolby Vision.
+local carried={active={'DYN'},details={{badge='DYN',active=true,text='DYN: dynamic metadata reaches the display'}}}
+data=pills_case({w=1920,h=1080,gamma='pq'},nil,{hdr='dolby_vision',dv_profile=8},carried)
+assert(has(data,'1080p'));assert(has(data,'DV P8 → HDR10'));assert(not has(data,'DYN'))
+data=pills_case({w=1920,h=1080,colormatrix='dolbyvision',profile=8},{kind='none',label='none (no Dolby Vision RPU)'},
+    {hdr='dolby_vision',dv_profile=8},carried)
+assert(not has(data,'DYN'))
+-- A processed route's server pills and HDR10-E range stand as its report states.
+data=pills_case({w=3840,h=2160,gamma='pq'},nil,nil,{active={'FEL','RPU','DYN'},processed='HDR10-E',
+    details={{badge='FEL',active=true,text='FEL: full enhancement layer reconstructed into the picture'}}})
+assert(has(data,'DV P7 → HDR10-E'));assert(has(data,'FEL'));assert(has(data,'RPU'));assert(has(data,'DYN'))
+-- An SDR source has no range pill; the audio pill still shows.
+data=pills_case({w=1280,h=720,gamma='bt.1886'},nil,{})
+assert(has(data,'720p'));assert(not has(data,'SDR'));assert(has(data,'ATMOS 7.1'))
+-- A narrow window drops audio and resolution before it would split the enhancement group.
+width=560;data=pills_case(dv,native)
+assert(has(data,'DV P7'));assert(has(data,'EL'));assert(has(data,'RPU'));assert(has(data,'DYN'))
+assert(has(data,'2160p'));assert(not has(data,'ATMOS 7.1'))
+update('user-data/cinema',{tone_mapping=true})
+assert(has(overlay.data,'DV P7'));assert(not has(overlay.data,'DYN'),'whole group dropped, never split')
+update('user-data/cinema',{})
+width=1280
+-- Playback info names the mapper and says why each enhancement is or is not active.
+pills_case(dv,native);click(1125,681)
+for i=1,60 do if overlay.data:find('Dolby Vision mapper:',1,true) then break end; press('down') end
+assert(overlay.data:find('Dolby Vision mapper: shared native Dolby renderer',1,true))
+for i=1,4 do press('down') end
+assert(overlay.data:find('Dolby Vision enhancements: EL · RPU · DYN',1,true))
+assert(overlay.data:find('● EL: the dual-layer Profile 7 stream',1,true))
+update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 11 quality pill cases passed')
