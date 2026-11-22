@@ -839,6 +839,7 @@ fn stored_title() -> TitleDemand {
         queued_job_id: None,
         active_job_id: None,
         fel_head_target: None,
+        fel_head_recipe: None,
         playback_requested: false,
         scanner_digest: None,
         playback_recipes: Vec::new(),
@@ -889,7 +890,10 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
         .find("demand.probe_revision = revision;")
         .expect("rebind");
     assert!(wait < bind && bind < reuse && reuse < moved);
-    assert!(source.contains("let stats = match reused {\n        Some(stats) => stats,"));
+    // A reusable generation aggregate replaces the title scan in every mode.
+    assert!(source.contains(
+        "match reused {\n            Some(stats) => Ok(stats),\n            None => scan.await,"
+    ));
 }
 
 #[test]
@@ -932,7 +936,7 @@ async fn live_title_qualification_publishes_its_receipt_without_polling_full_sca
     use std::sync::atomic::{AtomicBool, Ordering};
     let visible = AtomicBool::new(false);
     let acquired = acquire_title(
-        true,
+        TitleAcquisitionMode::Playback,
         None,
         async { panic!("a live qualification must not read the whole title") },
         async {
@@ -951,7 +955,7 @@ async fn live_title_qualification_publishes_its_receipt_without_polling_full_sca
     );
     let stats = reusable_aggregate(&stored_title(), 7).expect("existing aggregate");
     let acquired = acquire_title(
-        true,
+        TitleAcquisitionMode::Playback,
         Some(stats),
         async { panic!("a stored aggregate does not turn live work into a scan") },
         async {},
@@ -969,7 +973,7 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
     let order = std::sync::Mutex::new(Vec::new());
     let stats = reusable_aggregate(&stored_title(), 7).expect("aggregate");
     let acquired = acquire_title(
-        false,
+        TitleAcquisitionMode::Maintenance,
         None,
         async {
             order.lock().expect("order").push("scan");
@@ -984,7 +988,7 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
     assert!(matches!(acquired, TitleAcquisition::Complete(_)));
     assert_eq!(*order.lock().expect("order"), vec!["scan", "qualify"]);
     let failed = acquire_title(
-        false,
+        TitleAcquisitionMode::Maintenance,
         None,
         async { Err(TitleScanError::from("source changed")) },
         async { panic!("failed source acquisition cannot qualify") },
@@ -992,7 +996,7 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
     .await;
     assert!(matches!(failed, Err(TitleScanError::Failed(error)) if error == "source changed"));
     let interrupted = acquire_title(
-        false,
+        TitleAcquisitionMode::Maintenance,
         None,
         async { Err(TitleScanError::SourceInterrupted("read".into())) },
         async { panic!("an interrupted acquisition cannot qualify") },
@@ -1205,6 +1209,30 @@ async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_
         bounded.last_error_code.as_deref(),
         Some("title_source_read_failed")
     );
+}
+
+#[tokio::test]
+async fn native_prewarm_precedes_the_whole_title_scan() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ready = AtomicBool::new(false);
+    let stats = reusable_aggregate(&stored_title(), 7).expect("aggregate");
+    let acquired = acquire_title(
+        TitleAcquisitionMode::NativePrewarm,
+        None,
+        async {
+            assert!(
+                ready.load(Ordering::Acquire),
+                "head must precede the full scan"
+            );
+            Ok(stats)
+        },
+        async {
+            ready.store(true, Ordering::Release);
+        },
+    )
+    .await
+    .expect("native title work");
+    assert!(matches!(acquired, TitleAcquisition::Complete(_)));
 }
 
 #[tokio::test]

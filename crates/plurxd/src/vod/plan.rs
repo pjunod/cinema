@@ -31,16 +31,26 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
                 .as_bytes(),
         );
     }
-    hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
-    hasher.update([
-        u8::from(recipe.aac),
-        u8::from(recipe.video.preserves_dolby_vision()),
-        u8::from(recipe.video.promotes_parameter_sets()),
-    ]);
-    hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
-    if let Some(audio) = &recipe.audio_delivery {
-        hasher.update(b"audio-delivery-v1\0");
-        hasher.update(audio.byte_identity().as_bytes());
+    if recipe.audio_excluded && recipe.encoding.is_none() {
+        // Language, AAC conversion, offset and audio delivery select no bytes
+        // of a video-only copy; they must not fork the shared video.
+        hasher.update(b"video-only-v1\0");
+        hasher.update([
+            u8::from(recipe.video.preserves_dolby_vision()),
+            u8::from(recipe.video.promotes_parameter_sets()),
+        ]);
+    } else {
+        hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
+        hasher.update([
+            u8::from(recipe.aac),
+            u8::from(recipe.video.preserves_dolby_vision()),
+            u8::from(recipe.video.promotes_parameter_sets()),
+        ]);
+        hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
+        if let Some(audio) = &recipe.audio_delivery {
+            hasher.update(b"audio-delivery-v1\0");
+            hasher.update(audio.byte_identity().as_bytes());
+        }
     }
     match recipe.cluster_cache_key.as_deref() {
         // A v2 artifact key, or `copy-index-v3:` and a v3 contract key.
@@ -95,8 +105,17 @@ pub(super) fn track_durations(
     recipe: &Recipe,
     container_ms: i64,
 ) -> TrackDurations {
+    let video_ms = index_video_ms(index);
+    if recipe.audio_excluded {
+        // No audio track: the plan has no audio tail and no audio bytes.
+        return TrackDurations {
+            video_ms,
+            audio_ms: video_ms,
+            audio_bits_per_second: 0,
+        };
+    }
     TrackDurations {
-        video_ms: index_video_ms(index),
+        video_ms,
         audio_ms: container_ms,
         audio_bits_per_second: audio_rate(recipe),
     }

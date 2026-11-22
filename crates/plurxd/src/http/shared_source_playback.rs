@@ -82,6 +82,12 @@ enum SourceStartTaskStage {
         // outcome, never as an adopted factory or physical-admission authority.
         intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
     },
+    /// The Store answered this planned incarnation's claim, and the answer
+    /// wrote no binding (unavailable, at capacity or in conflict). Unlike a
+    /// lost reply, nothing durable or physical is owed for it.
+    Unclaimed {
+        planned_incarnation: Uuid,
+    },
     Acquired(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigning(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigned(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
@@ -102,6 +108,12 @@ enum SourceUninvokedCleanup {
         planned_incarnation: Uuid,
         intent: Box<plurx_core::sharing_source_sessions::SourceSessionIntent>,
     },
+    /// The claim affirmatively wrote nothing for this planned incarnation.
+    /// There is no row to release: the joined task is the whole obligation,
+    /// so its End settles without a Store exchange.
+    Unclaimed {
+        planned_incarnation: Uuid,
+    },
     G0(plurx_core::sharing_source_sessions::SourceBindingHandle),
     G1(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
 }
@@ -111,6 +123,9 @@ impl SourceUninvokedCleanup {
             Self::UncertainG0 {
                 planned_incarnation,
                 ..
+            }
+            | Self::Unclaimed {
+                planned_incarnation,
             } => *planned_incarnation,
             Self::G0(binding) => binding.incarnation_id(),
             Self::G1(assignment) => assignment.binding().incarnation_id(),
@@ -119,6 +134,7 @@ impl SourceUninvokedCleanup {
     async fn release(&self, state: &crate::state::AppState) -> Result<(), SourceStartFailure> {
         use plurx_core::sharing_source_sessions::SourceReleaseOutcome;
         let result = match self {
+            Self::Unclaimed { .. } => return Ok(()),
             Self::UncertainG0 { intent, .. } => {
                 state
                     .store
@@ -154,6 +170,9 @@ impl SourceStartTaskStage {
             | Self::Claiming {
                 planned_incarnation,
                 ..
+            }
+            | Self::Unclaimed {
+                planned_incarnation,
             } => Some(*planned_incarnation),
             Self::Acquired(binding) | Self::Assigning(binding) => Some(binding.incarnation_id()),
             Self::Assigned(assignment)
@@ -207,6 +226,7 @@ impl SourceStartEntry {
                     SourceStartTaskStage::ReadingIntent { .. } => "reading_intent",
                     SourceStartTaskStage::IntentReady { .. } => "intent_ready",
                     SourceStartTaskStage::Claiming { .. } => "claiming",
+                    SourceStartTaskStage::Unclaimed { .. } => "claim_refused",
                     SourceStartTaskStage::Acquired(_) => "preparing",
                     SourceStartTaskStage::Assigning(_) => "assigning",
                     SourceStartTaskStage::Assigned(_) => "ingress_admission",
@@ -245,6 +265,11 @@ impl SourceStartEntry {
                             intent: Box::new(intent.clone()),
                         })
                     }
+                    SourceStartTaskStage::Unclaimed {
+                        planned_incarnation,
+                    } => Some(SourceUninvokedCleanup::Unclaimed {
+                        planned_incarnation: *planned_incarnation,
+                    }),
                     SourceStartTaskStage::Acquired(binding)
                     | SourceStartTaskStage::Assigning(binding) => {
                         Some(SourceUninvokedCleanup::G0(binding.clone()))
@@ -670,6 +695,19 @@ impl SourceStartRegistry {
             .iter()
             .filter(|entry| !entry.actual_finished())
             .count()
+    }
+    /// The growing copy a started request is served from, while it has one.
+    #[cfg(unix)]
+    pub(crate) fn growing_backing(
+        &self,
+        request_id: Uuid,
+    ) -> Option<std::sync::Arc<crate::transcode::source_actor::SourceGrowingBacking>> {
+        let entries = self.entries.lock().expect("Source HTTP starts");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.identity.request_id == request_id)?;
+        let result = entry.result.lock().expect("Source start result");
+        result.as_ref()?.as_ref().ok()?.actor.growing_backing()
     }
 }
 impl SourceStartRegistry {
@@ -2042,7 +2080,7 @@ async fn own_start(
     // withholds those claims from every receiver that did not. An older
     // receiver round-trips the Start through a `StartResponse` that never
     // deserializes the rows, and would refuse it.
-    let relays_enhancement = (headers.forwarded_ingress().is_none()
+    let relays_enhancement = (!headers.arrived_forwarded()
         && receiver_presentation::authenticated_receiver_dolby_vision(&headers))
         || input
             .session
@@ -2058,7 +2096,7 @@ async fn own_start(
         // receiver that did not affirm relay; a Start taken here with the
         // receiver's own headers can also say so. A forwarded owner cannot
         // tell a withheld recipe from one that never claimed Dolby Vision.
-        headers.forwarded_ingress().is_none()
+        !headers.arrived_forwarded()
             && !receiver_presentation::authenticated_receiver_dolby_vision(&headers),
         relays_enhancement,
     ))
@@ -2093,9 +2131,26 @@ async fn own_start(
         SourceClaimOutcome::InFlight(_)
         | SourceClaimOutcome::Resolved { .. }
         | SourceClaimOutcome::Retired(_) => return Err(SourceStartFailure::Unresolved),
-        SourceClaimOutcome::Conflict => return Err(SourceStartFailure::Conflict),
-        SourceClaimOutcome::Unavailable => return Err(SourceStartFailure::Unavailable),
-        SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
+        // Each of these is the Store's own answer for this fresh planned
+        // incarnation, and none of them wrote a binding for it. A replayed
+        // answer may name another incarnation's row for the same request;
+        // that row is not this Start's to release, and the planned
+        // incarnation's release could never match it. Retaining the
+        // unknown-claim stage would owe a release of a row that does not
+        // exist: End could never settle and the entry would hold its
+        // registry slot until restart.
+        outcome @ (SourceClaimOutcome::Conflict
+        | SourceClaimOutcome::Unavailable
+        | SourceClaimOutcome::Capacity(_)) => {
+            entry.retain_stage(SourceStartTaskStage::Unclaimed {
+                planned_incarnation,
+            });
+            return Err(match outcome {
+                SourceClaimOutcome::Conflict => SourceStartFailure::Conflict,
+                SourceClaimOutcome::Capacity(_) => SourceStartFailure::Capacity,
+                _ => SourceStartFailure::Unavailable,
+            });
+        }
         SourceClaimOutcome::RetargetUnassigned => {
             // This is an affirmative atomic no-binding result, unlike an
             // error/lost reply. Preserve no ambiguous-claim cleanup obligation.
@@ -2629,6 +2684,31 @@ pub(crate) enum SourceFixtureMode {
     /// Dolby Vision decoder (every shipped client's shared path): the base
     /// strip, on a node whose FFmpeg has `dovi_rpu`.
     DolbyVisionStripped,
+    /// The production web shape: a BT.709-tagged H.264 High source whose row
+    /// carries the scan's profile, started through a receiver that affirms
+    /// bounded ranges, so the Source runs its growing copy owner.
+    RangeCopy,
+    /// [`Self::RangeCopy`] in Matroska with two embedded SubRip tracks,
+    /// started with native subtitles and the first track selected.
+    RangeNativeCopy,
+    /// [`Self::RangeCopy`] as a scanned remux carries it: Matroska with an
+    /// E-AC-3 5.1 track, started with that track by caps that decode it, so
+    /// it passes through.
+    RangeAudioCopy,
+    /// A scanned Dolby Vision Profile 7 remux through a range-affirming
+    /// receiver: Matroska with the Profile 7 source of
+    /// [`Self::DolbyVisionConverted`] and a TrueHD 5.1 track, converted to
+    /// Profile 8.1 by the growing copy owner.
+    RangeDolbyVisionConverted,
+    /// [`Self::RangeDolbyVisionConverted`] whose scan records a 3840x2160
+    /// remux, as M6 file 6751's does. For preparation only: the generated
+    /// source itself stays small, so no copy of it is started.
+    RangeDolbyVisionScanned4k,
+    /// File 3122's shape through the web player: Matroska H.264 SDR with an
+    /// E-AC-3 5.1 track and two SubRip tracks (the first "English (SDH)"),
+    /// started by Chrome's caps document and audio sinks with `aac` asked and
+    /// native subtitles on the first track.
+    RangeWebNativeAudioCopy,
 }
 
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
@@ -2753,11 +2833,12 @@ pub(crate) fn real_source_start_fixture_with_budget(
 }
 #[cfg(test)]
 fn real_source_start_fixture_at(
+    mode: SourceFixtureMode,
     listener: tokio::net::TcpListener,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
     Box::pin(build_real_source_start_fixture(
-        SourceFixtureMode::Copy,
+        mode,
         None,
         Some(listener),
         fixture_body_budget,
@@ -2900,7 +2981,29 @@ async fn build_real_source_start_fixture(
         SourceFixtureMode::NativeCopy
             | SourceFixtureMode::NativeEncoded
             | SourceFixtureMode::NativeHdr10Copy
+            | SourceFixtureMode::RangeNativeCopy
+            | SourceFixtureMode::RangeWebNativeAudioCopy
     );
+    // The modes a range-affirming receiver starts: a growing H.264 copy.
+    let range_copy = matches!(
+        mode,
+        SourceFixtureMode::RangeCopy
+            | SourceFixtureMode::RangeNativeCopy
+            | SourceFixtureMode::RangeAudioCopy
+            | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeDolbyVisionScanned4k
+            | SourceFixtureMode::RangeWebNativeAudioCopy
+    );
+    // The scanned remux modes' audio: the codec FFmpeg encodes, its scanned
+    // name and channel count.
+    let audio = match mode {
+        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeWebNativeAudioCopy => {
+            Some(("eac3", 6))
+        }
+        SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => Some(("truehd", 6)),
+        _ => None,
+    };
     let burn = matches!(
         mode,
         SourceFixtureMode::BurnText | SourceFixtureMode::BurnBitmap
@@ -2910,7 +3013,9 @@ async fn build_real_source_start_fixture(
         | SourceFixtureMode::DolbyVisionCompatibleEncoded
         | SourceFixtureMode::DolbyVisionUnaffirmed
         | SourceFixtureMode::DolbyVisionStripped => Some((8u8, 1u8)),
-        SourceFixtureMode::DolbyVisionConverted => Some((7, 6)),
+        SourceFixtureMode::DolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => Some((7, 6)),
         SourceFixtureMode::DolbyVisionProfile5Encoded => Some((5, 0)),
         _ => None,
     };
@@ -2921,6 +3026,8 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::DolbyVisionConverted
             | SourceFixtureMode::DolbyVisionUnaffirmed
             | SourceFixtureMode::DolbyVisionStripped
+            | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeDolbyVisionScanned4k
     );
     let hdr = matches!(
         mode,
@@ -2942,7 +3049,7 @@ async fn build_real_source_start_fixture(
     } else {
         (320, 180)
     };
-    let file = directory.path().join(if native || burn {
+    let mut file = directory.path().join(if native || burn {
         "source.mkv"
     } else {
         "source.mp4"
@@ -2987,6 +3094,31 @@ async fn build_real_source_start_fixture(
             generate.args(["-tag:v", "hvc1"]);
         }
         generate.arg("-y");
+    } else if range_copy {
+        // BT.709 signalled in the frames and the bitstream, as a scanned
+        // library title carries it: the growing copy checks its head's
+        // declared transfer against the player's caps.
+        generate.arg("testsrc2=s=320x180:r=24").args([
+            "-vf",
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-t",
+            "4",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "24",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-y",
+        ]);
     } else {
         generate
             .arg("color=s=320x180:r=24")
@@ -3047,6 +3179,44 @@ async fn build_real_source_start_fixture(
         }
         None => {}
     }
+    if let Some((codec, channels)) = audio {
+        // A remux's audio beside the video built above, in Matroska.
+        let muxed = directory.path().join("remux.mkv");
+        let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args(["-v", "error", "-i"])
+            .arg(&file)
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-shortest",
+                "-c:v",
+                "copy",
+                "-c:a",
+                codec,
+                "-strict",
+                "experimental",
+                "-ac",
+            ])
+            .arg(channels.to_string())
+            .arg("-y")
+            .arg(&muxed)
+            .output()
+            .await
+            .expect("actual audio mux");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::remove_file(&file).expect("video-only fixture removed");
+        file = muxed;
+    }
     if native {
         let caption = directory.path().join("actual.srt");
         std::fs::write(
@@ -3068,10 +3238,42 @@ async fn build_real_source_start_fixture(
             .arg(&caption)
             .arg("-i")
             .arg(&alternative)
-            .args([
-                "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
-                "subrip", "-y",
-            ])
+            .args(
+                if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+                    // File 3122's shape: its audio beside two English SubRip
+                    // tracks, the first titled "English (SDH)".
+                    &[
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a",
+                        "-map",
+                        "1:s:0",
+                        "-map",
+                        "2:s:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "copy",
+                        "-c:s",
+                        "subrip",
+                        "-metadata:s:s:0",
+                        "language=eng",
+                        "-metadata:s:s:0",
+                        "title=English (SDH)",
+                        "-metadata:s:s:1",
+                        "language=eng",
+                        "-y",
+                    ][..]
+                } else {
+                    // The other native modes keep their original video-only,
+                    // untagged two-track shape.
+                    &[
+                        "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
+                        "subrip", "-y",
+                    ][..]
+                },
+            )
             .arg(&muxed)
             .output()
             .await
@@ -3232,10 +3434,15 @@ async fn build_real_source_start_fixture(
             7 => "Dolby Vision · Profile 7 (HDR10-compatible)",
             _ => "Dolby Vision · Profile 5",
         };
-        let (scanned_width, scanned_height) = (
-            video["width"].as_i64().expect("width"),
-            video["height"].as_i64().expect("height"),
-        );
+        let (scanned_width, scanned_height) =
+            if matches!(mode, SourceFixtureMode::RangeDolbyVisionScanned4k) {
+                (3840, 2160)
+            } else {
+                (
+                    video["width"].as_i64().expect("width"),
+                    video["height"].as_i64().expect("height"),
+                )
+            };
         client
             .execute(
                 "UPDATE files SET hdr='dolby_vision',hdr_format=$1,dv_profile=$2,dv_level=$3,dv_bl_compat_id=$4,dv_el_present=0,dv_rpu_present=1,width=$5,height=$6 WHERE id=1",
@@ -3243,6 +3450,27 @@ async fn build_real_source_start_fixture(
             )
             .await
             .expect("Dolby Vision scan facts");
+    }
+    if range_copy && dolby_vision.is_none() {
+        // The scan's profile for the generated H.264 source.
+        client
+            .execute(
+                "UPDATE files SET video_profile='High',duration_ms=4000 WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("scanned H.264 profile");
+    }
+    if let Some((codec, channels)) = audio {
+        // The scan's container and audio facts for the generated remux.
+        let streams = serde_json::json!([{"index":0,"codec":codec,"channels":channels,"sample_rate":48000,"language":"eng","title":null,"default":true}]);
+        client
+            .execute(
+                "UPDATE files SET container='mkv',audio_streams=$1 WHERE id=1",
+                hiqlite::params!(streams.to_string()),
+            )
+            .await
+            .expect("scanned audio facts");
     }
     if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
         // A copy's head is checked against the scan's profile.
@@ -3352,16 +3580,24 @@ async fn build_real_source_start_fixture(
             ..(*state.system).clone()
         });
     }
+    if range_copy {
+        // A growing copy records its range under the node's data directory,
+        // as `AppState::new` derives it for a daemon.
+        Arc::get_mut(&mut state)
+            .expect("sole State before listeners")
+            .copy_observation_dir = Some(directory.path().join("copy-ranges").join("observations"));
+    }
     let manager = manager.with_dv_strippable(strips);
-    let manager = if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy {
-        manager.with_cache(
-            directory.path().join("cache"),
-            "fixture".into(),
-            state.node_id.clone(),
-        )
-    } else {
-        manager
-    };
+    let manager =
+        if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy || range_copy {
+            manager.with_cache(
+                directory.path().join("cache"),
+                "fixture".into(),
+                state.node_id.clone(),
+            )
+        } else {
+            manager
+        };
     Arc::get_mut(&mut state)
         .expect("sole State before listeners")
         .transcode = Arc::new(
@@ -3436,13 +3672,72 @@ async fn build_real_source_start_fixture(
         }
         SourceFixtureMode::DolbyVisionPreserved
         | SourceFixtureMode::DolbyVisionConverted
-        | SourceFixtureMode::DolbyVisionUnaffirmed => {
+        | SourceFixtureMode::DolbyVisionUnaffirmed
+        | SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => {
             // The ask only clamps: a player that does not ask for Dolby
             // Vision is given the compatible base whatever its caps say.
             recipe["session"]["preserve_dolby_vision"] = serde_json::json!(true);
             recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[8]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls","display":{"hdr":true}});
         }
         _ => {}
+    }
+    if range_copy {
+        // What the web player and a current receiver send: the public range
+        // transport beside HLS, Dolby Vision claims on HEVC, and all three
+        // receiver affirmations on every operation.
+        recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[5,8]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["progressive","hls","hls-bounded-range-v1"],"dv_transport":"progressive"});
+        for (name, value) in [
+            (
+                receiver_presentation::RECEIVER_HEADER,
+                receiver_presentation::RECEIVER_HEADER_VALUE,
+            ),
+            (
+                receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+                receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+            ),
+            (
+                receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+            ),
+        ] {
+            headers.insert(name, value.parse().expect("receiver affirmation"));
+        }
+    }
+    if matches!(mode, SourceFixtureMode::RangeDolbyVisionConverted) {
+        // A rung below the source, as production's 4K Profile 7 plan resolved
+        // under the node's Dolby Vision transcode ceiling: the copy still
+        // carries, and reports, the source's own geometry.
+        recipe["session"]["height"] = serde_json::json!(144);
+    }
+    if audio.is_some() {
+        // Selected by index and with no `aac` ask, as a client whose caps name
+        // no audio sinks sends it. E-AC-3 is in its decoder list and passes
+        // through, so its Dolby brand reaches the AV output; TrueHD is in
+        // neither that list nor a copy MP4, so the Source converts it to AAC.
+        recipe["session"]["audio"] = serde_json::json!(0);
+        if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
+            recipe["session"]["caps"]["audio"] = serde_json::json!(["aac", "eac3"]);
+        }
+        if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+            // Chrome on macOS as decode-tiers.js builds it: no AC-3/E-AC-3
+            // decoder, stereo output, a sink for each decodable codec, and the
+            // `aac` ask copyAudioNeedsTranscode makes for E-AC-3.
+            recipe["session"]["caps"] = serde_json::json!({"v":2,
+                "client":{"kind":"web","build":"fixture","ua":"Mozilla/5.0 (Macintosh) Chrome"},
+                "video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr"],"dv_profiles":[]}],
+                "audio":["aac","mp3","opus","flac"],
+                "containers":["mp4","webm","mov","m4a","m4b","mp3","aac","flac","ogg","opus","wav"],
+                "transports":["progressive","hls","hls-bounded-range-v1"],
+                "hls_hevc_sample_entries":["hvc1"],"progressive_hevc_sample_entries":[],
+                "display":{"hdr":false,"dolby_vision":false},
+                "audio_sinks":[
+                    {"codec":"aac","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                    {"codec":"mp3","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                    {"codec":"flac","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]}],
+                "learned_limits":[]});
+            recipe["session"]["aac"] = serde_json::json!(true);
+        }
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");

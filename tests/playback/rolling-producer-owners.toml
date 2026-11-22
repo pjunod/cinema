@@ -2038,7 +2038,11 @@ pattern = "VodPublication"
 # F1/N2 landing repair: +1 test-only VodPublication match in
 # an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere. It inspects the
 # existing owner-bearing refusal; no producer or response owner is created.
-expected_occurrences = 54
+# P49 split copy: +2 in vod/serve/split.rs. `split_copy_master_before`
+# returns the master as a VodPublication bound to the session's captured
+# ResponseOwner, beside the continuous master. It creates no producer or
+# response owner and transfers none.
+expected_occurrences = 56
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -4188,7 +4192,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Recovery fixture union: +1 request task held at Source preparation.
 # The fixture awaits this exact task before inspecting its Direct response.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 1195
+# PR 1846 Source refusal fixtures: +3 test-only tasks. Two serve_http
+# listeners (refused claim, range copy) are stopped and joined before return;
+# the refused-claim Start caller is awaited for its answer. No production task.
+# Receiver-consume fixture: +1 test-only serve_http listener in
+# sharing_receiver_consumes_the_range_copy_start_the_source_published, stopped
+# and joined before the fixture shuts down. No production task.
+# DV window runs (#1862): +5. One production task in dv_segment/window_run.rs
+# is a run's idle-expiry timer; it only signals the run's owner to kill and
+# settle the helper and holds no process or source. Four are joined test
+# tasks in the same module. The helper's stage task and its launch moved into
+# the single/run split without changing count.
+expected_occurrences = 1204
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6229,8 +6244,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 
 
 # The merged source inventories 2286 occurrences.
+# Main 2306 plus PR 1846's +3 test-only tokio::time::timeout bounds
+# (120 s) around each Start/Status/playlist/End exchange; expiry is failure.
+# Receiver-consume fixture: +1 test-only tokio::time::sleep for the typed
+# Retry-After between the receiver's Start re-posts, bounded by its 120 s
+# viewer clock; it supplies no readiness or settlement evidence.
 # Cinema fixes + main 32f30addc union: main 2305 plus the branch's own 1 over base 5a5e6c97a.
-expected_occurrences = 2306
+# DV window runs (#1862): +9. Four production waits in dv_segment/window_run.rs:
+# the idle-rest bound, the run backstop deadline, and two 20 ms polls (FIFO
+# readiness, next-window marker), each inside a select! with the window's own
+# deadline and cancellation. Five are test sleeps under paused time.
+# Source copy production meter: +2 tokio::time constructors in the growing
+# copy's production loop (a tokio::time::sleep bounding the one stall report in
+# copyrange::meter::await_reporting_stall, and the observation Instants). They
+# only time and report; no wait, deadline or retry changes. No new task.
+expected_occurrences = 2321
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -6258,7 +6286,10 @@ pattern = "use\\s+tokio::time"
 # PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
 # +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
 # clock and its handoff tests, each on its owning task (reviewed in #1645).
-expected_occurrences = 8
+# Source copy production meter and receiver relay log: +2 `use tokio::time::
+# Instant` imports (copyrange::meter, shared_receiver_playback::relay_log) so
+# their measurements follow tokio's test clock. Observation only.
+expected_occurrences = 10
 
 # Static fixture lifecycle follow-up (2026-11-17): gap-fill adds two real
 # children (FFmpeg builder and FFprobe) joined by testfixtures::run; TempDir
@@ -6774,7 +6805,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
 # Cinema fixes + main 32f30addc union: main 376 plus the branch's own 4 over base 5a5e6c97a.
-expected_occurrences = 380
+# Source range audio fixture: +1 test-only FFmpeg command muxing a generated
+# E-AC-3 or TrueHD track beside the fixture video; its awaited output() joins
+# the child before the fixture continues. No production command.
+expected_occurrences = 381
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7553,8 +7587,19 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The merged source inventories 968 occurrences.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-# Cinema fixes + main 32f30addc union: main 964 plus the branch's own 1 over base 5a5e6c97a.
-expected_occurrences = 965
+# Main 965 plus PR 1846's +11 `.status()` reads of HTTP responses (one in
+# the forwarding refusal trace, the rest in the new Source fixtures). No
+# process launch.
+# Receiver-consume lease checks: +1 `.status()` read of the Source resource
+# reply in the fixture's playlist/init fetch helper. No process launch.
+# Source range audio fixture: +1 awaited output() joining that test-only FFmpeg
+# mux child. No production launch, kill or wait.
+# Source range init check: +1 response.status() assertion on the fixture's
+# HTTP resource reply in actual_range_resource. No process launch, kill or wait.
+# Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
+# the forwarded native-readiness fixture case and one in the typed-refusal
+# test. No process launch.
+expected_occurrences = 981
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7878,7 +7923,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Recovery fixture union: +1 retained Source factory entry.wait() observer.
 # It observes the actual factory owner, not a new OS-child reaper.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 403
+# DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
+# owner whose kill cancels the helper's existing stage owner and waits for its
+# reap and the run's source/lane/reservation settlement. No new process launch.
+expected_occurrences = 408
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7961,7 +8009,9 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 88
+# DV window runs (#1862): +1 is the declaration `async fn kill(self)` of the
+# WindowRun owner above; it signals the existing helper stage owner only.
+expected_occurrences = 89
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

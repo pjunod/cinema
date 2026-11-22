@@ -596,6 +596,9 @@ async fn actual_pinned_playback(
     let observed_ends = source_ends.clone();
     let source_resource_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_resource_status = source_resource_status.clone();
+    // The resource name each relayed Source request carried.
+    let source_resources = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let observed_resources = source_resources.clone();
     let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let stalled_end_release = tokio_util::sync::CancellationToken::new();
     let observed_stall_release = stalled_end_release.clone();
@@ -614,6 +617,7 @@ async fn actual_pinned_playback(
                 let starts = observed_starts.clone();
                 let ends = observed_ends.clone();
                 let resource_status = observed_resource_status.clone();
+                let resources = observed_resources.clone();
                 let status = observed_status.clone();
                 async move {
                     if request.uri().path().ends_with("/end") {
@@ -640,6 +644,21 @@ async fn actual_pinned_playback(
                         starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     let is_resource = request.uri().path().ends_with("/resources");
+                    let request = if is_resource {
+                        let (parts, body) = request.into_parts();
+                        let bytes = axum::body::to_bytes(body, 128 * 1024)
+                            .await
+                            .expect("bounded Source resource ask");
+                        if let Some(name) = serde_json::from_slice::<Value>(&bytes)
+                            .ok()
+                            .and_then(|value| value["resource"].as_str().map(str::to_owned))
+                        {
+                            resources.lock().expect("Source resources").push(name);
+                        }
+                        Request::from_parts(parts, Body::from(bytes))
+                    } else {
+                        request
+                    };
                     let response = next.run(request).await;
                     if is_resource {
                         resource_status.store(
@@ -1099,6 +1118,46 @@ async fn actual_pinned_playback(
         .to_str()
         .expect("playlist MIME")
         .contains("mpegurl"));
+    // Safari's native HLS readiness asks for the same playlist with the
+    // viewer's login in the URL (`core/api.js` `tok`). B relays it, and the
+    // Source is asked for the playlist alone, never for the token.
+    let source_name = playlist_path
+        .strip_prefix(&prefix)
+        .expect("B session playlist")
+        .to_owned();
+    let native_path = format!(
+        "{playlist_path}{}token={}",
+        if playlist_path.contains('?') {
+            '&'
+        } else {
+            '?'
+        },
+        fixture.original_login
+    );
+    let (native_status, _, native_bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &native_path,
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        native_status,
+        StatusCode::OK,
+        "native readiness URL; H2={h2}: {}",
+        String::from_utf8_lossy(&native_bytes)
+    );
+    assert!(native_bytes.starts_with(b"#EXTM3U"));
+    {
+        let asked = source_resources.lock().expect("Source resources");
+        assert_eq!(asked.last(), Some(&source_name), "H2={h2}");
+        assert!(
+            asked.iter().all(|name| !name.contains("token")),
+            "{asked:?}"
+        );
+    }
     let mut playlist = String::from_utf8(bytes.to_vec()).expect("actual HLS UTF-8");
     assert!(playlist.starts_with("#EXTM3U"));
     if playlist.contains("#EXT-X-STREAM-INF:") {

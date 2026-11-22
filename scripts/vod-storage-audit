@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Proof B auditor: is every packaged video picture stored once?
+
+Walks a VOD rendition cache. For every rendition directory with an init,
+demuxes the video track of init+fragment and hashes each video packet
+(ffmpeg framemd5), so the same pictures inside differently muxed files are
+recognised. Each packet hash maps to the set of physical files (device,
+inode) that carry it: a hard-link alias counts once, an independent copy
+twice. Prints one JSON report.
+
+Usage: scripts/vod-storage-audit <data_dir>/cache/renditions
+"""
+import collections, json, os, subprocess, sys
+
+root = sys.argv[1]
+packets = collections.defaultdict(set)   # video packet md5 -> {(dev, ino)}
+report = {"renditions": {}, "unreadable": []}
+for key in sorted(os.listdir(root)):
+    d = os.path.join(root, key)
+    init = os.path.join(d, "init.mp4")
+    if not os.path.isfile(init):
+        continue
+    segs = sorted(f for f in os.listdir(d) if f.endswith(".m4s"))
+    row = {"segments": len(segs), "video_packets": 0, "has_video": False, "has_audio": False,
+           "bytes": sum(os.path.getsize(os.path.join(d, f)) for f in segs + ["init.mp4"])}
+    head = open(init, "rb").read()
+    for seg in segs:
+        path = os.path.join(d, seg)
+        st = os.stat(path)
+        data = head + open(path, "rb").read()
+        out = subprocess.run(["ffmpeg", "-v", "error", "-f", "mp4", "-i", "pipe:0", "-map", "0", "-c", "copy",
+                              "-f", "framemd5", "pipe:1"], input=data, capture_output=True)
+        if out.returncode != 0:
+            report["unreadable"].append(path)
+            continue
+        for line in out.stdout.decode().splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            fields = [f.strip() for f in line.split(",")]
+            stream, digest = fields[0], fields[-1]
+            # framemd5 numbers streams by output order; probe the kinds once.
+            kinds = row.setdefault("_kinds", None)
+            if kinds is None:
+                probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+                                        "-f", "mp4", "pipe:0"], input=data, capture_output=True).stdout.decode().split()
+                row["_kinds"] = kinds = probe
+            kind = kinds[int(stream)] if int(stream) < len(kinds) else "?"
+            if kind == "video":
+                row["has_video"] = True
+                row["video_packets"] += 1
+                packets[digest].add((st.st_dev, st.st_ino))
+            elif kind == "audio":
+                row["has_audio"] = True
+    row.pop("_kinds", None)
+    report["renditions"][key] = row
+copies = collections.Counter(len(holders) for holders in packets.values())
+report["distinct_video_packets"] = len(packets)
+report["video_packets_by_physical_copies"] = dict(sorted(copies.items()))
+report["duplicated_video_packets"] = sum(n for c, n in copies.items() if c > 1)
+report["video_renditions"] = sorted(k for k, r in report["renditions"].items() if r["has_video"])
+report["muxed_renditions"] = sorted(k for k, r in report["renditions"].items() if r["has_video"] and r["has_audio"])
+report["stored_once"] = report["duplicated_video_packets"] == 0 and not report["unreadable"]
+print(json.dumps(report, indent=1))

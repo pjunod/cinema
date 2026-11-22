@@ -10,6 +10,20 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- A shared title's Source copy now says where its time goes. Each published
+  segment logs one `Source copy segment published` line (incarnation, range,
+  segment, media start and end, bytes, wall time, media-per-wall-second rate,
+  and the split between waiting on FFmpeg's output, plurx's conversion and the
+  segment commit). A wait past one advertised target duration logs one
+  warning naming what it waited on, and production logs how far it got
+  when it ends. Each
+  refused Source start response names the check that refused it. The
+  receiving server logs every HLS resource it relays (status, bytes against
+  the declared length, duration, `Range`, whether it completed): at debug
+  normally, at info when it fell short or took longer than a target duration.
+  Web player beacons now carry the playhead and buffered ranges.
+- **Language changes keep the picture playing on copied titles.** A copy-VOD title with two or three soundtracks now plays in the web player as one shared video with each language as an alternate audio track, so choosing another language switches in place on the same player and session instead of reopening the stream. The video is packaged and stored once for every language and viewer. Other clients, native HLS and titles with more soundtracks keep the existing combined stream.
+
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
   FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
   conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
@@ -44,6 +58,19 @@ bump may break compatibility and a **patch** bump never does.
 - Web and Apple playback information reports the attached conversion's F+
   mapping and held-out gain, or its identity reason. This metadata comes from
   the pinned rendition and adds no curve-store read to status polls.
+- plurx Player (Linux) draws the web player's quality pills beside the
+  title: resolution, dynamic range (source → what mpv renders, e.g.
+  "DV P7 → DV P8", "DV P7 → HDR10-E"), the active Dolby Vision enhancements
+  (FEL / EL / RPU / DYN) and the audio format. RPU and DYN light when mpv
+  renders Dolby Vision itself (no RPU claim on a Profile 7 → 8.1 delivery); EL
+  lights when the private build receives the dual-layer Profile 7 stream; FEL
+  is only ever the server's claim. A carried route's server pills hold only
+  while mpv renders Dolby Vision; a processed route's hold while its current
+  report does. Playback info adds the source grade, the Dolby Vision mapper
+  and one line per enhancement saying why it is or is not active. The
+  launcher now ignores VO warnings (an unmapped screenshot) and non-VO text
+  when reading the mapper line, and a failed control exchange keeps the
+  current processing report instead of clearing it.
 
 ### Changed
 
@@ -84,6 +111,66 @@ bump may break compatibility and a **patch** bump never does.
   published. A scanner failure on readable input stays `title_scan_failed`
   and now records the exit status and the end of the scanner's stderr,
   redacted, instead of a bare "scan failed".
+- 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
+  with playback instead of stalling every few seconds. Each 2-second window
+  used to start its own renderer, which re-read and re-decoded the source
+  back to the previous keyframe and restarted the GPU. One renderer now
+  produces up to eight consecutive windows, each still verified and
+  published on its own. That is about 30% less work per window and about
+  60% fewer source reads, with byte-identical output.
+- Shared Dolby Vision Profile 7 titles start again when converted to Profile
+  8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
+  first fragment against the rung its plan resolved instead of the source's own
+  size, and a 4K title, which Auto plans under the node's Dolby Vision encode
+  ceiling, was refused at `growing.copy_head_caps` with
+  `source_rescan_required` although the copy matched the scan. The check
+  compares the copy with the scanned source only. The same fix starts every
+  other shared copy whose planned rung differs from the source: 4K SDR or HDR10
+  copies from a Source whose encode ceiling is below 2160, sources taller than
+  2160 or shorter than 144 lines, and a copy started with a lower rung named,
+  which now gets the full-resolution copy over sharing as it already did
+  locally, instead of a 409.
+- Shared titles that Safari plays through its native HLS player (Dolby
+  Vision, HDR and HEVC copies, including SDR HEVC) play again. That player
+  carries the viewer's sign-in as a `token` in each playlist URL, and the
+  receiver refused every such URL, `master.m3u8` or `index.m3u8`, as an
+  unknown resource with a bare 422 ("HLS readiness returned HTTP 422") after
+  the Source had already started. The receiver now drops that one token,
+  which authorizes nothing on a shared session, and never passes it to the
+  Source. A resource it still will not relay answers a typed
+  `sharing_resource_unsupported` and logs one line naming the step. H.264
+  played through hls.js was unaffected, because hls.js signs in with a header.
+- Shared titles play again in the web player. Every web shared Start runs
+  the Source's growing copy, which answered with a 60-second control lease that
+  the receiver refused, so the viewer saw "The sharing host could not confirm
+  playback preparation" and the copy expired a minute later without serving a
+  byte. The growing copy now keeps the 300-second lease every shared client is
+  promised, on its Start, its control replies and its own retirement, and
+  counts any resource fetch or authenticated control exchange the receiver
+  relays as viewer activity (the receiver's own status checks are not). The
+  web player also accepts the bounded view such a Start returns, as the Apple
+  and Android players already did. The Source and the receiver both need this
+  release: a receiver still refuses the 60-second lease an older Source sends.
+- A shared Start whose claim the Source refuses (sharing unavailable, at
+  capacity, or in conflict) no longer leaves a cleanup that can never finish.
+  The refusal wrote nothing for that Start, so the receiver's End now settles at once instead
+  of answering 503 on every retry, and the refused Start no longer holds one of
+  the Source's eight start slots until the node restarts. A Dolby Vision title
+  started through a Source node that forwards to another is no longer noted as
+  "receiver does not relay Dolby Vision" when the receiver said it does. Every
+  refusal on the Source's forwarding paths, a growing copy that fails to start,
+  a refused claim, and a receiver about to tell its viewer only "could not
+  confirm playback preparation" now log one line naming the step that refused.
+- A shared title's Start, and every other membership-guarded Source write, no
+  longer refuses as "sharing unavailable" when a member's routine heartbeat
+  commits while the write is in flight. The write's guard counted that
+  heartbeat as a future-dated clock because it was stamped after the write
+  sampled its own clock. A heartbeat is now accepted up to the five seconds a
+  write may use its membership observation. A clock further ahead is still
+  refused. A heartbeat still goes stale 120 seconds after the time it carries,
+  so a member whose clock runs up to five seconds ahead stays fresh for up to
+  125 seconds. A viewer saw "The sharing host could not confirm playback
+  preparation".
 - 4K Dolby Vision titles played as HDR10-E or with display mapping no
   longer stall in the browser on Intel nodes. The node's Main10 GPU decode
   probe copied its test picture to system memory, which crashed the shipped
@@ -103,6 +190,9 @@ bump may break compatibility and a **patch** bump never does.
   preparation. Slow filesystem or planning work no longer consumes the
   five-second authority proof before it is used; claim expiry, file and grant
   checks, and overlapping playback ownership are preserved.
+- Keep the accepted copy recipe bound when a Dolby Vision FEL measurement completes
+  during playback. Give the most recent native FEL title's existing background job
+  priority to prepare its exact qualified startup segments before the complete-title scan.
 
 - Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
   Resume. Resume binds the renderer to the actual source pictures observed by
