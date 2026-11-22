@@ -8966,6 +8966,15 @@ source_anchor = "private func tvStartupPreparation("
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws"
 
+# The Theater feature resumes Continue Watching without title detail.
+[[fixes]]
+id = "apple.tvos-home-feature-startup-preparation"
+commits = ["19adc2cf3e2ad790197d47c0ad47aa5a919701dc"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = "private func prepareFeature(_ feature: TvTheaterFeature) async"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "func testTheaterContinueWatchingOffersPreparationForItsResumeWindow() throws"
+
 [[fixes]]
 id = "apple.cinema-refused-subtitle-keeps-generated-captions"
 commits = ["5ce3268f688f74a586013c3252ea13a89694e094"]
