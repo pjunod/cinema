@@ -501,6 +501,12 @@ state it decides `within budget` and deletes nothing. Then, only if the Docker
 filesystem is still under its reserve, it prunes stopped containers older than a week, images
 unused for two weeks, and build cache older than a week — not all build cache,
 because the named `plurx-<runner>` builders are kept warm on purpose.
+If that still leaves the filesystem under its reserve, a warm cache no longer
+buys anything, because every job held to the reserve is refused. So, provided no
+job container has appeared in the meantime, the pass finishes the operator's
+step 2 below: all build cache and dangling images. A filesystem that is still
+short afterwards counts in `still short` (`short_after` in the receipt). It used
+to report `0 still short` beside a free figure under the reserve.
 
 On Linux, a cache smaller than 1 GiB is left warm unless deleting it can close
 the measured free-space gap. A Forgejo container in the created, running,

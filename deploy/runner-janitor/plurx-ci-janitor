@@ -461,8 +461,9 @@ done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*'
 # packaging job loads a new `plurx/plurxd:ci-<arch>`, and media1 was carrying
 # 101G of images with four of a hundred and thirty-one in use. The named
 # BuildKit builders are bounded per job, so only cache older than a week is
-# taken here — pruning it wholesale would throw away exactly the state the
-# packaging lane keeps warm on purpose.
+# taken here first — pruning it wholesale would throw away exactly the state
+# the packaging lane keeps warm on purpose. Only when that leaves the host
+# below the reserve does the pass go further (see below).
 docker_pruned=false
 # The prune deletes across the whole host, so it needs the guard at least as
 # much as a cache reset does. `docker container prune -f` removes containers
@@ -495,8 +496,35 @@ elif command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; the
         "$DOCKER" builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
         docker_pruned=true
         after_kb=$(available_kb_for "$root")
+        # The week-old bound keeps the packaging lane's cache warm, but on a
+        # busy runner every build record is younger than a week, so that prune
+        # reclaims nothing: `gha-lab1-plurx-heavy-01` sat at 24G against the
+        # 25G every heavy job requires on 2026-11-22 with 8.7G of build cache
+        # this pass was not allowed to touch, refusing plurx#1857 and #1864
+        # while this script reported it pruned. Below the reserve a warm cache
+        # is worth nothing -- every job it would serve is refused -- so finish
+        # the operator's pass from docs/ci/RUNNER-DISK.md (all build cache,
+        # dangling images) rather than leave the host short. Re-checked first:
+        # a job may have been created since the guard above.
+        if [ "$after_kb" -lt "$floor_kb" ]; then
+          if containerised_job_running; then
+            say 'a containerised job started during the prune; leaving the rest of Docker for the next pass'
+          else
+            say "still short after the age-bounded prune ($((after_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G); pruning all build cache and dangling images"
+            "$DOCKER" builder prune -af >/dev/null || true
+            "$DOCKER" image prune -f >/dev/null || true
+            after_kb=$(available_kb_for "$root")
+          fi
+        fi
         reclaimed_kb=$((reclaimed_kb + after_kb - available_kb))
         say "Docker pruned, $((after_kb / 1024 / 1024))G free"
+        # And said, not just printed: a host left short here refuses every job
+        # held to the reserve, which is what `short_after` exists to count. It
+        # used to read `0 still short` beside a free figure under the floor.
+        if [ "$after_kb" -lt "$floor_kb" ]; then
+          say "Docker volume still $((after_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve after pruning what it may — this host cannot reach it by pruning" >&2
+          short_after=$((short_after + 1))
+        fi
       fi
     else
       say "Docker within reserve: $((available_kb / 1024 / 1024))G free"
