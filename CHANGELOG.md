@@ -72,6 +72,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A complete-title Dolby Vision scan interrupted by a failed source read
+  (a disk error, lost source authority or a revoked read budget) no longer
+  counts against the title's five attempts. The scanner saw truncated input,
+  so the job now yields as `title_source_interrupted` and retries, and never
+  publishes an aggregate built from that input. Before, such interruptions
+  were charged as `title_scan_failed`, and readable titles failed
+  permanently after five. A genuine scanner failure is still charged and now
+  records the exit status and the end of the scanner's stderr instead of a
+  bare "scan failed".
 - 4K Dolby Vision titles played as HDR10-E or with display mapping no
   longer stall in the browser on Intel nodes. The node's Main10 GPU decode
   probe copied its test picture to system memory, which crashed the shipped

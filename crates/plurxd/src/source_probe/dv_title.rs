@@ -5,12 +5,89 @@ use plurx_core::{
     scan::dv_title::{DvTitleStats, TitleEligibility},
 };
 
+/// Why a complete-title scan produced no aggregate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TitleScanError {
+    /// A served source read failed (EIO, a changed source, lost authority, a
+    /// revoked budget) while the scanner was reading. It saw truncated input,
+    /// so whatever it concluded is not a verdict on the file — the same
+    /// contract the ordinary probe applies through `source_read_failed`.
+    SourceInterrupted(String),
+    /// The scanner, its aggregate or its prerequisites refused readable input.
+    Failed(String),
+}
+
+impl std::fmt::Display for TitleScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceInterrupted(reason) | Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for TitleScanError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for TitleScanError {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.to_owned())
+    }
+}
+
+/// Bounded stderr carried into a failure reason: the final bytes, where a
+/// scanner prints its fatal error, on one line.
+const STDERR_TAIL_BYTES: usize = 512;
+
+fn stderr_tail(stderr: &[u8]) -> String {
+    let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+    String::from_utf8_lossy(&stderr[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Classify the scanner's exit before its aggregate is trusted. A failed
+/// source read outranks every scanner outcome, including an apparent
+/// success: an aggregate computed over truncated input is never published.
+pub(super) fn scanner_verdict(
+    output: std::io::Result<plurx_core::process::bounded::Output>,
+    source_read_failed: bool,
+) -> Result<Vec<u8>, TitleScanError> {
+    let describe = |output: &std::io::Result<plurx_core::process::bounded::Output>| match output {
+        Ok(output) => {
+            let tail = stderr_tail(&output.stderr);
+            if tail.is_empty() {
+                output.status.to_string()
+            } else {
+                format!("{}; stderr: {tail}", output.status)
+            }
+        }
+        Err(error) => error.to_string(),
+    };
+    if source_read_failed {
+        return Err(TitleScanError::SourceInterrupted(format!(
+            "source read failed during title scan ({})",
+            describe(&output)
+        )));
+    }
+    match output {
+        Ok(output) if output.status.success() => Ok(output.stdout),
+        failed => Err(TitleScanError::Failed(format!(
+            "complete-title DV scan failed ({})",
+            describe(&failed)
+        ))),
+    }
+}
+
 #[cfg(unix)]
 pub(super) async fn scan(
     file: &MediaFile,
     document: &str,
     tools: &ToolSet,
-) -> Result<DvTitleStats, String> {
+) -> Result<DvTitleStats, TitleScanError> {
     use std::{os::fd::AsRawFd, time::Duration};
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
@@ -60,16 +137,18 @@ pub(super) async fn scan(
     } else {
         output.await
     };
+    // Read the bridge's verdict before it is closed: the scanner has exited,
+    // so every served read that could fail has already been observed.
+    let source_read_failed = input
+        .as_ref()
+        .is_some_and(crate::source_input::SourceInput::source_read_failed);
     if let Some(input) = input {
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining title source input: {error}"))?;
     }
-    let output = output.map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err("complete-title DV scan failed".into());
-    }
+    let stdout = scanner_verdict(output, source_read_failed)?;
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
     }
@@ -77,7 +156,7 @@ pub(super) async fn scan(
         return Err("source changed during title scan".into());
     }
     let stats: DvTitleStats =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
+        serde_json::from_slice(&stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
     if stats.eligibility() == TitleEligibility::InvalidAggregate || !stats.complete {
         return Err("incomplete or inconsistent DV aggregate".into());
     }
@@ -239,7 +318,8 @@ pub(crate) async fn publish_title_with_tools_for_control(
             },
             scan(file, &demand.probe_json, &tools),
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         if !tools.is_current().await || !source.unchanged() || source.reopen(file).await.is_err() {
             return Err("title scanner or source changed before control publication".into());
         }
