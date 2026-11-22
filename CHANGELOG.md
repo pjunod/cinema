@@ -83,6 +83,15 @@ bump may break compatibility and a **patch** bump never does.
   a refused claim, and a receiver about to tell its viewer only "could not
   confirm playback preparation" now log one line naming the step that refused.
 
+- A shared-library Source no longer refuses its catalogue, current-scope and
+  content reads with `sharing_member_floor_unavailable` when a registered
+  learner is offline. Serving reads require fresh heartbeats from the
+  committed voters and the serving member only. Capability proofs, the
+  committed roster, joins and removals in flight, and quorum remain required.
+  Every replicated write and transition still requires every member to be
+  fresh. Before this, a receiver showed `sharing source unavailable` under
+  Assign viewers and `sharing body authority unavailable` under Shared
+  Libraries, even though Check connection passed.
 - Source playback Start observes membership at its claim boundary after pure
   preparation. Slow filesystem or planning work no longer consumes the
   five-second authority proof before it is used; claim expiry, file and grant
