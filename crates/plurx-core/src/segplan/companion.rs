@@ -162,6 +162,7 @@ mod tests {
             canonical_dts: 37,
             duration,
             next_packet_sequence: 1,
+            last_muxed_dts: 0,
         };
         let row = verifier
             .verify(&fragment, first_clock, &fragment)
@@ -175,6 +176,7 @@ mod tests {
             canonical_dts: 37 + duration,
             duration,
             next_packet_sequence: 2,
+            last_muxed_dts: 0,
         };
         assert_eq!(
             verifier.verify(&fragment, later_clock, &fragment),
@@ -196,6 +198,7 @@ mod tests {
             canonical_dts: 0,
             duration: fragment.video_duration(&init),
             next_packet_sequence: 1,
+            last_muxed_dts: 0,
         };
         let mut verifier =
             CopyCompanionVerifier::new(init.clone(), init).expect("matching decoder contracts");
