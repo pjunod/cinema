@@ -2588,6 +2588,41 @@ pub(crate) async fn receiver_media(
     )
     .await
 }
+/// The Source HLS resource a viewer's public B request names.
+///
+/// A native HLS element cannot set headers, so the web player carries its
+/// login as `?token=` on every playlist URL it fetches (`core/api.js` `tok`),
+/// as it does for every Local stream. On this route the B session in the path
+/// is the capability and the token authorizes nothing, so B takes at most one
+/// and drops it, as the shared asset routes do (`shared_receiver_assets`): it
+/// is never parsed as a resource parameter and never crosses to a peer or the
+/// Source. Every other key stays the closed Source grammar.
+pub(super) fn receiver_hls_resource(
+    suffix: &str,
+    query: Option<&str>,
+) -> Option<plurx_core::sharing_resources::SharingHlsResource> {
+    let mut token = false;
+    let mut kept = Vec::new();
+    for pair in query
+        .unwrap_or("")
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        if pair.split_once('=').map(|(key, _)| key) == Some("token") {
+            if std::mem::replace(&mut token, true) {
+                return None;
+            }
+        } else {
+            kept.push(pair);
+        }
+    }
+    let relative = if kept.is_empty() {
+        suffix.to_owned()
+    } else {
+        format!("{suffix}?{}", kept.join("&"))
+    };
+    plurx_core::sharing_resources::SharingHlsResource::parse(&relative).ok()
+}
 pub(super) async fn receiver_media_actor(
     state: AppState,
     actor: ReceiverStartActor,
@@ -2701,11 +2736,7 @@ pub(super) async fn receiver_media_actor(
         )
             .into_response();
     }
-    let relative = match request.uri().query() {
-        Some(query) => format!("{suffix}?{query}"),
-        None => suffix.to_owned(),
-    };
-    let Ok(resource) = plurx_core::sharing_resources::SharingHlsResource::parse(&relative) else {
+    let Some(resource) = receiver_hls_resource(suffix, request.uri().query()) else {
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
     };
     let Some(connection) = request
@@ -2843,6 +2874,35 @@ impl ReceiverStartRegistry {
 
 #[cfg(test)]
 mod tests {
+    /// Safari's native HLS element cannot set headers, so the web player
+    /// carries its login as `?token=` on every playlist URL it fetches
+    /// (`core/api.js` `tok`, `player.js` `nativeHlsResourceUrl`). A shared
+    /// Dolby Vision or HDR copy is played natively from `master.m3u8`, so B
+    /// must take exactly those URLs, and the token must never reach a peer.
+    #[test]
+    fn native_hls_readiness_urls_name_the_source_resource_without_the_login_token() {
+        use plurx_core::sharing_resources::SharingHlsResourceKind;
+        let master = super::receiver_hls_resource("master.m3u8", Some("token=b%2Fsecret"))
+            .expect("the native readiness master");
+        assert_eq!(master.kind(), SharingHlsResourceKind::Master);
+        assert_eq!(master.as_str(), "master.m3u8");
+        let index = super::receiver_hls_resource("index.m3u8", Some("subtitle=2&token=secret"))
+            .expect("the master's media playlist");
+        assert_eq!(index.kind(), SharingHlsResourceKind::Index);
+        assert_eq!(index.as_str(), "index.m3u8?subtitle=2");
+        assert!(!index.as_str().contains("token"));
+        // One login token at most; every other key stays closed.
+        assert!(super::receiver_hls_resource("master.m3u8", Some("token=a&token=b")).is_none());
+        assert!(super::receiver_hls_resource("master.m3u8", Some("session=a")).is_none());
+        assert!(super::receiver_hls_resource("seg1.m4s", Some("token=a")).is_some());
+        assert_eq!(
+            super::receiver_hls_resource("index.m3u8", None)
+                .expect("plain index")
+                .as_str(),
+            "index.m3u8"
+        );
+    }
+
     use super::*;
     use plurx_core::{
         sharing::SourceId,

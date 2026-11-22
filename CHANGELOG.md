@@ -85,6 +85,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared Dolby Vision and HDR titles play again in Safari. Safari plays them
+  through its native HLS player, which carries the viewer's sign-in as a
+  `token` in each playlist URL, and the receiver refused that URL as an
+  unknown resource with a bare 422 ("HLS readiness returned HTTP 422") after
+  the Source had already started. The receiver now drops that one token, which
+  authorizes nothing on a shared session, and never passes it to the Source.
+  Shared SDR titles were unaffected because Safari plays H.264 through hls.js.
 - Shared titles play again in the web player. Every web shared Start runs
   the Source's growing copy, which answered with a 60-second control lease that
   the receiver refused, so the viewer saw "The sharing host could not confirm
