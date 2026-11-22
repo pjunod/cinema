@@ -18035,3 +18035,26 @@ fn only_a_copy_that_negotiated_split_audio_delivers_alternates() {
     request.kind = SessionKind::Transcode { height: 1080 };
     assert!(!EffectiveSelection::from_request(&request, 1080, None).audio_alternates);
 }
+
+/// Auto and Original both deliver the copy's own bytes: copy to copy is no
+/// resolution crossing, while leaving the copy for a rung still is.
+#[test]
+fn a_copy_is_not_a_rung_for_auto_or_original() {
+    let caps = can_prepare(true);
+    let mut copy = playing(1080);
+    copy.codec = "source".to_owned();
+    copy.quality_auto = true;
+    let mut original = copy.clone();
+    original.quality_auto = false;
+    assert_eq!(
+        decide_preparation(view(&copy), view(&original), Some(&caps), roomy()),
+        PreparationDecision::Unchanged,
+    );
+    let mut rung = original.clone();
+    rung.codec = "server_selected".to_owned();
+    rung.height = 720;
+    assert_ne!(
+        decide_preparation(view(&copy), view(&rung), Some(&caps), roomy()),
+        PreparationDecision::Unchanged,
+    );
+}

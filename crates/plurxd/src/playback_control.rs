@@ -1856,7 +1856,13 @@ fn decide_preparation_given_client(
     if delivered.subtitle_burn != candidate.subtitle_burn {
         cross(PreparationAxis::SubtitleBurn);
     }
-    if delivered.height != candidate.height || delivered.quality_auto != candidate.quality_auto {
+    // A copy is not a rung: copy to copy delivers the same source bytes at
+    // any height or Auto/Original answer, so neither is a recipe change.
+    let copy_to_copy = delivered.codec == "source" && candidate.codec == "source";
+    if !copy_to_copy
+        && (delivered.height != candidate.height
+            || delivered.quality_auto != candidate.quality_auto)
+    {
         cross(PreparationAxis::ResolutionOrBitrate);
     }
 

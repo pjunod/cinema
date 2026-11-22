@@ -90,7 +90,9 @@ function installAlternationCapture(clock, tones, block, decodeSource) {
     engineHls.on(Hls.Events.BUFFER_FLUSHING, (_, d) => note("flushing", {type: d.type, start: d.startOffset, end: d.endOffset}));
     engineHls.on(Hls.Events.ERROR, (_, d) => note("error", {details: d.details, fatal: d.fatal, frag: d.frag ? {type: d.frag.type, sn: d.frag.sn, level: d.frag.level} : null, code: d.response && d.response.code}));
   }
-  capture.stop = () => { capture.stopped = true; try { capture.audio_context && capture.audio_context.close(); } catch (e) {} };
+  // Stop recording only. The element's sound still flows through this graph;
+  // closing the context would stop its audio sink and with it the media clock.
+  capture.stop = () => { capture.stopped = true; };
   capture.drain = () => {
     const out = {frames: capture.frames, audio: capture.audio, marks: capture.marks, errors: capture.errors,
       hls_objects: capture.hls_objects, engine: capture.engine};

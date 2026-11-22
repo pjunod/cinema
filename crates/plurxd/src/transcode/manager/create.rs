@@ -6267,6 +6267,10 @@ impl TranscodeManager {
             let Ok(companion) = self.prepare_vod_companion(&req, &file).await else {
                 return false;
             };
+            // A resurrected split copy keeps its soundtrack alternates.
+            let split_soundtracks = self
+                .prepare_vod_split_soundtracks(&req, &file, encoding.as_ref())
+                .await;
             let measured_candidate = if first_capture && root_admission.is_none() {
                 match self
                     .resolved_retained_candidate_binding(&req, &file, &encoding)
@@ -6331,7 +6335,7 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
-                        split_soundtracks: Vec::new(),
+                        split_soundtracks,
                         admission_priority: if speculative {
                             Priority::Speculative
                         } else {
