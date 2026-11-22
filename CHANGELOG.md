@@ -74,6 +74,21 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- 4K Dolby Vision titles played as HDR10-E or with display mapping no
+  longer stall in the browser on Intel nodes. The node's Main10 GPU decode
+  probe copied its test picture to system memory, which crashed the shipped
+  FFmpeg in about one run in nine; each crash sent every Dolby Vision
+  window to software decode, which needs 2-3 s for each 2 s window. The probe
+  now keeps the picture on the GPU, as the renderer does.
+- A shared-library Source no longer refuses its catalogue, current-scope and
+  content reads with `sharing_member_floor_unavailable` when a registered
+  learner is offline. Serving reads require fresh heartbeats from the
+  committed voters and the serving member only. Capability proofs, the
+  committed roster, joins and removals in flight, and quorum remain required.
+  Every replicated write and transition still requires every member to be
+  fresh. Before this, a receiver showed `sharing source unavailable` under
+  Assign viewers and `sharing body authority unavailable` under Shared
+  Libraries, even though Check connection passed.
 - Source playback Start observes membership at its claim boundary after pure
   preparation. Slow filesystem or planning work no longer consumes the
   five-second authority proof before it is used; claim expiry, file and grant

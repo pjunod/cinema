@@ -4554,9 +4554,12 @@ pub async fn has_hdr10_passthrough_vaapi(
 /// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
 /// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
 /// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a shipped
-/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into
-/// `hwdownload`, which accepts only hardware frames, so success means the GPU
-/// decoded it.
+/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into a
+/// `scale_vaapi` render, which accepts only VA-API surfaces: a decoder that
+/// fell back to software hands it system-memory frames and the graph fails,
+/// so success means the GPU decoded it. The pictures stay on the GPU, as they do in the
+/// renderer, which maps its VA-API surfaces into Vulkan and never copies them
+/// to system memory (see [`hevc_main10_decode_probe_args`]).
 ///
 /// A success is kept for the process. A failure is not: it may be a device
 /// still settling at boot, so the probe runs again on the next need after a
@@ -4610,6 +4613,55 @@ fn main10_probe_backoff(failures: u32) -> Duration {
         .min(Duration::from_secs(3600))
 }
 
+/// The Main10 decode probe's FFmpeg arguments.
+///
+/// The decoded picture goes to `scale_vaapi`, never to `hwdownload`. The
+/// half-size scale makes it a real VA-API video-processing render (at the
+/// same size and format the filter passes the surface through untouched),
+/// so the GPU must finish decoding the picture and read it, and the picture
+/// stays on the GPU as it does in the renderer, which maps its surfaces into
+/// Vulkan. The probe used to download the picture to system memory, which
+/// the renderer never does, and on an Intel iHD node the shipped FFmpeg
+/// crashed in that download (SIGSEGV, sometimes abort) in 28 of 260 runs,
+/// about one in nine, with or without frame threads. Each crash left Main10
+/// decode unproved, and until a later probe passed every Dolby Vision window
+/// was admitted for a software decode: 2.0-3.3 s of work for each 2.002 s 4K
+/// window, against 1.3-1.6 s on the GPU, so the player's runway drained. The
+/// same node passed this graph 240 times in 240, alone and beside other GPU
+/// work, and it still fails on software frames and without a decode device.
+fn hevc_main10_decode_probe_args(device: &str, clip: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-hwaccel",
+        "vaapi",
+        "-hwaccel_device",
+        device,
+        "-hwaccel_output_format",
+        "vaapi",
+        "-i",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    args.push(clip.as_os_str().to_owned());
+    args.extend(
+        [
+            "-vf",
+            "scale_vaapi=w=iw/2:h=ih/2:format=p010",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ]
+        .into_iter()
+        .map(Into::into),
+    );
+    args
+}
+
 async fn probe_hevc_main10_vaapi_decode() -> bool {
     let device = plurx_core::transcode::vaapi_device();
     if !std::path::Path::new(&device).exists() {
@@ -4627,24 +4679,7 @@ async fn probe_hevc_main10_vaapi_decode() -> bool {
     }
     let mut decode = tokio::process::Command::new(ffmpeg_bin());
     decode
-        .args(["-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi"])
-        .args([
-            "-hwaccel_device",
-            &device,
-            "-hwaccel_output_format",
-            "vaapi",
-            "-i",
-        ])
-        .arg(&clip)
-        .args([
-            "-vf",
-            "hwdownload,format=p010le",
-            "-frames:v",
-            "1",
-            "-f",
-            "null",
-            "-",
-        ])
+        .args(hevc_main10_decode_probe_args(&device, &clip))
         .kill_on_drop(true);
     tokio::time::timeout(
         HEVC_MAIN10_PROBE_DEADLINE,
