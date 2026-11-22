@@ -2692,7 +2692,8 @@ pub(crate) enum SourceFixtureMode {
     /// started with native subtitles and the first track selected.
     RangeNativeCopy,
     /// [`Self::RangeCopy`] as a scanned remux carries it: Matroska with an
-    /// E-AC-3 5.1 track, started with that track.
+    /// E-AC-3 5.1 track, started with that track by caps that decode it, so
+    /// it passes through.
     RangeAudioCopy,
     /// A scanned Dolby Vision Profile 7 remux through a range-affirming
     /// receiver: Matroska with the Profile 7 source of
@@ -3650,10 +3651,14 @@ async fn build_real_source_start_fixture(
         }
     }
     if audio.is_some() {
-        // Selected by index and with no `aac` ask, as a client that decodes
-        // the codec itself sends it: these caps name AAC alone, so the Source
-        // converts a track they do not allow instead of copying it.
+        // Selected by index and with no `aac` ask, as a client whose caps name
+        // no audio sinks sends it. E-AC-3 is in its decoder list and passes
+        // through, so its Dolby brand reaches the AV output; TrueHD is in
+        // neither that list nor a copy MP4, so the Source converts it to AAC.
         recipe["session"]["audio"] = serde_json::json!(0);
+        if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
+            recipe["session"]["caps"]["audio"] = serde_json::json!(["aac", "eac3"]);
+        }
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");

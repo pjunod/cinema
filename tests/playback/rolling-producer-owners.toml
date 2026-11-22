@@ -7573,7 +7573,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # reply in the fixture's playlist/init fetch helper. No process launch.
 # Source range audio fixture: +1 awaited output() joining that test-only FFmpeg
 # mux child. No production launch, kill or wait.
-expected_occurrences = 978
+# Source range init check: +1 response.status() assertion on the fixture's
+# HTTP resource reply in actual_range_resource. No process launch, kill or wait.
+expected_occurrences = 979
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

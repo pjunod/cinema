@@ -1351,6 +1351,75 @@ async fn sharing_source_http_range_dolby_vision_converted_start_status_playlist_
     ))
     .await;
 }
+/// One resource of the range session, named relative to `base`'s resource.
+async fn actual_range_resource(
+    address: std::net::SocketAddr,
+    operation: &str,
+    fixture: &RealSourceStartFixture,
+    base: &Value,
+    uri: &str,
+) -> (Value, axum::body::Bytes) {
+    let mut request = base.clone();
+    request["resource"] = json!(base["resource"]
+        .as_str()
+        .expect("base resource")
+        .rsplit_once('/')
+        .map_or_else(|| uri.to_owned(), |(dir, _)| format!("{dir}/{uri}")));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/resources"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&request).expect("resource body"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "range resource {uri}");
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("resource bytes");
+    (request, bytes)
+}
+
+/// The served initialization segment the range playlist names (through its
+/// first variant when it is a multivariant playlist), parsed.
+async fn actual_range_init(
+    address: std::net::SocketAddr,
+    operation: &str,
+    fixture: &RealSourceStartFixture,
+    playlist: &Value,
+    playlist_bytes: &[u8],
+) -> plurx_core::fmp4::Init {
+    let mut base = playlist.clone();
+    let mut text = std::str::from_utf8(playlist_bytes)
+        .expect("playlist text")
+        .to_owned();
+    if text.contains("#EXT-X-STREAM-INF") {
+        let variant = text
+            .lines()
+            .skip_while(|line| !line.starts_with("#EXT-X-STREAM-INF"))
+            .nth(1)
+            .expect("a variant follows its stream info")
+            .to_owned();
+        let (request, bytes) =
+            actual_range_resource(address, operation, fixture, &base, &variant).await;
+        base = request;
+        text = String::from_utf8(bytes.to_vec()).expect("variant text");
+    }
+    let map = text
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the range playlist names its initialization segment")
+        .to_owned();
+    let (_, bytes) = actual_range_resource(address, operation, fixture, &base, &map).await;
+    let mut reader = plurx_core::fmp4::FragmentReader::new();
+    reader.push(&bytes);
+    match reader.next_unit().expect("served init parses") {
+        Some(plurx_core::fmp4::Unit::Init(init)) => init,
+        _ => panic!("the range init is an initialization segment"),
+    }
+}
+
 async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     let mut fixture = real_source_start_fixture_with(mode, None).await;
     fixture.keep_fixture_membership_stable().await;
@@ -1464,6 +1533,33 @@ async fn actual_source_range_delivery(mode: SourceFixtureMode) {
         String::from_utf8_lossy(&bytes)
     );
     assert!(bytes.starts_with(b"#EXTM3U"));
+    if matches!(
+        mode,
+        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeDolbyVisionConverted
+    ) {
+        let init = actual_range_init(address, &operation, &fixture, &playlist, &bytes).await;
+        let has = |needle: &[u8]| init.bytes.windows(needle.len()).any(|w| w == needle);
+        let video = init.video().expect("the AV init carries its video");
+        assert_eq!(init.tracks.len(), 2, "{mode:?}: video and audio");
+        if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
+            // E-AC-3 passes through, so the muxer's Dolby brand reached this
+            // output: the case the canonical/AV companion check must accept.
+            assert!(has(b"ec-3") && has(b"dec3"), "E-AC-3 passes through");
+            assert!(!has(b"mp4a"), "E-AC-3 is not converted");
+            assert!(!video.dolby_vision_config, "SDR video");
+        } else {
+            // TrueHD converts to AAC; the Profile 8.1 conversion keeps its
+            // Dolby Vision record and brand on the served video.
+            let master = String::from_utf8_lossy(&bytes);
+            assert!(
+                master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
+                "Profile 8.1 signalled: {master}"
+            );
+            assert!(has(b"mp4a") && !has(b"mlpa"), "TrueHD converts to AAC");
+            assert!(video.dolby_vision_config, "Dolby Vision record kept");
+            assert!(has(b"dby1"), "Dolby Vision brand kept");
+        }
+    }
     let response = actual_resource_request(
         address,
         true,
