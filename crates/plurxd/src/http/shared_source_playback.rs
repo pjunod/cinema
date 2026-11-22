@@ -2700,6 +2700,11 @@ pub(crate) enum SourceFixtureMode {
     /// [`Self::DolbyVisionConverted`] and a TrueHD 5.1 track, converted to
     /// Profile 8.1 by the growing copy owner.
     RangeDolbyVisionConverted,
+    /// File 3122's shape through the web player: Matroska H.264 SDR with an
+    /// E-AC-3 5.1 track and two SubRip tracks (the first "English (SDH)"),
+    /// started by Chrome's caps document and audio sinks with `aac` asked and
+    /// native subtitles on the first track.
+    RangeWebNativeAudioCopy,
 }
 
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
@@ -2973,6 +2978,7 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::NativeEncoded
             | SourceFixtureMode::NativeHdr10Copy
             | SourceFixtureMode::RangeNativeCopy
+            | SourceFixtureMode::RangeWebNativeAudioCopy
     );
     // The modes a range-affirming receiver starts: a growing H.264 copy.
     let range_copy = matches!(
@@ -2981,11 +2987,14 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::RangeNativeCopy
             | SourceFixtureMode::RangeAudioCopy
             | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeWebNativeAudioCopy
     );
     // The scanned remux modes' audio: the codec FFmpeg encodes, its scanned
     // name and channel count.
     let audio = match mode {
-        SourceFixtureMode::RangeAudioCopy => Some(("eac3", 6)),
+        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeWebNativeAudioCopy => {
+            Some(("eac3", 6))
+        }
         SourceFixtureMode::RangeDolbyVisionConverted => Some(("truehd", 6)),
         _ => None,
     };
@@ -3165,7 +3174,7 @@ async fn build_real_source_start_fixture(
     }
     if let Some((codec, channels)) = audio {
         // A remux's audio beside the video built above, in Matroska.
-        let muxed = directory.path().join("source.mkv");
+        let muxed = directory.path().join("remux.mkv");
         let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
             .args(["-v", "error", "-i"])
             .arg(&file)
@@ -3222,10 +3231,42 @@ async fn build_real_source_start_fixture(
             .arg(&caption)
             .arg("-i")
             .arg(&alternative)
-            .args([
-                "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
-                "subrip", "-y",
-            ])
+            .args(
+                if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+                    // File 3122's shape: its audio beside two English SubRip
+                    // tracks, the first titled "English (SDH)".
+                    &[
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a",
+                        "-map",
+                        "1:s:0",
+                        "-map",
+                        "2:s:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "copy",
+                        "-c:s",
+                        "subrip",
+                        "-metadata:s:s:0",
+                        "language=eng",
+                        "-metadata:s:s:0",
+                        "title=English (SDH)",
+                        "-metadata:s:s:1",
+                        "language=eng",
+                        "-y",
+                    ][..]
+                } else {
+                    // The other native modes keep their original video-only,
+                    // untagged two-track shape.
+                    &[
+                        "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
+                        "subrip", "-y",
+                    ][..]
+                },
+            )
             .arg(&muxed)
             .output()
             .await
@@ -3658,6 +3699,25 @@ async fn build_real_source_start_fixture(
         recipe["session"]["audio"] = serde_json::json!(0);
         if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
             recipe["session"]["caps"]["audio"] = serde_json::json!(["aac", "eac3"]);
+        }
+        if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+            // Chrome on macOS as decode-tiers.js builds it: no AC-3/E-AC-3
+            // decoder, stereo output, a sink for each decodable codec, and the
+            // `aac` ask copyAudioNeedsTranscode makes for E-AC-3.
+            recipe["session"]["caps"] = serde_json::json!({"v":2,
+                "client":{"kind":"web","build":"fixture","ua":"Mozilla/5.0 (Macintosh) Chrome"},
+                "video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr"],"dv_profiles":[]}],
+                "audio":["aac","mp3","opus","flac"],
+                "containers":["mp4","webm","mov","m4a","m4b","mp3","aac","flac","ogg","opus","wav"],
+                "transports":["progressive","hls","hls-bounded-range-v1"],
+                "hls_hevc_sample_entries":["hvc1"],"progressive_hevc_sample_entries":[],
+                "display":{"hdr":false,"dolby_vision":false},
+                "audio_sinks":[
+                    {"codec":"aac","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                    {"codec":"mp3","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                    {"codec":"flac","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]}],
+                "learned_limits":[]});
+            recipe["session"]["aac"] = serde_json::json!(true);
         }
     }
     if matches!(mode, SourceFixtureMode::Direct) {
