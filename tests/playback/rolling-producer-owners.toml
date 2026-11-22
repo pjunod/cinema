@@ -4216,7 +4216,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # and joined before the fixture shuts down. No production task.
 # Cluster remainder + Main 7df74ec6d union: Main's count plus the remainder's
 # unchanged delta over Main 4bb5e1862; matcher unchanged.
-expected_occurrences = 1201
+# DV window runs (#1862): +5. One production task in dv_segment/window_run.rs
+# is a run's idle-expiry timer; it only signals the run's owner to kill and
+# settle the helper and holds no process or source. Four are joined test
+# tasks in the same module. The helper's stage task and its launch moved into
+# the single/run split without changing count.
+# Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
+# unchanged delta over Main b6e8efe17; matcher unchanged.
+expected_occurrences = 1206
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6288,7 +6295,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # viewer clock; it supplies no readiness or settlement evidence.
 # Cluster remainder + Main 7df74ec6d union: Main's count plus the remainder's
 # unchanged delta over Main 4bb5e1862; matcher unchanged.
-expected_occurrences = 2314
+# Cinema fixes + main 32f30addc union: main 2305 plus the branch's own 1 over base 5a5e6c97a.
+# DV window runs (#1862): +9. Four production waits in dv_segment/window_run.rs:
+# the idle-rest bound, the run backstop deadline, and two 20 ms polls (FIFO
+# readiness, next-window marker), each inside a select! with the window's own
+# deadline and cancellation. Five are test sleeps under paused time.
+# Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
+# unchanged delta over Main b6e8efe17; matcher unchanged.
+expected_occurrences = 2323
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7970,7 +7984,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Final cluster/main union: +1 cluster.rs Barrier.wait() in the concurrent
 # refusal-isolation regression. Both requests are joined; this is not a process
 # wait, reap acknowledgement or new production lifecycle owner.
-expected_occurrences = 404
+# DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
+# owner whose kill cancels the helper's existing stage owner and waits for its
+# reap and the run's source/lane/reservation settlement. No new process launch.
+# Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
+# unchanged delta over Main b6e8efe17; matcher unchanged.
+expected_occurrences = 409
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -8053,7 +8072,9 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 88
+# DV window runs (#1862): +1 is the declaration `async fn kill(self)` of the
+# WindowRun owner above; it signals the existing helper stage owner only.
+expected_occurrences = 89
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

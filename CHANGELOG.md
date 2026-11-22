@@ -92,6 +92,13 @@ bump may break compatibility and a **patch** bump never does.
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
   admission checks still run before execution.
+- 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
+  with playback instead of stalling every few seconds. Each 2-second window
+  used to start its own renderer, which re-read and re-decoded the source
+  back to the previous keyframe and restarted the GPU. One renderer now
+  produces up to eight consecutive windows, each still verified and
+  published on its own. That is about 30% less work per window and about
+  60% fewer source reads, with byte-identical output.
 - Shared Dolby Vision Profile 7 titles start again when converted to Profile
   8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
   first fragment against the rung its plan resolved instead of the source's own

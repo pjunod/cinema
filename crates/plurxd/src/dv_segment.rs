@@ -27,6 +27,10 @@ use tokio_util::sync::CancellationToken;
 mod stage_clock;
 #[cfg(target_os = "linux")]
 pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};
+#[cfg(target_os = "linux")]
+mod window_run;
+#[cfg(target_os = "linux")]
+pub(crate) use window_run::{request_key, RunLaunch, WindowRun, WindowRunSlot, RUN_MAX};
 
 const DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
@@ -325,8 +329,21 @@ pub(crate) struct SegmentProducer {
     helper_completion: Option<HelperCompletion>,
     #[cfg(target_os = "linux")]
     evidence: Option<SegmentEvidence>,
+    /// A run window's helper process, which outlives this window's encoder.
+    #[cfg(target_os = "linux")]
+    run_helper: Option<ProducerRegistration>,
 }
 impl SegmentProducer {
+    /// The registrations a source owner must settle for this window: a run's
+    /// helper (still reading the source between windows), then the encoder.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_registrations(&self) -> Vec<ProducerRegistration> {
+        self.run_helper
+            .iter()
+            .chain([&self.registration])
+            .cloned()
+            .collect()
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn take_source_settlement(&mut self) -> Option<SourceInputSettlement> {
         self.source_settlement.take()
@@ -381,6 +398,9 @@ pub(crate) struct SourceInputLease {
     url: String,
     users: std::sync::atomic::AtomicUsize,
     settled: tokio::sync::Notify,
+    /// Held across the one real close, so every concurrent closer returns
+    /// only after the input is actually closed and its reads are joined.
+    closing: tokio::sync::Mutex<()>,
 }
 impl SourceInputLease {
     #[cfg(target_os = "linux")]
@@ -390,7 +410,27 @@ impl SourceInputLease {
             input: std::sync::Mutex::new(Some(input)),
             users: std::sync::atomic::AtomicUsize::new(0),
             settled: tokio::sync::Notify::new(),
+            closing: tokio::sync::Mutex::new(()),
         })
+    }
+    /// Publish this input's foreground observer for the rendition in place of
+    /// `previous`'s, under the generation epoch `previous` was published at.
+    /// A window run's later windows read through the run's input, so the
+    /// observer the driver steers must be the run's, not the window's unused one.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn adopt_observer_publication(&self, previous: &Self) -> Result<(), String> {
+        let update = {
+            let previous = previous.input.lock().expect("DV source input");
+            let mut input = self.input.lock().expect("DV source input");
+            match (previous.as_ref(), input.as_mut()) {
+                (Some(previous), Some(input)) => input.adopt_observer_publication(previous),
+                _ => None,
+            }
+        };
+        match update {
+            Some(update) => update.await,
+            None => Ok(()),
+        }
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn physical_owner(self: &Arc<Self>) -> SourceInputUse {
@@ -407,6 +447,7 @@ impl SourceInputLease {
             }
             settled.await;
         }
+        let _closing = self.closing.lock().await;
         let input = { self.input.lock().expect("DV source input").take() };
         if let Some(input) = input {
             input.close_and_wait().await?;
@@ -453,8 +494,19 @@ struct Resources {
     source: Arc<SourceFence>,
     original_offset: u64,
     _offset_lane: Option<OwnedSemaphorePermit>,
-    _admission: SegmentAdmission,
+    _admission: HeldAdmission,
     directory: Arc<tempfile::TempDir>,
+}
+
+/// What a helper's resources keep admitted. A single window holds its graph
+/// credit (and a retained family's exclusive worker claim) until both children
+/// are reaped. A window run's helper holds only the family reservation: each
+/// run window's encoder holds that window's own worker claim, so the next
+/// window claims the same reservation while the run's helper lives.
+enum HeldAdmission {
+    Window(#[allow(dead_code, reason = "held until reap")] SegmentAdmission),
+    #[cfg(target_os = "linux")]
+    Run(#[allow(dead_code, reason = "held until reap")] crate::vodencode::EncodePermit),
 }
 impl Drop for Resources {
     fn drop(&mut self) {
@@ -834,7 +886,7 @@ async fn run(
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
-        _admission: admission,
+        _admission: HeldAdmission::Window(admission),
         directory: Arc::new(directory),
     });
     // /dev/fd on macOS shares the description's offset. A fresh demuxer
@@ -977,6 +1029,8 @@ async fn run(
         helper_completion: None,
         #[cfg(target_os = "linux")]
         evidence: None,
+        #[cfg(target_os = "linux")]
+        run_helper: None,
     })
 }
 
@@ -994,7 +1048,7 @@ pub(crate) struct SegmentWindow {
 }
 #[cfg(target_os = "linux")]
 impl SegmentWindow {
-    fn args(&self) -> Result<[String; 3], String> {
+    pub(crate) fn args(&self) -> Result<[String; 3], String> {
         let (start, sd) = self.start;
         let (end, ed) = self.end;
         let (origin, od) = self.source_origin.map_or((0, 1), |origin| origin.exact());
@@ -1117,11 +1171,34 @@ fn check_streaming_budget(
 pub(crate) async fn spawn_streaming(
     request: StreamingSegmentRequest,
 ) -> Result<SegmentProducer, String> {
+    spawn_launch(request, None)
+        .await
+        .map(|(producer, _)| producer)
+}
+
+/// Start a window run: the request's window is the run's first, and
+/// `launch.later` its following windows. The returned producer is the first
+/// window's, exactly as [`spawn_streaming`] returns it; the run hands out the
+/// later windows' producers one at a time ([`WindowRun::attach`]).
+#[cfg(target_os = "linux")]
+pub(crate) async fn spawn_streaming_run(
+    request: StreamingSegmentRequest,
+    launch: RunLaunch,
+) -> Result<(SegmentProducer, WindowRun), String> {
+    let (producer, run) = spawn_launch(request, Some(launch)).await?;
+    Ok((producer, run.ok_or("DV window run launch returned no run")?))
+}
+
+#[cfg(target_os = "linux")]
+async fn spawn_launch(
+    request: StreamingSegmentRequest,
+    run: Option<RunLaunch>,
+) -> Result<(SegmentProducer, Option<WindowRun>), String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let cancel = request.request.cancel.child_token();
     let owner_cancel = cancel.clone();
     tokio::spawn(async move {
-        let _ = sender.send(run_streaming(request, owner_cancel).await);
+        let _ = sender.send(launch_streaming(request, owner_cancel, run).await);
     });
     struct CancelOnDrop(Option<CancellationToken>);
     impl Drop for CancelOnDrop {
@@ -1139,40 +1216,24 @@ pub(crate) async fn spawn_streaming(
     result
 }
 
+/// Everything a streaming window's request must satisfy before it reserves
+/// its producer slot, whether it starts a helper or continues a run.
 #[cfg(target_os = "linux")]
-async fn run_streaming(
-    stream: StreamingSegmentRequest,
-    cancel: CancellationToken,
-) -> Result<SegmentProducer, String> {
-    let window_args = stream
-        .window
-        .as_ref()
-        .map(SegmentWindow::args)
-        .transpose()?;
-    let windowed = window_args.is_some();
+fn check_streaming_request(stream: &StreamingSegmentRequest) -> Result<(), String> {
+    let windowed = stream.window.is_some();
     let base_only = stream.mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu;
-    let stages = Arc::clone(&stream.stages);
     if base_only && (!windowed || stream.request.shape.el != (0, 0)) {
         return Err("base-RPU processing requires an original-source window and omitted EL".into());
     }
-    let request = stream.request;
-    if stream.background && request.source_input.is_none() {
+    if stream.background && stream.request.source_input.is_none() {
         return Err("background FEL render requires its owned source reader".into());
     }
-    let work = |name| {
-        if stream.background {
-            crate::process_control::ChildWork::background(name)
-        } else {
-            crate::process_control::ChildWork::realtime(name)
-        }
-    };
     if windowed {
-        request.shape.window_frame_bytes()?;
+        stream.request.shape.window_frame_bytes()?;
     } else {
-        request.shape.frame_bytes()?;
+        stream.request.shape.frame_bytes()?;
     }
-    let admission = request.admission;
-    let held = admission.resources();
+    let held = stream.request.admission.resources();
     held.hardware
         .ok_or("streaming segment requires concrete GPU admission")?;
     let cpu = held
@@ -1181,16 +1242,153 @@ async fn run_streaming(
     check_streaming_budget(
         stream.mode,
         stream.decode,
-        &request.encoder_args,
+        &stream.request.encoder_args,
         cpu.threads(),
     )?;
-    check_streaming_clock(&request.encoder_args, windowed)?;
+    check_streaming_clock(&stream.request.encoder_args, windowed)
+}
+
+/// The streaming helper's argv after the executable. `run_tail` is a window
+/// run's `--window-run N END DIR NUT ...` list, which the helper requires
+/// after every ordinary argument and before `--held-source-origin`.
+#[cfg(target_os = "linux")]
+pub(crate) fn streaming_helper_args(
+    shape: &SegmentShape,
+    source_url: Option<&str>,
+    window: Option<SegmentWindow>,
+    mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    export_raster: Option<(u32, u32)>,
+    display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    run_tail: &[String],
+) -> Result<Vec<String>, String> {
+    let window_args = window.as_ref().map(SegmentWindow::args).transpose()?;
+    let windowed = window_args.is_some();
+    let base_only = mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu;
+    let mut args = shape.renderer_args();
+    if let Some(url) = source_url {
+        if !windowed {
+            return Err("original source service requires windowed renderer input".into());
+        }
+        url.clone_into(&mut args[0]);
+    }
+    args.push(fd(5));
+    if let Some(window_args) = window_args {
+        args.extend(window_args);
+    }
+    if base_only || export_raster.is_some() {
+        args.push(if base_only { "base-rpu" } else { "fel" }.into());
+    }
+    if let Some((width, height)) = export_raster {
+        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
+            raster: (width, height),
+        }
+        .raster(shape.bl)
+        .map_err(|error| error.to_string())?;
+        args.extend([
+            width.to_string(),
+            height.to_string(),
+            "pq-bilinear-yuv420p10-v1".into(),
+        ]);
+    }
+    if let Some(target) = display_target {
+        if !windowed || export_raster.is_none() {
+            return Err(
+                "display targeting requires an explicit bounded window/export policy".into(),
+            );
+        }
+        // Helper argv[10]: executable is not part of this Vec. Title endpoints
+        // follow the export policy; no environment-dependent renderer defaults.
+        args[9] = target.output_policy();
+        args.extend(target.endpoint_args());
+    }
+    if !run_tail.is_empty() && !windowed {
+        return Err("a window run requires a bounded original-source window".into());
+    }
+    args.extend(run_tail.iter().cloned());
+    if let Some(origin_args) = window.and_then(SegmentWindow::held_origin_args) {
+        args.extend(origin_args);
+    }
+    Ok(args)
+}
+
+#[cfg(target_os = "linux")]
+fn streaming_work(background: bool, name: &'static str) -> crate::process_control::ChildWork {
+    if background {
+        crate::process_control::ChildWork::background(name)
+    } else {
+        crate::process_control::ChildWork::realtime(name)
+    }
+}
+
+/// The window's encoder: NUT video on fd3, original audio on fd4 or through
+/// the source reader's URL.
+#[cfg(target_os = "linux")]
+fn spawn_streaming_encoder(
+    encoder: &std::path::Path,
+    encoder_args: &[String],
+    runtime_cache: &std::path::Path,
+    background: bool,
+    nut: &std::fs::File,
+    audio: Option<&std::fs::File>,
+    source_url: Option<&str>,
+) -> Result<Spawned, String> {
+    producer_spawn::spawn(
+        encoder,
+        &crate::source_input::source_args(encoder_args, std::path::Path::new(""), &[4], source_url),
+        SpawnOptions {
+            runtime_cache,
+            progress: Progress::Stderr,
+            descriptors: Descriptors::from_files(Some(nut), audio, None, false),
+            env: &[],
+            work: streaming_work(background, "DV streaming encoder"),
+        },
+    )
+}
+
+/// What one run window's encoder keeps until it is reaped: that window's
+/// admission (its exclusive worker claim), its use of the run's source reader
+/// (the encoder reads audio through it) and its private directory.
+#[cfg(target_os = "linux")]
+struct WindowResources {
+    _source_input: SourceInputUse,
+    _admission: SegmentAdmission,
+    _directory: Arc<tempfile::TempDir>,
+}
+
+/// Where a single window's renderer observations come from: the helper's
+/// stdout, which the daemon writes into the window's `renderer.jsonl`. A
+/// window run's helper writes every window's `renderer.jsonl` itself and
+/// must leave stdout empty.
+#[cfg(target_os = "linux")]
+fn record_single_observations(
+    directory: &std::fs::File,
+    observations: &[u8],
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = SegmentEvidence::open(
+        directory,
+        c"renderer.jsonl",
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )?;
+    file.write_all(observations).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "linux")]
+async fn launch_streaming(
+    stream: StreamingSegmentRequest,
+    cancel: CancellationToken,
+    run: Option<RunLaunch>,
+) -> Result<(SegmentProducer, Option<WindowRun>), String> {
+    check_streaming_request(&stream)?;
+    let windowed = stream.window.is_some();
+    let stages = Arc::clone(&stream.stages);
+    let request = stream.request;
     let reservation = request
         .producer
         .try_reserve_empty()
         .map_err(|e| e.to_string())?;
     let lane = acquire_offset_lane(
-        request.source_offsets,
+        Arc::clone(&request.source_offsets),
         request.preparation_deadline,
         &cancel,
         &stages,
@@ -1204,84 +1402,78 @@ async fn run_streaming(
         .map_err(|e| e.to_string())?
         .len();
     // Window mode keeps the original movie descriptor. The helper bounds all
-    // header/probe/preroll/window reads together at 128MiB; seeks never reset it.
+    // header/probe/preroll/window reads together at 128MiB per window; seeks
+    // never reset it.
     if bytes == 0 || (!windowed && bytes > SOURCE_LIMIT) {
         return Err("finite streaming source exceeds byte envelope".into());
     }
     let original_offset = (&request.source.handle)
         .stream_position()
         .map_err(|e| e.to_string())?;
-    let directory = tempfile::Builder::new()
-        .prefix("dv-stream-")
-        .tempdir_in(&request.runtime_cache)
-        .map_err(|e| e.to_string())?;
+    let directory = Arc::new(
+        tempfile::Builder::new()
+            .prefix("dv-stream-")
+            .tempdir_in(&request.runtime_cache)
+            .map_err(|e| e.to_string())?,
+    );
     let source_input = request.source_input;
+    // A run's later windows each get their own private directory and NUT
+    // FIFO, whose read end exists before the helper can open its writer.
+    let (run_outputs, run_tail) = match &run {
+        Some(launch) => {
+            if source_input.is_none() {
+                return Err("a DV window run requires its owned source reader".into());
+            }
+            window_run::outputs(
+                &request.runtime_cache,
+                stream
+                    .window
+                    .as_ref()
+                    .ok_or("a DV window run requires a bounded window")?,
+                &launch.later,
+            )?
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let admission = request.admission;
+    let (helper_admission, window_admission) = match &run {
+        Some(launch) => (
+            HeldAdmission::Run(launch.reservation.clone()),
+            Some(admission),
+        ),
+        None => (HeldAdmission::Window(admission), None),
+    };
     let resources = Arc::new(Resources {
         _source_input: source_input.as_ref().map(|input| input.physical_owner()),
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
-        _admission: admission,
-        directory: Arc::new(directory),
+        _admission: helper_admission,
+        directory: Arc::clone(&directory),
     });
     (&resources.source.handle)
         .seek(SeekFrom::Start(0))
         .map_err(|e| e.to_string())?;
-    let directory =
-        plurx_core::fs_secure::open_directory_nofollow_blocking(resources.directory.path())
-            .map_err(|e| e.to_string())?;
+    let held_directory = plurx_core::fs_secure::open_directory_nofollow_blocking(directory.path())
+        .map_err(|e| e.to_string())?;
     let evidence = SegmentEvidence {
-        directory: resources.directory.clone(),
-        held: Arc::new(directory.try_clone().map_err(|e| e.to_string())?),
+        directory: Arc::clone(&directory),
+        held: Arc::new(held_directory.try_clone().map_err(|e| e.to_string())?),
     };
     let evidence_hold = evidence.held.clone();
     let evidence_lease = evidence.directory.clone();
     let (read, write) = std::io::pipe().map_err(|e| e.to_string())?;
     let read: std::fs::File = std::os::fd::OwnedFd::from(read).into();
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
-    let mut args = request.shape.renderer_args();
-    if let Some(input) = &source_input {
-        if !windowed {
-            return Err("original source service requires windowed renderer input".into());
-        }
-        args[0] = input.url.clone();
-    }
-    args.push(fd(5));
-    if let Some(window_args) = window_args {
-        args.extend(window_args);
-    }
-    if base_only || stream.export_raster.is_some() {
-        args.push("base-rpu".into());
-        if !base_only {
-            *args.last_mut().expect("mode") = "fel".into();
-        }
-    }
-    if let Some((width, height)) = stream.export_raster {
-        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
-            raster: (width, height),
-        }
-        .raster(request.shape.bl)
-        .map_err(|error| error.to_string())?;
-        args.extend([
-            width.to_string(),
-            height.to_string(),
-            "pq-bilinear-yuv420p10-v1".into(),
-        ]);
-    }
-    if let Some(target) = stream.display_target {
-        if !windowed || stream.export_raster.is_none() {
-            return Err(
-                "display targeting requires an explicit bounded window/export policy".into(),
-            );
-        }
-        // Helper argv[10]: executable is not part of this Vec. Title endpoints
-        // follow the export policy; no environment-dependent renderer defaults.
-        args[9] = target.output_policy();
-        args.extend(target.endpoint_args());
-    }
-    if let Some(origin_args) = stream.window.and_then(SegmentWindow::held_origin_args) {
-        args.extend(origin_args);
-    }
+    let args = streaming_helper_args(
+        &request.shape,
+        source_input.as_ref().map(|input| input.url.as_str()),
+        stream.window,
+        stream.mode,
+        stream.export_raster,
+        stream.display_target,
+        &run_tail,
+    )?;
     let renderer_env: Vec<_> = request
         .renderer_env
         .iter()
@@ -1295,54 +1487,108 @@ async fn run_streaming(
             progress: Progress::None,
             descriptors: Descriptors::from_files(
                 (!stream.background).then_some(&resources.source.handle),
-                Some(&directory),
+                Some(&held_directory),
                 Some(&write),
                 true,
             ),
             env: &renderer_env,
-            work: work("DV streaming reconstruction"),
+            work: streaming_work(stream.background, "DV streaming reconstruction"),
         },
     )?;
     stages.mark(WindowStage::HelperSpawned);
     drop(write); // Only the real renderer owns the writer; its exit delivers EOF.
-    let helper_cancel = cancel.child_token();
+
+    // A single window's helper is that window's; a run's helper outlives its
+    // first window and is cancelled only by the run (or a failing window).
+    let helper_cancel = if run.is_some() {
+        CancellationToken::new()
+    } else {
+        cancel.child_token()
+    };
     let stage_cancel = helper_cancel.clone();
     let stage_resources = resources.clone();
-    let helper = tokio::spawn(async move {
-        stage(
-            render,
-            stage_resources,
-            stream.renderer_deadline,
-            &stage_cancel,
-            "streaming renderer",
-            WINDOW_TRACE_LIMIT,
-        )
-        .await
-    });
+    let helper_deadline = run
+        .as_ref()
+        .map_or(stream.renderer_deadline, |launch| launch.deadline);
+    enum Helper {
+        Single(tokio::task::JoinHandle<Result<Vec<u8>, String>>),
+        Run {
+            helper: window_run::RunHelper,
+            launch: RunLaunch,
+            admission: SegmentAdmission,
+            input: Arc<SourceInputLease>,
+            registration: ProducerRegistration,
+        },
+    }
+    // Everything the first run window needs is moved into the helper's arm
+    // before its encoder exists, so nothing after the encoder spawn can fail.
+    let helper = match (run, window_admission, &source_input) {
+        (Some(launch), Some(admission), Some(input)) => {
+            let (registered, registration) = tokio::sync::oneshot::channel();
+            let staged = async move {
+                stage_with(
+                    render,
+                    stage_resources,
+                    helper_deadline,
+                    &stage_cancel,
+                    "streaming renderer",
+                    WINDOW_TRACE_LIMIT,
+                    Some(registered),
+                )
+                .await
+            };
+            let helper = window_run::spawn_helper(
+                staged,
+                helper_cancel.clone(),
+                Arc::clone(input),
+                run_outputs
+                    .iter()
+                    .map(window_run::RunOutput::directory)
+                    .chain([Arc::clone(&directory)])
+                    .collect(),
+            );
+            let Ok(registration) = registration.await else {
+                helper_cancel.cancel();
+                drop(resources);
+                helper.settled().await;
+                return Err("DV window run helper was never registered".into());
+            };
+            Helper::Run {
+                helper,
+                launch,
+                admission,
+                input: Arc::clone(input),
+                registration,
+            }
+        }
+        (None, None, _) => Helper::Single(tokio::spawn(async move {
+            stage(
+                render,
+                stage_resources,
+                helper_deadline,
+                &stage_cancel,
+                "streaming renderer",
+                WINDOW_TRACE_LIMIT,
+            )
+            .await
+        })),
+        _ => {
+            // Unreachable: a run always has its first admission and reader.
+            return Err("DV window run launch lost its admission or reader".into());
+        }
+    };
     let encoded = check_source(&resources.source).and_then(|()| {
         if cancel.is_cancelled() || Instant::now() >= request.preparation_deadline {
             return Err("streaming segment cancelled before encoder".into());
         }
-        producer_spawn::spawn(
+        spawn_streaming_encoder(
             &request.encoder,
-            &crate::source_input::source_args(
-                &request.encoder_args,
-                std::path::Path::new(""),
-                &[4],
-                source_input.as_ref().map(|input| input.url.as_str()),
-            ),
-            SpawnOptions {
-                runtime_cache: &request.runtime_cache,
-                progress: Progress::Stderr,
-                descriptors: Descriptors::from_files(
-                    Some(&read),
-                    source_input.is_none().then_some(&resources.source.handle),
-                    None,
-                    false,
-                ),
-                env: &[],
-                work: work("DV streaming encoder"),
-            },
+            &request.encoder_args,
+            &request.runtime_cache,
+            stream.background,
+            &read,
+            source_input.is_none().then_some(&resources.source.handle),
+            source_input.as_ref().map(|input| input.url.as_str()),
         )
     });
     drop(read); // No parent reader can prevent SIGPIPE after encoder failure.
@@ -1353,56 +1599,124 @@ async fn run_streaming(
         }
         Err(error) => {
             helper_cancel.cancel();
-            let _ = helper.await;
+            // A run's settlement closes its source reader, which waits for
+            // every use of it, this one included.
+            drop(resources);
+            match helper {
+                Helper::Single(helper) => {
+                    let _ = helper.await;
+                }
+                Helper::Run { helper, .. } => helper.settled().await,
+            }
             return Err(error);
         }
     };
     let watched_source = resources.source.clone();
-    let (registration, writers) = reservation.attach_registered_job_owned(
-        encoded.child,
-        encoded.child_job,
-        request.at,
-        Box::new(resources),
-    );
     let handoff_cancel = cancel.clone();
-    let completed_helper = async move {
-        let helper_result = helper
-            .await
-            .unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}")));
-        helper_result.and_then(|observations| {
-            check_source(&watched_source)?;
-            use std::io::Write;
-            let _lease = (&evidence_lease, &evidence_hold);
-            let mut file = SegmentEvidence::open(
-                &evidence_hold,
-                c"renderer.jsonl",
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            )?;
-            file.write_all(&observations).map_err(|e| e.to_string())
-        })
-    };
-    let completion = supervise_streaming_helper(
-        completed_helper,
-        helper_cancel,
-        cancel,
-        Arc::downgrade(&request.producer),
-        registration.clone(),
-    );
-    let source_settlement = source_input.map(|input| SourceInputSettlement {
-        input,
-        encoder: registration.clone(),
-        helper: completion.clone(),
-    });
-    Ok(SegmentProducer {
-        source_settlement,
-        registration,
-        writers: Some(writers),
-        stdout: Some(encoded.stdout),
-        stderr: Some(encoded.stderr),
-        unaccepted_cancel: Some(handoff_cancel),
-        helper_completion: Some(completion),
-        evidence: Some(evidence),
-    })
+    match helper {
+        Helper::Single(helper) => {
+            let (registration, writers) = reservation.attach_registered_job_owned(
+                encoded.child,
+                encoded.child_job,
+                request.at,
+                Box::new(resources),
+            );
+            let completed_helper = async move {
+                let helper_result = helper
+                    .await
+                    .unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}")));
+                helper_result.and_then(|observations| {
+                    check_source(&watched_source)?;
+                    let _lease = (&evidence_lease, &evidence_hold);
+                    record_single_observations(&evidence_hold, &observations)
+                })
+            };
+            let completion = supervise_streaming_helper(
+                completed_helper,
+                helper_cancel,
+                cancel,
+                Arc::downgrade(&request.producer),
+                registration.clone(),
+            );
+            let source_settlement = source_input.map(|input| SourceInputSettlement {
+                input,
+                encoder: registration.clone(),
+                helper: completion.clone(),
+            });
+            Ok((
+                SegmentProducer {
+                    source_settlement,
+                    registration,
+                    writers: Some(writers),
+                    stdout: Some(encoded.stdout),
+                    stderr: Some(encoded.stderr),
+                    unaccepted_cancel: Some(handoff_cancel),
+                    helper_completion: Some(completion),
+                    evidence: Some(evidence),
+                    run_helper: None,
+                },
+                None,
+            ))
+        }
+        Helper::Run {
+            helper,
+            launch,
+            admission,
+            input,
+            registration: helper_registration,
+        } => {
+            // The helper's own stage holds the lane, offset and family
+            // reservation; the first window's encoder holds only its own.
+            drop(resources);
+            let (registration, writers) = reservation.attach_registered_job_owned(
+                encoded.child,
+                encoded.child_job,
+                request.at,
+                Box::new(WindowResources {
+                    _source_input: input.physical_owner(),
+                    _admission: admission,
+                    _directory: Arc::clone(&directory),
+                }),
+            );
+            let completed = window_run::window_complete(
+                run_outputs.first().map(window_run::RunOutput::held),
+                helper.exit(),
+                watched_source.clone(),
+            );
+            let completion = supervise_streaming_helper(
+                completed,
+                helper_cancel.clone(),
+                cancel,
+                Arc::downgrade(&request.producer),
+                registration.clone(),
+            );
+            let run = WindowRun::new(
+                launch,
+                request.shape.max_frames,
+                run_outputs,
+                helper,
+                helper_cancel,
+                input,
+                watched_source,
+                helper_registration.clone(),
+            );
+            stages.run_window(0, run.windows());
+            Ok((
+                SegmentProducer {
+                    source_settlement: None,
+                    registration,
+                    writers: Some(writers),
+                    stdout: Some(encoded.stdout),
+                    stderr: Some(encoded.stderr),
+                    unaccepted_cancel: Some(handoff_cancel),
+                    helper_completion: Some(completion),
+                    evidence: Some(evidence),
+                    run_helper: Some(helper_registration),
+                },
+                Some(run),
+            ))
+        }
+    }
 }
 
 /// Wait for the recipe's one-permit source-offset lane within the window's
@@ -1451,6 +1765,28 @@ async fn stage<R: Send + Sync + 'static>(
     name: &str,
     trace_limit: u64,
 ) -> Result<Vec<u8>, String> {
+    stage_with(
+        spawned,
+        resources,
+        deadline,
+        cancel,
+        name,
+        trace_limit,
+        None,
+    )
+    .await
+}
+/// [`stage`], also handing out the child's registration once it is attached,
+/// so an owner can settle on that exact process's reap.
+async fn stage_with<R: Send + Sync + 'static>(
+    spawned: Spawned,
+    resources: Arc<R>,
+    deadline: Instant,
+    cancel: &CancellationToken,
+    name: &str,
+    trace_limit: u64,
+    registered: Option<tokio::sync::oneshot::Sender<ProducerRegistration>>,
+) -> Result<Vec<u8>, String> {
     let slot = ProducerSlot::new();
     let (registration, writers) = slot
         .attach_registered_job_owned(
@@ -1460,6 +1796,9 @@ async fn stage<R: Send + Sync + 'static>(
             Some(Box::new(resources)),
         )
         .await;
+    if let Some(registered) = registered {
+        let _ = registered.send(registration.clone());
+    }
     let result = {
         let pipes = async {
             tokio::try_join!(
@@ -2710,6 +3049,142 @@ mod tests {
     #[test]
     fn original_movie_window_uses_exact_bounded_rationals() {
         window_argument_regression();
+    }
+
+    /// A window run's helper is the single window's helper argv for the
+    /// run's first window with `--window-run N END DIR NUT ...` after every
+    /// ordinary argument and before `--held-source-origin`, which the helper
+    /// strips first. Without a run the argv is exactly the single window's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_window_run_appends_its_windows_after_the_ordinary_helper_argv() {
+        use plurx_core::transcode::{
+            dv_processing::{DvProcessingMode, DvSourceOrigin, DvTimestamp},
+            VodSourceClock,
+        };
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(0, 1).expect("origin"),
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("origin");
+        let shape = SegmentShape {
+            video_index: 0,
+            max_frames: 48,
+            bl: (3840, 2160),
+            el: (0, 0),
+        };
+        let window = SegmentWindow {
+            start: (48048, 24000),
+            end: (96096, 24000),
+            max_preroll: 512,
+            source_origin: Some(origin),
+        };
+        let args = |tail: &[String]| {
+            streaming_helper_args(
+                &shape,
+                Some("http://127.0.0.1:9/source"),
+                Some(window),
+                DvProcessingMode::BaseRpu,
+                Some((3840, 2160)),
+                None,
+                tail,
+            )
+            .expect("helper argv")
+        };
+        let single = args(&[]);
+        assert_eq!(
+            single,
+            [
+                "http://127.0.0.1:9/source",
+                "/proc/self/fd/4",
+                "0",
+                "48",
+                "3840",
+                "2160",
+                "0",
+                "0",
+                "0",
+                "bt2020-pq-master-clip",
+                "/proc/self/fd/5",
+                "48048/24000",
+                "96096/24000",
+                "512",
+                "base-rpu",
+                "3840",
+                "2160",
+                "pq-bilinear-yuv420p10-v1",
+                "--held-source-origin",
+                "0/1",
+            ]
+        );
+        let tail = window_run::run_tail(&[(
+            "144144/24000".into(),
+            "/cache/dv-stream-b".into(),
+            "/cache/dv-stream-b/video.nut".into(),
+        )]);
+        let run = args(&tail);
+        let origin_at = single.len() - 2;
+        assert_eq!(run[..origin_at], single[..origin_at]);
+        assert_eq!(
+            run[origin_at..],
+            [
+                "--window-run",
+                "2",
+                "144144/24000",
+                "/cache/dv-stream-b",
+                "/cache/dv-stream-b/video.nut",
+                "--held-source-origin",
+                "0/1",
+            ]
+        );
+        // A run window may differ only in its source reader, cap and bounds.
+        let later = SegmentWindow {
+            start: (96096, 24000),
+            end: (144144, 24000),
+            ..window
+        };
+        let later_args = streaming_helper_args(
+            &SegmentShape {
+                max_frames: 40,
+                ..shape
+            },
+            Some("http://127.0.0.1:9/other"),
+            Some(later),
+            DvProcessingMode::BaseRpu,
+            Some((3840, 2160)),
+            None,
+            &[],
+        )
+        .expect("later argv");
+        assert_eq!(
+            window_run::helper_key(&single),
+            window_run::helper_key(&later_args)
+        );
+        let full = streaming_helper_args(
+            &shape,
+            Some("http://127.0.0.1:9/source"),
+            Some(window),
+            DvProcessingMode::Fel,
+            Some((3840, 2160)),
+            None,
+            &[],
+        )
+        .expect("FEL argv");
+        assert_ne!(
+            window_run::helper_key(&single),
+            window_run::helper_key(&full)
+        );
+        // A run needs a bounded window.
+        assert!(streaming_helper_args(
+            &shape,
+            None,
+            None,
+            DvProcessingMode::Fel,
+            None,
+            None,
+            &tail
+        )
+        .is_err());
     }
 
     #[cfg(target_os = "linux")]
