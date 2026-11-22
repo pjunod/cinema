@@ -380,8 +380,10 @@ pub(super) async fn spawn_generation(
                 );
                 return;
             };
-            runtime
-                .execute_with_source_input(
+            // Boxed so the DV window's large future lives on the heap, not in
+            // every generation future's stack frame.
+            Box::pin(
+                runtime.execute_with_source_input(
                     &recipe.file,
                     &encoding.plan,
                     &encoding.options,
@@ -403,25 +405,26 @@ pub(super) async fn spawn_generation(
                         .map_or(&[][..], |rest| {
                             &rest[..rest.len().min(crate::dv_segment::RUN_MAX - 1)]
                         }),
-                )
-                .await
-                .and_then(|outcome| match outcome {
-                    crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
-                        Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
-                    }
-                    crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
-                        match &encoding.dv_processing {
-                            plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
-                                if actual.semantic_digest() == frozen.semantic_digest() =>
-                            {
-                                Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
-                                    window,
-                                ))
-                            }
-                            _ => Err("completed DV graph differs from frozen rendition".into()),
+                ),
+            )
+            .await
+            .and_then(|outcome| match outcome {
+                crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                    Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
+                }
+                crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
+                    match &encoding.dv_processing {
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                            if actual.semantic_digest() == frozen.semantic_digest() =>
+                        {
+                            Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
+                                window,
+                            ))
                         }
+                        _ => Err("completed DV graph differs from frozen rendition".into()),
                     }
-                })
+                }
+            })
         };
         let verified = match verified {
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,

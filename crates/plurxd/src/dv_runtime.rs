@@ -1629,9 +1629,16 @@ impl RuntimeRecipe {
                 window: Some(window),
                 stages: Arc::clone(&stages),
             };
-            let private = match self
-                .render_window(request, registration_hook, entry, following, grid)
-                .await?
+            // Boxed: the window-run state makes this future large, and every
+            // VOD generation future embeds it.
+            let private = match Box::pin(self.render_window(
+                request,
+                registration_hook,
+                entry,
+                following,
+                grid,
+            ))
+            .await?
             {
                 WindowOutcome::Completed(private) => private,
                 WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
