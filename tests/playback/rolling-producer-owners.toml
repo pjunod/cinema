@@ -7566,7 +7566,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Main 965 plus PR 1846's +11 `.status()` reads of HTTP responses (one in
 # the forwarding refusal trace, the rest in the new Source fixtures). No
 # process launch.
-expected_occurrences = 976
+# Receiver-consume lease checks: +1 `.status()` read of the Source resource
+# reply in the fixture's playlist/init fetch helper. No process launch.
+expected_occurrences = 977
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
