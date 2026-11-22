@@ -37,24 +37,24 @@ change eligibility or renew an unconfirmed worker.
 
 Run the existing renewal and ambiguous/lost-owner fencing before optional
 publication reconciliation. Do not reconcile a newly fenced identity. The tick's one
-four-second absolute deadline (new with this change: inventory and renewal previously
-each took a fresh one) includes inventory, renewal and the
+four-second absolute deadline (introduced by these corrections; before them inventory
+and renewal each took a fresh one) includes inventory, renewal and the
 optional reconciliation phase under the same fanout; no route gets a fresh
 interval. Optional work receives only the budget the critical work leaves,
 so it cannot spend another four seconds after renewal. An expired optional budget performs no new
 Store work.
 
 A renewal chunk the exhausted budget never dispatched is not commit-unknown:
-no Store write exists that could commit late. Treat it like a failed owner
-inventory, not like a timed-out renewal. Keep each route whose durable lease
-from this tick's inventory has not yet expired, recording that expiry, and
-fence only a route whose lease has expired ("cluster lease expired"). The next
-three-second tick renews it while it still has the full four-second runway,
-or fails it closed. Serving still checks lease expiry per request. Fencing
-undispatched chunks as ambiguous would let a slow inventory read end live
-playback whose leases still hold most of their twelve seconds. A dispatched
-chunk that errors or times out remains commit-unknown and is fenced as
-before. A late result still needs the exact owner/epoch and active,
+no Store write exists that could commit late, so it must not be fenced as
+commit-unknown. Keep exactly the routes it would have sent: those with the
+full four-second renewal runway and a frontier. `known` already records their
+durable expiry from this tick's inventory. The next tick renews them; a late
+tick fires at once. Fail the rest closed now ("cluster lease lost"), as a
+dispatched chunk does for routes it leaves out. Serving still checks lease
+expiry per request. Fencing undispatched chunks as ambiguous would let a slow
+inventory read end live playback whose leases still hold several seconds. A
+dispatched chunk that errors or times out remains commit-unknown and is fenced
+as before. A late result still needs the exact owner/epoch and active,
 unexpired route checks before cache publication.
 
 ## 3. Owned files — focused changes and meaningful regressions

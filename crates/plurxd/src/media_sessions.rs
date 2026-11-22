@@ -6039,7 +6039,12 @@ pub(crate) async fn lease_loop(state: AppState) {
                             })
                     })
                     .collect::<Vec<_>>();
-                let outcome = if tokio::time::Instant::now() >= renewal_deadline {
+                // A chunk the spent budget never dispatches issued no Store
+                // write, so nothing can commit late on its behalf. The
+                // outcome pass treats it like a failed inventory rather than
+                // a commit-unknown renewal.
+                let dispatched = tokio::time::Instant::now() < renewal_deadline;
+                let outcome = if !dispatched {
                     None
                 } else {
                     tokio::time::timeout_at(
@@ -6054,7 +6059,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                     .await
                     .ok()
                 };
-                (chunk, renewal_now_ms, outcome, vod_capabilities)
+                (chunk, renewal_now_ms, dispatched, outcome, vod_capabilities)
             }
         }))
         .buffer_unordered(LEASE_RENEWAL_FANOUT)
@@ -6146,7 +6151,35 @@ pub(crate) async fn lease_loop(state: AppState) {
             ));
             known.remove(&lease.incarnation_id);
         }
-        for (chunk, renewal_now_ms, outcome, vod_capabilities) in renewal_outcomes {
+        for (chunk, renewal_now_ms, dispatched, outcome, vod_capabilities) in renewal_outcomes {
+            if !dispatched {
+                // No Store write was issued, so nothing can commit late. Keep
+                // exactly the routes this chunk would have sent: they still
+                // have the full renewal runway and a frontier, and `known`
+                // already holds their durable expiry from this tick's
+                // inventory. A later tick (which fires at once when late)
+                // renews them. Fail the rest closed as the dispatched path
+                // does for routes it leaves out.
+                let undispatched_now_ms = unix_ms();
+                for route in &chunk {
+                    if undispatched_renewal_keeps_lease(
+                        route.lease_expires_at_ms,
+                        undispatched_now_ms,
+                    ) && frontiers.contains_key(&route.session_id)
+                    {
+                        continue;
+                    }
+                    cleanup.push((
+                        route.incarnation_id.clone(),
+                        route.session_id.clone(),
+                        route.owner_epoch,
+                        vod_capabilities.contains(&route.session_id),
+                        "cluster lease lost",
+                    ));
+                    known.remove(&route.incarnation_id);
+                }
+                continue;
+            }
             match outcome {
                 Some(Ok(renewed)) => {
                     let renewed = renewed.into_iter().collect::<HashSet<_>>();
@@ -7828,6 +7861,14 @@ fn renewal_has_full_runway(
 ) -> bool {
     tokio::time::Instant::now() < cycle_deadline
         && lease_expires_at_ms > now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
+}
+
+/// A renewal the cycle never dispatched wrote nothing and cannot commit late.
+/// It keeps its lease for the next tick exactly when it would still have been
+/// sent now: the lease clause of [`renewal_has_full_runway`], without the
+/// spent cycle deadline.
+fn undispatched_renewal_keeps_lease(lease_expires_at_ms: i64, now_ms: i64) -> bool {
+    lease_expires_at_ms > now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
 }
 
 /// An acknowledgement can be polled late without moving the expiry that
