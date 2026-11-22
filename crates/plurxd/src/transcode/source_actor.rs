@@ -616,23 +616,36 @@ impl SourceViewerActor {
         &self,
         deadline: Instant,
     ) -> Result<(crate::http::hls::StartResponse, SourceResponseGuard), SourceWorkerError> {
-        let response = self.wait_ready(deadline).await?;
-        let manager = self
-            .0
-            .manager
-            .upgrade()
-            .ok_or(SourceWorkerError::Unavailable)?;
+        // Each refusal names its check: Status answers every one of them
+        // with the same terminal-only projection, which ends a shared
+        // session, so the cause has to be on record here.
+        let refused = |check: &'static str| {
+            tracing::warn!(target: "plurxd::transcode", check, "Source start response refused");
+            SourceWorkerError::Unavailable
+        };
+        let response = self.wait_ready(deadline).await.inspect_err(|error| {
+            tracing::warn!(target: "plurxd::transcode", check = "wait_ready", error_class = ?error, "Source start response refused");
+        })?;
+        let manager = self.0.manager.upgrade().ok_or_else(|| refused("manager"))?;
         {
             let mut state = self.0.state.lock().expect("Source worker state");
-            if state.retirement_requested
-                || state.bodies >= 64
-                || state
-                    .start
-                    .as_ref()
-                    .and_then(|start| start.as_ref().ok())
-                    .is_none_or(|start| start.session_id != response.session_id)
+            let check = if state.retirement_requested {
+                Some("retirement_requested")
+            } else if state.bodies >= 64 {
+                Some("body_limit")
+            } else if state
+                .start
+                .as_ref()
+                .and_then(|start| start.as_ref().ok())
+                .is_none_or(|start| start.session_id != response.session_id)
             {
-                return Err(SourceWorkerError::Unavailable);
+                Some("session_changed")
+            } else {
+                None
+            };
+            if let Some(check) = check {
+                drop(state);
+                return Err(refused(check));
             }
             state.bodies += 1;
         }
@@ -643,27 +656,56 @@ impl SourceViewerActor {
         };
         #[cfg(unix)]
         if let Some(backing) = self.growing_backing() {
-            guard.source = Some(backing.physical_fence().await?);
-            let proof = self.0.gate.current_owned(&self.0.assignment).await?;
-            let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
-            if route.session_id != response.session_id
+            let traced = |check: &'static str| {
+                move |error: &SourceWorkerError| {
+                    tracing::warn!(target: "plurxd::transcode", check, error_class = ?error, "Source start response refused");
+                }
+            };
+            guard.source = Some(
+                backing
+                    .physical_fence()
+                    .await
+                    .inspect_err(traced("physical_fence"))?,
+            );
+            let proof = self
+                .0
+                .gate
+                .current_owned(&self.0.assignment)
+                .await
+                .inspect_err(traced("current_owned"))?;
+            let route = self
+                .0
+                .gate
+                .renew_with(&self.0.assignment, &proof)
+                .await
+                .inspect_err(traced("route_renewal"))?;
+            let check = if route.session_id != response.session_id
                 || route.publication_ready_at_ms != 0
                 || route.response_json
-                    != serde_json::to_string(&response)
-                        .map_err(|_| SourceWorkerError::Unavailable)?
-                || self
-                    .0
-                    .state
-                    .lock()
-                    .expect("Source worker state")
-                    .retirement_requested
-                || !backing.is_live()
-                || guard
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                    != serde_json::to_string(&response).map_err(|_| refused("response_json"))?
             {
-                return Err(SourceWorkerError::Unavailable);
+                Some("route_changed")
+            } else if self
+                .0
+                .state
+                .lock()
+                .expect("Source worker state")
+                .retirement_requested
+            {
+                Some("retirement_requested")
+            } else if !backing.is_live() {
+                Some("growing_copy_not_live")
+            } else if guard
+                .source
+                .as_ref()
+                .is_none_or(|source| !source.unchanged())
+            {
+                Some("source_changed")
+            } else {
+                None
+            };
+            if let Some(check) = check {
+                return Err(refused(check));
             }
             return Ok((response, guard));
         }

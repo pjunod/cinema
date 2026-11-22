@@ -10,6 +10,18 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- A shared title's Source copy now says where its time goes. Each published
+  segment logs one `Source copy segment published` line (incarnation, range,
+  segment, media start and end, bytes, wall time, media-per-wall-second rate,
+  and the split between waiting on FFmpeg's output, plurx's conversion and the
+  segment commit). A wait past one advertised target duration logs one
+  warning naming what it waited on, and production logs how far it got
+  when it ends. Each
+  refused Source start response names the check that refused it. The
+  receiving server logs every HLS resource it relays (status, bytes against
+  the declared length, duration, `Range`, whether it completed): at debug
+  normally, at info when it fell short or took longer than a target duration.
+  Web player beacons now carry the playhead and buffered ranges.
 - **Language changes keep the picture playing on copied titles.** A copy-VOD title with two or three soundtracks now plays in the web player as one shared video with each language as an alternate audio track, so choosing another language switches in place on the same player and session instead of reopening the stream. The video is packaged and stored once for every language and viewer. Other clients, native HLS and titles with more soundtracks keep the existing combined stream.
 
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
