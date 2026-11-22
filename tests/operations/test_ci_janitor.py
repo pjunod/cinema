@@ -88,6 +88,10 @@ case "$*" in
     [ -n "$FIXTURE_DOCKER_FS_KB" ] && fs=$FIXTURE_DOCKER_FS_KB
     [ -n "$FIXTURE_DOCKER_AVAIL_KB" ] && avail=$FIXTURE_DOCKER_AVAIL_KB ;;
 esac
+# A full build-cache prune frees space on whichever volume holds Docker's root.
+if [ -n "${FIXTURE_FULL_PRUNE_MARK:-}" ] && [ -f "$FIXTURE_FULL_PRUNE_MARK" ]; then
+  case "$*" in *"$FIXTURE_DOCKER_ROOT"*) avail=$FIXTURE_AVAIL_AFTER_FULL_PRUNE_KB ;; esac
+fi
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted'
 printf 'fixture %s 0 %s 50%% /fixture\\n' "$fs" "$avail"
 """
@@ -116,6 +120,9 @@ if [ "$1" = ps ]; then
     case "$argument" in name=*) pattern=${argument#name=} ;; esac
   done
   printf '%s\\n' "$FIXTURE_DOCKER_PS" | grep -e "$pattern" || true
+  if [ -n "${FIXTURE_JOB_AFTER_PRUNE:-}" ] && [ -f "$FIXTURE_DOCKER_LOG" ]; then
+    printf '%s\\n' "$FIXTURE_JOB_AFTER_PRUNE" | grep -e "$pattern" || true
+  fi
   exit 0
 fi
 [ -n "$FIXTURE_DOCKER_ROOT" ] || exit 1
@@ -124,6 +131,7 @@ case "$1 $2" in
 esac
 [ "$1" = info ] && exit 0
 printf '%s\\n' "$*" >> "$FIXTURE_DOCKER_LOG"
+[ "$*" = "builder prune -af" ] && [ -n "${FIXTURE_FULL_PRUNE_MARK:-}" ] && : > "$FIXTURE_FULL_PRUNE_MARK"
 exit 0
 """
 
@@ -196,6 +204,9 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_DOCKER_PS_HANG": "",
                 "FIXTURE_DOCKER_FS_KB": "",
                 "FIXTURE_DOCKER_AVAIL_KB": "",
+                "FIXTURE_FULL_PRUNE_MARK": str(fixture / "full-prune"),
+                "FIXTURE_AVAIL_AFTER_FULL_PRUNE_KB": "",
+                "FIXTURE_JOB_AFTER_PRUNE": "",
                 "FIXTURE_FS_KB": str(78 * 1024 * 1024),
                 "FIXTURE_AVAIL_KB": str(40 * 1024 * 1024),
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
@@ -477,6 +488,99 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
         self.assertIn("container prune -f --filter until=168h", commands)
+
+    def _short_docker_host(self, avail_after_full_gb):
+        # The 2026-11-22 shape: runner cache healthy, Docker on the runner
+        # volume, 24G free against the 25G reserve, and nothing a week old.
+        self.environment["FIXTURE_DOCKER_ROOT"] = str(self.runner_root)
+        self.environment["FIXTURE_FS_KB"] = str(117 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_KB"] = str(24 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_AFTER_FULL_PRUNE_KB"] = str(avail_after_full_gb * 1024 * 1024)
+        # Busy, as it was: the cache server is over budget but its runner is
+        # mid-job, so the cache reset declines and Docker is the only lever.
+        self.procs.write_text("4242\n4300\n", encoding="utf-8")
+
+    def test_an_age_bounded_prune_that_leaves_the_host_short_finishes_the_operators_pass(self):
+        """A busy runner has no week-old build cache, so the bounded prune frees
+        nothing; below the reserve the warm cache is worthless, so take it."""
+        self._short_docker_host(avail_after_full_gb=33)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
+        self.assertIn("builder prune -f --filter until=168h", commands)
+        self.assertLess(commands.index("builder prune -f --filter until=168h"), commands.index("builder prune -af"))
+        self.assertIn("image prune -f", commands)
+        self.assertIn("pruning all build cache and dangling images", result.stdout)
+        self.assertIn("Docker pruned, 33G free", result.stdout)
+        receipt = self.last_run()
+        self.assertTrue(receipt["docker_pruned"])
+        self.assertEqual(receipt["short_after"], 0)
+        self.assertEqual(receipt["reclaimed_gb"], 9)
+
+    def test_a_docker_volume_still_short_after_everything_is_counted_short(self):
+        """It used to say `0 still short` beside a free figure under the reserve."""
+        self._short_docker_host(avail_after_full_gb=24)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cannot reach it by pruning", result.stderr)
+        self.assertEqual(self.last_run()["short_after"], 1)
+        self.assertIn("1 still short", result.stdout)
+
+    def test_a_job_that_starts_during_the_prune_stops_the_wholesale_pass(self):
+        self._short_docker_host(avail_after_full_gb=33)
+        self.environment["FIXTURE_JOB_AFTER_PRUNE"] = "FORGEJO-ACTIONS-TASK-37600_WORKFLOW-x_JOB-Rust-units"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
+        self.assertNotIn("builder prune -af", commands)
+        self.assertNotIn("image prune -f", commands)
+        self.assertIn("until the next pass", result.stdout)
+        # Deferred is not exhausted: a pass cut short by a job is not a host
+        # pruning cannot fix, so it must not read as one.
+        self.assertEqual(self.last_run()["short_after"], 0)
+        self.assertNotIn("cannot reach it by pruning", result.stderr)
+
+    def test_dry_run_never_escalates_the_docker_pass(self):
+        self._short_docker_host(avail_after_full_gb=33)
+
+        result = self.run_janitor("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would prune Docker", result.stdout)
+        self.assertFalse(Path(self.environment["FIXTURE_DOCKER_LOG"]).exists())
+
+    def test_a_shared_volume_a_reset_left_short_and_docker_rescued_is_not_short(self):
+        """Short is measured at the end, once per filesystem: the runner reset
+        ran first and left the volume short, then the Docker pass freed it."""
+        self._short_docker_host(avail_after_full_gb=33)
+        self.procs.write_text("4242\n", encoding="utf-8")       # idle: the reset happens
+        self.environment["FIXTURE_USED_KB"] = str(2 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = self.last_run()
+        self.assertEqual(receipt["reset"], 1)
+        self.assertEqual(receipt["short_after"], 0)
+        self.assertNotIn("cannot reach it by pruning", result.stderr)
+
+    def test_a_shared_volume_short_after_both_passes_counts_once(self):
+        self._short_docker_host(avail_after_full_gb=24)
+        self.procs.write_text("4242\n", encoding="utf-8")
+        self.environment["FIXTURE_USED_KB"] = str(2 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.last_run()["reset"], 1)
+        self.assertEqual(self.last_run()["short_after"], 1)
+        self.assertEqual(result.stderr.count("cannot reach it by pruning"), 1)
 
     def test_a_runner_that_will_not_stop_is_never_left_stopped(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
