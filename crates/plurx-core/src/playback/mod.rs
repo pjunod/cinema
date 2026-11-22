@@ -245,7 +245,9 @@ impl DeviceProfile {
             .any(|x| x.eq_ignore_ascii_case(codec))
     }
 
-    fn allows_audio_stream(&self, stream: &crate::domain::AudioStream) -> bool {
+    /// Whether `stream` may reach this client as it is, without conversion:
+    /// the per-track audio judgement the plan's `audio_ok` makes.
+    pub fn allows_audio_stream(&self, stream: &crate::domain::AudioStream) -> bool {
         let codec = stream.codec.to_ascii_lowercase();
         // Sink claims decide what the server encodes and what may be passed
         // through. A client that decodes the codec mixes and resamples for its

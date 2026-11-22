@@ -16,6 +16,7 @@
 #endif
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
+#include <libavutil/time.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <pthread.h>
@@ -45,6 +46,21 @@ static AVBufferRef *hw_device;
 static bool hw_fell_back;
 static const char *software_reason = "no-decode-device";
 static unsigned preroll, paired, preroll_cap;
+static FILE *stage_output;
+static int64_t stage_started_us;
+
+// The daemon reads these optional diagnostics even if the window is refused.
+// Flush each mark while its stage is still observable.
+static void mark_stage(const char *name) {
+  if (!stage_output)
+    return;
+  int64_t elapsed_us = av_gettime_relative() - stage_started_us;
+  if (elapsed_us >= 0) {
+    fprintf(stage_output, "%s\t%lld\t%u\t%u\t%d\n", name,
+            (long long)elapsed_us, preroll, paired, emitted);
+    fflush(stage_output);
+  }
+}
 struct rational {
   int64_t num;
   int den;
@@ -619,10 +635,12 @@ static void render_pairs(void) {
         base_only || (mapped && !diagnostic_hashes) ? NULL : pack(el)};
     const AVFrame *hardware[2] = {bl, el};
     if (!initialized) {
+      mark_stage("first_frame");
       if (base_only)
         base_gpu_init(expected_w[0], expected_h[0]);
       else
         gpu_init(expected_w[0], expected_h[0], expected_w[1], expected_h[1]);
+      mark_stage("gpu_ready");
       initialized = true;
     }
     char pts[64], duration[64], bl_hash[65], el_hash[65], rpu_hash[65];
@@ -930,6 +948,10 @@ int main(int argc, char **argv) {
   need(stat(argv[2], &st) == 0 && S_ISDIR(st.st_mode),
        "private output directory");
   need(chdir(argv[2]) == 0, "output directory enter");
+  if (window_mode) {
+    stage_started_us = av_gettime_relative();
+    stage_output = fopen("stages.tsv", "wx");
+  }
   need(mkdir("rpus", 0700) == 0, "fresh accepted RPU directory");
   if (debug_frames)
     need(mkdir("outputs", 0700) == 0, "fresh debug output directory");
@@ -949,6 +971,7 @@ int main(int argc, char **argv) {
   int opened = avformat_open_input(&input, argv[1], NULL, NULL);
   need(!movie_io.exhausted, "window source read budget exhausted");
   need(opened >= 0, "timestamped segment open");
+  mark_stage("opened");
   need(input->nb_streams > 0 && input->nb_streams <= 256,
        "bounded stream inventory");
   // This helper consumes only the selected coded AU. Keep the original
@@ -976,6 +999,7 @@ int main(int argc, char **argv) {
     av_dict_free(&probe_options[i]);
   need(!movie_io.exhausted, "window source read budget exhausted");
   need(probed >= 0, "bounded stream discovery");
+  mark_stage("probed");
   need((unsigned)stream_index < input->nb_streams &&
            input->streams[stream_index]->codecpar->codec_type ==
                AVMEDIA_TYPE_VIDEO &&
@@ -1027,6 +1051,7 @@ int main(int argc, char **argv) {
     need(avformat_seek_file(input, stream_index, INT64_MIN, target, target,
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before exact window start");
+    mark_stage("seeked");
     // require() refusals in shared renderer code must also avoid destructors
     // throughout the reader-only interval before the export writer starts.
     dv_threads_live = true;
@@ -1057,6 +1082,7 @@ int main(int argc, char **argv) {
   layers[0] = open_layer(stream, 0);
   if (!base_only)
     layers[1] = open_layer(stream, 1);
+  mark_stage("decoders");
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "demux packet");
   int result;
@@ -1088,6 +1114,7 @@ int main(int argc, char **argv) {
   }
   // Every frame is rendered: finish its writes before the window checks.
   writer_finish();
+  mark_stage("rendered");
   release_held();
   need(emitted > 0 &&
            (window_done || (layers[0].count == 0 && layers[1].count == 0)),
@@ -1204,5 +1231,8 @@ int main(int argc, char **argv) {
            "\"fel_contributed\":false,"
            "\"production_qualified\":false}\n", source_profile, emitted);
   need(fflush(stdout) == 0, "observations flush");
+  mark_stage("complete");
+  if (stage_output)
+    fclose(stage_output);
   return 0;
 }

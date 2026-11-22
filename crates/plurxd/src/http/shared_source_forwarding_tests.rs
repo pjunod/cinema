@@ -55,7 +55,7 @@ async fn sharing_source_nonowner_http_cold_probe_and_same_driver_end_require_act
         crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     Box::pin(tokio::time::timeout(
         Duration::from_secs(120),
-        actual_nonowner_forwarding(fixture_body_budget, false),
+        actual_nonowner_forwarding(fixture_body_budget, false, SourceFixtureMode::Copy),
     ))
     .await
     .expect("finite real-member forwarding fixture");
@@ -70,15 +70,72 @@ async fn sharing_source_nonowner_clocked_start_answers_not_yet_and_rejoins_the_o
         crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     Box::pin(tokio::time::timeout(
         Duration::from_secs(120),
-        actual_nonowner_forwarding(fixture_body_budget, true),
+        actual_nonowner_forwarding(fixture_body_budget, true, SourceFixtureMode::Copy),
     ))
     .await
     .expect("finite real-member forwarding fixture");
 }
+/// The production shape across the Source cluster: a web player's range
+/// caps through a receiver that affirms bounded ranges, Dolby Vision relay
+/// and processed upgrades, arriving at an ingress that is not the owner. The
+/// owner runs its growing copy; the receiver's Status after Start, the
+/// playlist and the End all answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_nonowner_range_copy_start_status_playlist_and_end() {
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    Box::pin(tokio::time::timeout(
+        Duration::from_secs(120),
+        actual_nonowner_forwarding(fixture_body_budget, false, SourceFixtureMode::RangeCopy),
+    ))
+    .await
+    .expect("finite real-member range forwarding fixture");
+}
+/// The same with a title that carries text subtitles, started with native
+/// subtitles and a selected track, as the web player starts every such title.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_nonowner_range_native_copy_start_status_playlist_and_end() {
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    Box::pin(tokio::time::timeout(
+        Duration::from_secs(120),
+        actual_nonowner_forwarding(
+            fixture_body_budget,
+            false,
+            SourceFixtureMode::RangeNativeCopy,
+        ),
+    ))
+    .await
+    .expect("finite real-member native range forwarding fixture");
+}
+/// A Dolby Vision title started by an affirming receiver through an ingress
+/// that is not the owner. The owner's task starts from the fresh preparation,
+/// which carries none of the receiver's headers: it must not read their
+/// absence as a receiver that withheld Dolby Vision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_nonowner_dolby_vision_start_is_preserved_and_not_marked_withheld() {
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    Box::pin(tokio::time::timeout(
+        Duration::from_secs(120),
+        actual_nonowner_forwarding(
+            fixture_body_budget,
+            false,
+            SourceFixtureMode::DolbyVisionPreserved,
+        ),
+    ))
+    .await
+    .expect("finite real-member Dolby Vision forwarding fixture");
+}
 async fn actual_nonowner_forwarding(
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
     clocked: bool,
+    mode: SourceFixtureMode,
 ) {
+    let range = matches!(
+        mode,
+        SourceFixtureMode::RangeCopy | SourceFixtureMode::RangeNativeCopy
+    );
     use plurx_core::{
         cluster::{membership::ClusterRole, migration::select_daemon_store_observing},
         config::Config,
@@ -89,7 +146,7 @@ async fn actual_nonowner_forwarding(
         .await
         .expect("worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    let mut worker = real_source_start_fixture_at(worker_listener, fixture_body_budget).await;
+    let mut worker = real_source_start_fixture_at(mode, worker_listener, fixture_body_budget).await;
     // Exercise both actual node and sharing routes with the strict sharing
     // fallback once; the ordinary web-shell fallback is irrelevant here.
     let worker_router = super::super::router((*worker.state).clone())
@@ -390,7 +447,75 @@ async fn actual_nonowner_forwarding(
         "routing metadata cannot adopt an actor"
     );
     let operation = format!("{path}/{request_id}");
-    recipe["resource"] = json!("index.m3u8");
+    // The session's own playlist: the media playlist for an SDR copy, the
+    // master for native subtitles or an HDR or Dolby Vision range.
+    let resource = decoded
+        .response()
+        .playlist_url
+        .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
+        .expect("session playlist")
+        .to_owned();
+    if matches!(mode, SourceFixtureMode::DolbyVisionPreserved) {
+        assert_eq!(
+            decoded.response().delivered_dynamic_range.as_deref(),
+            Some("dolby_vision")
+        );
+        assert!(
+            !decoded
+                .response()
+                .plan_notes
+                .iter()
+                .any(|note| note == super::receiver_presentation::DOLBY_VISION_WITHHELD_NOTE),
+            "an affirming receiver's forwarded Start is not marked withheld: {:?}",
+            decoded.response().plan_notes
+        );
+        assert!(
+            decoded.response().enhancement.is_some(),
+            "the affirming receiver is sent the enhancement rows"
+        );
+    }
+    if range {
+        // The growing copy is a bounded view, presentable only to a client
+        // and receiver that both affirmed ranges, as these did.
+        assert!(!decoded.response().vod);
+        assert!(
+            super::receiver_presentation::response_presentable(decoded.response(), true, true),
+            "a receiver that affirmed ranges accepts the Start"
+        );
+        // A receiver confirms every Start with a Status before it answers its
+        // viewer; it must read the same published session back.
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("{operation}/status"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&recipe).expect("status body"),
+            ))
+            .expect("status request");
+        *request.headers_mut() = worker.headers.clone();
+        let response = sender
+            .send_request(request)
+            .await
+            .expect("forwarded status");
+        let status = response.status();
+        let bytes =
+            axum::body::to_bytes(axum::body::Body::new(response.into_body()), 4 * 1024 * 1024)
+                .await
+                .expect("status envelope");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "forwarded Source Status after Start: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let confirmed = super::super::decode_source_start_response(&bytes, &worker.reference)
+            .expect("strict Source status envelope");
+        assert_eq!(confirmed.incarnation_id(), decoded.incarnation_id());
+        assert_eq!(
+            confirmed.response().session_id,
+            decoded.response().session_id
+        );
+    }
+    recipe["resource"] = json!(resource);
     let mut request = axum::http::Request::builder()
         .method("POST")
         .uri(format!("{operation}/resources"))
@@ -403,10 +528,16 @@ async fn actual_nonowner_forwarding(
         .send_request(request)
         .await
         .expect("forwarded resource");
-    assert_eq!(response.status(), StatusCode::OK);
+    let resource_status = response.status();
     let playlist = axum::body::to_bytes(axum::body::Body::new(response.into_body()), 1024 * 1024)
         .await
         .expect("protected playlist bytes");
+    assert_eq!(
+        resource_status,
+        StatusCode::OK,
+        "forwarded playlist: {}",
+        String::from_utf8_lossy(&playlist)
+    );
     assert!(playlist.starts_with(b"#EXTM3U"));
     recipe.as_object_mut().expect("object").remove("resource");
     let known_body = serde_json::to_vec(&recipe).expect("exact cleanup body");
