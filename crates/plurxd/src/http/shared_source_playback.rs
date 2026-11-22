@@ -3649,13 +3649,11 @@ async fn build_real_source_start_fixture(
             headers.insert(name, value.parse().expect("receiver affirmation"));
         }
     }
-    if let Some((codec, _)) = audio {
+    if audio.is_some() {
+        // Selected by index and with no `aac` ask, as a client that decodes
+        // the codec itself sends it: these caps name AAC alone, so the Source
+        // converts a track they do not allow instead of copying it.
         recipe["session"]["audio"] = serde_json::json!(0);
-        // A client asks for the AAC conversion its decision named: these
-        // caps take AAC alone, and the decision converts TrueHD to it.
-        if codec == "truehd" {
-            recipe["session"]["aac"] = serde_json::json!(true);
-        }
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");

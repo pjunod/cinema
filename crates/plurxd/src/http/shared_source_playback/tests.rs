@@ -1342,7 +1342,8 @@ async fn sharing_source_http_range_audio_copy_start_status_playlist_and_end() {
     ))
     .await;
 }
-/// A scanned Dolby Vision Profile 7 remux with TrueHD audio.
+/// A scanned Dolby Vision Profile 7 remux with TrueHD audio, started without
+/// an `aac` ask by caps that name no audio sinks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_range_dolby_vision_converted_start_status_playlist_and_end() {
     Box::pin(actual_source_range_delivery(
