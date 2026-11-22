@@ -72,6 +72,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
+  with playback instead of stalling every few seconds. Each 2-second window
+  used to start its own renderer, which re-read and re-decoded the source
+  back to the previous keyframe and restarted the GPU. One renderer now
+  produces up to eight consecutive windows, each still verified and
+  published on its own. That is about 30% less work per window and about
+  60% fewer source reads, with byte-identical output.
 - 4K Dolby Vision titles played as HDR10-E or with display mapping no
   longer stall in the browser on Intel nodes. The node's Main10 GPU decode
   probe copied its test picture to system memory, which crashed the shipped
