@@ -1,7 +1,8 @@
 //! Source direct play: preparation by current Source authority and the actual
 //! decision engine, and the admitted byte exchange. Admission, claim,
 //! assignment, lease and End are the parent's Source session machinery.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 #[path = "direct_start_failure_tests.rs"]
 mod start_failure_tests;
 

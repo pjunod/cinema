@@ -262,12 +262,20 @@
         "item_sha256": "9df3b0d8e41f4708cc660b86c34889daa257e6883243f293ee0328dd629b8385"
       },
       {
+        "table": "31b owned job capability delegates fresh authority",
+        "source": "crates/plurx-core/src/cluster/membership/access.rs",
+        "anchor": "impl ClusterJobAuthority for JobControl {",
+        "scope": "item",
+        "item": "impl ClusterJobAuthority for JobControl",
+        "item_sha256": "28ecc5135bb2550710f6d55a39e969c5554aa2239f60b560d93e1ebc56c2c9bc"
+      },
+      {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
-        "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
+        "anchor": "pub(super) async fn may_run_cluster_jobs(&self) -> bool {",
         "scope": "item",
         "item": "impl MembershipManager > fn may_run_cluster_jobs",
-        "item_sha256": "c251cd66853c04f9a38a1af483dcd66ca793b89dcef58abdc4595256bfcf43ee"
+        "item_sha256": "54ec32eaff32c4c31f9feea60ae0806248f9066ce3f72b805e1ff71609a40f09"
       },
       {
         "table": "33 local raft metrics authority",
@@ -904,26 +912,26 @@
       {
         "table": "same-file dependency of MembershipManager, may_run_cluster_jobs: membership.rs fn local_maintenance_active",
         "source": "crates/plurx-core/src/cluster/membership.rs",
-        "anchor": "pub fn local_maintenance_active(&self) -> bool {",
+        "anchor": "pub(super) fn local_maintenance_active(&self) -> bool {",
         "scope": "item",
         "item": "impl MembershipManager > fn local_maintenance_active",
-        "item_sha256": "d82f433ddd66bc0c9a3d3983e3d05061472f6e33db59027db1c82f27a685f4dc"
+        "item_sha256": "fb28cedca01e6ea8f24d8ec2c884714e197f5e3aada1eaeef3b24c6b2e1dfdfd"
       },
       {
         "table": "same-file dependency of MembershipManager: membership.rs fn local_node_is_committed_member",
         "source": "crates/plurx-core/src/cluster/membership.rs",
-        "anchor": "pub async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {",
+        "anchor": "pub(super) async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {",
         "scope": "item",
         "item": "impl MembershipManager > fn local_node_is_committed_member",
-        "item_sha256": "eb97657c2dff7348bc03444ff2644a024b28e1eae13ef8990077f763e98b22f8"
+        "item_sha256": "5fd215c816c10eb69ace095288654b942e99e03a1a949c6da110f546a408ff00"
       },
       {
         "table": "same-file dependency of MembershipManager: membership.rs fn local_serving_role",
         "source": "crates/plurx-core/src/cluster/membership.rs",
-        "anchor": "pub async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {",
+        "anchor": "pub(super) async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {",
         "scope": "item",
         "item": "impl MembershipManager > fn local_serving_role",
-        "item_sha256": "b281bfbab97942d7c14e65e263100e959ab4a0e698518d37fcc05710ca5968e0"
+        "item_sha256": "5d02351a33b9d19cd8dced94c2a010adacd507ce9e5081c58a235c94a2b6154e"
       },
       {
         "table": "same-file dependency of may_run_cluster_jobs: membership.rs fn decide_cluster_job_authority",
@@ -936,10 +944,10 @@
       {
         "table": "same-file dependency of may_run_cluster_jobs: membership.rs fn local_node_is_committed_voter",
         "source": "crates/plurx-core/src/cluster/membership.rs",
-        "anchor": "pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {",
+        "anchor": "pub(super) async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {",
         "scope": "item",
         "item": "impl MembershipManager > fn local_node_is_committed_voter",
-        "item_sha256": "88548338bede3d582d5b7cd024e7b839f73a298852e81f41fd074a14ea56357f"
+        "item_sha256": "dc617a62e313f714678c27f4378c7dcb44ad5b222ab781beb7b42d3fc575439b"
       },
       {
         "table": "same-file dependency of metrics_db: mgmt.rs fn get_metrics_remote",

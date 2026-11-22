@@ -1029,7 +1029,8 @@ async fn cluster_vtt_into(
     use crate::subtitle_source::{Consumer, Live, Lookup, RepresentationFormat};
     use plurx_core::store::SubtitleSourceStamp;
 
-    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_enabled().await {
+    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_sources_enabled().await
+    {
         return Ok(false);
     }
     let (Some(store), Some(jobs)) = (access.store(), access.jobs()) else {
@@ -1948,7 +1949,8 @@ async fn cluster_wait_burn(
     use crate::subtitle_source::RepresentationFormat;
     use plurx_core::store::SubtitleSourceStamp;
 
-    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_enabled().await {
+    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_sources_enabled().await
+    {
         return Ok(StoredBurn::Extract);
     }
     let (Some(store), Some(jobs)) = (access.store(), access.jobs()) else {

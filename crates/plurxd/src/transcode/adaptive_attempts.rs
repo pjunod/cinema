@@ -2001,8 +2001,8 @@ impl super::TranscodeManager {
         // Actual private W0 precedes original registration. This cutoff only
         // expires inert CONTROL work; it grants no source/image/process entry.
         let anchor = state
-            .membership
-            .clock_guard()
+            .cluster
+            .clock()
             .capture_continuous()
             .map_err(|error| format!("insufficient_evidence: original remote clock: {error}"))?;
         let control = anchor

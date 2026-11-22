@@ -250,7 +250,7 @@ async fn adopt_adaptive_origin(
             .begin_adaptive_adopt(
                 adoption,
                 selected.preview_json,
-                state.serving.authority(),
+                state.cluster.authority(),
                 deadline.into_std(),
             )
             .map_err(ApiError::ServiceUnavailable)?;
@@ -729,7 +729,7 @@ async fn prepare_claimed_adaptive_origin(
             break;
         }
         if owner_node_id == state.node_id {
-            let admission = state.serving.try_restart_admission().await.ok_or_else(|| {
+            let admission = state.cluster.try_restart_admission().await.ok_or_else(|| {
                 ApiError::ServiceUnavailable("adaptive local worker is draining".into())
             })?;
             match state
@@ -4308,10 +4308,8 @@ async fn create_with_purpose(
             "no startup allowance remains",
         ));
     }
-    let budget = crate::media_pool::CreateStartupBudget::new_with_clock(
-        remaining,
-        &state.membership.clock_guard(),
-    );
+    let budget =
+        crate::media_pool::CreateStartupBudget::new_with_clock(remaining, &state.cluster.clock());
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let before = counts.snapshot();
     let methods_before = counts.method_snapshot();
@@ -4740,7 +4738,7 @@ async fn create_with_purpose_attempt(
         }
         None => None,
     };
-    let ingress_serving_authority = state.serving.authority();
+    let ingress_serving_authority = state.cluster.authority();
     let ingress_serving_generation = ingress_serving_authority
         .admit()
         .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
@@ -7685,10 +7683,10 @@ pub(in crate::http) async fn prime_live_prepared_session(
     {
         return false;
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return false;
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return false;
     };

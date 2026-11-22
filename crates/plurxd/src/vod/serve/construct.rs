@@ -177,7 +177,7 @@ impl VodServe {
             .parent()
             .unwrap_or(base.as_path())
             .join(".runtime-cache");
-        Self::new_configured(base, runtime_cache, store, None, None, None, None)
+        Self::new_configured(base, runtime_cache, store, None, None, None, None, None)
     }
 
     /// Publish a producer-less VOD attachment for HTTP response-finalization
@@ -413,7 +413,8 @@ impl VodServe {
         store: Arc<dyn Store>,
         node_id: String,
         cluster_index_root: PathBuf,
-        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        calls: Option<crate::cluster::calls::PeerTransport>,
+        directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         let runtime_cache = cluster_index_root
             .parent()
@@ -425,18 +426,21 @@ impl VodServe {
             store,
             node_id,
             cluster_index_root,
-            membership,
+            calls,
+            directory,
             None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_cluster_with_runtime(
         base: PathBuf,
         runtime_cache: PathBuf,
         store: Arc<dyn Store>,
         node_id: String,
         cluster_index_root: PathBuf,
-        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        calls: Option<crate::cluster::calls::PeerTransport>,
+        directory: Option<crate::cluster::Directory>,
         resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     ) -> Arc<VodServe> {
         Self::new_configured(
@@ -445,18 +449,21 @@ impl VodServe {
             store,
             Some(node_id),
             Some(cluster_index_root),
-            membership,
+            calls,
+            directory,
             resource_runtime,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_configured(
         base: PathBuf,
         runtime_cache: PathBuf,
         store: Arc<dyn Store>,
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
-        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_calls: Option<crate::cluster::calls::PeerTransport>,
+        cluster_directory: Option<crate::cluster::Directory>,
         resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     ) -> Arc<VodServe> {
         let mut encoded_generation_scanner = EncodedGenerationScanner::new(base.clone());
@@ -493,7 +500,8 @@ impl VodServe {
                 encoded_generation_scanner: Arc::new(StdMutex::new(encoded_generation_scanner)),
                 cluster_node_id,
                 cluster_index_root,
-                cluster_membership,
+                cluster_calls,
+                cluster_directory,
                 catalog_namespace: tokio::sync::OnceCell::new(),
                 copy_analysis: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
@@ -648,7 +656,8 @@ impl VodServe {
                         .await?;
                 crate::copy_index_v3::resolve(
                     self.shared.store.as_ref(),
-                    self.shared.cluster_membership.as_ref(),
+                    self.shared.cluster_calls.as_ref(),
+                    self.shared.cluster_directory.as_ref(),
                     node_id,
                     namespace,
                     &self.shared.runtime_cache,
@@ -803,7 +812,8 @@ impl VodServe {
         };
         let index = crate::fragment_index_cluster::hydrate(
             self.shared.store.as_ref(),
-            self.shared.cluster_membership.as_ref(),
+            self.shared.cluster_calls.as_ref(),
+            self.shared.cluster_directory.as_ref(),
             node_id,
             root,
             &artifact,

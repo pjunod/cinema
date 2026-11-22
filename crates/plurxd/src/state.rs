@@ -807,14 +807,9 @@ pub struct AppState {
     /// (playback-start E1). E1a builds and observes it; no call site reads
     /// through it yet.
     pub applied: plurx_core::store::AppliedView,
-    /// Read-only projection of the selected backend's watch-state convergence.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    /// Monotonic, Store-free authority for mutable media and readiness.
-    pub(crate) serving: crate::serving_fence::ServingFence,
-    /// Join/add/remove lifecycle and privacy-safe per-node health.
-    pub membership: plurx_core::cluster::membership::MembershipManager,
-    /// The cluster facade (`crate::cluster`): authority, role and peers.
-    /// Feature code asks it; the three raw handles above stay until slice 7.
+    /// The cluster facade (`crate::cluster`): authority, role and peers. It
+    /// alone owns the fence, the membership manager and the replication
+    /// monitor; feature code asks it.
     pub(crate) cluster: crate::cluster::Cluster,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
@@ -844,7 +839,7 @@ pub struct AppState {
     /// five-second memory of the owner's address. Signing, expected-node
     /// binding and response verification stay per request inside the
     /// transport; nothing about a credential is held here.
-    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
+    pub(crate) live_tv_peers: crate::cluster::calls::PeerTransport,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
     /// Items whose review-site scores this node is fetching right now.
@@ -1081,7 +1076,7 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
-        .with_membership(self.membership.clone())
+        .with_cluster(self.cluster.calls(), self.cluster.directory())
         .with_jobs(Arc::clone(&self.jobs))
     }
 
@@ -1116,8 +1111,7 @@ impl AppState {
                 trusted_proxies: config.server.trusted_proxies.clone(),
                 scan_prune_percent: config.storage.scan_prune_percent,
                 credential_key: Arc::clone(&selected.credential_key),
-                replication: selected.replication_monitor(),
-                membership: selected.membership_manager(),
+                cluster_parts: crate::cluster::ClusterParts::of(selected),
                 cluster_id: selected.identity.cluster_id.clone(),
                 shared_cache_dir: config.cluster.shared_cache_dir.clone(),
                 shared_cache_id: config.cluster.shared_cache_id.clone(),
@@ -1130,7 +1124,7 @@ impl AppState {
                 },
                 data_dir: config.storage.data_dir.clone(),
                 credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
-                backup_client: selected.local_client(),
+                backup_source: selected.local_client().map(crate::cluster::backup_source),
             },
             Arc::clone(&selected.store),
             dirs,
@@ -1203,8 +1197,7 @@ impl AppState {
                 // data directory to resolve it from, so nothing sealed under
                 // it is expected to outlive the process.
                 credential_key: Arc::new(CredentialKey::generate()),
-                replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-                membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_parts: crate::cluster::ClusterParts::standalone(),
                 cluster_id: String::new(),
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
@@ -1213,7 +1206,7 @@ impl AppState {
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
                 credential_key_path: PathBuf::new(),
-                backup_client: None,
+                backup_source: None,
             },
             store,
             dirs,
@@ -1245,8 +1238,7 @@ impl AppState {
             trusted_proxies,
             scan_prune_percent,
             credential_key,
-            replication,
-            membership,
+            cluster_parts,
             cluster_id,
             shared_cache_dir,
             shared_cache_id,
@@ -1255,17 +1247,14 @@ impl AppState {
             snapshot_recovery_budgets,
             data_dir,
             credential_key_path,
-            backup_client,
+            backup_source,
         } = config;
         crate::source_custody::configure_settlement_journal(&data_dir);
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
-        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
-        let cluster = crate::cluster::Cluster::new(
-            serving.clone(),
-            membership.clone(),
-            applied.applied_mark(),
-        );
+        let cluster = crate::cluster::Cluster::compose(cluster_parts, applied.applied_mark());
+        let node_hostname = cluster.own_hostname();
+        let clock_observer = crate::clock_offset::ClockObserver::new(cluster.operations().clock());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1290,15 +1279,17 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
-        let peer_activity =
-            crate::http::internal_activity::PeerActivityClient::new(membership.clone());
+        let peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            cluster.calls(),
+            cluster.directory(),
+        );
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
                 artwork_dir.clone(),
                 scan_prune_percent,
                 node_id.clone(),
-                Arc::new(membership.clone()),
+                Arc::new(cluster.jobs().clone()),
             )
             .with_source_checkpoint_dir(
                 (!data_dir.as_os_str().is_empty())
@@ -1306,7 +1297,7 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_applied_view(applied.clone())
-            .with_membership(membership.clone())
+            .with_cluster(cluster.jobs().clone(), cluster.calls(), cluster.directory())
             .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -1317,12 +1308,12 @@ impl AppState {
         // A replicated daemon applies the Raft log in this process; that watch
         // is how an idle settings reader (the Live TV observer, the takeover
         // gate, the clock-enforcement follower) learns of a save elsewhere.
-        let settings_changes = match backup_client
+        let settings_changes = match backup_source
             .as_ref()
-            .and_then(|client| client.local_db_raft_metrics().ok())
+            .and_then(crate::cluster::BackupSource::applied_changes)
         {
             Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => {
+            None if cluster.jobs().clustered() => {
                 crate::settings_changes::SettingsChangeSource::Polled
             }
             None => crate::settings_changes::SettingsChangeSource::LocalOnly,
@@ -1331,7 +1322,7 @@ impl AppState {
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
-            backup_client,
+            backup_source,
             data_dir,
             credential_key_path,
             node_id.clone(),
@@ -1347,7 +1338,7 @@ impl AppState {
             shared_cache_id,
             &cluster_id,
             node_id.clone(),
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
         );
@@ -1390,11 +1381,12 @@ impl AppState {
                 renditions,
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-                Some(membership.clone()),
+                Some(cluster.calls()),
+                Some(cluster.directory()),
                 resource_runtime.clone(),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
-            .with_serving_authority(serving.authority())
+            .with_serving_authority(cluster.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
         transcode.register_playback_cache(&playback_cache);
@@ -1437,23 +1429,23 @@ impl AppState {
             Arc::clone(&store),
             Arc::clone(&transcode),
             node_id.clone(),
-            serving.clone(),
+            cluster.restart_admissions(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_pool = crate::media_pool::MediaPool::new(cluster.calls(), cluster.directory());
         let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
             Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
-            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
-        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
+            crate::http::CacheOnlyAdminProofCache::new(cluster.role().is_clustered());
+        let live_tv_peers = cluster.calls();
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
             Arc::clone(&transcode),
-            serving.authority(),
+            cluster.authority(),
             node_id.clone(),
             live_tv_scratch,
             runtime_cache.join("live-tv"),
@@ -1476,16 +1468,13 @@ impl AppState {
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             applied,
-            replication,
             peer_activity,
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
-            serving,
-            clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            clock_observer,
             copy_analysis,
             copy_observation_dir,
-            node_hostname: membership.local_hostname(),
-            membership,
+            node_hostname,
             cluster,
             media_pool,
             media_sessions,
@@ -1540,6 +1529,16 @@ impl AppState {
         }
     }
 
+    /// Point this state at another replication monitor, and the cluster
+    /// facade with it.
+    #[cfg(test)]
+    pub(crate) fn replace_replication(
+        &mut self,
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    ) {
+        self.cluster = self.cluster.with_replication(replication);
+    }
+
     /// Point this state at another membership manager, and the cluster
     /// facade with it, so a fixture can never leave the two disagreeing.
     #[cfg(test)]
@@ -1547,12 +1546,10 @@ impl AppState {
         &mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
     ) {
-        self.cluster = crate::cluster::Cluster::new(
-            self.serving.clone(),
-            membership.clone(),
-            self.applied.applied_mark(),
-        );
-        self.membership = membership;
+        self.cluster = self
+            .cluster
+            .with_membership(membership, self.applied.applied_mark());
+        self.live_tv_peers = self.cluster.calls();
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1698,9 +1695,9 @@ pub struct AppConfig {
     /// verifies. Resolved by `open_store` so a boot that cannot open the
     /// existing Trakt rows fails before any subsystem starts.
     pub credential_key: Arc<CredentialKey>,
-    /// Actual backend selected before HTTP starts; tests default to SQLite.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Actual backend's cluster handles, selected before HTTP starts and
+    /// composed into the facade; tests default to SQLite.
+    pub cluster_parts: crate::cluster::ClusterParts,
     pub cluster_id: String,
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
@@ -1709,7 +1706,7 @@ pub struct AppConfig {
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
     pub credential_key_path: PathBuf,
-    pub backup_client: Option<hiqlite::Client>,
+    pub(crate) backup_source: Option<crate::cluster::BackupSource>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -1900,9 +1897,11 @@ pub struct JobManager {
     /// than sampled once, because committed membership moves under a running
     /// daemon: a learner may be promoted, and a voter may be removed.
     job_authority: Arc<dyn ClusterJobAuthority>,
-    /// Exact committed membership and internal addressing for optional peer
-    /// hydration. Tests and recovery-only construction deliberately omit it.
-    membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// Existing membership evidence for analysis reconciliation. Hydration
+    /// separately owns bounded peer calls and the stamped directory.
+    reconciliation: Option<crate::cluster::Jobs>,
+    peer_calls: Option<crate::cluster::calls::PeerTransport>,
+    directory: Option<crate::cluster::Directory>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -1912,6 +1911,9 @@ pub struct JobManager {
     statuses: Mutex<HashMap<i64, ScanStatus>>,
     /// Live counters for in-flight scans, sampled by `all_statuses`.
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
+    /// Coalesced hint for the local title worker after a durable viewer admission.
+    #[cfg(target_os = "linux")]
+    pub(crate) title_viewer_wake: tokio::sync::Notify,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
     /// Per-request completion signals for a `POST /scan` that waits
@@ -4119,47 +4121,27 @@ async fn fragment_index_requested_video_options(
 /// one re-check per identity per quarter hour, instead of one per pass.
 const ANALYSIS_EXECUTOR_REFUSAL_TTL_MS: i64 = 15 * 60 * 1_000;
 
+#[cfg(target_os = "linux")]
 struct DiskRefitHelper {
-    #[cfg(target_os = "linux")]
     original: Arc<crate::vodencode::dv_runtime::ToolSet>,
 }
 
+#[cfg(target_os = "linux")]
 impl DiskRefitHelper {
     async fn capture() -> Result<(String, Self), String> {
-        #[cfg(target_os = "linux")]
-        {
-            let original = crate::vodencode::dv_runtime::ToolSet::capture()
-                .await
-                .map_err(|error| format!("waiting for F+ helper: {error}"))?
-                .ok_or("waiting for F+ helper installation")?;
-            Ok((original.refit_helper_identity(), Self { original }))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Err("waiting for a Linux F+ helper host".into())
-        }
+        let original = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await
+            .map_err(|error| format!("waiting for F+ helper: {error}"))?
+            .ok_or("waiting for F+ helper installation")?;
+        Ok((original.refit_helper_identity(), Self { original }))
     }
 
     fn scanner(&self) -> Option<&Path> {
-        #[cfg(target_os = "linux")]
-        {
-            Some(self.original.scanner.as_path())
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
+        Some(self.original.scanner.as_path())
     }
 
     async fn is_current(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.original.is_current().await
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.original.is_current().await
     }
 }
 
@@ -4284,13 +4266,17 @@ impl JobManager {
             identity_repairs: Default::default(),
             coordinator,
             job_authority,
-            membership: None,
+            reconciliation: None,
+            peer_calls: None,
+            directory: None,
             artwork_dir,
             scan_prune_percent,
             #[cfg(test)]
             tmdb_base: None,
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            title_viewer_wake: tokio::sync::Notify::new(),
             library_wake: tokio::sync::Notify::new(),
             scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),
@@ -4339,11 +4325,15 @@ impl JobManager {
         self
     }
 
-    fn with_membership(
+    fn with_cluster(
         mut self,
-        membership: plurx_core::cluster::membership::MembershipManager,
+        reconciliation: crate::cluster::Jobs,
+        peer_calls: crate::cluster::calls::PeerTransport,
+        directory: crate::cluster::Directory,
     ) -> Self {
-        self.membership = Some(membership);
+        self.reconciliation = Some(reconciliation);
+        self.peer_calls = Some(peer_calls);
+        self.directory = Some(directory);
         self
     }
 
@@ -4378,7 +4368,7 @@ impl JobManager {
         let ctx = crate::background_jobs::analysis_reconcile::ReconcileContext {
             store: &*self.store,
             node_id: self.coordinator.node_id(),
-            membership: self.membership.as_ref(),
+            jobs: self.reconciliation.as_ref(),
             peers: self.peer_activity.as_ref(),
         };
         let report = match crate::background_jobs::analysis_reconcile::reconcile_retired(
@@ -5180,6 +5170,24 @@ impl JobManager {
     // A queued disk request is itself a fitting consumer. The title scanner
     // must first identify every displayed RPU as FEL or MEL; a legacy recipe
     // fact cannot authorize deletion of the enhancement layer.
+    async fn disk_refit_title(
+        &self,
+        file_id: i64,
+    ) -> Result<(String, plurx_core::scan::dv_title::DvTitleStats), String> {
+        use plurx_core::scan::dv_title::DvTitleStats;
+        let document = self
+            .store
+            .get_file_probe_json(file_id)
+            .await
+            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
+            .ok_or("complete title facts are not yet available")?;
+        let stats = DvTitleStats::from_probe_json(&document)
+            .filter(|stats| stats.complete)
+            .ok_or("complete title facts are not yet available")?;
+        Ok((document, stats))
+    }
+
+    #[cfg(target_os = "linux")]
     async fn disk_refit_ready(
         &self,
         file: &MediaFile,
@@ -5190,17 +5198,9 @@ impl JobManager {
         )>,
         String,
     > {
-        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
         use plurx_core::store::dv_refit_jobs::RefitVerdict;
-        let document = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
-            .ok_or("complete title facts are not yet available")?;
-        let stats = DvTitleStats::from_probe_json(&document)
-            .filter(|stats| stats.complete)
-            .ok_or("complete title facts are not yet available")?;
+        let (document, stats) = self.disk_refit_title(file.id).await?;
         match stats.el_kind {
             TitleConstant::Consistent(TitleElKind::Mel) => return Ok(None),
             TitleConstant::Consistent(TitleElKind::Fel) => {}
@@ -5374,6 +5374,7 @@ impl JobManager {
                     return;
                 }
             };
+            #[cfg(target_os = "linux")]
             let fitted = match self.disk_refit_ready(&file).await {
                 Ok(fitted) => fitted,
                 Err(waiting) => {
@@ -5381,6 +5382,30 @@ impl JobManager {
                     return;
                 }
             };
+            #[cfg(not(target_os = "linux"))]
+            {
+                use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
+                let ready = self
+                    .disk_refit_title(file.id)
+                    .await
+                    .and_then(|(_, stats)| match stats.el_kind {
+                        TitleConstant::Consistent(TitleElKind::Mel) => Ok(()),
+                        TitleConstant::Consistent(TitleElKind::Fel) => {
+                            Err("waiting for a Linux host with the F+ helper".into())
+                        }
+                        _ => Err("waiting for a complete, consistent FEL or MEL title scan".into()),
+                    });
+                if let Err(waiting) = ready {
+                    tracing::info!(file_id, %waiting, "Dolby Vision disk conversion remains queued");
+                    return;
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let fitted_input = fitted
+                .as_ref()
+                .and_then(|(table, tools)| tools.scanner().map(|scanner| (table, scanner)));
+            #[cfg(not(target_os = "linux"))]
+            let fitted_input = None;
             match publisher
                 .mark_dv_conversion_running(file_id, file.size)
                 .await
@@ -5399,9 +5424,7 @@ impl JobManager {
                 self.coordinator.node_id(),
                 loss,
                 keep_original,
-                fitted
-                    .as_ref()
-                    .and_then(|(table, tools)| tools.scanner().map(|scanner| (table, scanner))),
+                fitted_input,
             )
             .await
             {
@@ -5415,6 +5438,7 @@ impl JobManager {
             if loss.is_cancelled() {
                 return;
             }
+            #[cfg(target_os = "linux")]
             if let Some((table, tools)) = &fitted {
                 let still_current = tools.is_current().await
                     && self
@@ -12130,7 +12154,7 @@ impl JobManager {
             .flatten();
         if let Some(artifact) = &published {
             let hydrated = tokio::select! {
-                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(),
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.peer_calls.as_ref(), self.directory.as_ref(),
                     &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
                 () = lost.cancelled() => false,
             };

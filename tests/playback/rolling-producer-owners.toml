@@ -1,3 +1,16 @@
+# Adaptive (0304917ac) + Main 5a5e6c97a merge: three-way census of the merged
+# source. Each structural count equals ours + main - base (f45c8d14e): tasks
+# 1281+1188-1186=1283, method-spawn 116+107-104=119, timers
+# 2552+2288-2273=2567, Command 383+369-370=382, launch 1004+951-956=999,
+# kill-on-drop 138+132-133=137; every delta is main's reviewed change.
+# ServingAuthority 49+34-33=50, less two: settlement services now hold the
+# cluster facade instead of a projected ServingAuthority field.
+# PR #1803 + Main f45c8d14 conflict resolution: measured the actual merged
+# source with the existing structural census over 549 Rust files, preserving
+# both parents' owner families, patterns, roots and historical explanations.
+# Task/method-spawn/timer/Command/launch-method/kill-on-drop counts are
+# 1188/107/2288/369/951/132. These are source shapes, not runtime settlement.
+
 # Native FEL Resume clock. The optional reader drains the rolling producer's
 # bounded picture records and keeps draining discarded data until its inherited
 # descriptor closes. It owns only the read endpoint and observation channel.
@@ -2204,7 +2217,7 @@ pattern = "ServingAuthority"
 # 31 -> 33 with the cluster facade (B1 slice 1): `crate::cluster`'s import
 # and its `authority()` return type. The facade hands out the fence's own
 # authority; it projects nothing new and owns no producer.
-expected_occurrences = 49
+expected_occurrences = 48
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -4332,7 +4345,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # The index-reclaim fixture drives the real paced index in one joined test task.
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
 # The relay regression runs a loopback fixture server and cancels it on completion.
-expected_occurrences = 1281
+expected_occurrences = 1283
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4596,10 +4609,14 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
+# Learner discovery: +3 test-only JoinSet tasks: unicast GDM, fake HTTP server,
+# and companion. Every JoinSet is joined or aborts its tasks on Drop.
+# Merged effort and main: both moved 99 -> 102 with different spawns (3 from
+# learner discovery, 3 from main), so the identical text merged cleanly; 99 + 3 + 3 = 105.
 # The owned voter fixture process is joined before a collision can retry.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 116
+expected_occurrences = 119
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6348,7 +6365,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observes slot release under a bounded wait.
 # Local offer classification and post-Busy peer discovery each use existing
 # request cutoffs. One fixture timer separates BOOTTIME expiry from paused Tokio time.
-expected_occurrences = 2552
+expected_occurrences = 2567
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6899,9 +6916,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # The owned voter fixture process is joined before a collision can retry.
+# The embedded placeholder source removes one test-only encoder setup site.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 383
+expected_occurrences = 382
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7645,6 +7663,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
+# Facade slice 3: -1. Two Developer MembershipManager::status() readers now
+# enter one Cluster::membership_status() delegate. The replication status
+# reader also moves into one delegate, with no net shape change. These are
+# state observations; no task or process ownership changes. The broad matcher
+# remains unchanged so future process-capable shapes still require review.
+# Facade slice 4: -8 passive MembershipManager status() spellings: five
+# cluster HTTP reads, two operations readers, and one desktop topology read
+# now enter the existing Cluster::membership_status delegate. No task, timer,
+# child launch, admission, or cleanup owner changes; the matcher is unchanged.
+# 927 -> 926 with cluster7c: one MembershipManager.status observation moves
+# from the daemon facade to its core administrative service. This removes one
+# lexical .status() match from these roots, not a process or task owner.
 # Prepared delivery (#1736): +1 test-only `.vod.status()` observation in
 # processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
@@ -7655,16 +7685,24 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Prepared delivery (#1736/#1752) contributes main's additional test-only
 # `.vod.status()` snapshot observation. It launches no child and transfers no
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
+# Learner discovery: +3 test-only JoinSet.spawn calls above, +1 plain
+# ServiceDaemon.status observation and +1 HTTP Response.status assertion.
+# No child launch; the broad matcher and production process owners are unchanged.
+# Merged effort and learner discovery: 927 + 5 (learner discovery, above) = 932.
+# Merged effort and main: 937 base - 5 (facade and discovery) + 8 (main) = 940.
+# The owned voter fixture process is joined before a collision can retry.
 # Developer tab cleanup (2026-11-18): +3 net lexical `.status(` matches in
 # the retain-output route tests (HTTP response status reads); no process.
 # Main 945 + 3 = 948.
 # PR #1802 adds two relay response status reads and five route-test status reads.
 # All seven matches inspect HTTP replies and launch no processes.
 # Removing the retired parser-floor refusal drops one HTTP status read.
+# The merged source inventories 951 occurrences.
+# The embedded placeholder source removes one test-only encoder setup site.
 # The owned voter fixture process is joined before a collision can retry.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 1004
+expected_occurrences = 999
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -8262,9 +8300,10 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
+# The embedded placeholder source removes one test-only encoder setup site.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 138
+expected_occurrences = 137
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

@@ -643,8 +643,9 @@ fn signed_peer_json(
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let payload = super::peer_transport::signed_response_payload(StatusCode::OK.as_u16(), &body);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
         .status(StatusCode::OK)
@@ -665,8 +666,9 @@ pub(crate) async fn authorize(
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let node_id = auth.node_id.clone();
     if state
-        .membership
-        .authorize_internal_peer_request(&auth, method, path, body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, method, path, body)
         .await
         .unwrap_or(false)
     {

@@ -119,10 +119,10 @@ pub(super) async fn after_factory(
     .await
     .is_err());
     let fence = before_factory(state).await;
-    let blocked = state.serving.restart_drain_status(0).await;
+    let blocked = state.cluster.operations().drain_status(0).await;
     assert_eq!(blocked.admissions_in_flight, 1);
     assert!(!blocked.drained);
-    assert!(state.serving.try_restart_admission().await.is_none());
+    assert!(state.cluster.try_restart_admission().await.is_none());
     assert_eq!(
         manager
             .resource_runtime
@@ -136,7 +136,7 @@ pub(super) async fn after_factory(
     // Reuse the authentic original-owner native closure / real JoinError body.
     // It releases this exact gate and never substitutes IDs for native proof.
     fixed_native::exercise(state, manager, actor, assignment, mode, ingress_monitor).await;
-    let status = state.serving.restart_drain_status(0).await;
+    let status = state.cluster.operations().drain_status(0).await;
     if case == 1 {
         assert_eq!(
             status.admissions_in_flight, 0,

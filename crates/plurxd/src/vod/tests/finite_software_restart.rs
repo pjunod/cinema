@@ -548,6 +548,7 @@ async fn finite_restart_unserved_child(root: &std::path::Path) {
         selected.identity.node_id.clone(),
         dirs.cache.join("cluster-index"),
         None,
+        None,
         Some(Arc::clone(&runtime)),
     );
     serve
@@ -713,6 +714,7 @@ async fn finite_restart_attach(
         Arc::clone(&store),
         selected.identity.node_id.clone(),
         dirs.cache.join("cluster-index"),
+        None,
         None,
         Some(Arc::clone(runtime)),
     );

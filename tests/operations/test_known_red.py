@@ -155,10 +155,86 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in desktop_harnesses},
             desktop_harness_reasons,
         )
+        # Adaptive playback resources (#1248) adds native containment, finite
+        # retirement and two-node qualification checks. Each needs an isolated
+        # delegated cgroup v2 root, Landlock, native FFmpeg, real hardware or a
+        # private two-daemon lab; the two private_* entries are child processes
+        # their parent test executes. Bind each identity to its exact reason.
+        adaptive_environment_reasons = {
+            "crates/plurx-core/src/adaptive_resources/runtime/finite_vod/tests/retirement_readers.rs::"
+            "adaptive_resources::runtime::operations::finite_retirement_reader_tests::bounded_native_software_preclone_refusal_settles_exact_original_arm":
+                "requires isolated finite delegated cgroup v2, clone3, Landlock ABI6 and native FFmpeg",
+            "crates/plurx-core/src/adaptive_resources/runtime/finite_vod/tests/retirement_readers.rs::"
+            "adaptive_resources::runtime::operations::finite_retirement_reader_tests::bounded_native_software_vod_retires_original_and_reuses_capacity":
+                "requires isolated finite delegated cgroup v2, clone3, Landlock ABI6 and native FFmpeg",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::private_contained_child_entry":
+                "private child executable entry; invoked only by delegated cgroup test",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::private_restricted_child_entry":
+                "private sandbox child; invoked only by the capped delegated parent",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_atomic_launch_is_born_inside_original_domain":
+                "requires explicit writable delegated cgroup2 root and clone3 support; run with PLURX_TEST_CGROUP_ROOT and --ignored",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_drop_retains_original_domain_until_descendants_close":
+                "requires explicit delegated cgroup2 root and clone3; proves original owner reaches the bounded reaper",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_exec_failure_retains_original_root_and_domain_custody":
+                "requires explicit delegated cgroup2 root and clone3; deliberately executes a pinned non-executable file",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_native_memory_limit_kills_original_allocating_root":
+                "requires explicit delegated cgroup2 root and clone3; intentionally causes a private domain OOM",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_native_pids_limit_refuses_descendant_forks":
+                "requires explicit delegated cgroup2 root and clone3; tests actual fork admission refusal",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_native_pids_limit_refuses_descendant_threads":
+                "requires explicit delegated cgroup2 root and clone3; tests actual pthread admission refusal",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_preclone_refusal_preserves_original_unentered_domain":
+                "requires explicit delegated cgroup2 root; refusal occurs before any clone",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_restricted_ffmpeg_uses_original_fd_three_four_and_nine":
+                "requires explicit capped delegated cgroup root, native FFmpeg and Landlock ABI6",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_root_exit_does_not_prove_descendant_extinction":
+                "requires explicit delegated cgroup2 root and clone3; no fixture files substitute for enforcement",
+            "crates/plurx-core/src/process/contained_launch.rs::"
+            "process::contained_launch::tests::strict_sandbox_denies_controller_namespace_and_descriptor_escape":
+                "requires capped delegated cgroup2 root and Landlock ABI6; run explicitly with --ignored",
+            "crates/plurx-core/src/process/containment/linux.rs::"
+            "process::containment::linux::tests::repeated_unused_domain_drop_removes_original_names_and_reuses_fixed_slots":
+                "requires explicit writable delegated cgroup2 root; run with PLURX_TEST_CGROUP_ROOT and --ignored",
+            "crates/plurx-core/src/process/containment/linux.rs::"
+            "process::containment::linux::tests::strict_native_empty_domain_configures_limits_and_proves_extinction":
+                "requires explicit writable delegated cgroup2 root; run with PLURX_TEST_CGROUP_ROOT and --ignored",
+            "crates/plurxd/tests/adaptive_two_node/cold_fel.rs::"
+            "cold_fel::cold_auto_fel_keeps_origin_until_verified_peer_commit":
+                "requires qualified FEL hardware, the real renderer, and built redistributable controls",
+            "crates/plurxd/tests/adaptive_two_node/hardware_fallback.rs::"
+            "hardware_fallback::real_hardware_busy_uses_one_signed_peer_start_and_releases_its_slot":
+                "requires a real supported VA-API encoder and an isolated two-daemon lab",
+            "crates/plurxd/tests/adaptive_two_node/singleton_trial.rs::"
+            "singleton_trial::activated_hiqlite_singleton_closes_native_trial_before_dvr_capture_opens":
+                "requires the native trial prerequisites and an isolated private IPv4 with non-root access to ports 80 and 5004",
+            "crates/plurxd/tests/adaptive_two_node/singleton_trial.rs::"
+            "singleton_trial::activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_trial":
+                "requires private noswap tmpfs, delegated cgroup v2, non-root clone3 and Landlock ABI6, and native FFmpeg/FFprobe",
+        }
+        self.assertEqual(
+            {
+                item.identity: item.reason
+                for item in ignored
+                if item.identity in adaptive_environment_reasons
+            },
+            adaptive_environment_reasons,
+        )
         admitted_identities = (
             {capture_identity, public_wire_identity}
             | fixture_ids
             | desktop_harness_reasons.keys()
+            | adaptive_environment_reasons.keys()
         )
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.

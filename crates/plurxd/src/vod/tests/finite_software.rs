@@ -119,6 +119,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         selected_store.identity.node_id.clone(),
         dirs.cache.join("cluster-index"),
         None,
+        None,
         Some(Arc::clone(&runtime)),
     );
     serve.register_playback_cache(&playback_cache);
@@ -850,6 +851,7 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
         Arc::clone(&store),
         selected_store.identity.node_id.clone(),
         dirs.cache.join("cluster-index"),
+        None,
         None,
         Some(Arc::clone(&runtime)),
     );
@@ -1889,6 +1891,7 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
             "foreign-fence-test".into(),
             node,
             None,
+            None,
             Some(Arc::clone(&fixture.runtime)),
         )
         .with_copy_test_vod(Arc::clone(&fixture.serve)),
@@ -2029,6 +2032,7 @@ async fn selected_copy_request_uses_core_segment_cap_and_admits_same_original_ow
         "selected-copy-profile-test".into(),
         fixture._selected_store.identity.node_id.clone(),
         None,
+        None,
         Some(Arc::clone(&fixture.runtime)),
     )
     .with_copy_test_vod(Arc::clone(&fixture.serve));
@@ -2065,6 +2069,7 @@ async fn selected_copy_quota_fixture(case: u8) {
         fixture.serve.shared.base.clone(),
         "selected-copy-quota-test".into(),
         fixture._selected_store.identity.node_id.clone(),
+        None,
         None,
         Some(Arc::clone(&fixture.runtime)),
     )

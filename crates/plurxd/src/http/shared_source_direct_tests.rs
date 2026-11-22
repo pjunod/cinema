@@ -590,7 +590,7 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
         .begin_restart_preparation_until(crate::state::clock_ms() as u64 + 60_000)
         .await
         .expect("actual planned-outage fence");
-    let status = fixture.state.serving.restart_drain_status(0).await;
+    let status = fixture.state.cluster.operations().drain_status(0).await;
     assert_eq!(status.admissions_in_flight, 1);
     assert!(!status.drained);
     let client = reqwest::Client::builder().build().expect("End client");
@@ -658,7 +658,7 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
     })
     .await
     .expect("FAILURE watchdog: original direct ticket handoff missing");
-    let status = fixture.state.serving.restart_drain_status(0).await;
+    let status = fixture.state.cluster.operations().drain_status(0).await;
     assert_eq!(status.admissions_in_flight, 1);
     assert!(
         !status.drained,
@@ -782,7 +782,7 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
             .used,
         plurx_core::adaptive_resources::ResourceVector::default()
     );
-    let settled = fixture.state.serving.restart_drain_status(0).await;
+    let settled = fixture.state.cluster.operations().drain_status(0).await;
     assert_eq!(settled.admissions_in_flight, 0);
     assert!(settled.drained);
     fixture

@@ -855,7 +855,7 @@ where
     #[cfg(target_os = "linux")]
     let peer_budget = crate::media_pool::CreateStartupBudget::new_with_clock(
         trial_budget_ms as u64,
-        &state.membership.clock_guard(),
+        &state.cluster.clock(),
     );
     let mut trial_request = intent.request.clone();
     trial_request.start_seconds = verified_ms as f64 / 1_000.0;

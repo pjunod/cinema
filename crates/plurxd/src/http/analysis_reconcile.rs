@@ -562,6 +562,39 @@ mod background_pass_tests {
             .put_setting("internal.cluster_job_owner_removed.removed-node", "1")
             .await
             .expect("removal fence");
+        // A current local engine does not prove that a silent target left.
+        // Unknown membership must leave every queued request untouched.
+        let unknown = inventory(&[(local.as_str(), live.as_str())], None);
+        let mut unknown_cursor = String::new();
+        let unknown_report = reconcile_retired_against(
+            ReconcileContext::of_state(&state),
+            &unknown,
+            &mut unknown_cursor,
+            400,
+            false,
+        )
+        .await
+        .expect("unknown membership pass");
+        assert_eq!(
+            (
+                unknown_report.retired,
+                unknown_report.absent_target,
+                unknown_report.replaced
+            ),
+            (0, 0, 0),
+        );
+        for row in [&departed, &silent, &removed] {
+            assert_eq!(
+                state
+                    .store
+                    .analysis_request(&row.request_id)
+                    .await
+                    .expect("read")
+                    .expect("row")
+                    .state,
+                "queued"
+            );
+        }
         let engines = inventory(
             &[(local.as_str(), live.as_str())],
             Some(&[local.as_str(), "silent-member"]),

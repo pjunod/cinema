@@ -274,7 +274,7 @@ async fn assert_native_disposition(
     );
     // Unlike a new admission check (policy2), this status also observes the
     // persistent native-cleanup uncertainty bit after the last actor drops.
-    let status = state.serving.restart_drain_status(0).await;
+    let status = state.cluster.operations().drain_status(0).await;
     assert_eq!(status.admissions_in_flight, 0);
     assert!(
         status.drained,

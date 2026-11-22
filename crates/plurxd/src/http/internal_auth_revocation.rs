@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, Response, StatusCode};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
     ActivityPeer, CacheAdminExclusionAdmission, CacheAdminRevocationCleanupOutcome,
-    CacheAdminRevocationLease, MembershipManager, MAX_CACHE_ADMIN_REVOCATION_PEERS,
+    CacheAdminRevocationLease, MAX_CACHE_ADMIN_REVOCATION_PEERS,
 };
 use plurx_core::store::CacheAdminMutationClaim;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use super::extract::{
     record_revocation_propagation_failed, CacheOnlyAdminRevocation, RevocationAdmission,
 };
 use super::peer_transport::{deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport};
+use crate::cluster::RevocationOperations;
 use crate::state::AppState;
 
 pub(crate) const PATH: &str = "/api/v1/internal/auth/cache-revocation";
@@ -71,28 +72,23 @@ struct StableBeginRoster {
 struct CacheAdminMembershipExclusion {
     lease: Option<CacheAdminRevocationLease>,
     operation_guard: Option<RevocationAdmission>,
-    membership: MembershipManager,
+    revocation: RevocationOperations,
     shutdown: tokio_util::sync::CancellationToken,
     release_runtime: tokio::runtime::Handle,
 }
 
 impl CacheAdminMembershipExclusion {
     fn prepare(state: &AppState, operation_guard: RevocationAdmission) -> Result<Self, ApiError> {
-        let lease = state
-            .membership
-            .is_replicated()
-            .then(|| {
-                MembershipManager::prepare_cache_admin_revocation_claim(
-                    &state.node_id,
-                    MEMBERSHIP_EXCLUSION_DURATION,
-                )
-            })
+        let revocation = state.cluster.operations().revocation();
+        let lease = revocation
+            .clustered()
+            .then(|| revocation.prepare_exclusion(&state.node_id, MEMBERSHIP_EXCLUSION_DURATION))
             .transpose()
             .map_err(|_| propagation_error())?;
         Ok(Self {
             lease,
             operation_guard: Some(operation_guard),
-            membership: state.membership.clone(),
+            revocation,
             shutdown: state.shutdown.clone(),
             release_runtime: tokio::runtime::Handle::current(),
         })
@@ -110,11 +106,7 @@ impl CacheAdminMembershipExclusion {
             .as_ref()
             .map(RevocationAdmission::deadline)
             .ok_or_else(propagation_error)?;
-        match self
-            .membership
-            .admit_cache_admin_revocation_lease(lease, deadline)
-            .await
-        {
+        match self.revocation.admit_exclusion(lease, deadline).await {
             Ok(CacheAdminExclusionAdmission::Acquired) => Ok(()),
             Ok(CacheAdminExclusionAdmission::DeadlinePassed) => {
                 record_revocation_admission_timeout();
@@ -141,7 +133,7 @@ impl CacheAdminMembershipExclusion {
         let Some(lease) = self.lease.as_ref() else {
             return Ok(());
         };
-        release_membership_exclusion_with_retry(&self.membership, lease, &self.shutdown).await?;
+        release_membership_exclusion_with_retry(&self.revocation, lease, &self.shutdown).await?;
         self.lease.take();
         self.operation_guard.take();
         Ok(())
@@ -158,7 +150,7 @@ impl Drop for CacheAdminMembershipExclusion {
             // Replicated heartbeat expiry is the bounded crash cleanup.
             return;
         }
-        let membership = self.membership.clone();
+        let revocation = self.revocation.clone();
         let shutdown = self.shutdown.clone();
         self.release_runtime.spawn(async move {
             // The fail-fast process gate remains owned until exact cleanup is
@@ -167,7 +159,7 @@ impl Drop for CacheAdminMembershipExclusion {
             // claims and retry tasks.
             let _operation_guard = operation_guard;
             if let Err(error) =
-                release_membership_exclusion_with_retry(&membership, &lease, &shutdown).await
+                release_membership_exclusion_with_retry(&revocation, &lease, &shutdown).await
             {
                 tracing::warn!(?error, "cache-admin membership exclusion cleanup stopped");
             }
@@ -247,20 +239,24 @@ impl ClusterCacheRevocation {
     pub(crate) async fn activate_if_ready(
         state: &AppState,
     ) -> Result<CacheAdminRevocationActivation, ApiError> {
-        if !state.membership.is_replicated() {
+        if !state.cluster.operations().revocation().clustered() {
             return Ok(CacheAdminRevocationActivation::Pending);
         }
         if state
-            .membership
-            .cache_admin_revocation_activated_locally()
+            .cluster
+            .operations()
+            .revocation()
+            .activated_locally()
             .await
             .map_err(|_| propagation_error())?
         {
             return Ok(CacheAdminRevocationActivation::Complete);
         }
         if !state
-            .membership
-            .cache_admin_revocation_activation_ready()
+            .cluster
+            .operations()
+            .revocation()
+            .activation_ready()
             .await
             .map_err(|_| propagation_error())?
         {
@@ -318,19 +314,19 @@ impl ClusterCacheRevocation {
         let mut membership_exclusion =
             CacheAdminMembershipExclusion::prepare(state, operation_guard)?;
         membership_exclusion.commit().await?;
-        let transport = PeerTransport::new(state.membership.clone());
+        let transport = state.cluster.calls();
         // The wire operation ID is the exact replicated claim. A peer only
         // acknowledges Begin after this same row is visible in its local
         // applied SQL, causally ordering any later absence after the acquire.
         let operation_id = membership_exclusion.operation_id();
-        let membership = state.membership.clone();
+        let revocation = state.cluster.operations().revocation();
         let claim_id = operation_id.clone();
         if wait_for_exact_local_claim_with(&state.shutdown, move || {
-            let membership = membership.clone();
+            let revocation = revocation.clone();
             let claim_id = claim_id.clone();
             async move {
-                membership
-                    .cache_admin_revocation_claim_applied(&claim_id)
+                revocation
+                    .claim_applied(&claim_id)
                     .await
                     .map_err(|_| "cache-admin exclusion local apply read failed")
             }
@@ -479,7 +475,7 @@ pub(crate) async fn cache_admin_revocation_activation_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    if !state.membership.is_replicated() {
+    if !state.cluster.operations().revocation().clustered() {
         return;
     }
     cache_admin_revocation_activation_loop_with(shutdown, move || {
@@ -492,7 +488,7 @@ pub(crate) async fn cache_admin_revocation_activation_loop(
                 // route answering 401 to a valid session — which reaches them
                 // as a login page, and reaches nobody as a cause.
                 Err(error) => Err(
-                    match state.membership.cache_admin_exclusion_blockers().await {
+                    match state.cluster.operations().revocation().blockers().await {
                         Ok(blockers) if !blockers.is_empty() => {
                             format!("{error:?}; blocked by: {}", blockers.join(", "))
                         }
@@ -568,13 +564,13 @@ async fn cleanup_begin(transport: &PeerTransport, peers: &[ActivityPeer], reques
 }
 
 async fn release_membership_exclusion_with_retry(
-    membership: &MembershipManager,
+    revocation: &RevocationOperations,
     lease: &CacheAdminRevocationLease,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
     let mut delay = EXCLUSION_CLEANUP_RETRY_INITIAL;
     loop {
-        match membership.release_cache_admin_revocation_lease(lease).await {
+        match revocation.release_exclusion(lease).await {
             Ok(CacheAdminRevocationCleanupOutcome::Confirmed) => return Ok(()),
             Ok(CacheAdminRevocationCleanupOutcome::Ambiguous) | Err(_) => {
                 tokio::select! {
@@ -594,7 +590,11 @@ async fn peer_directory(
 ) -> Result<Vec<ActivityPeer>, ApiError> {
     let peers = tokio::time::timeout_at(
         deadline,
-        state.membership.cache_admin_revocation_peers(claim_id),
+        state
+            .cluster
+            .operations()
+            .revocation()
+            .claim_roster(claim_id),
     )
     .await
     .map_err(|_| propagation_error())?
@@ -671,8 +671,9 @@ pub(crate) async fn receive(
 ) -> Result<Response<Body>, StatusCode> {
     let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", PATH, &body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, "POST", PATH, &body)
         .await
         .unwrap_or(false)
     {
@@ -680,18 +681,18 @@ pub(crate) async fn receive(
     }
     let request: Request = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     validate(&request)?;
-    let membership = state.membership.clone();
+    let revocation = state.cluster.operations().revocation();
     let claim_id = request.operation_id.clone();
     apply_and_wait_for_local_claim_with(
         &state.cache_only_admin_proofs,
         &request,
         &state.shutdown,
         move || {
-            let membership = membership.clone();
+            let revocation = revocation.clone();
             let claim_id = claim_id.clone();
             async move {
-                membership
-                    .cache_admin_revocation_claim_applied(&claim_id)
+                revocation
+                    .claim_applied(&claim_id)
                     .await
                     .map_err(|_| "cache-admin exclusion local apply read failed")
             }
@@ -705,8 +706,9 @@ pub(crate) async fn receive(
     let payload =
         super::peer_transport::signed_response_payload(StatusCode::NO_CONTENT.as_u16(), &[]);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PATH, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, PATH, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -802,7 +804,25 @@ mod tests {
             .split_once("async fn fanout(")
             .expect("revocation peer directory end")
             .0;
-        assert!(source.contains("cache_admin_revocation_peers(claim_id)"));
+        assert!(source.contains(".claim_roster(claim_id)"));
+        let facade = include_str!("../cluster.rs")
+            .split_once("pub(crate) async fn claim_roster(")
+            .expect("daemon revocation claim roster capability")
+            .1
+            .split_once("pub(crate) async fn blockers(")
+            .expect("daemon revocation claim roster capability end")
+            .0;
+        assert!(facade.contains("self.protocol.claim_roster(claim_id).await"));
+        let core_capability = include_str!("../../../plurx-core/src/cluster/membership/access.rs")
+            .split_once("pub fn claim_roster<'a>(")
+            .expect("core revocation claim roster capability")
+            .1
+            .split_once("pub fn blockers(")
+            .expect("core revocation claim roster capability end")
+            .0;
+        assert!(core_capability.contains("self.manager.cache_admin_revocation_peers(claim)"));
+        assert!(!core_capability.contains("operations_peers()"));
+        assert!(!core_capability.contains("snapshot("));
         assert!(!source.contains("operations_peers()"));
     }
 
@@ -824,7 +844,8 @@ mod tests {
             .split_once("fn validate(")
             .expect("revocation receiver end")
             .0;
-        assert!(receive.contains("sign_internal_peer_response"));
+        assert!(receive.contains(".authentication()"));
+        assert!(receive.contains("sign_exact_response"));
         assert!(receive.contains("RESPONSE_SIGNATURE_HEADER"));
         assert!(receive.contains("StatusCode::NO_CONTENT"));
     }
@@ -840,15 +861,15 @@ mod tests {
             .0;
         assert!(
             source
-                .find("cache_admin_revocation_activated_locally()")
+                .find("activated_locally()")
                 .expect("local permanent-marker stop")
                 < source
-                    .find("cache_admin_revocation_activation_ready()")
+                    .find("activation_ready()")
                     .expect("marker-aware quorum preflight")
         );
         assert!(
             source
-                .find("cache_admin_revocation_activation_ready()")
+                .find("activation_ready()")
                 .expect("marker-aware quorum preflight")
                 < source
                     .find("acquire_revocation_operation()")

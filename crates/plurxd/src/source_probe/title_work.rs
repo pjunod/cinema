@@ -14,7 +14,7 @@ use plurx_core::{
             CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
             JobKind, JobPayload, JobRequest, JobSettlement,
         },
-        dv_title_jobs::{TitleDemand, TitleOutput},
+        dv_title_jobs::{TitleDemand, TitleMaintenanceCursor, TitleOutput},
     },
 };
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -42,7 +42,7 @@ impl TitleTask {
     pub(super) async fn start(
         state: &AppState,
         boot: &str,
-        after: &mut i64,
+        maintenance: &mut TitleMaintenanceCursor,
         live_after: &mut i64,
         playback_only: bool,
     ) -> Result<Option<Self>, StoreError> {
@@ -125,12 +125,11 @@ impl TitleTask {
         let fel = fel_backend(state, &tools).await;
         #[cfg(target_os = "linux")]
         state.transcode.observe_native_fel_backend(fel.clone());
-        let demands = match live_demands {
-            Some(demands) => demands,
+        let (demands, after) = match live_demands {
+            Some(demands) => (demands, live_after),
             None => {
-                state
-                    .store
-                    .dv_title_demands(&scanner, *after, now_ms())
+                maintenance
+                    .next_page(state.store.as_ref(), &scanner, now_ms())
                     .await?
             }
         };
@@ -138,7 +137,6 @@ impl TitleTask {
             if playback_only {
                 return Ok(None);
             }
-            *after = 0;
             #[cfg(target_os = "linux")]
             {
                 if let Err(error) = state
@@ -153,13 +151,12 @@ impl TitleTask {
             return Ok(None);
         }
         for mut demand in demands {
+            *after = demand.probe_revision;
             if playback_only {
-                *live_after = demand.probe_revision;
                 if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
                     continue;
                 }
             } else {
-                *after = demand.probe_revision;
                 // Live work was considered independently above; an ordinary
                 // turn must not acquire its more permissive companion class.
                 if demand.playback_requested

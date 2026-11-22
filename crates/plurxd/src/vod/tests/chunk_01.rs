@@ -392,6 +392,7 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         "node-a".to_owned(),
         cache.path().to_path_buf(),
         None,
+        None,
     );
     let (hydrated, hydrated_version, hydrated_key) = serve
         .try_cluster_fragment_index(&file, video, None)
@@ -594,7 +595,7 @@ async fn store_with_index(file: &MediaFile) -> (Arc<dyn Store>, FragmentIndex) {
 
 fn local_serve(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
     let cache = base.join("cluster-index");
-    VodServe::new_cluster(base, store, "test-local".into(), cache, None)
+    VodServe::new_cluster(base, store, "test-local".into(), cache, None, None)
 }
 
 #[tokio::test]

@@ -140,7 +140,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     #[cfg(target_os = "linux")]
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(target_os = "linux")]
-    let mut title_after = 0;
+    let mut title_cursor = plurx_core::store::dv_title_jobs::TitleMaintenanceCursor::default();
     // The F+ fit shares the title lane: it starts only when no title scan
     // does, and either one yields to ordinary probes.
     #[cfg(target_os = "linux")]
@@ -186,7 +186,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             let admission = title_work::TitleTask::start(
                 &state,
                 &boot,
-                &mut title_after,
+                &mut title_cursor,
                 &mut live_title_after,
                 true,
             );
@@ -239,7 +239,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             match title_work::TitleTask::start(
                 &state,
                 &boot,
-                &mut title_after,
+                &mut title_cursor,
                 &mut live_title_after,
                 false,
             )
@@ -271,6 +271,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             };
             tokio::select! {
                 () = shutdown.cancelled() => {},
+                () = state.jobs.title_viewer_wake.notified() => {},
                 _ = title_poll => { title = None; },
                 _ = refit_poll => { refit = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},

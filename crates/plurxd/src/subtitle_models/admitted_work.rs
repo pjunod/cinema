@@ -68,5 +68,6 @@ where
     tokio::task::spawn_blocking(move || input.map(|operation| operation()))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests;

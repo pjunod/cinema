@@ -111,7 +111,7 @@ pub(crate) struct DeveloperReadiness {
 /// turn enforcement on with any of them unmet, and off at any time.
 fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
-    let guard = state.membership.clock_guard();
+    let guard = state.cluster.clock();
     let snapshot = guard.snapshot();
     let would_refuse = guard.check_evidence().err();
     let peers = snapshot.peers.len();
@@ -235,7 +235,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
 /// whenever the create can prove its grant. Facts only, never a gate.
 fn adaptive_remote_placement(state: &AppState) -> DeveloperEnableItem {
     use crate::media_pool::{remote_placement_count, RemotePlacementOutcome};
-    let policy = state.membership.clock_guard().check_evidence();
+    let policy = state.cluster.clock().check_evidence();
     DeveloperEnableItem {
         id: "adaptive_remote_placement",
         title: "Cross-node adaptive placement",
@@ -1125,7 +1125,6 @@ pub(crate) fn create_plan(
 
 /// Facts only: these observations are never consulted by settings updates.
 async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
-    use plurx_core::cluster::coordination::ClusterJobAuthority;
     use plurx_core::store::background_jobs::JobKind;
     use RequirementStatus::{Met, Unavailable, Unknown, Unmet};
     let (queue_status, queue_evidence) = match tokio::time::timeout(
@@ -1145,7 +1144,7 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     };
     let capacity_idle = state.transcode.pretranscode_worker_idle();
     let (peer_status, peer_evidence) = match tokio::time::timeout(
-        std::time::Duration::from_secs(3), state.membership.media_peers()
+        std::time::Duration::from_secs(3), state.cluster.media_targets()
     ).await {
         Ok(Ok(peers)) => (Unknown, format!(
             "{} reachable media peers are reported. Reachability does not prove each job's payload version, source access or encoder recipe; workers check those individually.",
@@ -1155,8 +1154,8 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     };
     let (role_status, role_evidence) = match tokio::time::timeout(
         std::time::Duration::from_secs(3), async {
-            tokio::join!(state.membership.may_execute_job(JobKind::FragmentIndexBuild),
-                state.membership.may_run_cluster_jobs())
+            tokio::join!(state.cluster.job_allowed(JobKind::FragmentIndexBuild),
+                state.cluster.singleton_jobs_allowed())
         }
     ).await {
         Ok((artifact, catalogue)) => (if artifact { Met } else { Unmet }, format!(
@@ -1356,7 +1355,6 @@ async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
 /// keeps indexing its own requests, an idle one takes other nodes'. Nothing
 /// to switch; these rows say what this node's indexer may do right now.
 async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
-    use plurx_core::cluster::coordination::ClusterJobAuthority as _;
     use plurx_core::store::background_jobs::JobKind;
     use RequirementStatus::{Met, Unavailable, Unmet};
     let observe = std::time::Duration::from_secs(3);
@@ -1403,9 +1401,7 @@ async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
     };
     let (cross_status, cross_evidence) = match tokio::time::timeout(
         observe,
-        state
-            .membership
-            .may_execute_job(JobKind::FragmentIndexBuild),
+        state.cluster.job_allowed(JobKind::FragmentIndexBuild),
     )
     .await
     {
@@ -1482,7 +1478,7 @@ async fn subtitle_cluster_sources(
     } else {
         state.runtime_cache_dir.clone()
     };
-    let peers = state.membership.media_peers().await;
+    let peers = state.cluster.media_targets().await;
     let (peer_status, peer_evidence) = match peers {
         Ok(peers) if peers.iter().any(|peer| peer.reachable) => (
             RequirementStatus::Met,
@@ -2821,7 +2817,7 @@ async fn cluster_api_requirement(state: &AppState) -> DeveloperRequirement {
     const ID: &str = "cluster_api_advertised";
     const TITLE: &str = "Authenticated diagnostics are reachable";
 
-    let status = match state.membership.status().await {
+    let status = match state.cluster.membership_status().await {
         Ok(status) => status,
         Err(MembershipError::Unavailable) => {
             return DeveloperRequirement {
@@ -2927,7 +2923,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
     const ID: &str = "cache_revocation_capability";
     const TITLE: &str = "Every committed node proves cache revocation";
 
-    if !state.membership.is_replicated() {
+    if !state.cluster.role().is_clustered() {
         return DeveloperRequirement {
             id: ID,
             title: TITLE,
@@ -2938,7 +2934,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
         };
     }
 
-    match state.membership.cache_admin_revocation_ready().await {
+    match state.cluster.revocation_ready().await {
         Ok(true) => DeveloperRequirement {
             id: ID,
             title: TITLE,
@@ -2962,10 +2958,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
         // on this fleet — where the guard has not activated — was a reading
         // the function never took.
         Ok(false) => {
-            let activated = state
-                .membership
-                .cache_admin_revocation_activated_locally()
-                .await;
+            let activated = state.cluster.revocation_activated().await;
             let evidence = match activated {
                 Ok(false) => "The credential guard has never activated on this cluster \
                               (`cluster_credential_guard_activation` is empty), which closes \
@@ -3290,7 +3283,7 @@ async fn dvr(
         id: "every_node_mounts_root",
         title: "Every node can read the DVR root",
         status: RequirementStatus::Unobservable,
-        evidence: if state.membership.is_replicated() {
+        evidence: if state.cluster.role().is_clustered() {
             "The owner writes recordings and any node may serve them, so the root has to be a \
              mount every node has. This process can see its own filesystem and no peer's."
                 .to_owned()
@@ -3575,7 +3568,7 @@ async fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem 
     // mutating the saved enablement choice.
     state
         .sharing
-        .observe_source_activation_current(state.membership.source_layout_ready().await.ok());
+        .observe_source_activation_current(state.cluster.source_layout_available().await.ok());
     let endpoints = sharing_endpoint_requirement(state.store.sharing_endpoint_manifest().await);
     let status = state.sharing.status();
     DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![

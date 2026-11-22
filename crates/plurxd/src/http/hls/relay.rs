@@ -101,9 +101,7 @@ pub(super) async fn relay_if_remote(
             let proof_deadline = request_deadline.min(Instant::now() + Duration::from_millis(100));
             tokio::time::timeout_at(
                 tokio::time::Instant::from_std(proof_deadline),
-                state
-                    .membership
-                    .media_relay_acquisition_supported(&route.owner_node_id),
+                state.cluster.relay_supported_by(&route.owner_node_id),
             )
             .await
             .ok()

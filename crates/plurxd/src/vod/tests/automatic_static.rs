@@ -140,6 +140,7 @@ async fn automatic_static_application_fixture(survivor: StaticApplicationSurvivo
         node.clone(),
         dirs.cache.join("cluster-index"),
         None,
+        None,
         Some(Arc::clone(&runtime)),
     );
     let decode_probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
@@ -161,6 +162,7 @@ async fn automatic_static_application_fixture(survivor: StaticApplicationSurvivo
         dirs.renditions.clone(),
         "automatic-carrier-test".into(),
         node.clone(),
+        None,
         None,
         Some(Arc::clone(&runtime)),
     )

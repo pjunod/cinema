@@ -1035,17 +1035,16 @@ impl<T: ActivationServices + ?Sized> ActivationServices for Arc<T> {
     }
 }
 
-/// One immutable service view. ServingAuthority contains only existing shared
-/// Arcs; cloning ServingFence would also copy metrics path/name allocations.
+/// One immutable service view. The cluster facade is a cheap shared-handle
+/// clone; settlement asks it for authority and outage operations.
 pub(super) struct PreparationSettlementServices {
     store: Arc<dyn plurx_core::store::Store>,
     transcode: Arc<crate::transcode::TranscodeManager>,
     media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     media_pool: Arc<crate::media_pool::MediaPool>,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    cluster: crate::cluster::Cluster,
     link_receipts: Arc<crate::http::hls::link_receipts::LinkReceipts>,
     hls_route_hooks: Arc<crate::seam_hooks::HookSlot<dyn crate::http::hls::HlsRouteHooks>>,
-    serving: crate::serving_fence::ServingAuthority,
     node_id: String,
     _allocation: Option<crate::playback_control::ActorPayloadAllocation>,
     _lifetime: crate::playback_control::ActorPayloadLifetime,
@@ -1074,11 +1073,11 @@ impl crate::media_pool::QualityCatalogServices for PreparationSettlementServices
     fn quality_node_id(&self) -> &str {
         &self.node_id
     }
-    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager {
-        &self.membership
+    fn quality_maintenance_active(&self) -> bool {
+        self.cluster.maintenance_active()
     }
     fn quality_serving(&self) -> crate::serving_fence::ServingAuthority {
-        self.serving.clone()
+        self.cluster.authority()
     }
 }
 
@@ -1093,10 +1092,9 @@ impl PreparationSettlementServices {
             transcode: Arc::clone(&state.transcode),
             media_sessions: Arc::clone(&state.media_sessions),
             media_pool: Arc::clone(&state.media_pool),
-            membership: state.membership.clone(),
+            cluster: state.cluster.clone(),
             link_receipts: Arc::clone(&state.link_receipts),
             hls_route_hooks: Arc::clone(&state.hls_route_hooks),
-            serving: state.serving.authority(),
             node_id: state.node_id.clone(),
             _allocation: allocation,
             _lifetime: lifetime,
@@ -1165,7 +1163,7 @@ pub(super) async fn reserve_preparation_settlement(
         .await
         .ok()?
         .ok()?;
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let serving_generation = authority.admit()?;
     let serving_commit = authority
         .commit_guard_before(serving_generation, deadline.into_std())
@@ -1479,7 +1477,7 @@ async fn settle_preparation_control(
                 let planned_commit_guard =
                     match active_preparation.as_ref().map(|active| active.purpose) {
                         Some(PreparationPurpose::PlannedRelocation(fence)) => {
-                            let Ok(guard) = state.serving.try_planned_outage_operation_guard()
+                            let Ok(guard) = state.cluster.operations().claim_outage_operation()
                             else {
                                 let wake = (tokio::time::Instant::now() + delay).min(deadline);
                                 tokio::time::sleep_until(wake).await;
@@ -1488,7 +1486,7 @@ async fn settle_preparation_control(
                                     .min(PREPARATION_SETTLEMENT_RETRY_MAX);
                                 continue;
                             };
-                            if !state.serving.planned_outage_is_current(fence).await {
+                            if !state.cluster.operations().outage_is_current(fence).await {
                                 if let Some(active) = active_preparation.clone() {
                                     settle_cancelled_preparation(
                                         active,
@@ -1756,8 +1754,9 @@ async fn planned_preparation_still_current(
         return true;
     };
     state
-        .serving
-        .current_planned_outage()
+        .cluster
+        .operations()
+        .current_outage()
         .await
         .is_some_and(|fence| reason == format!("planned_relocation:{}", fence.identity()))
 }
@@ -1821,7 +1820,7 @@ async fn settle_committed_preparation(
     if successor.publication_ready_at_ms == 0 {
         return;
     }
-    let authority = state.serving.clone();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return;
     };
@@ -4181,7 +4180,7 @@ async fn control_local_with_observation(
     // the successor the viewer actually asked for was built once, refused, and
     // forgotten. This stays true until the ask has been dispatched.
     let planned_relocation = if route.owner_node_id == state.node_id {
-        state.serving.current_planned_outage().await
+        state.cluster.operations().current_outage().await
     } else {
         None
     };

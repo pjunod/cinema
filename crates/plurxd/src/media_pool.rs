@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, MembershipManager};
+use plurx_core::cluster::membership::ActivityPeer;
+#[cfg(test)]
+use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::store::background_jobs_resources::SourcePlacementPressure;
 use serde::{Deserialize, Serialize};
@@ -351,7 +353,7 @@ pub(crate) trait QualityCatalogServices: Send + Sync {
     fn quality_store(&self) -> &Arc<dyn plurx_core::store::Store>;
     fn quality_transcode(&self) -> &Arc<crate::transcode::TranscodeManager>;
     fn quality_node_id(&self) -> &str;
-    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager;
+    fn quality_maintenance_active(&self) -> bool;
     fn quality_serving(&self) -> crate::serving_fence::ServingAuthority;
     fn quality_applied(&self) -> Option<&plurx_core::store::AppliedView> {
         None
@@ -367,11 +369,11 @@ impl QualityCatalogServices for AppState {
     fn quality_node_id(&self) -> &str {
         &self.node_id
     }
-    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager {
-        &self.membership
+    fn quality_maintenance_active(&self) -> bool {
+        self.cluster.maintenance_active()
     }
     fn quality_serving(&self) -> crate::serving_fence::ServingAuthority {
-        self.serving.authority()
+        self.cluster.authority()
     }
     fn quality_applied(&self) -> Option<&plurx_core::store::AppliedView> {
         Some(&self.applied)
@@ -387,8 +389,8 @@ impl<T: QualityCatalogServices + ?Sized> QualityCatalogServices for Arc<T> {
     fn quality_node_id(&self) -> &str {
         self.as_ref().quality_node_id()
     }
-    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager {
-        self.as_ref().quality_membership()
+    fn quality_maintenance_active(&self) -> bool {
+        self.as_ref().quality_maintenance_active()
     }
     fn quality_serving(&self) -> crate::serving_fence::ServingAuthority {
         self.as_ref().quality_serving()
@@ -1769,12 +1771,9 @@ impl MediaPool {
             },
         );
     }
-    pub(crate) fn new(
-        membership: MembershipManager,
-        directory: crate::cluster::Directory,
-    ) -> Arc<Self> {
+    pub(crate) fn new(transport: PeerTransport, directory: crate::cluster::Directory) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership),
+            transport,
             directory,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
@@ -2626,7 +2625,7 @@ impl MediaPool {
         let evidence_exchange = request
             .finite_service
             .as_ref()
-            .and_then(|_| state.membership.clock_guard().capture_continuous().ok());
+            .and_then(|_| state.cluster.clock().capture_continuous().ok());
         let snapshots = tokio::time::timeout_at(deadline, async {
             self.expire().await;
             self.snapshots
@@ -2878,12 +2877,12 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     let runtime = state.transcode.media_node_runtime().await;
     #[cfg(target_os = "linux")]
     let adaptive_worker_quote = {
-        let accepting = state.serving.accepting_new_media().await;
-        let serving = state.serving.authority().state();
+        let accepting = state.cluster.admitting_new_media().await;
+        let serving = state.cluster.authority().state();
         state
             .resource_runtime
             .as_ref()
-            .filter(|_| accepting && serving.ready && !state.membership.local_maintenance_active())
+            .filter(|_| accepting && serving.ready && !state.cluster.maintenance_active())
             .map(|runtime| AdaptiveWorkerQuote {
                 version: 1,
                 owner_id: runtime.owner().owner_id,
@@ -2935,7 +2934,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         io: media_io_observation(),
         // Older owners must not dispatch their removed relay endpoint here.
         live_tv_processing: false,
-        live_tv_resource_processing: state.serving.is_ready()
+        live_tv_resource_processing: state.cluster.ready()
             && state.cluster.role().admission != Admission::Maintenance,
         adaptive_source_scope: cfg!(target_os = "linux") && adaptive_worker_quote.is_some(),
         adaptive_worker_quote,
@@ -2982,7 +2981,7 @@ pub(crate) async fn local_quality_catalog(
     if let Err(error) = request.validate() {
         return QualityCatalogResult::unavailable(CatalogCause::RequestInvalid(error));
     }
-    if state.quality_membership().local_maintenance_active() {
+    if state.quality_maintenance_active() {
         return QualityCatalogResult::unavailable(CatalogCause::Maintenance);
     }
     let progress = std::sync::Mutex::new(Vec::new());
@@ -3212,7 +3211,7 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
                     });
                     let mut offer = base.await;
                     if binding_matches && offer.eligible && offer.encoder == "software" {
-                        offer.finite_service = state.membership.clock_guard()
+                        offer.finite_service = state.cluster.clock()
                             .capture_continuous().ok()
                             .zip(runtime.finite_placement_hint(request_digest))
                             .and_then(|(clock, sample)| finite_service_evidence(request_digest, sample, &clock));
@@ -3284,7 +3283,7 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
             ..base()
         };
     }
-    if !state.serving.accepting_new_media().await {
+    if !state.cluster.admitting_new_media().await {
         return MediaOffer {
             refusal_code: Some("serving_fenced".to_owned()),
             ..base()
@@ -3773,7 +3772,7 @@ mod tests {
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         assert!(!pool.retained_output_receiver("worker").await);
@@ -4779,7 +4778,7 @@ mod tests {
     #[tokio::test]
     async fn deadline_fencing_retains_children_and_rejects_delayed_success() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         let running_root = PathBuf::from("/media/running");
@@ -5065,7 +5064,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn snapshots_expire_after_fifteen_seconds() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         pool.snapshots.write().await.insert(
@@ -5111,7 +5110,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn receipt_cannot_restart_an_old_snapshots_full_ttl() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         let mut old = snapshot("peer", &["h264"], 1080);
@@ -5130,7 +5129,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn root_readability_is_specific_and_age_bounded() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         let observed_at = tokio::time::Instant::now();
@@ -5185,7 +5184,7 @@ mod tests {
     #[tokio::test]
     async fn a_single_node_poll_performs_no_peer_http_work() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         pool.poll_once().await.expect("empty membership is a no-op");

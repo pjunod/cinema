@@ -121,7 +121,7 @@ obligation = "remain probe/head-only and never attest a complete producer"
 [[surfaces]]
 id = "process.vod_pipe_consumer"
 kind = "process_consumer"
-source = "crates/plurxd/src/vodgen.rs"
+source = "crates/plurx-core/src/vod_generation/mod.rs"
 anchor = "pub async fn run<R, S>("
 obligation = "consume the producer pipe without becoming a second child owner"
 

@@ -275,7 +275,7 @@ where
                         .await
                     {
                         crate::serving_fence::OutageWait::Recovered => {
-                            baseline = state.serving.authority().outage_baseline();
+                            baseline = state.cluster.authority().outage_baseline();
                         }
                         crate::serving_fence::OutageWait::Expired
                         | crate::serving_fence::OutageWait::TimedOut => {

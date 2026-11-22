@@ -77,7 +77,8 @@ use super::HiqliteAuthStore;
 use crate::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
 /// Tables the applied views stamp, one revision each. The mark registers
-/// these and [`SHARING_WATCH_TABLES`] (`production_hiqlite_defaults_with_read_pool`).
+/// these, [`SHARING_WATCH_TABLES`] and the canonical roster tables
+/// (`production_hiqlite_defaults_with_read_pool`).
 pub const APPLIED_VIEW_TABLES: &[&str] = &["settings", "media_sessions"];
 
 /// Tables the sharing monitors wait on (A6 M3), registered after the
@@ -107,10 +108,10 @@ pub const APPLIED_MARK_DELETES_ONLY: &[&str] = &["tokens"];
 
 /// Every table the applied mark registers, in slot order.
 pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
-    let tables = APPLIED_VIEW_TABLES
-        .iter()
-        .chain(SHARING_WATCH_TABLES)
-        .copied();
+    let tables = APPLIED_VIEW_TABLES.iter().chain(SHARING_WATCH_TABLES);
+    #[cfg(feature = "hiqlite-store")]
+    let tables = tables.chain(crate::cluster::membership::directory::ROSTER_TABLES.iter());
+    let tables = tables.copied();
     #[cfg(target_os = "linux")]
     let tables = tables.chain(DVR_TRIAL_WATCH_TABLES);
     tables
@@ -2461,7 +2462,14 @@ mod tests {
         let mut writers = std::collections::BTreeSet::new();
         for (crate_name, dir) in [("plurx-core", &root), ("plurxd", &daemon)] {
             for (path, text) in production_sources(dir, "") {
-                if sql_texts(&path, &text).into_iter().any(writes_settings) {
+                if sql_texts(&path, &text).into_iter().any(|sql| {
+                    // The facade now owns this backup anchor. Its exact SQL
+                    // appends a committed cut and cannot change settings rows.
+                    let backup_anchor = crate_name == "plurxd"
+                        && path == "cluster.rs"
+                        && sql == "UPDATE settings SET updated_at = updated_at WHERE 0";
+                    writes_settings(sql) && !backup_anchor
+                }) {
                     writers.insert(format!("{crate_name}/{path}"));
                 }
             }

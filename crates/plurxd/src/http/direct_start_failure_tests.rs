@@ -66,8 +66,9 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
         panic!("real direct intent refused");
     };
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .cluster
+        .source_members()
+        .observe()
         .await
         .expect("actual claim members")
         .expect("actual claim floor");
@@ -95,8 +96,9 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
     .await;
     let permission = ingress.permission().await;
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .cluster
+        .source_members()
+        .observe()
         .await
         .expect("actual factory members")
         .expect("actual factory floor");
@@ -247,7 +249,7 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
         runtime.accounting().expect("actual typed R refund").used,
         plurx_core::adaptive_resources::ResourceVector::default()
     );
-    let status = state.serving.restart_drain_status(0).await;
+    let status = state.cluster.operations().drain_status(0).await;
     assert_eq!(status.admissions_in_flight, 0);
     assert!(
         status.drained,

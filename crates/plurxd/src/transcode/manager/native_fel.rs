@@ -543,9 +543,9 @@ impl TranscodeManager {
                 .await
         };
         if let Err(error) = hint.await {
-            tracing::debug!(target:"plurxd::dv", file_id=file.id, %error, "could not retain FEL preparation target hint");
+            tracing::debug!(target: "plurxd::transcode", file_id=file.id, %error, "could not retain FEL preparation target hint");
         }
-        tracing::info!(target: "plurxd::dv", file_id = file.id, staged, "admitted native FEL head is ready");
+        tracing::info!(target: "plurxd::transcode", file_id = file.id, staged, "admitted native FEL head is ready");
         Ok(())
     }
 
@@ -813,7 +813,7 @@ impl NativeFelHead {
             if let Err(reason) = result {
                 split.decline_prepared_head();
                 queue_rejected_native_fel_objects(&session, staged);
-                tracing::debug!(target:"plurxd::dv", file_id=session.file_id, %reason, "native FEL head kept ordinary startup");
+                tracing::debug!(target: "plurxd::transcode", file_id=session.file_id, %reason, "native FEL head kept ordinary startup");
             }
         });
     }

@@ -3714,7 +3714,7 @@ async fn serve_stream_mp4(
         runtime_cache: &state.runtime_cache_dir,
         readrate,
         tracked,
-        serving: state.serving.subscribe(),
+        serving: state.cluster.subscribe_authority(),
         #[cfg(target_os = "linux")]
         protection,
     })

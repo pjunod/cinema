@@ -61,7 +61,7 @@ impl TranscodeManager {
             incarnation_id,
         )?;
         if split.first_fel_presentation() {
-            tracing::info!(target: "plurxd::http::hls", session = %session_log_id(session_id),
+            tracing::info!(target: "plurxd::transcode", session = %session_log_id(session_id),
                 segment = segment.index, phase = "committed", mode = "native_server_splice",
                 "prepared_replacement");
         }
