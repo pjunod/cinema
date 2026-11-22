@@ -6112,6 +6112,74 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
     }
 }
 
+/// Caps that name no audio sinks judge the copy's selected track: an allowed
+/// codec keeps the client's ask, a codec the caps or the copy's MP4 cannot take
+/// converts, a missing selection maps nothing and converts nothing, and a claim
+/// or a Transcode keeps its own resolution. The quality catalog's copy contract
+/// names the same audio as the built request every time.
+#[test]
+fn claimless_copy_audio_converts_what_the_caps_or_copy_mp4_cannot_take() {
+    use crate::transcode::SessionKind;
+    let stream = |index, codec: &str, channels| plurx_core::domain::AudioStream {
+        index, codec: codec.into(), channels: Some(channels), sample_rate: Some(48_000),
+        channel_layout: None, language: None, title: None, default: index == 1,
+    };
+    let mut file = dolby_vision_p7_file();
+    file.audio_streams = vec![stream(1, "aac", 2), stream(3, "truehd", 6), stream(5, "eac3", 6)];
+    let caps = |audio: &str| caps_v2(&format!(
+        r#"{{"v":2,"video":[{{"codec":"hevc","present":["hdr10"]}}],"audio":{audio},"transports":["hls"]}}"#
+    ));
+    for (audio, decoders, aac, expected) in [
+        (None, r#"["aac"]"#, None, false),              // allowed first track
+        (Some(1), r#"["aac"]"#, Some(true), true),      // an ask is kept
+        (Some(5), r#"["aac"]"#, None, true),            // decoder list refuses
+        (Some(5), r#"["aac","eac3"]"#, Some(false), false), // passthrough
+        (Some(3), r#"["aac","truehd"]"#, None, true),   // copy MP4 refuses
+        (Some(9), r#"["aac"]"#, None, false),           // selects no track
+    ] {
+        let caps = caps(decoders);
+        let body = CreateSession {
+            processed_upgrade: None, copy: Some(true), aac, audio, ..bare_create() };
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert!(query.audio_claim.is_none());
+        let mut request = body.into_request(file.id, 2160);
+        reconcile_request_audio(Some(&file), &mut request);
+        reconcile_claimless_copy_audio(
+            Some(&file),
+            Some(&plurx_core::playback::DeviceProfile::from_caps_v2(&caps)),
+            &mut request,
+        );
+        let SessionKind::Copy { aac: built, .. } = request.kind else {
+            panic!("a Copy request stays Copy");
+        };
+        assert_eq!(built, expected, "track {audio:?} with {decoders}");
+        assert_eq!(
+            query.copy_contract.expect("Copy contract").0,
+            built,
+            "the catalog names the audio the copy runs: track {audio:?} with {decoders}"
+        );
+    }
+    // A claim resolves the full delivery; the claimless rule never overrides it.
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]}"#);
+    let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
+    let body = CreateSession {
+        processed_upgrade: None, copy: Some(true), aac: Some(false), audio: Some(5), ..bare_create() };
+    let mut request = body.into_request(file.id, 2160);
+    request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+    assert!(request.audio_claim.is_some());
+    let before = request.kind;
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before, "a claim is left to reconcile_request_audio");
+    // A Transcode has no copied audio to judge.
+    let body = CreateSession { processed_upgrade: None, audio: Some(3), ..bare_create() };
+    let mut request = body.into_request(file.id, 1080);
+    let before = request.kind;
+    assert!(matches!(before, SessionKind::Transcode { .. }));
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before);
+}
+
 /// Compare actual emitted IDs across decision discovery (no retained Copy
 /// contract) and create discovery, not two digests of a manufactured tuple.
 #[tokio::test]
