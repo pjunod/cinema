@@ -766,7 +766,7 @@ pub(super) fn supported_tracks(
     if file.subtitle_streams.len() > 4096 {
         return Err("Source subtitle metadata exceeds bound".into());
     }
-    let tracks: Vec<u16> = file
+    let eligible: Vec<u16> = file
         .subtitle_streams
         .iter()
         .enumerate()
@@ -776,13 +776,42 @@ pub(super) fn supported_tracks(
         })
         .map(|(i, _)| i as u16)
         .collect();
-    if tracks.is_empty()
-        || tracks.len() > TRACKS
-        || selected.is_some_and(|i| !(0..=4095).contains(&i) || !tracks.contains(&(i as u16)))
+    if eligible.is_empty()
+        || selected.is_some_and(|i| !(0..=4095).contains(&i) || !eligible.contains(&(i as u16)))
     {
         return Err("Source native track is unsupported".into());
     }
-    Ok(tracks)
+    Ok(bounded_tracks(&file.subtitle_streams, eligible, selected))
+}
+
+/// At most `TRACKS` held private tracks per session. A title with more text
+/// tracks than that (Countdown on M6 carries 36) still plays: the bound picks
+/// which tracks it offers instead of refusing the Start. It keeps the
+/// viewer's selection, then the default and forced tracks, then stream
+/// order, and returns them in stream order.
+fn bounded_tracks(
+    streams: &[plurx_core::domain::SubtitleStream],
+    eligible: Vec<u16>,
+    selected: Option<i64>,
+) -> Vec<u16> {
+    if eligible.len() <= TRACKS {
+        return eligible;
+    }
+    let stream = |index: u16| streams.get(usize::from(index));
+    let rank = |index: u16| {
+        if selected == Some(i64::from(index)) {
+            0
+        } else if stream(index).is_some_and(|s| s.default || s.forced) {
+            1
+        } else {
+            2
+        }
+    };
+    let mut kept = eligible;
+    kept.sort_by_key(|&index| (rank(index), index));
+    kept.truncate(TRACKS);
+    kept.sort_unstable();
+    kept
 }
 fn validate_text(bytes: &[u8]) -> Result<(), String> {
     let text =
@@ -936,6 +965,34 @@ fn timestamp(raw: &str) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Production 2026-11-22: "Countdown" on M6 carries 36 SubRip tracks, and
+    /// every shared growing Start refused at `growing.native_tracks`. The
+    /// bound now chooses tracks instead of refusing the Start.
+    #[test]
+    fn more_text_tracks_than_the_bound_keep_the_selected_and_default_tracks() {
+        let streams = (0..36)
+            .map(|index| plurx_core::domain::SubtitleStream {
+                index,
+                codec: "subrip".into(),
+                default: index == 1,
+                forced: index == 34,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let eligible = (0..36).collect::<Vec<u16>>();
+        let kept = bounded_tracks(&streams, eligible.clone(), Some(35));
+        assert_eq!(kept.len(), TRACKS);
+        assert!(
+            kept.windows(2).all(|pair| pair[0] < pair[1]),
+            "stream order"
+        );
+        for required in [35, 1, 34, 0] {
+            assert!(kept.contains(&required), "keeps track {required}");
+        }
+        assert!(!kept.contains(&33), "the last plain tracks give way");
+        let within = (0..TRACKS as u16).collect::<Vec<u16>>();
+        assert_eq!(bounded_tracks(&streams, within.clone(), None), within);
+    }
     #[test]
     fn source_raw_positive_anchor_rejects_lossy_utf8_and_invalid_timestamp_maps() {
         let invalid = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nbad \xff\n";

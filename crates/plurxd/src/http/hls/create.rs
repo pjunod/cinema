@@ -7206,6 +7206,16 @@ fn validate_prepared_copy_head(
         "dolby_vision" => dolby_vision_base_transfer(file),
         _ => return Err(()),
     };
+    // H.273 code 2 is an explicit "unspecified": the head makes no transfer
+    // claim. Many SDR encodes ship it (e.g. an HDTV H.264 with only a BT.709
+    // matrix). When the scan found no HDR or Dolby Vision signalling, the
+    // prepared delivery is SDR, and the copied bytes are exactly what Local
+    // plays as SDR. Any HDR, HLG or Dolby Vision expectation still needs its
+    // explicit code, and a head with no colour description still refuses.
+    let actual_transfer = match actual_transfer {
+        None if transfer == 2 && expected_transfer == Some(Transfer::Sdr) => Some(Transfer::Sdr),
+        actual => actual,
+    };
     match (expected_transfer, actual_transfer) {
         (Some(expected), Some(actual)) if expected == actual => {}
         // Profile 5 alone has no compatible base; its head declares the
@@ -7473,6 +7483,37 @@ mod source_copy_head_tests {
             validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
         );
         assert!(validate_prepared_copy_head(&source, 720, &caps, (false, false), &good).is_err());
+    }
+    /// Production 2026-11-22: an HDTV-720p H.264 ("Kiss Kiss, Cam Cam", M6
+    /// file 3057) declares a BT.709 matrix but transfer and primaries 2
+    /// ("unspecified"). Every shared growing start refused it as
+    /// `vod_source_rescan_required` at `growing.copy_head_caps`.
+    #[test]
+    fn prepared_copy_head_accepts_an_unspecified_transfer_for_an_sdr_delivery() {
+        let source = file();
+        let caps = caps();
+        let mut unspecified = facts();
+        unspecified.color = Some((2, 2, 1, false));
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &unspecified).is_ok()
+        );
+        // A reserved or unknown code still makes no admissible claim.
+        let mut reserved = facts();
+        reserved.color = Some((1, 3, 1, false));
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &reserved).is_err()
+        );
+        // An SDR head is not admitted to an HDR-only decoder claim.
+        let mut hdr_only = caps.clone();
+        hdr_only.video[0].present = vec![plurx_core::playback::Transfer::Pq];
+        assert!(validate_prepared_copy_head(
+            &source,
+            1080,
+            &hdr_only,
+            (false, false),
+            &unspecified
+        )
+        .is_err());
     }
     #[test]
     fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {
