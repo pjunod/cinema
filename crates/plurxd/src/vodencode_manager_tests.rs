@@ -3791,6 +3791,12 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         )
         .await
         .expect("attested source metadata");
+    // Each shared AAC soundtrack reserves VOD_SHARED_AUDIO_CPU_THREADS; pin a
+    // budget that admits it rather than inheriting this machine's core count.
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "8")
+        .await
+        .expect("software pool budget");
     let file = store
         .get_file(file_id)
         .await
