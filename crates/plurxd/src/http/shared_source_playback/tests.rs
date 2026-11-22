@@ -1417,6 +1417,16 @@ async fn sharing_source_auto_profile7_copy_head_is_judged_by_the_source_not_the_
     );
     fixture.shutdown().await;
 }
+
+/// File 3122's shape (H.264 SDR, E-AC-3 5.1, two SubRip tracks, one SDH)
+/// started by the web player's real caps with `aac` asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_web_native_audio_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeWebNativeAudioCopy,
+    ))
+    .await;
+}
 /// One resource of the range session, named relative to `base`'s resource.
 async fn actual_range_resource(
     address: std::net::SocketAddr,
@@ -1608,13 +1618,19 @@ async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     assert!(bytes.starts_with(b"#EXTM3U"));
     if matches!(
         mode,
-        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeDolbyVisionConverted
+        SourceFixtureMode::RangeAudioCopy
+            | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeWebNativeAudioCopy
     ) {
         let init = actual_range_init(address, &operation, &fixture, &playlist, &bytes).await;
         let has = |needle: &[u8]| init.bytes.windows(needle.len()).any(|w| w == needle);
         let video = init.video().expect("the AV init carries its video");
         assert_eq!(init.tracks.len(), 2, "{mode:?}: video and audio");
-        if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
+        if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+            // Chrome decodes no E-AC-3: its AAC sink takes the conversion.
+            assert!(has(b"mp4a") && !has(b"ec-3"), "E-AC-3 converts to AAC");
+            assert!(!video.dolby_vision_config, "SDR video");
+        } else if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
             // E-AC-3 passes through, so the muxer's Dolby brand reached this
             // output: the case the canonical/AV companion check must accept.
             assert!(has(b"ec-3") && has(b"dec3"), "E-AC-3 passes through");
