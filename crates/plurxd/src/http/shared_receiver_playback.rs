@@ -76,7 +76,7 @@ pub(crate) enum ReceiverStartError {
 }
 /// A Source that could not be reached or was busy is unavailable, not a
 /// refusal; anything the Source affirmatively answered stays unresolved.
-pub(super) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
+pub(crate) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
     match error {
         crate::sharing_client::PeerError::Unavailable
         | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::PeerUnavailable,

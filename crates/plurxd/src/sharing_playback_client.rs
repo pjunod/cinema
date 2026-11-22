@@ -798,7 +798,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
-            let retry_after = response.headers().contains_key(header::RETRY_AFTER);
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -820,7 +820,10 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(crate::sharing_client::peer_status_refusal(status, retry_after));
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    retry_after.as_ref(),
+                ));
             }
             SourceStatusReceipt::parse_with_receiver(&bytes, session, known, true)
         })
@@ -1104,7 +1107,7 @@ impl PeerConnection {
             status => {
                 return Err(crate::sharing_client::peer_status_refusal(
                     status,
-                    response.headers().contains_key(header::RETRY_AFTER),
+                    response.headers().get(header::RETRY_AFTER),
                 ))
             }
         }
