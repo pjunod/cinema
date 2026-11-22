@@ -458,8 +458,7 @@ impl Init {
 /// for an AC-3, E-AC-3 or TrueHD track as well as for a Dolby Vision record,
 /// so over a video entry with no Dolby Vision record that brand is the
 /// audio's and is dropped; [`replace_dolby_file_type_brand`]'s `iso6` stand-in
-/// for it is then a repeat and drops too. An init with neither keeps its
-/// exact payload, so existing contracts are unchanged.
+/// for it is then a repeat and drops too.
 fn video_file_type_brands(payload: &[u8], dolby_vision: bool) -> Result<Vec<u8>, Fmp4Error> {
     if payload.len() < 8 || !(payload.len() - 8).is_multiple_of(4) {
         return malformed("copy init ftyp is malformed");
@@ -476,16 +475,37 @@ fn video_file_type_brands(payload: &[u8], dolby_vision: bool) -> Result<Vec<u8>,
     Ok(brands)
 }
 
+/// Which `ftyp` bytes a copy init digest covers.
+#[derive(Clone, Copy)]
+enum FileTypeBrands {
+    /// The payload exactly as written: the persisted contract.
+    Exact,
+    /// [`video_file_type_brands`]: what canonical and AV outputs share.
+    Video,
+}
+
 /// Decoder/timing identity for a copy output, independent of global muxer
 /// metadata such as `udta`'s Lavf version. Call after the shared init
 /// normalization/promotion recipe. This hashes the selected video sample
-/// entries (including codec/color/DV records), the file-type brands the video
-/// determines (see [`video_file_type_brands`]), timescale and track defaults;
-/// only the visual entry's descriptive compressor name is omitted. The
-/// canonical output carries video alone and the AV output carries audio too,
-/// so nothing an audio track contributes may enter this identity.
-/// It is not a source attestation or a media-sample digest.
+/// entries (including codec/color/DV records), ftyp, timescale and track
+/// defaults; only the visual entry's descriptive compressor name is omitted.
+/// It is not a source attestation or a media-sample digest. Sealed indexes
+/// and Analysis fills persist it, so its bytes never change; compare a
+/// canonical output with its AV companion by
+/// [`copy_video_companion_init_sha256`] instead.
 pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error> {
+    copy_video_init_digest(init, FileTypeBrands::Exact)
+}
+
+/// [`copy_video_init_contract_sha256`] over only the file-type brands the
+/// video determines. The canonical output carries video alone and the AV
+/// output carries audio too, so nothing an audio track contributes to `ftyp`
+/// may separate the two. Never persisted.
+pub fn copy_video_companion_init_sha256(init: &Init) -> Result<String, Fmp4Error> {
+    copy_video_init_digest(init, FileTypeBrands::Video)
+}
+
+fn copy_video_init_digest(init: &Init, brands: FileTypeBrands) -> Result<String, Fmp4Error> {
     use sha2::{Digest, Sha256};
     let video = init
         .video()
@@ -508,10 +528,16 @@ pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error>
     digest.update([video.nal_length_size, u8::from(video.dolby_vision_config)]);
     let (ftyp_at, ftyp) = find_child(&init.bytes, 0..init.bytes.len(), b"ftyp")?
         .ok_or_else(|| Fmp4Error::Malformed("copy init has no ftyp".into()))?;
-    let ftyp_bytes = video_file_type_brands(
-        &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size],
-        video.dolby_vision_config,
-    )?;
+    let ftyp_payload = &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size];
+    let ftyp_bytes = match brands {
+        FileTypeBrands::Exact => {
+            if ftyp_payload.len() < 8 || !(ftyp_payload.len() - 8).is_multiple_of(4) {
+                return malformed("copy init ftyp is malformed");
+            }
+            ftyp_payload.to_vec()
+        }
+        FileTypeBrands::Video => video_file_type_brands(ftyp_payload, video.dolby_vision_config)?,
+    };
     digest.update((ftyp_bytes.len() as u64).to_be_bytes());
     digest.update(&ftyp_bytes);
     let (moov_at, moov) = find_child(&init.bytes, 0..init.bytes.len(), b"moov")?
@@ -619,12 +645,39 @@ mod copy_init_contract_tests {
         payload
     }
 
+    /// A video-only init whose Dolby Vision record is stripped repeats `iso6`
+    /// (the record's `dby1` rewritten). Sealed copy indexes and Analysis fills
+    /// persist this digest, so it stays byte-exact: the value below is the one
+    /// computed before the companion form existed. The companion digest drops
+    /// the repeat and so differs.
+    #[test]
+    fn copy_init_contract_of_a_stripped_dolby_vision_init_is_persisted_exactly() {
+        let mut init = fixture();
+        assert!(remove_dolby_vision_record(&mut init).expect("strip"));
+        let (at, header) = find_child(&init.bytes, 0..init.bytes.len(), b"ftyp")
+            .expect("ftyp")
+            .expect("ftyp present");
+        assert_eq!(
+            &init.bytes[at.start + header.header_len..at.start + header.size],
+            ftyp(&[b"iso5", b"iso6", b"iso6", b"mp41"]).as_slice()
+        );
+        let contract = copy_video_init_contract_sha256(&init).expect("contract");
+        assert_eq!(
+            contract,
+            "a40f167d3dfa43415506bcaf5e7e77aa429207d385a07cd8eec0a2c4eec8db54"
+        );
+        assert_ne!(
+            copy_video_companion_init_sha256(&init).expect("companion"),
+            contract
+        );
+    }
+
     /// FFmpeg's AV output of an E-AC-3 or TrueHD title adds `dby1` beside
     /// SDR or HDR10 video, and the shared normalization rewrites it to `iso6`;
-    /// the video-only canonical output has neither. Both are one video
-    /// contract, which is what failed every such shared range Start.
+    /// the video-only canonical output has neither. Both are one companion
+    /// video identity, which is what failed every such shared range Start.
     #[test]
-    fn copy_init_contract_brands_leave_out_what_audio_adds() {
+    fn copy_init_companion_brands_leave_out_what_audio_adds() {
         let head = ftyp(&[b"iso5", b"iso6", b"mp41"]);
         let brands = |payload: &[u8], dolby_vision| {
             video_file_type_brands(payload, dolby_vision).expect("brands")
