@@ -6791,7 +6791,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Source range audio fixture: +1 test-only FFmpeg command muxing a generated
 # E-AC-3 or TrueHD track beside the fixture video; its awaited output() joins
 # the child before the fixture continues. No production command.
-expected_occurrences = 381
+# P49 AC-5: +1 test-only FFmpeg Command in
+# split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_copy;
+# it builds the two-language source and waits for the child to exit.
+expected_occurrences = 382
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7582,7 +7585,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
 # the forwarded native-readiness fixture case and one in the typed-refusal
 # test. No process launch.
-expected_occurrences = 981
+# P49 AC-5: +1 test-only output() in the split admission test; it
+# synchronously joins the FFmpeg fixture child.
+expected_occurrences = 982
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
