@@ -4769,12 +4769,31 @@ test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedProtocolCasesT
 test_anchor = "sharedFileSuffixesFollowTheClosedSharedGrammar"
 
 [[fixes]]
+# Historical web request-contract row: the old DV refusal anchor was
+# superseded by the DV preservation ask. Keep this commit represented through
+# the current source-owned burn validation and the test that forwards the ask.
 id = "sharing.web-source-owned-burn-and-hdr-request"
 commits = ["d4d2ec8e4"]
 source = "crates/plurxd/src/web/core/shared-decision.js"
-source_anchor = "if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();"
+source_anchor = "if(body.subtitle_burn!=null&&(!Number.isSafeInteger(body.subtitle_burn)||body.subtitle_burn<0||body.subtitle_burn>4095||body.native_subtitles===true))unsupported();"
 test = "tests/web/shared-decision.test.js"
-test_anchor = "synthetic B Start carries a burn and an HDR10 ask unchanged and refuses Dolby Vision before sending"
+test_anchor = "synthetic B Start carries a burn, an HDR10 ask and a Dolby Vision ask unchanged"
+
+[[fixes]]
+id = "sharing.apple-dolby-vision-ask-start-responds-immediately"
+commits = ["d141052e"]
+source = "clients/apple/Tests/SharedDecisionClientTests.swift"
+source_anchor = "return (request.url!, 500, [:], Data())"
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "func testInitialStartSendsTheDolbyVisionPreservationAsk() async throws {"
+
+[[fixes]]
+id = "sharing.clients-request-dolby-vision-as-local"
+commits = ["87b2df58"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackSession.kt"
+source_anchor = "val preserveDolbyVision = presentation.delivery?.preserve_dolby_vision ?: presentation.preserve_dolby_vision"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "dolbyVisionCapableSharedStartAsksToPreserveExactlyAsLocalDoes"
 
 [[fixes]]
 id = "sharing.native-burn-hdr-and-closed-direct-request"
@@ -8610,7 +8629,7 @@ test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
 id = "linux-player.shared-native-physical-target"
 commits = ["3cb2b008d0c2ca48680d63c1cd8aa9121533574a"]
 source = "clients/linux-player/plurx_player/playback.py"
-source_anchor = "NATIVE_MAPPER = \"shared native Dolby renderer\""
+source_anchor = "self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_authoritative_success_reports_physical_peak_in_existing_fact_fields(self):"
 
@@ -8888,3 +8907,44 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = '"transport": "mpv"'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
+
+[[fixes]]
+id = "apple.cinema-refused-subtitle-keeps-generated-captions"
+commits = ["5ce3268f688f74a586013c3252ea13a89694e094"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func selectSubtitle(_ index: Int?)"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "func testRefusedHDRSubtitlePreservesGeneratedCaptionsUntilOff()"
+
+[[fixes]]
+id = "linux-player.cinema-quality-commit-clock"
+commits = ["3c59c1e184e2a673e39286e2d30a1ef72bcdf713"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def change_quality(self, choice):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_uses_clock_and_pause_at_commit_after_delayed_admission(self):"
+
+[[fixes]]
+id = "linux-player.cinema-quality-readmits-outrun-candidate"
+commits = ["7dce5a573a132ed33caca0de3fa091aade6a9582"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "replacement = self.create_session(position)"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_readmits_rolling_candidate_at_commit_position_beyond_its_end(self):"
+
+[[fixes]]
+id = "linux-player.cinema-queued-seek-preserves-pause"
+commits = ["cba42fd40de71ffcc46940db1c186d08558342a7"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "self.seek_film(target, preserve_pause=True)"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_admission_preserves_paused_film_seek_on_rolling_success(self):"
+
+# Cinema's quality pills claim only what mpv and the server prove.
+[[fixes]]
+id = "linux-player.quality-pills-claim-only-what-is-true"
+commits = ["2356e657232716201add448ded8d0c4288eaf83c"]
+source = "clients/linux-player/plurx_player/badges.py"
+source_anchor = "def current_report(session):"
+test = "clients/linux-player/tests/test_badges.py"
+test_anchor = "def test_failed_control_exchange_keeps_the_current_report(self):"

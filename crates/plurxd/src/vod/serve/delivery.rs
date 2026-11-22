@@ -1,6 +1,49 @@
 use super::*;
 
 impl VodServe {
+    /// A sharing successor carries no predecessor session id. Find only a
+    /// live Source-owned processed root in the same principal and hint scope;
+    /// physical reservation and incarnation checks remain in the common
+    /// capture helper below.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn capture_source_processed_root(
+        &self,
+        request: &SessionRequest,
+        supersession_user: &str,
+        scope: [u8; 32],
+        deadline: Instant,
+    ) -> Option<PreparedRootAdmission> {
+        let principal: serde_json::Value = serde_json::from_str(supersession_user).ok()?;
+        let parts = principal.as_array()?;
+        if parts.len() != 2
+            || parts[0].as_str() != Some("principal")
+            || !parts[1].as_str()?.starts_with("share:")
+        {
+            return None;
+        }
+        let sessions = self.shared.sessions.lock().await;
+        sessions.iter().find_map(|(id, session)| {
+            let rendition = session.live_rendition()?;
+            if session.file.id != request.file_id
+                || session.supersession_user != supersession_user
+                || session.processed_reuse_scope != Some(scope)
+                || !rendition.ephemeral_processing
+                || rendition.source_owners.copy_admissions().is_none()
+            {
+                return None;
+            }
+            Self::capture_session_processed_root_scoped(
+                session,
+                id,
+                request,
+                supersession_user,
+                scope,
+                deadline,
+                false,
+            )
+        })
+    }
+
     /// Capture one exact admitted predecessor under one registry read. Recipe
     /// descriptions alone cannot mint this executable or its capacity.
     #[cfg(any(target_os = "linux", test))]
@@ -66,9 +109,30 @@ impl VodServe {
         scope: [u8; 32],
         deadline: Instant,
     ) -> Option<PreparedRootAdmission> {
+        Self::capture_session_processed_root_scoped(
+            session,
+            id,
+            request,
+            supersession_user,
+            scope,
+            deadline,
+            true,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn capture_session_processed_root_scoped(
+        session: &Session,
+        id: &str,
+        request: &SessionRequest,
+        supersession_user: &str,
+        scope: [u8; 32],
+        deadline: Instant,
+        same_playback: bool,
+    ) -> Option<PreparedRootAdmission> {
         if !session.renewable()
             || session.supersession_user != supersession_user
-            || session.playback_id != request.playback_id
+            || same_playback && session.playback_id != request.playback_id
             || session.file.id != request.file_id
             || session.processed_reuse_scope != Some(scope)
             || Instant::now() >= deadline
@@ -506,7 +570,8 @@ impl VodServe {
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
             && session.rendition_key == owner.rendition_key
-            && session.supersession_user == assignment.binding().principal().owner_key()
+            && session.supersession_user
+                == crate::transcode::principal_supersession_scope(assignment.binding().principal())
             && session.rendition.as_ref().is_some_and(|rendition| {
                 owner
                     .rendition

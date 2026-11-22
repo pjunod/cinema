@@ -4071,6 +4071,8 @@ impl MediaStore for HiqliteAuthStore {
     async fn get_file_probe_chapters_json(
         &self,
         file_id: i64,
+        size: i64,
+        mtime: i64,
     ) -> Result<Option<String>, StoreError> {
         Ok(self
             .client()
@@ -4080,8 +4082,8 @@ impl MediaStore for HiqliteAuthStore {
                    WHEN probe_json IS NOT NULL AND json_valid(probe_json)
                     AND json_type(probe_json, '$.chapters') = 'array'
                    THEN json_extract(probe_json, '$.chapters') END AS probe_json
-                   FROM files WHERE id = $1",
-                params!(file_id),
+                   FROM files WHERE id = $1 AND size = $2 AND mtime = $3",
+                params!(file_id, size, mtime),
             )
             .await
             .map_err(database_error)?
@@ -4100,6 +4102,26 @@ impl MediaStore for HiqliteAuthStore {
             "UPDATE files SET probe_json = json_set(probe_json, '$.chapters', json($1)) \
              WHERE id = $2 AND probe_json IS NOT NULL",
             params!(chapters_json, file_id),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn merge_file_probe_chapters_if_missing(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        chapters_json: &str,
+    ) -> Result<(), StoreError> {
+        self.execute(
+            "merge_file_probe_chapters",
+            "UPDATE files SET probe_json = json_set(probe_json, '$.chapters', json($1)) \
+             WHERE id = $2 AND size = $3 AND mtime = $4
+               AND CASE WHEN json_valid(probe_json)
+                        THEN json_type(probe_json, '$.chapters') IS NOT 'array'
+                        ELSE 0 END",
+            params!(chapters_json, file_id, size, mtime),
         )
         .await?;
         Ok(())

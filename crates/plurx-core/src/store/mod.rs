@@ -1203,16 +1203,17 @@ pub use fragment_index_cluster::{
     cluster_fragment_index_pipeline_digest, cluster_fragment_index_v3_key,
     decode_cluster_fragment_index_blob, decode_cluster_fragment_index_blob_v3,
     decode_cluster_fragment_index_blob_with_provenance, encode_cluster_fragment_index_blob,
-    encode_cluster_fragment_index_blob_v3, stored_switch, AnalysisAttempt, AnalysisFileLabel,
-    AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage, AnalysisHistoryQuery,
-    AnalysisHistoryRow, AnalysisIndexRepairCandidate, AnalysisIndexRepairResult, AnalysisRequest,
-    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe,
-    DecodedFragmentIndex, FragmentIndexBlobExpectations, FragmentIndexEngineProvenance,
-    FragmentIndexOutputIdentity, FragmentIndexProvenance, FragmentIndexSourceObservation,
-    LiveAnalysisEngines, NewAnalysisRequest, NewClusterFragmentIndexJob, StrandedRemedy,
-    SubtitleBackfillCandidate, SubtitleBackfillDiagnostics, SubtitleSourcePublication,
-    SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    encode_cluster_fragment_index_blob_v3, stored_switch, AnalysisAttempt, AnalysisClaimMode,
+    AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
+    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
+    AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, DecodedFragmentIndex,
+    FragmentIndexBlobExpectations, FragmentIndexEngineProvenance, FragmentIndexOutputIdentity,
+    FragmentIndexProvenance, FragmentIndexSourceObservation, LiveAnalysisEngines,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, StrandedRemedy, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
     CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
     DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_INDEX_CONTRACT, FRAGMENT_PRUNE_CANDIDATES,
@@ -3839,17 +3840,23 @@ pub trait MediaStore: Send + Sync + 'static {
     async fn get_file_probe_chapters_json(
         &self,
         file_id: i64,
+        size: i64,
+        mtime: i64,
     ) -> Result<Option<String>, StoreError>;
-    /// Graft a `chapters` array onto a file's stored probe JSON.
-    ///
-    /// Only for files probed before chapters were captured at scan time: the
-    /// play path probes such a file once, then writes the answer here so the
-    /// next play reads it like any other. `chapters_json` is a JSON array.
-    /// A file with no stored probe is left alone — there is nothing to graft
-    /// onto, and inventing a document would fake a successful probe.
+    /// Graft chapter data onto an existing probe document for a known file.
     async fn merge_file_probe_chapters(
         &self,
         file_id: i64,
+        chapters_json: &str,
+    ) -> Result<(), StoreError>;
+
+    /// Backfill an already verified chapter array into the matching revision.
+    /// Preserve newer chapter arrays and leave failed probes recognizable.
+    async fn merge_file_probe_chapters_if_missing(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
         chapters_json: &str,
     ) -> Result<(), StoreError>;
     /// Graft the HEVC parameter-set census (`transcode::hevc_census`) onto a
@@ -6510,7 +6517,20 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
         &self,
         file_id: i64,
         source: &crate::segplan::SourceIdentity,
-    ) -> Result<Option<crate::segplan::TimelineAnnotationSet>, StoreError>;
+    ) -> Result<Option<crate::segplan::TimelineAnnotationSet>, StoreError> {
+        Ok(self
+            .timeline_annotation_set_with_evidence(file_id, source)
+            .await?
+            .map(|(set, _)| set))
+    }
+
+    /// Compose manual corrections over the matching base set and report whether
+    /// that base was published with chapter evidence.
+    async fn timeline_annotation_set_with_evidence(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<(crate::segplan::TimelineAnnotationSet, bool)>, StoreError>;
 
     async fn forget_timeline_annotation_set(&self, file_id: i64) -> Result<bool, StoreError>;
 

@@ -4385,12 +4385,30 @@ mod tests {
             .join(uuid::Uuid::new_v4().to_string());
         // A rolling collection's directory has no manifest: after a crash it
         // is an orphan, and retention is refused while any remain.
-        d3_rolling_tree(&orphan, 600);
+        let segments = 600;
+        d3_rolling_tree(&orphan, segments);
         let serve = crate::vodserve::tests::bare_serve(temp.path());
-        serve.shared.retained_artifacts.collect(temp.path()).await;
+        let mut files_remaining = segments + 1;
+        // Every tick can remove one batch even when its clock budget is spent.
+        // Allow the final tick to remove the empty directory itself.
+        for _ in 0..=files_remaining / RETAINED_GC_BATCH {
+            serve.shared.retained_artifacts.collect(temp.path()).await;
+            if !orphan.exists() {
+                break;
+            }
+            let remaining = std::fs::read_dir(&orphan)
+                .expect("orphan directory")
+                .count();
+            assert!(
+                remaining < files_remaining,
+                "each maintenance tick sweeps the orphan"
+            );
+            assert_eq!(serve.retained_cleanup_pending(), 1);
+            files_remaining = remaining;
+        }
         assert!(
             !orphan.exists(),
-            "the first maintenance tick sweeps a crash-orphaned rolling directory"
+            "bounded maintenance removes the crash-orphaned rolling directory"
         );
         assert_eq!(serve.retained_cleanup_pending(), 0);
     }

@@ -888,8 +888,11 @@ impl TranscodeManager {
                 bodies: 0,
                 planned_session: None,
                 native: None,
+                presentation_probe: None,
                 direct_start: None,
                 direct_activity: None,
+                processed_cancel: None,
+                processed_activity: None,
             }),
             changed: tokio::sync::Notify::new(),
         };

@@ -1129,6 +1129,7 @@ async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
         },
     };
     let start = StartResponse {
+        processed_upgrade: None,
         enhancement: None,
         effective_processing: None,
         delivered_audio: None,
@@ -2073,6 +2074,7 @@ async fn a_switch_releases_the_drain_through_the_relay_and_only_when_accepted() 
         .recipe_json
         .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
     let start = StartResponse {
+        processed_upgrade: None,
         enhancement: None,
         effective_processing: None,
         delivered_audio: None,
@@ -2349,6 +2351,7 @@ async fn terminal_control_cancellation_and_reaper_preserve_one_durable_reply() {
         },
     };
     let start = StartResponse {
+        processed_upgrade: None,
         enhancement: None,
         effective_processing: None,
         delivered_audio: None,
@@ -2636,6 +2639,7 @@ async fn settled_rolling_and_vod_routes_replay_the_durable_terminal_ack() {
             },
         };
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,

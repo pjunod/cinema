@@ -263,6 +263,101 @@ enum SourceFixtureVideo {
     Hdr10,
     Hdr10Promotion,
     Hdr10Retention,
+    /// The HDR10 source scanned as Dolby Vision Profile 8.1 on a node with
+    /// `dovi_rpu`, started by an HDR10 player: the planner strips to the
+    /// HDR10 base. The generated stream carries no RPU (no fixture encoder
+    /// writes one), so this proves the Source's cold Dolby Vision strip
+    /// index and HDR10 delivery are wired, not RPU removal itself.
+    DolbyVisionStrip,
+    /// The HDR10 source scanned as Dolby Vision Profile 5 (no compatible
+    /// base) on a node with the boot-proved RPU renderer, started as an encode:
+    /// the Source runs the per-source pixel proof as its own children.
+    DolbyVisionProfile5,
+}
+
+/// The actor mode that pauses a Source's own Profile 5 pixel-proof child.
+const SOURCE_FIXTURE_PROFILE5_PROOF: u8 = 66;
+const SOURCE_FIXTURE_PROCESSED_SETTLEMENT: u8 = 67;
+const SOURCE_FIXTURE_PROCESSED_DEADLINE: u8 = 68;
+const SOURCE_FIXTURE_PROCESSED_ADMIN_STOP: u8 = 69;
+
+/// Activity is visible under the admitted Source owner before any processed
+/// Start publishes, and its admin Stop waits for the owned child and reader.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_stop_of_a_source_processed_session_settles_and_ends_the_start() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROCESSED_ADMIN_STOP,
+        SourceFixtureVideo::DolbyVisionStrip,
+    ))
+    .await;
+}
+
+/// A real Source Store assignment drives the detached processed operation;
+/// its receipt cannot be used for a different live assignment. The operation
+/// must also wait for its actual child and reader before issuing that receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_processed_settlement_of_another_assignment_is_a_mismatch() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROCESSED_SETTLEMENT,
+        SourceFixtureVideo::H264,
+    ))
+    .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_processed_trial_past_its_deadline_releases_the_preparation_slot() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROCESSED_DEADLINE,
+        SourceFixtureVideo::H264,
+    ))
+    .await;
+}
+
+/// Modes whose Source owns native subtitles.
+fn source_fixture_native(mode: u8) -> bool {
+    mode >= 21
+        && !matches!(
+            mode,
+            SOURCE_FIXTURE_PROFILE5_PROOF
+                | SOURCE_FIXTURE_PROCESSED_SETTLEMENT
+                | SOURCE_FIXTURE_PROCESSED_DEADLINE
+                | SOURCE_FIXTURE_PROCESSED_ADMIN_STOP
+        )
+}
+
+/// Modes whose prepared recipe is an encode.
+fn source_fixture_encoded(mode: u8) -> bool {
+    (12..=20).contains(&mode) || matches!(mode, 29 | 31 | 58 | SOURCE_FIXTURE_PROFILE5_PROOF)
+}
+
+/// The Source runs a Profile 5 encode's pixel proof as its own child, under
+/// its copy permit and file fence: the child is listed in Activity →
+/// Processes under the Source purpose with a Stop, it holds the start's CPU
+/// admission, a revocation while it runs leaves nothing published, and
+/// retirement settles only after the child is reaped. An interrupted proof
+/// is not a verdict, so nothing is remembered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_profile5_proof_runs_under_source_custody_and_settles_on_revoke() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROFILE5_PROOF,
+        SourceFixtureVideo::DolbyVisionProfile5,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_actor_builds_cold_dolby_vision_strip_index_and_serves_hdr10_bytes() {
+    if !crate::ffmpeg::has_dovi_rpu().await {
+        eprintln!("SKIP: this ffmpeg has no dovi_rpu bitstream filter to strip with");
+        return;
+    }
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::DolbyVisionStrip,
+    ))
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -343,6 +438,13 @@ async fn source_copy_preadmission_fixture_with_video(
         .await
         .expect("saved Source choice before startup");
     eprintln!("Source fixture: saved Source choice");
+    if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
+        selected
+            .store
+            .put_setting(keys::DV_HDR_PROCESSING, "true")
+            .await
+            .expect("enable processed HDR10 upgrade for actual Source owner");
+    }
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual Source startup coordinator"));
@@ -376,6 +478,13 @@ async fn source_copy_preadmission_fixture_with_video(
     let mut state = source_fixture_state();
     let state_mut = Arc::get_mut(&mut state).expect("sole fixture state");
     eprintln!("Source fixture: state constructed without Router");
+    let dolby_vision = matches!(video, SourceFixtureVideo::DolbyVisionStrip);
+    if dolby_vision {
+        state_mut.system = Arc::new(crate::state::SystemInfo {
+            dovi_rpu: true,
+            ..(*state_mut.system).clone()
+        });
+    }
     state_mut.store = Arc::clone(&selected.store);
     state_mut.replace_membership(membership.clone());
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
@@ -436,7 +545,7 @@ async fn source_copy_preadmission_fixture_with_video(
         })
         .await
         .expect("item");
-    let file = directory.path().join(if mode >= 21 {
+    let file = directory.path().join(if source_fixture_native(mode) {
         "source.mkv"
     } else {
         "source.mp4"
@@ -464,7 +573,7 @@ async fn source_copy_preadmission_fixture_with_video(
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
-    if mode >= 21 {
+    if source_fixture_native(mode) {
         let caption = directory.path().join("actual.srt");
         std::fs::write(
             &caption,
@@ -536,7 +645,13 @@ async fn source_copy_preadmission_fixture_with_video(
     if hdr10 {
         client.execute("UPDATE files SET video_codec='hevc',bit_depth=10,hdr='hdr10',audio_streams='[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]' WHERE id=1", hiqlite::params!()).await.expect("actual HDR10 scan facts");
     }
-    if mode >= 21 {
+    if matches!(video, SourceFixtureVideo::DolbyVisionProfile5) {
+        client.execute("UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 5',dv_profile=5,dv_bl_compat_id=0,dv_rpu_present=1 WHERE id=1", hiqlite::params!()).await.expect("Dolby Vision Profile 5 scan facts");
+    }
+    if dolby_vision {
+        client.execute("UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 8.1 (HDR10-compatible)',dv_profile=8,dv_level=6,dv_bl_compat_id=1,dv_el_present=0,dv_rpu_present=1 WHERE id=1", hiqlite::params!()).await.expect("Dolby Vision Profile 8.1 scan facts");
+    }
+    if source_fixture_native(mode) {
         client
             .execute(
                 "UPDATE files SET container='matroska' WHERE id=1",
@@ -673,11 +788,20 @@ async fn source_copy_preadmission_fixture_with_video(
         body.aac = Some(true);
         body.caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","max_height":2160,"present":["pq","sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]})).expect("HDR10 client"));
     }
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+    if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
+        body.processed_upgrade = Some(true);
+        let caps = body.caps.as_mut().expect("processed client caps");
+        caps.hls_hevc_sample_entries = Some(vec!["hvc1".into()]);
+        // The processed Source uses the same canonical encoded-audio claim
+        // as an ordinary receiver. Let production planning reconcile the
+        // E-AC-3 source track to this declared stereo AAC output route.
+        caps.audio_sinks = plurx_core::playback::audio::canonical_producer_claim().sinks;
+    }
+    if source_fixture_encoded(mode) {
         body.copy = Some(false);
         body.height = Some(if mode == 31 { 144 } else { 36 });
     }
-    if mode >= 21 {
+    if source_fixture_native(mode) {
         body.native_subtitles = Some(true);
         body.subtitle = Some(0);
     }
@@ -697,7 +821,10 @@ async fn source_copy_preadmission_fixture_with_video(
         "cinemashare-viewer",
         "c".repeat(64).parse().expect("viewer"),
     );
-    let second_prepared = if mode == 53 {
+    let second_prepared = if matches!(
+        mode,
+        53 | SOURCE_FIXTURE_PROCESSED_SETTLEMENT | SOURCE_FIXTURE_PROCESSED_DEADLINE
+    ) {
         let mut second: CreateSession =
             serde_json::from_value(serde_json::to_value(&body).expect("second actual ask"))
                 .expect("second complete ask");
@@ -726,7 +853,7 @@ async fn source_copy_preadmission_fixture_with_video(
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let mut prepared = preparation.await.expect("actual Source engine preparation");
-    if hdr10 {
+    if hdr10 && !source_fixture_encoded(mode) && mode != SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
         assert_eq!(
             store
                 .get_file_probe_json(1)
@@ -758,7 +885,7 @@ async fn source_copy_preadmission_fixture_with_video(
             matches!(video, SourceFixtureVideo::Hdr10Retention)
         );
     }
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+    if source_fixture_encoded(mode) || mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -953,6 +1080,9 @@ async fn source_copy_preadmission_fixture_with_video(
         EncoderCaps::default(),
         Pipeline::Cpu,
     );
+    let manager = manager
+        .with_dv_strippable(dolby_vision)
+        .with_dovi_reshape(matches!(video, SourceFixtureVideo::DolbyVisionProfile5));
     #[cfg(target_os = "linux")]
     let manager = if let Some(runtime) = fixed_runtime {
         let dirs = crate::configured_dirs(&config.storage);
@@ -1035,6 +1165,18 @@ async fn source_copy_preadmission_fixture_with_video(
             .await
             .expect("actual second assignment")
             .expect("second assigned owner");
+        if mode == SOURCE_FIXTURE_PROCESSED_SETTLEMENT {
+            source_processed_assignment_settlement(&assignment, &second_assignment).await;
+        }
+        #[cfg(target_os = "linux")]
+        if mode == SOURCE_FIXTURE_PROCESSED_DEADLINE {
+            source_processed_deadline_settlement(
+                &assignment,
+                &second_assignment,
+                Arc::clone(&manager.processed_preparation_slot),
+            )
+            .await;
+        }
         Box::pin(source_two_owner_generation_fixture(
             state,
             manager,
@@ -1073,6 +1215,7 @@ async fn source_copy_preadmission_fixture_with_video(
         &manager.admissions,
         store.as_ref(),
         Instant::now() + Duration::from_secs(10),
+        manager.dv_strippable(),
     ));
     let bytes = std::mem::size_of_val(admission.as_ref().get_ref());
     eprintln!("Source copy admission future: {bytes} bytes");
@@ -1404,7 +1547,9 @@ async fn source_actual_actor(
     restart_case: Option<u8>,
     client: hiqlite::Client,
 ) {
-    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10");
+    // A Dolby Vision Profile 8.1 strip delivers exactly the HDR10 base.
+    let dolby_vision_strip = prepared.file().hdr.as_deref() == Some("dolby_vision");
+    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10") || dolby_vision_strip;
     let delivered_fixture = prepared.file().path.with_extension("delivered.mp4");
     if mode == 55 {
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
@@ -1614,6 +1759,12 @@ async fn source_actual_actor(
             }
         }
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
+        SOURCE_FIXTURE_PROFILE5_PROOF => Some(
+            manager
+                .source_workers
+                .probe_hooks
+                .pause_after_dovi_proof_spawn(),
+        ),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
         23 | 25 | 26 | 27 | 57 | 58 | 84 => {
             Some(manager.source_workers.native_hooks.pause_before_spawn())
@@ -1668,6 +1819,45 @@ async fn source_actual_actor(
     #[cfg(target_os = "linux")]
     let restart_fence = if restart_case == Some(0) {
         Some(restart_admission_tests::before_factory(&state).await)
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let processed_stop = if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
+        use tokio::io::AsyncReadExt;
+        let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+        let (reader_closed_tx, reader_closed_rx) = tokio::sync::oneshot::channel();
+        let (reader_release_tx, reader_release_rx) = tokio::sync::oneshot::channel();
+        manager.arm_source_processed_activity_hook(Box::new(move |producer, cancel| {
+            Box::pin(async move {
+                let mut child = tokio::process::Command::new("sleep")
+                    .arg("30")
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("actual processed child");
+                let mut stdout = child.stdout.take().expect("actual processed stdout");
+                producer.attach(child, 0).await;
+                let reader = tokio::spawn(async move {
+                    let mut drained = Vec::new();
+                    stdout
+                        .read_to_end(&mut drained)
+                        .await
+                        .expect("actual reader EOF");
+                    let _ = reader_closed_tx.send(());
+                    reader_release_rx
+                        .await
+                        .expect("reader held until admin Stop checks");
+                });
+                let _ = spawned_tx.send(());
+                cancel.cancelled().await;
+                producer
+                    .retire_storage()
+                    .await
+                    .expect("reap processed child");
+                reader.await.expect("join processed reader");
+            })
+        }));
+        Some((spawned_rx, reader_closed_rx, reader_release_tx))
     } else {
         None
     };
@@ -1779,7 +1969,64 @@ async fn source_actual_actor(
         fixed_native::exercise(&state, &manager, &actor, &assignment, mode, ingress_monitor).await;
         return;
     }
-
+    #[cfg(target_os = "linux")]
+    if let Some((spawned, reader_closed, reader_release)) = processed_stop {
+        tokio::time::timeout(Duration::from_secs(5), spawned)
+            .await
+            .expect("processed child spawn deadline")
+            .expect("actual processed child spawned");
+        let activities = manager.source_processed_activities();
+        let [activity] = activities.as_slice() else {
+            panic!("one admitted Source processed Activity before publication");
+        };
+        let stop_id = activity.stop_id.clone();
+        assert_eq!(activity.title, "source.mp4");
+        assert_eq!(activity.viewer, "c".repeat(64));
+        let plurx_core::playback_principal::PlaybackPrincipal::Sharing { grant_id, .. } =
+            assignment.binding().principal()
+        else {
+            panic!("actual shared Source principal");
+        };
+        assert_eq!(activity.grant, grant_id.to_string());
+        assert!(activity.session_id.is_none());
+        assert!(state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("unpublished processed route")
+            .is_none());
+        let stop_manager = Arc::clone(&manager);
+        let mut stop =
+            tokio::spawn(async move { stop_manager.stop_source_processed_session(&stop_id).await });
+        tokio::time::timeout(Duration::from_secs(5), reader_closed)
+            .await
+            .expect("processed reader EOF deadline")
+            .expect("reader closed after actual child reap");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut stop)
+                .await
+                .is_err(),
+            "admin Stop waits for the retained reader after child reap"
+        );
+        assert_eq!(manager.source_processed_activities().len(), 1);
+        reader_release.send(()).expect("release retained reader");
+        assert!(tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("admin Stop settlement deadline")
+            .expect("admin Stop task")
+            .expect("actual Source retirement"));
+        assert!(manager.source_processed_activities().is_empty());
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        assert!(actor.wait_ready(Instant::now()).await.is_err());
+        assert!(state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("no processed publication after Stop")
+            .is_none());
+        ingress_monitor.join().await;
+        return;
+    }
     if matches!(mode, 22..=27 | 57 | 58 | 84) {
         // The hook is armed before Start. Publication must happen without
         // reaching a native child, for both copy and encoded recipes.
@@ -1909,15 +2156,18 @@ async fn source_actual_actor(
             .await
             .expect("no preactivation media route")
             .is_none());
-        let pid = if mode >= 21 {
+        let pid = if source_fixture_native(mode) {
             manager.source_workers.native_hooks.spawned_pid()
-        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+        } else if source_fixture_encoded(mode) {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
         if !fixed {
-            if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
+            if matches!(
+                mode,
+                6 | 8 | 13 | 15 | 20 | 22 | 24 | SOURCE_FIXTURE_PROFILE5_PROOF
+            ) {
                 assert!(pid > 0, "actual legacy Source child started");
             } else {
                 assert_eq!(pid, 0, "legacy refusal point precedes its child");
@@ -1930,7 +2180,24 @@ async fn source_actual_actor(
             Err(SourceWorkerError::Deadline)
         ));
         drop(joined); // A disconnected waiter cannot abandon the scan owner.
-        if matches!(mode, 6 | 7 | 13 | 14 | 22 | 23) {
+        if mode == SOURCE_FIXTURE_PROFILE5_PROOF {
+            // Activity attributes the child to the shared start, with a Stop.
+            let row = plurx_core::process::priority::running()
+                .into_iter()
+                .find(|row| row.pid == pid)
+                .expect("the Source proof child is listed in Activity");
+            assert_eq!(
+                row.purpose,
+                crate::transcode::source_preparation::SOURCE_DOVI_PIXEL_PROOF.purpose
+            );
+            assert_eq!(row.class, crate::process_control::ChildClass::Realtime);
+            #[cfg(target_os = "linux")]
+            assert!(row.stoppable, "Activity can stop the proof child");
+        }
+        if matches!(
+            mode,
+            6 | 7 | 13 | 14 | 22 | 23 | SOURCE_FIXTURE_PROFILE5_PROOF
+        ) {
             state
                 .store
                 .put_setting(keys::SHARING_ENABLED, "false")
@@ -1984,6 +2251,22 @@ async fn source_actual_actor(
             .expect("actual index retirement budget")
             .expect("confirmed scan/no-media-producer cleanup");
         assert_eq!(manager.admissions.software_in_use(), 0);
+        if mode == SOURCE_FIXTURE_PROFILE5_PROOF {
+            assert!(
+                !plurx_core::process::priority::running()
+                    .iter()
+                    .any(|row| row.pid == pid),
+                "retirement settles only after the proof child is reaped"
+            );
+            let file = state.store.get_file(1).await.expect("file").expect("file");
+            assert_eq!(
+                manager
+                    .dovi_proofs
+                    .verdict(&TranscodeManager::dovi_proof_key(&file)),
+                None,
+                "an interrupted proof is not a verdict"
+            );
+        }
         assert!(manager.lookup_source_worker(&assignment).is_none());
         let file = state
             .store
@@ -2131,7 +2414,7 @@ async fn source_actual_actor(
         return;
     }
 
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+    if source_fixture_encoded(mode) {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
         assert_eq!(
@@ -2205,12 +2488,15 @@ async fn source_actual_actor(
             .get_file_probe_json(1)
             .await
             .expect("retained recipe facts");
-        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
-            &file,
-            probe.as_deref(),
-            false,
-            false,
-        );
+        // The Source's own copy options: for a Dolby Vision strip this is
+        // the `dovi_rpu=strip=1` identity local indexes, not `filter_units`.
+        let options = manager.source_copy_video_options(&file, probe.as_deref(), false, false);
+        if dolby_vision_strip {
+            assert_eq!(
+                options,
+                crate::vodserve::copy_video_pipeline(&file, probe.as_deref(), true, false, false)
+            );
+        }
         let index = state
             .store
             .fragment_index(1, &crate::fragindex::identity_for(&file, options))
@@ -3227,7 +3513,7 @@ async fn source_actual_actor(
             drop(guard);
         }
     }
-    let native_body = if mode >= 21 {
+    let native_body = if source_fixture_native(mode) {
         assert!(response.playlist_url.contains("master.m3u8"));
         assert!(matches!(
             actor
@@ -3368,6 +3654,13 @@ async fn source_actual_actor(
         );
         assert!(init.bytes.windows(4).any(|bytes| bytes == b"mdcv"));
         assert!(init.bytes.windows(4).any(|bytes| bytes == b"clli"));
+        assert!(
+            !init
+                .bytes
+                .windows(4)
+                .any(|bytes| bytes == b"dvvC" || bytes == b"dvcC" || bytes == b"dby1"),
+            "an HDR10 delivery, a Dolby Vision strip included, declares no Dolby Vision"
+        );
         let opened = actor
             .open_resource(
                 &SharingHlsResource::parse("seg00000.m4s").expect("typed copied HDR10 segment"),
@@ -4027,6 +4320,165 @@ impl SourceFactoryIngressFixture {
     }
 }
 
+async fn source_processed_assignment_settlement(
+    assignment: &SourceDispatchAssignment,
+    another: &SourceDispatchAssignment,
+) {
+    use tokio::io::AsyncReadExt;
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let (reader_closed_tx, reader_closed_rx) = tokio::sync::oneshot::channel();
+    let (reader_release_tx, reader_release_rx) = tokio::sync::oneshot::channel();
+    let operation = super::super::source_preparation::start_source_processed(
+        assignment.clone(),
+        Instant::now() + Duration::from_secs(30),
+        move |producer, cancel| async move {
+            let mut child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let mut stdout = child.stdout.take().expect("actual child stdout");
+            producer.attach(child, 0).await;
+            let reader = tokio::spawn(async move {
+                let mut drained = Vec::new();
+                stdout
+                    .read_to_end(&mut drained)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let _ = reader_closed_tx.send(());
+                reader_release_rx
+                    .await
+                    .map_err(|_| "reader release dropped".to_owned())?;
+                Ok::<(), String>(())
+            });
+            let _ = spawned_tx.send(());
+            cancel.cancelled().await;
+            producer
+                .retire_storage()
+                .await
+                .map_err(|error| error.to_string())?;
+            reader.await.map_err(|error| error.to_string())??;
+            Err("cancelled after actual child and reader settlement".to_owned())
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(5), spawned_rx)
+        .await
+        .expect("actual child spawn deadline")
+        .expect("child spawned");
+    operation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), reader_closed_rx)
+        .await
+        .expect("actual child reap and reader EOF deadline")
+        .expect("reader reached EOF");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operation.settle())
+            .await
+            .is_err(),
+        "the receipt waits for the retained reader, even after its child exits"
+    );
+    reader_release_tx.send(()).expect("release actual reader");
+    let receipt = tokio::time::timeout(Duration::from_secs(5), operation.settle())
+        .await
+        .expect("processed operation settlement deadline");
+    assert!(receipt.matches(assignment));
+    assert!(
+        !receipt.matches(another),
+        "a separate actual Source assignment cannot settle with this receipt"
+    );
+    assert!(
+        operation.outcome().await.is_err(),
+        "cancelled trial does not claim a processed root"
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn source_processed_deadline_settlement(
+    assignment: &SourceDispatchAssignment,
+    another: &SourceDispatchAssignment,
+    preparation_slot: Arc<tokio::sync::Semaphore>,
+) {
+    use tokio::io::AsyncReadExt;
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let (deadline_tx, deadline_rx) = tokio::sync::oneshot::channel();
+    let (reader_closed_tx, reader_closed_rx) = tokio::sync::oneshot::channel();
+    let (reader_release_tx, reader_release_rx) = tokio::sync::oneshot::channel();
+    let deadline = Instant::now() + Duration::from_millis(150);
+    let slot_for_assertions = Arc::clone(&preparation_slot);
+    let operation = super::super::source_preparation::start_source_processed(
+        assignment.clone(),
+        deadline,
+        move |producer, cancel| async move {
+            let _permit = Arc::clone(&preparation_slot)
+                .acquire_owned()
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let mut stdout = child.stdout.take().expect("actual child stdout");
+            producer.attach(child, 0).await;
+            let reader = tokio::spawn(async move {
+                let mut drained = Vec::new();
+                stdout
+                    .read_to_end(&mut drained)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let _ = reader_closed_tx.send(());
+                reader_release_rx
+                    .await
+                    .map_err(|_| "reader release dropped".to_owned())?;
+                Ok::<(), String>(())
+            });
+            let _ = spawned_tx.send(());
+            cancel.cancelled().await;
+            let _ = deadline_tx.send(());
+            producer
+                .retire_storage()
+                .await
+                .map_err(|error| error.to_string())?;
+            reader.await.map_err(|error| error.to_string())??;
+            Err("deadline after actual child and reader settlement".to_owned())
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(5), spawned_rx)
+        .await
+        .expect("actual child spawn deadline")
+        .expect("child spawned before deadline");
+    tokio::time::timeout(Duration::from_secs(5), deadline_rx)
+        .await
+        .expect("constructor deadline cancellation")
+        .expect("deadline cancellation observed by owned closure");
+    tokio::time::timeout(Duration::from_secs(5), reader_closed_rx)
+        .await
+        .expect("actual child reap and reader EOF deadline")
+        .expect("reader reached EOF after deadline retirement");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operation.settle())
+            .await
+            .is_err(),
+        "deadline receipt waits for the retained reader"
+    );
+    assert!(
+        Arc::clone(&slot_for_assertions)
+            .try_acquire_owned()
+            .is_err(),
+        "the actual preparation slot remains held while the reader is retained"
+    );
+    reader_release_tx.send(()).expect("release actual reader");
+    let receipt = tokio::time::timeout(Duration::from_secs(5), operation.settle())
+        .await
+        .expect("deadline operation settlement deadline");
+    assert!(receipt.matches(assignment));
+    assert!(!receipt.matches(another));
+    assert!(operation.outcome().await.is_err());
+    let _permit = tokio::time::timeout(Duration::from_secs(1), slot_for_assertions.acquire_owned())
+        .await
+        .expect("preparation slot released after physical settlement")
+        .expect("preparation semaphore remains open");
+}
+
 async fn source_two_owner_generation_fixture(
     state: Arc<crate::state::AppState>,
     manager: Arc<TranscodeManager>,
@@ -4407,4 +4859,365 @@ async fn source_native_control_returns_while_parked_caption_work_retains_one_gua
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_sparse_input_reserves_before_write_and_releases_only_after_close() {
     Box::pin(source_copy_preadmission_fixture(65)).await;
+}
+
+fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> SessionRequest {
+    SessionRequest {
+        source_telemetry: None,
+        continuous_media: None,
+        dv_processing_destination: None,
+        dv_refit_digest: None,
+        retain_output: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        audio_delivery: None,
+        audio_claim: None,
+        quality_catalog: None,
+        candidate_context: None,
+        control_sequence: None,
+        file_id: 1,
+        playback_id: "source-delivery-policy".into(),
+        request_id: None,
+        automatic: false,
+        previous_session_id: None,
+        reopen_reason: None,
+        kind,
+        start_seconds: 0.0,
+        audio_index: None,
+        subtitle_burn,
+        audio_offset_ms: 0,
+        hdr10: false,
+        presentation: Default::default(),
+        block_budget_secs: None,
+        transport: None,
+    }
+}
+
+fn delivery_policy_copy(preserve: bool, convert: bool) -> SessionKind {
+    SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: preserve,
+        convert_dolby_vision: convert,
+        dual_layer_as_copied: false,
+    }
+}
+
+/// A scanned HEVC source with the given coarse range, label and Dolby Vision
+/// record — the three facts the delivery policy reads.
+fn delivery_policy_file(
+    hdr: Option<&str>,
+    hdr_format: Option<&str>,
+    profile: Option<i64>,
+    bl_compat_id: Option<i64>,
+) -> plurx_core::domain::MediaFile {
+    plurx_core::domain::MediaFile {
+        downloaded_subtitles: Vec::new(),
+        id: 1,
+        item_id: 1,
+        path: std::path::PathBuf::from("/media/source-delivery-policy.mkv"),
+        size: 1,
+        mtime: 1,
+        duration_ms: Some(1_000),
+        container: Some("matroska".into()),
+        video_codec: Some("hevc".into()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: Some("Main 10".into()),
+        width: Some(3840),
+        height: Some(2160),
+        bit_depth: Some(10),
+        hdr: hdr.map(Into::into),
+        hdr_format: hdr_format.map(Into::into),
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        bitrate: Some(20_000_000),
+        audio_streams: vec![],
+        subtitle_streams: vec![],
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+        dolby_vision: plurx_core::domain::DolbyVisionFacts {
+            profile,
+            level: profile.map(|_| 6),
+            bl_compat_id,
+            el_present: Some(profile == Some(7)),
+            rpu_present: profile.map(|_| true),
+        },
+    }
+}
+
+fn delivery_policy_profile8_1() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+        Some(8),
+        Some(1),
+    )
+}
+
+fn delivery_policy_profile8_4() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.4 (HLG-compatible)"),
+        Some(8),
+        Some(4),
+    )
+}
+
+fn delivery_policy_profile7() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        Some(7),
+        Some(6),
+    )
+}
+
+fn delivery_policy_profile5() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 5"),
+        Some(5),
+        Some(0),
+    )
+}
+
+#[test]
+fn source_delivery_policy_admits_dolby_vision_preserve_and_convert_copies() {
+    let no_native = (false, None);
+    for (name, file, preserve, convert) in [
+        ("P8.1 preserve", delivery_policy_profile8_1(), true, false),
+        ("P8.4 preserve", delivery_policy_profile8_4(), true, false),
+        ("P5 preserve", delivery_policy_profile5(), true, false),
+        (
+            "P7 to P8.1 convert",
+            delivery_policy_profile7(),
+            false,
+            true,
+        ),
+        ("P7 base strip", delivery_policy_profile7(), false, false),
+        (
+            "P8.1 base strip",
+            delivery_policy_profile8_1(),
+            false,
+            false,
+        ),
+    ] {
+        let request = delivery_policy_request(delivery_policy_copy(preserve, convert), None);
+        assert_eq!(
+            source_delivery_refusal(&request, &file, no_native),
+            None,
+            "{name}: a Dolby Vision copy is an in-process rewrite local delivers; the Source must too"
+        );
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_native_subtitles_over_hdr10_hlg_and_dolby_vision() {
+    let native = (true, Some(0));
+    for (name, file, kind) in [
+        (
+            "HDR10 copy",
+            delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None),
+            delivery_policy_copy(false, false),
+        ),
+        (
+            "HLG copy",
+            delivery_policy_file(Some("hlg"), Some("HLG"), None, None),
+            delivery_policy_copy(false, false),
+        ),
+        (
+            "HDR10 encode",
+            delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None),
+            SessionKind::Transcode { height: 1080 },
+        ),
+        (
+            "P8.1 preserve",
+            delivery_policy_profile8_1(),
+            delivery_policy_copy(true, false),
+        ),
+        (
+            "P7 convert",
+            delivery_policy_profile7(),
+            delivery_policy_copy(false, true),
+        ),
+        (
+            "P5 preserve",
+            delivery_policy_profile5(),
+            delivery_policy_copy(true, false),
+        ),
+        (
+            "P7 compatible-base encode",
+            delivery_policy_profile7(),
+            SessionKind::Transcode { height: 1080 },
+        ),
+    ] {
+        let request = delivery_policy_request(kind, None);
+        assert_eq!(
+            source_delivery_refusal(&request, &file, native),
+            None,
+            "{name}: native subtitles beside HDR or Dolby Vision need nothing range-specific"
+        );
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_compatible_base_dolby_vision_encodes() {
+    for (name, file) in [
+        ("P7 HDR10 base", delivery_policy_profile7()),
+        ("P8.1 HDR10 base", delivery_policy_profile8_1()),
+        ("P8.4 HLG base", delivery_policy_profile8_4()),
+        (
+            "label-only P8.1",
+            delivery_policy_file(
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+                None,
+                None,
+            ),
+        ),
+    ] {
+        assert!(
+            !plurx_core::playback::dolby_vision_needs_rpu_render(&file),
+            "{name}: a compatible base encodes through the ordinary base route"
+        );
+        for native in [(false, None), (true, Some(0))] {
+            let request = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
+            assert_eq!(
+                source_delivery_refusal(&request, &file, native),
+                None,
+                "{name} {native:?}: a compatible-base encode spawns no RPU proof"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_profile5_encodes_now_the_source_owns_the_proof() {
+    let profile5 = delivery_policy_profile5();
+    assert!(plurx_core::playback::dolby_vision_needs_rpu_render(
+        &profile5
+    ));
+    let encode = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
+    // A burn always encodes, so a burn over Profile 5 needs the renderer too.
+    let burn = delivery_policy_request(delivery_policy_copy(false, false), Some(0));
+    for (name, request, native) in [
+        ("encode", &encode, (false, None)),
+        ("encode beside native subtitles", &encode, (true, Some(0))),
+    ] {
+        assert_eq!(
+            source_delivery_refusal(request, &profile5, native),
+            None,
+            "{name}: the Source runs the Profile 5 pixel proof as its own work and plans like local"
+        );
+    }
+    for kind in [
+        delivery_policy_copy(true, false),
+        delivery_policy_copy(false, false),
+    ] {
+        let request = delivery_policy_request(kind, None);
+        assert_eq!(
+            source_delivery_refusal(&request, &profile5, (true, Some(0))),
+            None
+        );
+    }
+    // The burn arm is unchanged: a burn of a track the scan does not hold.
+    // Over Profile 5 a burn is decided by that arm alone, as over HDR10.
+    let hdr10 = delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None);
+    assert_eq!(
+        source_delivery_refusal(&burn, &hdr10, (false, None)),
+        Some(SourceDeliveryRefusal::Unsupported)
+    );
+    assert_eq!(
+        source_delivery_refusal(&burn, &profile5, (false, None)),
+        Some(SourceDeliveryRefusal::Unsupported)
+    );
+}
+
+#[tokio::test]
+async fn source_copy_identity_for_dolby_vision_equals_the_local_index_identity() {
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let directory = crate::test_tempdir().expect("work directory");
+    for dv_strippable in [false, true] {
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            directory.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dv_strippable(dv_strippable);
+        for (name, file) in [
+            ("P8.1", delivery_policy_profile8_1()),
+            ("P7", delivery_policy_profile7()),
+            ("P5", delivery_policy_profile5()),
+        ] {
+            for (shape, preserve, convert) in [
+                ("strip", false, false),
+                ("preserve", true, false),
+                ("convert", false, true),
+            ] {
+                let source = manager.source_copy_video_options(&file, None, preserve, convert);
+                let local = crate::vodserve::copy_video_pipeline(
+                    &file,
+                    None,
+                    dv_strippable,
+                    preserve,
+                    convert,
+                );
+                assert_eq!(
+                    crate::fragindex::identity_for(&file, source),
+                    crate::fragindex::identity_for(&file, local),
+                    "{name} {shape} dovi_rpu={dv_strippable}: the Source must cut the pipeline local indexed"
+                );
+            }
+        }
+    }
+    // The strip is the shape `dovi_rpu` decides: with it the Source strips
+    // with `dovi_rpu=strip=1`, which is a different identity from the
+    // `filter_units`-only pipeline a hard-coded `false` named.
+    let file = delivery_policy_profile8_1();
+    let measured = TranscodeManager::new(
+        Arc::clone(&store),
+        directory.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dv_strippable(true)
+    .source_copy_video_options(&file, None, false, false);
+    assert_ne!(
+        crate::fragindex::identity_for(&file, measured),
+        crate::fragindex::identity_for(
+            &file,
+            crate::vodserve::copy_video_pipeline(&file, None, false, false, false)
+        ),
+    );
+}
+
+#[test]
+fn source_compatible_base_encode_never_renders_a_processed_window_in_the_start() {
+    use plurx_core::transcode::dv_processing::{DvFallbackReason, DvSelection};
+    // What `vod_dv_processing_from_snapshot` answers for a compatible-base
+    // Dolby Vision encode on a node with DV processing on.
+    let awaiting = DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow);
+    // A Source Start carries no candidate context and is no processed trial.
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, false, true
+    ));
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, true, true
+    ));
+    // Local keeps its legacy first-window arm and its trial.
+    assert!(TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, false, false
+    ));
+    assert!(TranscodeManager::start_renders_a_processed_window(
+        &awaiting, true, true, false
+    ));
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, true, false, false
+    ));
 }

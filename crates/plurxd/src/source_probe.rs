@@ -814,6 +814,8 @@ where
                 match fence.pause_source().await {
                     Ok(true) => {
                         source_paused = true;
+                        #[cfg(all(test, target_os = "linux"))]
+                        source_budget.record_test_pause_ack(&control, observation.revision);
                         if finite_hold_pressure_revision
                             != Some(crate::source_custody::source_pressure_changed().revision())
                         {

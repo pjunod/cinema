@@ -25,7 +25,6 @@ pub(super) struct SourceNativeTracks {
     file: MediaFile,
     indexes: BTreeSet<u16>,
     selected: Option<i64>,
-    presentation_probe: Mutex<Option<String>>,
     directory: PathBuf,
     windows: Mutex<BTreeMap<String, Vec<u8>>>,
     unsupported: Mutex<BTreeSet<String>>,
@@ -45,7 +44,6 @@ impl SourceNativeTracks {
             indexes: supported_tracks(file, selected)?.into_iter().collect(),
             selected,
             directory,
-            presentation_probe: Mutex::new(None),
             windows: Mutex::new(BTreeMap::new()),
             unsupported: Mutex::new(BTreeSet::new()),
             flight: tokio::sync::Mutex::new(()),
@@ -66,20 +64,6 @@ impl SourceNativeTracks {
     }
     pub(super) fn selected(&self) -> Option<i64> {
         self.selected
-    }
-    // Copy recipe preparation already reads this bounded evidence. Captions
-    // reuse its projection facts without adding a probe prerequisite or read.
-    pub(super) fn set_presentation_probe(&self, probe: Option<&str>) {
-        *self
-            .presentation_probe
-            .lock()
-            .expect("Source copy presentation") = probe.map(str::to_owned);
-    }
-    pub(super) fn presentation_probe(&self) -> Option<String> {
-        self.presentation_probe
-            .lock()
-            .expect("Source copy presentation")
-            .clone()
     }
     fn remember(&self, revision: String, bytes: Vec<u8>) {
         let mut windows = self.windows.lock().expect("Source caption cache");

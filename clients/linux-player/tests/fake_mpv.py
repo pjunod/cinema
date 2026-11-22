@@ -114,7 +114,11 @@ def main():
                 values = dict(props)
                 if not loaded["value"]:
                     values.pop("time-pos", None)
-                values.update(state().get("props", {}))
+                current = state()
+                values.update(current.get("props", {}))
+                values.update(current.get("props_by_load", {}).get(str(loaded["count"]), {}))
+                if props["pause"] and "time-pos-when-paused" in values:
+                    values["time-pos"] = values["time-pos-when-paused"]
                 if command[1] in values and values[command[1]] is not None:
                     reply["data"] = values[command[1]]
                 else:
@@ -123,7 +127,8 @@ def main():
                 props[command[1]] = command[2]
             elif name == "loadfile":
                 loaded["count"] += 1
-                if state().get("props", {}).get("load-error-on") == loaded["count"]:
+                current = state().get("props", {})
+                if current.get("load-error-on") == loaded["count"]:
                     send(reply)
                     send({"event": "end-file", "reason": "error", "file_error": "fixture decode failure"})
                     continue
@@ -131,8 +136,16 @@ def main():
                 props["path"] = command[1]
                 props["time-pos"] = float(props.get("start", 0) or 0)
                 send(reply)
-                for event in ("start-file", "file-loaded", "playback-restart"):
+                for event in ("start-file", "file-loaded"):
                     send({"event": event})
+                if current.get("skip-restart-on") != loaded["count"]:
+                    send({"event": "playback-restart"})
+                continue
+            elif name == "seek":
+                props["time-pos"] = command[1]
+                send(reply)
+                send({"event": "seek"})
+                send({"event": "playback-restart"})
                 continue
             elif name == "quit":
                 send(reply)

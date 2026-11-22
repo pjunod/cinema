@@ -142,6 +142,7 @@ pub async fn start(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
 ) -> Result<super::create::FundedStartReply, ApiError> {
     let legacy = CreateSession {
+        processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         intent: None,
         // No control exchange precedes a legacy start, so there is no

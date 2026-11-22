@@ -1,5 +1,23 @@
 use super::*;
 use serde_json::json;
+
+/// The Source actor emits this worker result only for a validated pending
+/// title qualification. Its public reply has a closed retry contract.
+#[tokio::test]
+async fn sharing_source_http_pending_verdict_maps_to_typed_not_yet() {
+    use axum::response::IntoResponse;
+    let response =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::NotYet)
+            .response()
+            .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("bounded pending-verdict body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("typed pending body");
+    assert_eq!(body["code"], "sharing_source_not_prepared");
+}
 pub(super) async fn actual_resource_request(
     address: std::net::SocketAddr,
     h2: bool,
@@ -54,6 +72,115 @@ pub(super) async fn actual_resource_request(
     let _ = driver.await;
     axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
 }
+/// Planning may wait on actual filesystem/Store work longer than the five-
+/// second member-proof lifetime. This ages the old placement of that proof,
+/// not the intent or the actual singleton's continuously running heartbeat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_direct_claim_observes_members_after_slow_preparation() {
+    use std::time::{Duration, Instant};
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("Source preparation finished before claim observation");
+    let state = (*fixture.state).clone();
+    let headers = fixture.headers.clone();
+    let reference = fixture.reference.clone();
+    let request = fixture.request.clone();
+    let starting = tokio::spawn(async move {
+        fixture_start(
+            axum::extract::State(state),
+            headers,
+            axum::extract::Path((
+                reference.item_id.as_str().to_owned(),
+                reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(request),
+        )
+        .await
+    });
+    let held = pause.reached().await;
+    // The old observation necessarily precedes this rendezvous. Wait for the
+    // actual Store wall clock to exceed its 5,000ms limit; virtual Tokio time
+    // cannot expire that proof. Every sleep is derived from this wall target.
+    let expired_after_ms = crate::state::clock_ms() + 5_000;
+    loop {
+        let remaining_ms = expired_after_ms.saturating_sub(crate::state::clock_ms());
+        if remaining_ms < 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis((remaining_ms + 1) as u64)).await;
+    }
+    held.release();
+    let response = starting
+        .await
+        .expect("actual Direct Start task")
+        .expect("claim uses a member observation made after preparation");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("actual Direct Start body");
+    let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
+        &bytes,
+        &fixture.reference,
+    )
+    .expect("exact actual Direct Start lineage");
+    let input = parse_start_request(
+        &fixture.request,
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str(),
+    )
+    .expect("original exact request");
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("actual retained Source task")
+        .iter()
+        .find(|entry| entry.identity.request_id == input.request_id)
+        .cloned()
+        .expect("the exact Start retained its actual factory owner");
+    let owned = entry
+        .wait(Instant::now() + Duration::from_secs(1))
+        .await
+        .expect("actual Direct factory");
+    let binding = owned.assignment.binding();
+    assert_eq!(binding.incarnation_id(), decoded.incarnation_id());
+    assert_eq!(binding.request_id(), input.request_id.to_string());
+    assert_eq!(binding.playback_id(), input.session.playback_id);
+    let source_headers: SourceHeaders = fixture.headers.clone().into();
+    let viewer = viewer_hash(&source_headers).expect("actual authenticated viewer");
+    assert_eq!(
+        binding.principal(),
+        &plurx_core::playback_principal::PlaybackPrincipal::sharing(fixture.grant, &viewer)
+            .expect("actual grant principal")
+    );
+    assert_eq!(binding.source_server_id(), fixture.reference.server_id);
+    assert_eq!(binding.catalogue_epoch(), fixture.reference.catalogue_epoch);
+    assert_eq!(binding.library_id(), &fixture.reference.library_id);
+    assert_eq!(binding.item_id(), &fixture.reference.item_id);
+    assert_eq!(binding.file_id(), &fixture.reference.file_id);
+    assert_eq!(binding.file_revision(), &fixture.reference.revision);
+    assert!(owned.actor.is_direct());
+    let (direct, guard) = owned
+        .actor
+        .open_direct_start(Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("actual factory retains its held unchanged source file");
+    assert_eq!(direct.session_id, decoded.direct().session_id);
+    assert!(direct.length > 0);
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(15), owned.actor.retire())
+        .await
+        .expect("actual Direct factory joins")
+        .expect("actual source custody settles");
+    drop(owned);
+    fixture.shutdown().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_initialization_overlapping_real_h2_registration_starts_and_ends() {
     actual_source_initialization_interleave(InitializationAssertionCase::CurrentAuthority).await;
@@ -74,7 +201,8 @@ async fn actual_source_initialization_interleave(assertion_case: InitializationA
     use plurx_core::store::sharing_source_ingress_custody::pause_source_ingress_initialization_for_fixture;
     use std::time::{Duration, Instant};
 
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::NativeCopy, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::NativeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let mut recipe: Value =
         serde_json::from_slice(&fixture.request).expect("complete native recipe");
     let request_id = recipe["session"]["request_id"]
@@ -913,10 +1041,952 @@ async fn sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end() {
     Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10)).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no_cleanup() {
+async fn sharing_source_http_dolby_vision_preserved_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionPreserved,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_unaffirmed_receiver_gets_the_hdr10_base_h1_h2_and_confirmed_end(
+) {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionUnaffirmed,
+    ))
+    .await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_receiver() {
+    use super::receiver_presentation::{
+        PROCESSED_UPGRADE_RECEIVER_HEADER, PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+    };
+
+    let mut fixture =
+        real_source_start_fixture_with(SourceFixtureMode::DolbyVisionUnaffirmed, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "true")
+        .await
+        .expect("enable Source HDR processing");
+
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("DV8 recipe");
+    recipe["session"]["preserve_dolby_vision"] = json!(false);
+    recipe["session"]["caps"] = json!({
+        "v": 2,
+        "video": [
+            {"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},
+            {"codec":"h264","max_height":2160,"present":["sdr"]}
+        ],
+        "audio":["aac"],
+        "containers":["mp4"],
+        "transports":["hls","progressive"],
+        "hls_hevc_sample_entries":["hvc1"],
+        "display":{"hdr":true}
+    });
+    assert!(recipe["session"].get("processed_upgrade").is_none());
+
+    let mut ordinary = recipe.clone();
+    ordinary["session"]["request_id"] = json!(Uuid::new_v4());
+    ordinary["session"]["playback_id"] = json!("ordinary-processed-upgrade-ask");
+    let ordinary = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        fixture.headers.clone(),
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(serde_json::to_vec(&ordinary).expect("ordinary recipe")),
+    )
+    .await
+    .expect("ordinary Source Start");
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    let ordinary_bytes = axum::body::to_bytes(ordinary.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("ordinary Start body");
+    let ordinary = super::super::decode_source_start_response(&ordinary_bytes, &fixture.reference)
+        .expect("ordinary Start DTO");
+    assert_eq!(ordinary.response().processed_upgrade, None);
+    assert_eq!(
+        ordinary.response().delivered_dynamic_range.as_deref(),
+        Some("hdr10"),
+        "the ordinary source output remains its compatible HDR10 base"
+    );
+    assert_eq!(ordinary.response().delivered_dolby_vision_profile, None);
+    assert_eq!(
+        fixture.active_source_sessions().await,
+        1,
+        "the ordinary Source session remains active during successor admission"
+    );
+
+    let mut affirmed_headers = fixture.headers.clone();
+    affirmed_headers.insert(
+        PROCESSED_UPGRADE_RECEIVER_HEADER,
+        PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE
+            .parse()
+            .expect("processed-upgrade affirmation header"),
+    );
+    let mut affirmed = recipe;
+    affirmed["session"]["request_id"] = json!(Uuid::new_v4());
+    affirmed["session"]["playback_id"] = json!("affirmed-processed-upgrade-ask");
+    let response = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        affirmed_headers,
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(serde_json::to_vec(&affirmed).expect("affirmed recipe")),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        let request_id = affirmed["session"]["request_id"]
+            .as_str()
+            .expect("affirmed request ID");
+        let registry = &fixture.state.transcode.source_http_starts;
+        let entries = registry.entries.lock().expect("Source Start registry");
+        let settled = registry
+            .settled
+            .lock()
+            .expect("settled Source Start registry");
+        let stage = entries
+            .iter()
+            .chain(settled.iter())
+            .find(|entry| entry.identity.request_id.to_string() == request_id)
+            .map(|entry| {
+                let stage = entry.task.stage.lock().expect("affirmed Start stage");
+                match &*stage {
+                    SourceStartTaskStage::Registered => "registered".to_owned(),
+                    SourceStartTaskStage::ReadingIntent { .. } => "reading_intent".to_owned(),
+                    SourceStartTaskStage::IntentReady { .. } => "intent_ready".to_owned(),
+                    SourceStartTaskStage::Claiming { .. } => "claiming".to_owned(),
+                    SourceStartTaskStage::Unclaimed { .. } => "claim_refused".to_owned(),
+                    SourceStartTaskStage::Acquired(_) => "acquired".to_owned(),
+                    SourceStartTaskStage::Assigning(_) => "assigning".to_owned(),
+                    SourceStartTaskStage::Assigned(_) => "assigned".to_owned(),
+                    SourceStartTaskStage::Activating(_) => "activating".to_owned(),
+                    SourceStartTaskStage::InvokingFactory(_) => "invoking_factory".to_owned(),
+                    SourceStartTaskStage::FactoryRefused(receipt) => {
+                        format!("factory_refused:{:?}", receipt.reason())
+                    }
+                }
+            })
+            .unwrap_or_else(|| "unregistered".to_owned());
+        panic!("affirmed Source Start: {error:?}; retained stage={stage}");
+    });
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("affirmed Start body");
+    let affirmed = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("affirmed Start DTO");
+    assert_eq!(
+        affirmed.response().processed_upgrade.as_deref(),
+        Some("offered"),
+        "the exact authenticated header offers a successor without changing this Start; delivered_range={:?}; delivered_profile={:?}; plan_notes={:?}",
+        affirmed.response().delivered_dynamic_range,
+        affirmed.response().delivered_dolby_vision_profile,
+        affirmed.response().plan_notes
+    );
+    assert_eq!(
+        affirmed.response().delivered_dynamic_range.as_deref(),
+        Some("hdr10")
+    );
+    assert_eq!(affirmed.response().delivered_dolby_vision_profile, None);
+
+    fixture.shutdown().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end() {
+    if !crate::ffmpeg::has_dovi_rpu().await {
+        eprintln!("SKIP: this FFmpeg has no dovi_rpu bitstream filter to strip with");
+        return;
+    }
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionStripped,
+    ))
+    .await;
+}
+/// A claim the Store answers "unavailable" wrote no binding. Its Start is
+/// refused, and the receiver's cleanup End must then settle: nothing durable
+/// is owed, so there is no row for a release to find. Before this, End
+/// answered 503 for ever and the entry held one of the registry's eight
+/// slots until the node restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_refused_claim_settles_end_and_frees_its_registry_slot() {
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Copy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("Source preparation finished before a refused claim");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let (url, headers, body) = (
+        sessions.clone(),
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    );
+    let starting =
+        tokio::spawn(
+            async move { actual_resource_request(address, true, &url, headers, body).await },
+        );
+    let held = pause.reached().await;
+    // Preparation passed with sharing on. The claim's own guard reads the
+    // switch again in its transaction and now refuses, writing nothing.
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "0")
+        .await
+        .expect("sharing switched off before the claim");
+    held.release();
+    let response = starting.await.expect("refused Start task");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .expect("refusal body");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let refusal: Value = serde_json::from_slice(&bytes).expect("typed refusal");
+    assert_eq!(refusal["code"], "sharing_start_unavailable");
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+        .await
+        .expect("sharing switched back on");
+    assert_eq!(fixture.active_source_sessions().await, 0);
+    assert_eq!(
+        fixture.state.transcode.source_http_starts.live_entries(),
+        0,
+        "a claim that wrote nothing holds no registry slot"
+    );
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"].as_str().expect("request");
+    for _ in 0..2 {
+        // The receiver's cleanup End, and its exact replay.
+        let response = actual_resource_request(
+            address,
+            true,
+            &format!("{sessions}/{request}/end"),
+            fixture.headers.clone(),
+            fixture.request.clone(),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("End receipt");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "End after a refused claim: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let receipt: Value = serde_json::from_slice(&bytes).expect("End receipt");
+        assert_eq!(receipt["settled"], json!(true));
+        assert_eq!(receipt["state"], json!("settled"));
+        assert!(receipt.get("session_id").is_none());
+    }
+    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
+/// The production web shape on one node: range caps through a receiver that
+/// affirms ranges, Dolby Vision relay and processed upgrades. The Source runs
+/// its growing copy owner, and Start, the receiver's confirming Status, the
+/// session playlist and End all answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(SourceFixtureMode::RangeCopy)).await;
+}
+/// The same for a title with text subtitles, started with native subtitles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_native_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeNativeCopy,
+    ))
+    .await;
+}
+/// A scanned remux's shape: Matroska with an E-AC-3 5.1 track.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_audio_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeAudioCopy,
+    ))
+    .await;
+}
+/// A scanned Dolby Vision Profile 7 remux with TrueHD audio, started without
+/// an `aac` ask by caps that name no audio sinks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_dolby_vision_converted_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeDolbyVisionConverted,
+    ))
+    .await;
+}
+/// One resource of the range session, named relative to `base`'s resource.
+async fn actual_range_resource(
+    address: std::net::SocketAddr,
+    operation: &str,
+    fixture: &RealSourceStartFixture,
+    base: &Value,
+    uri: &str,
+) -> (Value, axum::body::Bytes) {
+    let mut request = base.clone();
+    request["resource"] = json!(base["resource"]
+        .as_str()
+        .expect("base resource")
+        .rsplit_once('/')
+        .map_or_else(|| uri.to_owned(), |(dir, _)| format!("{dir}/{uri}")));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/resources"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&request).expect("resource body"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "range resource {uri}");
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("resource bytes");
+    (request, bytes)
+}
+
+/// The served initialization segment the range playlist names (through its
+/// first variant when it is a multivariant playlist), parsed.
+async fn actual_range_init(
+    address: std::net::SocketAddr,
+    operation: &str,
+    fixture: &RealSourceStartFixture,
+    playlist: &Value,
+    playlist_bytes: &[u8],
+) -> plurx_core::fmp4::Init {
+    let mut base = playlist.clone();
+    let mut text = std::str::from_utf8(playlist_bytes)
+        .expect("playlist text")
+        .to_owned();
+    if text.contains("#EXT-X-STREAM-INF") {
+        let variant = text
+            .lines()
+            .skip_while(|line| !line.starts_with("#EXT-X-STREAM-INF"))
+            .nth(1)
+            .expect("a variant follows its stream info")
+            .to_owned();
+        let (request, bytes) =
+            actual_range_resource(address, operation, fixture, &base, &variant).await;
+        base = request;
+        text = String::from_utf8(bytes.to_vec()).expect("variant text");
+    }
+    let map = text
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the range playlist names its initialization segment")
+        .to_owned();
+    let (_, bytes) = actual_range_resource(address, operation, fixture, &base, &map).await;
+    let mut reader = plurx_core::fmp4::FragmentReader::new();
+    reader.push(&bytes);
+    match reader.next_unit().expect("served init parses") {
+        Some(plurx_core::fmp4::Unit::Init(init)) => init,
+        _ => panic!("the range init is an initialization segment"),
+    }
+}
+
+async fn actual_source_range_delivery(mode: SourceFixtureMode) {
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let response = actual_resource_request(
+        address,
+        true,
+        &sessions,
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Start envelope");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} range Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source envelope");
+    assert!(!decoded.response().vod, "a growing copy is a bounded view");
+    assert!(receiver_presentation::response_presentable(
+        decoded.response(),
+        true,
+        true
+    ));
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"]
+        .as_str()
+        .expect("request")
+        .to_owned();
+    recipe["incarnation_id"] = json!(decoded.incarnation_id());
+    recipe["session_id"] = json!(decoded.response().session_id);
+    recipe["control_epoch"] = json!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .control_epoch
+    );
+    let operation = format!("{sessions}/{request}");
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/status"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("status body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Status envelope");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} Status after Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let confirmed = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source status envelope");
+    assert_eq!(confirmed.incarnation_id(), decoded.incarnation_id());
+    assert_eq!(
+        confirmed.response().session_id,
+        decoded.response().session_id
+    );
+    let mut playlist = recipe.clone();
+    playlist["resource"] = json!(decoded
+        .response()
+        .playlist_url
+        .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
+        .expect("session playlist"));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/resources"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&playlist).expect("playlist body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("playlist bytes");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} playlist: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(bytes.starts_with(b"#EXTM3U"));
+    if matches!(
+        mode,
+        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeDolbyVisionConverted
+    ) {
+        let init = actual_range_init(address, &operation, &fixture, &playlist, &bytes).await;
+        let has = |needle: &[u8]| init.bytes.windows(needle.len()).any(|w| w == needle);
+        let video = init.video().expect("the AV init carries its video");
+        assert_eq!(init.tracks.len(), 2, "{mode:?}: video and audio");
+        if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
+            // E-AC-3 passes through, so the muxer's Dolby brand reached this
+            // output: the case the canonical/AV companion check must accept.
+            assert!(has(b"ec-3") && has(b"dec3"), "E-AC-3 passes through");
+            assert!(!has(b"mp4a"), "E-AC-3 is not converted");
+            assert!(!video.dolby_vision_config, "SDR video");
+        } else {
+            // TrueHD converts to AAC; the Profile 8.1 conversion keeps its
+            // Dolby Vision record and brand on the served video.
+            let master = String::from_utf8_lossy(&bytes);
+            assert!(
+                master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
+                "Profile 8.1 signalled: {master}"
+            );
+            assert!(has(b"mp4a") && !has(b"mlpa"), "TrueHD converts to AAC");
+            assert!(video.dolby_vision_config, "Dolby Vision record kept");
+            assert!(has(b"dby1"), "Dolby Vision brand kept");
+        }
+    }
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/end"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("End body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .expect("End receipt");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} End: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let receipt: Value = serde_json::from_slice(&bytes).expect("End receipt");
+    assert_eq!(receipt["settled"], json!(true));
+    assert_eq!(receipt["incarnation_id"], json!(decoded.incarnation_id()));
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
+/// The receiver half of the production web Start (2026-11-21: published on
+/// the Source, never fetched, `sharing_start_unresolved` at the viewer). The
+/// receiver's own pinned-connection client sends the range Start with the
+/// viewer's start clock and all three affirmations, re-posts typed "not yet"
+/// answers as its owner does, confirms with Status on a fresh connection, and
+/// then runs the owner's acceptance and B's public projection on what came
+/// back. The bounded view is the Source's growing copy with its rolling
+/// control lease, and the reply B publishes must be one a shared client binds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_receiver_consumes_the_range_copy_start_the_source_published() {
+    use crate::sharing_client::{PeerConnection, SourcePeerLineage, SourcePeerSession, StartRetry};
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let endpoint = plurx_core::sharing::Endpoint {
+        ipv4: std::net::Ipv4Addr::LOCALHOST,
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: address.port(),
+        spki_sha256: "0".repeat(64),
+    };
+    let credential = plurx_core::secrets::Secret::from_cleartext(
+        fixture.headers["authorization"]
+            .to_str()
+            .expect("credential header")
+            .strip_prefix("CinemaShare ")
+            .expect("CinemaShare credential"),
+    );
+    let viewer = fixture.headers["cinemashare-viewer"]
+        .to_str()
+        .expect("viewer header")
+        .to_owned();
+    let wrapper = String::from_utf8(fixture.request.clone()).expect("canonical wrapper");
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    // B retains the viewer's own request; the wrapper's session is that
+    // request with B's request and playback identities.
+    let request_json = recipe["session"].to_string();
+    let connect = || async {
+        PeerConnection::fixture_verified(
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("pinned Source connection"),
+            endpoint.clone(),
+        )
+        .await
+        .expect("receiver peer connection")
+    };
+    let mut peer = connect().await;
+    let viewer_end = tokio::time::Instant::now() + Duration::from_secs(120);
+    let decoded = loop {
+        let remaining = viewer_end.saturating_duration_since(tokio::time::Instant::now());
+        match peer
+            .file_start(
+                &credential,
+                &fixture.reference,
+                &viewer,
+                &wrapper,
+                Some(remaining),
+            )
+            .await
+        {
+            Err(error) if StartRetry::from_peer(error).is_some() => {
+                let retry = StartRetry::from_peer(error).expect("typed retry");
+                assert!(
+                    tokio::time::Instant::now() < viewer_end,
+                    "the Source never published the range Start"
+                );
+                tokio::time::sleep(Duration::from_secs(retry.retry_after_secs)).await;
+            }
+            result => break result.expect("receiver Start exchange"),
+        }
+    };
+    let affirmed = peer.receiver_presentation_affirmed();
+    assert!(affirmed, "the receiver's Start affirms bounded ranges");
+    let crate::http::sharing_direct_wire::DecodedSourceStart::Hls(decoded) = decoded else {
+        panic!("an HLS range Start");
+    };
+    let (_, incarnation, response) = (*decoded).into_parts();
+    assert!(!response.vod, "a range Start runs the growing copy");
+    // The owner's acceptance of the received Start (`run_owner`).
+    let client_range = receiver_presentation::client_supports_range(&request_json);
+    assert!(receiver_presentation::response_presentable(
+        &response,
+        client_range,
+        affirmed
+    ));
+    assert!(
+        crate::http::sharing_start_decode::delivered_range_presentable(&request_json, &response)
+    );
+    let known = SourcePeerLineage::from_start(incarnation, &response).expect("Source lineage");
+    let session = SourcePeerSession::new(fixture.reference.clone(), &fixture.request)
+        .expect("receiver peer session");
+    // Status on a fresh pinned connection, as the owner's confirmation opens.
+    let status = connect()
+        .await
+        .file_status(&credential, &viewer, &session, &known)
+        .await
+        .expect("receiver Status after Start");
+    let confirmed = status.response().expect("HLS Status").clone();
+    // The copy advertises the lease it keeps: the shared session lease.
+    let source_control = response.control.clone().expect("Source control bootstrap");
+    assert_eq!(
+        source_control.lease_timeout_ms,
+        crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS
+    );
+    // One control exchange, relayed as B relays its viewer's, on a fresh
+    // pinned connection: the Source accepts it and reports the same lease.
+    // The copy may start on the keyframe before zero; a control position is
+    // never negative, and zero is inside the produced range either way.
+    let origin = response
+        .media_origin_ms
+        .expect("signed bounded origin")
+        .max(0);
+    let exchange = {
+        use crate::playback_control as pc;
+        pc::ControlRequestV1 {
+            intent: None,
+            protocol: pc::PROTOCOL_V1.to_owned(),
+            generation: source_control.generation.clone(),
+            control_epoch: source_control.control_epoch,
+            client_instance_id: "6f1c2d1e-7f9a-4b8e-9d3c-2a1b0c9d8e7f".to_owned(),
+            sequence: 1,
+            demand: pc::PlaybackDemand::Active,
+            position_ms: origin,
+            buffered_from_ms: Some(origin),
+            buffered_through_ms: origin + 500,
+            playback_rate: 1.0,
+            render_state: pc::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: pc::ClientSelection {
+                quality: pc::QualitySelection::Original,
+                audio_track: None,
+                subtitle: pc::SubtitleSelection {
+                    mode: pc::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: pc::CodecPolicy::Auto,
+                dynamic_range: pc::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(pc::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
+                platform: pc::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![pc::CodecPolicy::H264],
+                dynamic_ranges: vec![pc::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: Some(vec!["hold".to_owned(), "retry_resource".to_owned()]),
+        }
+    };
+    // The live copy's own expiry, read at chosen instants: a renewal at or
+    // after `before` keeps it alive one lease past `before`; without one, it
+    // has expired by then. No wall-clock wait or tolerance is involved.
+    let request_id = Uuid::parse_str(
+        recipe["session"]["request_id"]
+            .as_str()
+            .expect("Source request"),
+    )
+    .expect("Source request id");
+    let backing = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .growing_backing(request_id)
+        .expect("the range Start is served from a growing copy");
+    let lease = Duration::from_millis(u64::from(
+        crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS,
+    ));
+    let renewed_since = |before: std::time::Instant| !backing.activity_expired_at(before + lease);
+    let before = std::time::Instant::now();
+    let accepted = connect()
+        .await
+        .file_control(&credential, &viewer, &session, &known, &exchange)
+        .await
+        .expect("relayed control exchange")
+        .into_outcome()
+        .expect("the Source accepts the exchange");
+    assert_eq!(accepted.accepted_sequence, 1);
+    assert!(
+        renewed_since(before),
+        "an accepted exchange renews the copy"
+    );
+    let kept = accepted.lease.expires_at_unix_ms - accepted.server_time_unix_ms;
+    let advertised = i64::from(crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS);
+    assert!(
+        kept > i64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS) && kept <= advertised,
+        "the copy reports the lease it advertised, not the rolling one: {kept} ms"
+    );
+    // (d) B's own Status says B's owner is alive, not that anyone watches.
+    let before = std::time::Instant::now();
+    connect()
+        .await
+        .file_status(&credential, &viewer, &session, &known)
+        .await
+        .expect("receiver Status");
+    assert!(!renewed_since(before), "Status does not renew the copy");
+    // (c) Every resource the viewer fetches renews it: the playlist, and the
+    // initialization segment it names.
+    let operation = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions/{request_id}",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let mut lineage = recipe.clone();
+    lineage["incarnation_id"] = json!(incarnation);
+    lineage["session_id"] = json!(response.session_id);
+    lineage["control_epoch"] = json!(source_control.control_epoch);
+    let prefix = format!("/api/v1/hls/{}/", response.session_id);
+    let fetch = |resource: String| {
+        let mut body = lineage.clone();
+        body["resource"] = json!(resource);
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/resources");
+        async move {
+            let response = actual_resource_request(
+                address,
+                true,
+                &url,
+                headers,
+                serde_json::to_vec(&body).expect("resource body"),
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("resource bytes");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            bytes
+        }
+    };
+    let before = std::time::Instant::now();
+    let playlist = fetch(
+        response
+            .playlist_url
+            .strip_prefix(&prefix)
+            .expect("session playlist")
+            .to_owned(),
+    )
+    .await;
+    assert!(renewed_since(before), "a playlist fetch renews the copy");
+    let playlist = String::from_utf8(playlist.to_vec()).expect("playlist text");
+    let init = playlist
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the copy's playlist names its initialization segment")
+        .to_owned();
+    let before = std::time::Instant::now();
+    fetch(init).await;
+    assert!(renewed_since(before), "an init fetch renews the copy");
+    // (a) Exchanges whose anchor is past everything produced are refused,
+    // as B's 500 ms retries of one would be, and renew nothing. (b) So the
+    // copy that serves nothing more retires one lease after it last served,
+    // yet still outlives the old 60 s window.
+    let last_served = std::time::Instant::now();
+    let beyond = response.duration_ms.expect("fixture duration") + 1_000;
+    for sequence in 2..=4 {
+        let mut refused = exchange.clone();
+        refused.sequence = sequence;
+        refused.position_ms = beyond;
+        refused.buffered_from_ms = Some(beyond);
+        refused.buffered_through_ms = beyond;
+        let answer = connect()
+            .await
+            .file_control(&credential, &viewer, &session, &known, &refused)
+            .await
+            .map(|receipt| receipt.into_outcome());
+        assert!(
+            !matches!(answer, Ok(Ok(_))),
+            "an anchor past the produced range is refused"
+        );
+    }
+    assert!(
+        !renewed_since(last_served),
+        "refusals do not renew the copy"
+    );
+    assert!(
+        !backing.activity_expired_at(last_served + Duration::from_secs(61)),
+        "the copy outlives 60 s after it last served"
+    );
+    assert!(
+        backing.activity_expired_at(last_served + lease),
+        "it retires one lease after it last served"
+    );
+    assert_eq!(confirmed.session_id, response.session_id);
+    let source_session = Uuid::parse_str(&response.session_id).expect("Source session");
+    let receiver_session = Uuid::new_v4();
+    let receiver_incarnation = Uuid::new_v4();
+    let public = crate::http::sharing_playback_wire::project_shared_start_with_receiver(
+        confirmed,
+        source_session,
+        receiver_session,
+        receiver_incarnation,
+        1,
+        affirmed && client_range,
+    )
+    .expect("B projects the Start the Source published");
+    // What every shared client binds (web `sharedPlaybackStartContext`,
+    // Apple and Android `bindInitial`): B's session, control and lease.
+    assert!(!public.vod);
+    assert!(public.media_origin_ms.is_some());
+    assert_eq!(public.session_id, receiver_session.to_string());
+    let control = public.control.expect("B control bootstrap");
+    assert_eq!(
+        control.url,
+        format!("/api/v1/hls/{receiver_session}/control")
+    );
+    assert_eq!(control.generation, receiver_incarnation.to_string());
+    assert_eq!(control.next_exchange_ms, 5000);
+    assert_eq!(
+        control.lease_timeout_ms,
+        crate::playback_control::VOD_LEASE_TIMEOUT_MS
+    );
+    connect()
+        .await
+        .file_end(&credential, &viewer, &session, Some(&known))
+        .await
+        .expect("receiver End");
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionConverted,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_native_hdr10_copy_h1_h2_vtt_and_held_body_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::NativeHdr10Copy,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_base_encoded_to_sdr_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionCompatibleEncoded,
+    ))
+    .await;
+}
+/// A Profile 5 encode over sharing, delivered as local delivers it: on the
+/// committed real Profile 5 control, the Source's own two pixel-proof
+/// children prove that the RPU changes pixels, the verdict is recorded, and
+/// the planner tone-maps through the RPU renderer without a second proof.
+/// The renderer is jellyfin-ffmpeg's `tonemapx`; a build without it SKIPs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_profile5_encoded_to_sdr_h1_h2_and_confirmed_end() {
+    if !crate::ffmpeg::has_dovi_reshape().await {
+        eprintln!(
+            "SKIP: this ffmpeg has no Dolby-aware tonemapx renderer to encode Profile 5 with"
+        );
+        return;
+    }
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionProfile5Encoded,
+    ))
+    .await;
+}
+/// A refuted Profile 5 proof is a verdict: the Source records it, the
+/// planner then answers exactly what it answers locally (the build cannot
+/// render this source) as a definite refusal, and a later start reads the
+/// remembered verdict instead of proving again. No probe runs in the planner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_profile5_refuted_proof_plans_like_local_and_spawns_no_second_probe() {
     use axum::response::IntoResponse;
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
-    let start = || {
+    use std::sync::atomic::Ordering;
+    let mut fixture =
+        real_source_start_fixture_with(SourceFixtureMode::DolbyVisionProfile5Encoded, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let hooks = fixture.state.transcode.test_hooks();
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Refuted);
+    let start = |request: Vec<u8>| {
         fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
@@ -924,7 +1994,7 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
                 fixture.reference.item_id.as_str().to_owned(),
                 fixture.reference.file_id.as_str().to_owned(),
             )),
-            axum::body::Body::from(fixture.request.clone()),
+            axum::body::Body::from(request),
         )
     };
     let refused = |error: ApiError| async move {
@@ -934,62 +2004,44 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
             .await
             .expect("typed refusal");
         let body: Value = serde_json::from_slice(&bytes).expect("JSON refusal");
-        assert_eq!(body["code"], SHARING_START_DOLBY_VISION_UNSUPPORTED);
+        assert_eq!(body["code"], "sharing_start_unsupported");
     };
     refused(
-        start()
+        start(fixture.request.clone())
             .await
-            .expect_err("DV encode has no Source-owned RPU preparation"),
+            .expect_err("a refuted Profile 5 source has no renderer route"),
     )
     .await;
-    let entries = fixture
+    let file = fixture
         .state
-        .transcode
-        .source_http_starts
-        .entries
-        .lock()
-        .expect("registry")
-        .clone();
-    assert_eq!(entries.len(), 1, "the exact refused invocation is retained");
-    // Pure planning precedes owner designation (1ef67c7de): the refusal is
-    // decided from the prepared request before any claim, so the entry
-    // never acquired a binding, owns no durable or physical obligation and
-    // leaves admission capacity at once, with nothing for an End to clean.
-    assert!(
-        matches!(
-            *entries[0].task.stage.lock().expect("stage"),
-            SourceStartTaskStage::IntentReady { .. }
-        ),
-        "the refusal is decided before the claim"
+        .store
+        .get_file(1)
+        .await
+        .expect("file")
+        .expect("file");
+    assert_eq!(
+        fixture.state.transcode.dovi_proof_verdict(&file),
+        Some(false),
+        "the Source's refuted proof is a remembered verdict"
     );
-    assert!(
-        entries[0]
-            .task
-            .cleanup
-            .lock()
-            .expect("uninvoked Source custody")
-            .is_none(),
-        "no claimed invocation is left to fence"
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        1,
+        "one proof, the Source's; the planner read its verdict"
     );
-    assert!(
-        entries[0].actual_finished(),
-        "a pre-claim refusal releases its slot without a cleanup receipt"
+    let mut again: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    again["session"]["request_id"] = json!(Uuid::new_v4());
+    refused(
+        start(serde_json::to_vec(&again).expect("second recipe"))
+            .await
+            .expect_err("the remembered verdict refuses again"),
+    )
+    .await;
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        1,
+        "a remembered verdict runs no second proof"
     );
-    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
-    for _ in 0..3 {
-        refused(start().await.expect_err("exact refusal retry")).await;
-        let registry = &fixture.state.transcode.source_http_starts;
-        assert!(
-            registry.entries.lock().expect("registry").is_empty(),
-            "a retry opens no second invocation"
-        );
-        let settled = registry.settled.lock().expect("settled receipts").clone();
-        assert_eq!(settled.len(), 1);
-        assert!(
-            std::sync::Arc::ptr_eq(&settled[0], &entries[0]),
-            "a retry replays the exact retained refusal"
-        );
-    }
     fixture.shutdown().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1121,15 +2173,69 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
         .is_err());
     fixture.shutdown().await;
 }
+/// Every video sample of one delivered media segment, as the Dolby Vision
+/// RPU NAL units (HEVC type 62) its length-prefixed sample carries.
+fn delivered_rpus(init: &[u8], segment: &[u8]) -> Vec<Vec<Vec<u8>>> {
+    use plurx_core::fmp4::{FragmentReader, Unit};
+    let mut reader = FragmentReader::new();
+    reader.push(init);
+    reader.push(segment);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("delivered init") else {
+        panic!("a delivered init");
+    };
+    let video = init.video().expect("delivered video track");
+    let (track, length_size) = (video.id, usize::from(video.nal_length_size));
+    let mut samples = Vec::new();
+    while let Some(unit) = reader.next_unit().expect("delivered media") {
+        let Unit::Fragment(fragment) = unit else {
+            continue;
+        };
+        for (_, data) in fragment.samples_with_bytes(track) {
+            let data = data.expect("sample inside its mdat");
+            let mut rpus = Vec::new();
+            let mut at = 0;
+            while at < data.len() {
+                let header = data
+                    .get(at..at + length_size)
+                    .expect("complete NAL length prefix");
+                let len = header
+                    .iter()
+                    .fold(0usize, |len, byte| (len << 8) | usize::from(*byte));
+                let nal = data
+                    .get(at + length_size..at + length_size + len)
+                    .expect("NAL unit inside its sample");
+                if nal.first().is_some_and(|byte| (byte >> 1) & 0x3f == 62) {
+                    rpus.push(nal.to_vec());
+                }
+                at += length_size + len;
+            }
+            samples.push(rpus);
+        }
+    }
+    samples
+}
 async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     use std::time::{Duration, Instant};
     let mut fixture = real_source_start_fixture_with(mode, None).await;
     let native = matches!(
         mode,
-        SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+        SourceFixtureMode::NativeCopy
+            | SourceFixtureMode::NativeEncoded
+            | SourceFixtureMode::NativeHdr10Copy
     );
-    // Resource delivery assumes a stable committed test roster.
+    // Real resource requests exercise a stable committed roster. Membership
+    // changes are exercised by the separate authority and retirement tests.
     fixture.keep_fixture_membership_stable().await;
+    let dolby_vision = matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
+    );
+    // A Profile 8.1 copy delivered as its HDR10 base.
+    let base_copy = matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionUnaffirmed | SourceFixtureMode::DolbyVisionStripped
+    );
+    let mut delivered_init: Option<Vec<u8>> = None;
     let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
     unsupported["session"]["request_id"] = json!(Uuid::new_v4());
@@ -1173,16 +2279,106 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         .await
         .expect("full DTO");
     let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
-        .expect("strict actual Start");
-    if matches!(mode, SourceFixtureMode::Hdr10 | SourceFixtureMode::Hdr10Sdr) {
+        .unwrap_or_else(|error| {
+            panic!(
+                "strict actual Start: {error:?}: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    if matches!(mode, SourceFixtureMode::DolbyVisionProfile5Encoded) {
+        // The Source's own proof reached the verdict the planner then read.
+        let file = fixture
+            .state
+            .store
+            .get_file(1)
+            .await
+            .expect("file")
+            .expect("file");
+        assert_eq!(
+            fixture.state.transcode.dovi_proof_verdict(&file),
+            Some(true),
+            "the real Profile 5 RPU changes pixels through the renderer"
+        );
+    }
+    let expected_range = match mode {
+        SourceFixtureMode::Hdr10
+        | SourceFixtureMode::NativeHdr10Copy
+        | SourceFixtureMode::DolbyVisionUnaffirmed
+        | SourceFixtureMode::DolbyVisionStripped => Some("hdr10"),
+        SourceFixtureMode::Hdr10Sdr
+        | SourceFixtureMode::DolbyVisionCompatibleEncoded
+        | SourceFixtureMode::DolbyVisionProfile5Encoded => Some("sdr"),
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted => {
+            Some("dolby_vision")
+        }
+        _ => None,
+    };
+    if let Some(range) = expected_range {
         assert_eq!(
             decoded.response().delivered_dynamic_range.as_deref(),
-            Some(if matches!(mode, SourceFixtureMode::Hdr10) {
-                "hdr10"
-            } else {
-                "sdr"
-            })
+            Some(range)
         );
+        // The Start B relays: its own decoder and presentability check admit
+        // exactly what the Source delivered for the caps it forwarded.
+        let session = serde_json::to_string(
+            &serde_json::from_slice::<Value>(&fixture.request).expect("recipe")["session"],
+        )
+        .expect("session JSON");
+        assert!(
+            super::super::sharing_start_decode::delivered_range_presentable(
+                &session,
+                decoded.response()
+            ),
+            "B must present the {range} Start the Source planned for these caps"
+        );
+    }
+    // The Source says why a Dolby Vision viewer got the base, and only then.
+    assert_eq!(
+        decoded
+            .response()
+            .plan_notes
+            .iter()
+            .any(|note| note == receiver_presentation::DOLBY_VISION_WITHHELD_NOTE),
+        matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed),
+        "plan notes: {:?}",
+        decoded.response().plan_notes
+    );
+    if dolby_vision {
+        // Profile 8.1 preserved, and Profile 7 converted to 8.1.
+        assert_eq!(decoded.response().delivered_dolby_vision_profile, Some(8));
+        // The FEL / RPU / DYN rows local playback shows: computed by the
+        // Source, decoded by B's closed Start decoder, and carried unchanged
+        // into the Start B answers its own client with.
+        let enhancement = decoded
+            .response()
+            .enhancement
+            .clone()
+            .expect("a Dolby Vision Start carries its enhancement rows");
+        assert!(enhancement.is_well_formed());
+        assert!(!enhancement.details.is_empty(), "{enhancement:?}");
+        let source_session =
+            Uuid::parse_str(&decoded.response().session_id).expect("Source session");
+        let client = super::super::sharing_playback_wire::project_shared_start_with_receiver(
+            decoded.response().clone(),
+            source_session,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            3,
+            true,
+        )
+        .expect("B's client Start");
+        assert_eq!(client.enhancement, Some(enhancement.clone()));
+        assert_eq!(
+            serde_json::to_value(&client).expect("client Start")["enhancement"],
+            serde_json::to_value(&enhancement).expect("rows")
+        );
+    } else {
+        assert_eq!(decoded.response().delivered_dolby_vision_profile, None);
+    }
+    if matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed) {
+        // A receiver that never affirmed relay may be one whose decoder
+        // refuses the rows: it is sent none.
+        assert!(decoded.response().enhancement.is_none());
     }
     let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     let request = recipe["session"]["request_id"]
@@ -1217,7 +2413,36 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         fixture.reference.item_id.as_str(),
         fixture.reference.file_id.as_str()
     );
+    // An HDR or Dolby Vision session opens on the master even without a
+    // selected subtitle: only the master can say VIDEO-RANGE and
+    // SUPPLEMENTAL-CODECS.
+    let ranged_without_subtitles =
+        !native && matches!(expected_range, Some("hdr10" | "hlg" | "dolby_vision"));
+    if ranged_without_subtitles {
+        assert_eq!(
+            decoded.response().playlist_url,
+            format!("/api/v1/hls/{}/master.m3u8", decoded.response().session_id),
+            "{mode:?} opens on the master"
+        );
+    } else if !native {
+        assert_eq!(
+            decoded.response().playlist_url,
+            format!("/api/v1/hls/{}/index.m3u8", decoded.response().session_id),
+            "{mode:?} keeps the media playlist"
+        );
+    }
     for h2 in [false, true] {
+        if ranged_without_subtitles {
+            actual_master_declares_the_range_without_subtitles(
+                address,
+                h2,
+                &url,
+                &fixture,
+                &mut recipe,
+                mode,
+            )
+            .await;
+        }
         recipe["resource"] = json!(if native { "video.m3u8" } else { "index.m3u8" });
         let response = actual_resource_request(
             address,
@@ -1314,6 +2539,60 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                 .expect("actual streamed file bytes");
             assert_eq!(bytes.len(), len);
             assert!(bytes.len() > 8);
+            if (dolby_vision || base_copy) && resource == "init.mp4" {
+                delivered_init = Some(bytes.to_vec());
+            }
+            if base_copy && resource == "init.mp4" {
+                assert!(
+                    !bytes
+                        .windows(4)
+                        .any(|part| part == b"dvvC" || part == b"dvcC" || part == b"dby1"),
+                    "{mode:?} delivers the HDR10 base with no Dolby Vision record"
+                );
+            }
+            if (dolby_vision || base_copy) && resource != "init.mp4" {
+                // Walk every video sample's length-prefixed NAL units: a Dolby
+                // Vision copy carries exactly one RPU per sample, and it says
+                // Profile 8 (for the conversion, the rewritten Profile 7 RPU);
+                // the base carries none.
+                let init = delivered_init.as_ref().expect("init precedes media");
+                let rpus_per_sample = delivered_rpus(init, &bytes);
+                assert!(!rpus_per_sample.is_empty(), "{mode:?} segment has samples");
+                for rpus in &rpus_per_sample {
+                    if dolby_vision {
+                        assert_eq!(rpus.len(), 1, "{mode:?}: one RPU per sample");
+                        let rpu =
+                            dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(&rpus[0])
+                                .expect("a parseable delivered RPU");
+                        assert_eq!(rpu.dovi_profile, 8, "{mode:?} delivers Profile 8 RPUs");
+                        assert!(
+                            rpu.el_type.is_none(),
+                            "Profile 8.1 has no enhancement layer"
+                        );
+                    } else {
+                        assert!(rpus.is_empty(), "{mode:?}: the base carries no RPU");
+                    }
+                }
+            }
+            if dolby_vision && resource == "init.mp4" {
+                let mut reader = plurx_core::fmp4::FragmentReader::new();
+                reader.push(&bytes);
+                let Some(plurx_core::fmp4::Unit::Init(init)) =
+                    reader.next_unit().expect("delivered init")
+                else {
+                    panic!("a delivered init");
+                };
+                let record = plurx_core::fmp4::dolby_vision_record(&init)
+                    .expect("readable Dolby Vision record")
+                    .expect("the delivered init declares Dolby Vision");
+                assert_eq!(record.profile, 8, "{mode:?} delivers Profile 8");
+                assert_eq!(record.bl_signal_compatibility_id, 1);
+                assert!(!record.el_present);
+                assert!(
+                    bytes.windows(4).any(|part| part == b"dvvC"),
+                    "Profile 8 is declared in dvvC"
+                );
+            }
             assert!(
                 bytes.windows(4).any(|part| part
                     == if resource == "init.mp4" {
@@ -1368,6 +2647,14 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                                 .contains("subs/1/index.m3u8"),
                             "wrong selected track exists and is actually advertised"
                         );
+                        if matches!(mode, SourceFixtureMode::NativeHdr10Copy) {
+                            assert!(
+                                std::str::from_utf8(&bytes)
+                                    .expect("actual master")
+                                    .contains("VIDEO-RANGE=PQ"),
+                                "an HDR10 copy beside native subtitles declares its range"
+                            );
+                        }
                     }
                     assert_eq!(mime, "application/vnd.apple.mpegurl");
                     plurx_core::sharing_resources::validate_sharing_playlist(
@@ -1438,6 +2725,67 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     server.await.expect("server").expect("shutdown");
     drop(owned);
     fixture.shutdown().await;
+}
+/// `sharing_source_http_dolby_vision_master_declares_supplemental_codecs_without_subtitles`
+/// (T2.2), run inside the HDR10 encode and Dolby Vision copy fixtures: the master a
+/// subtitle-less session opens on admits no subtitle group and declares the
+/// delivered range and, for Dolby Vision, the enhanced codec.
+async fn actual_master_declares_the_range_without_subtitles(
+    address: std::net::SocketAddr,
+    h2: bool,
+    url: &str,
+    fixture: &RealSourceStartFixture,
+    recipe: &mut Value,
+    mode: SourceFixtureMode,
+) {
+    recipe["resource"] = json!("master.m3u8");
+    let response = actual_resource_request(
+        address,
+        h2,
+        url,
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("master request"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{mode:?} master h2={h2}");
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.apple.mpegurl"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("actual master bytes");
+    plurx_core::sharing_resources::validate_sharing_playlist(
+        &plurx_core::sharing_resources::SharingHlsResource::parse("master.m3u8")
+            .expect("master path"),
+        &bytes,
+    )
+    .expect("closed actual master");
+    let master = std::str::from_utf8(&bytes).expect("master text");
+    assert!(master.contains("VIDEO-RANGE=PQ"), "{mode:?}: {master}");
+    assert!(
+        !master.contains("TYPE=SUBTITLES") && !master.contains("SUBTITLES=\"subs\""),
+        "{mode:?} admits no subtitle group: {master}"
+    );
+    assert!(master.ends_with("index.m3u8\n"), "{mode:?}: {master}");
+    if matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
+    ) {
+        assert!(
+            master.starts_with("#EXTM3U\n#EXT-X-VERSION:10\n"),
+            "{master}"
+        );
+        assert!(
+            master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
+            "{mode:?} declares Profile 8 Dolby Vision: {master}"
+        );
+    } else {
+        assert!(
+            !master.contains("SUPPLEMENTAL-CODECS"),
+            "{mode:?}: {master}"
+        );
+    }
 }
 async fn actual_vtt_writer_end(
     fixture: &RealSourceStartFixture,
@@ -3362,6 +4710,14 @@ async fn actual_source_budgeted_start() {
         .transcode
         .test_hold_source_software_capacity()
         .expect("actual occupied software capacity");
+    // Hold pure preparation through the viewer-clock checks. Only after the
+    // NotYet rejoin do we let this real worker enter its unchanged queue.
+    let preparation = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("budgeted_start_preparation");
     let index_pause = fixture
         .state
         .transcode
@@ -3526,32 +4882,47 @@ async fn actual_source_budgeted_start() {
         "local fall-through preserves the ingress clock"
     );
     // Past the viewer's whole window (2 s plus the re-post grace) the
-    // entry is still working on its own budget: the clock bounded the
-    // answer, not the work.
+    // entry is still retained in pure preparation on its own budget. After
+    // this viewer window, release it into the real queue and rejoin only
+    // once its actual owned index child is held after spawn.
     tokio::time::sleep_until(tokio::time::Instant::from_std(
         began + Duration::from_millis(4_600),
     ))
     .await;
+    let held_preparation = preparation.reached().await;
+    let viewer_elapsed_before_release = began.elapsed();
+    let preparation_released_at = Instant::now();
+    held_preparation.release();
+    // Free capacity before the actual queue's five-second limit. The next
+    // observation is the real owned index child, with permit/fence/authority.
+    drop(hold);
     let entry = entry_of(abandoned).expect("the abandoned start's retained entry");
+    // The first POST answered while pure preparation was held, before any
+    // assignment or ingress registration. Observe this same entry's actual
+    // assignment before rejoining: the factory must see the rejoin driver's
+    // durable ingress custody before it may spawn a source-reading child.
     let assignment = super::ingress::assigned(
         &fixture.state,
         &entry,
-        Instant::now() + crate::seam_hooks::ASYNC_PAUSE_BOUND,
+        preparation_released_at + crate::seam_hooks::ASYNC_PAUSE_BOUND,
     )
     .await
     .expect("the retained owner assigns on its preparation budget");
-    // Capacity can release before End once the actual index child is held.
-    // Let the rejoin register a real ingress while watching for that child.
-    drop(hold);
+    // Drive the original clocked rejoin while observing the actual child.
+    // Waiting for the child first would wait for custody that this very POST
+    // has not registered yet. Its original 300 ms answer clock is unchanged.
     let (held_index, (status, _, bytes)) =
         tokio::join!(index_pause.reached(), post(body(abandoned), Some(300)));
+    let index_after_preparation_release = preparation_released_at.elapsed();
+    // Rejoin while the actual owned index child is held, rather than
+    // inferring a live cold-index operation from a planned incarnation.
     assert_eq!(
         (status, typed(&bytes[..])),
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_timeout".to_owned()
         ),
-        "the viewer's window does not end owned preparation: {}",
+        "the viewer's window does not end owned preparation: {}; viewer_elapsed={viewer_elapsed_before_release:?}, index_after_preparation_release={index_after_preparation_release:?}",
         String::from_utf8_lossy(&bytes)
     );
     let incarnation = entry
@@ -3562,8 +4933,9 @@ async fn actual_source_budgeted_start() {
         .incarnation()
         .expect("the entry owns its claim");
     assert_eq!(incarnation, assignment.binding().incarnation_id());
-    // End now observes a real cold index in progress. Releasing its existing
-    // hook lets the index persist before the owner settles.
+    // Deliver End while this exact owned index child is held after spawn.
+    // Its stage cannot complete or its queue expire before End ownership.
+    // Releasing the existing seam lets the real index persist and settle.
     let end_url = format!("{path}/{abandoned}/end");
     // End must arrive on a fresh driver: the Start driver's retained
     // ingress custody cannot be settled while that same driver awaits End.
@@ -3598,8 +4970,16 @@ async fn actual_source_budgeted_start() {
     .await
     .expect("the End is owned");
     assert!(
+        held_index.is_held(),
+        "owned index hold expired before End observation"
+    );
+    assert!(
         !indexed().await,
-        "the owned index is still unpersisted at End"
+        "the actual index is still unpersisted at owned End"
+    );
+    assert!(
+        held_index.is_held(),
+        "owned index hold expired during the index observation"
     );
     held_index.release();
     let receipt = tokio::time::timeout(Duration::from_secs(40), end)

@@ -163,6 +163,16 @@ pub(super) fn resource_busy_response(retry_after_secs: u64) -> super::error::Api
     }
 }
 fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
+    log_source_peer_failure("status", stage, error);
+}
+/// What the Source answered when this receiver is about to tell its viewer
+/// only "unresolved". The viewer's message cannot tell one Source refusal
+/// from another; this line can.
+fn log_source_peer_failure(
+    operation: &'static str,
+    stage: &'static str,
+    error: crate::sharing_client::PeerError,
+) {
     use crate::sharing_client::PeerError;
     let (error_class, http_status) = match error {
         PeerError::Unavailable => ("unavailable", None),
@@ -174,8 +184,9 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::Busy { .. } => ("busy", Some(429)),
         PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
         PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
+        PeerError::StartNotPrepared { .. } => ("source_not_prepared", Some(503)),
     };
-    tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
+    tracing::warn!(target: "plurx::sharing", operation, stage, error_class, http_status, "receiver Source exchange refused");
 }
 
 #[derive(Default)]
@@ -187,6 +198,17 @@ pub(crate) struct ReceiverStartRegistry {
     /// registered before it, so an older Start that publishes late can never
     /// retire the newer session that replaced it.
     registered: std::sync::atomic::AtomicU64,
+}
+/// An actual retained B owner for a processed Source successor. The session
+/// correlation is one-way; it is never the playback bearer capability.
+#[derive(Clone)]
+pub(crate) struct ReceiverProcessedActivity {
+    pub stop_id: String,
+    pub source_server_id: uuid::Uuid,
+    pub import_id: uuid::Uuid,
+    pub catalogue_epoch: uuid::Uuid,
+    pub item_id: String,
+    pub viewer_id: i64,
 }
 struct SettledReceiverAttempt {
     user_id: i64,
@@ -514,6 +536,93 @@ pub(crate) enum ReceiverPublished {
 #[derive(Clone)]
 pub(crate) struct ReceiverStartActor(Arc<ReceiverStartInner>);
 impl ReceiverStartRegistry {
+    pub(crate) fn processed_activities(&self) -> Vec<ReceiverProcessedActivity> {
+        self.entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .filter_map(|entry| {
+                let processed =
+                    serde_json::from_str::<serde_json::Value>(&entry.intent.recipe.request_json)
+                        .ok()
+                        .and_then(|request| {
+                            request.get("processed_upgrade").and_then(|v| v.as_bool())
+                        })
+                        == Some(true);
+                if !processed {
+                    return None;
+                }
+                let owned = entry.state.lock().expect("receiver owner");
+                let owner = owned.owner.as_ref()?;
+                if owned.prepared.is_none() || owned.retirement_started || owned.retired {
+                    return None;
+                }
+                Some(ReceiverProcessedActivity {
+                    stop_id: format!(
+                        "receiver-{}",
+                        crate::transcode::session_log_id(&owner.session_id.to_string())
+                    ),
+                    source_server_id: entry.intent.scope.source_server_id,
+                    import_id: entry.intent.scope.import_id,
+                    catalogue_epoch: entry.intent.scope.catalogue_epoch,
+                    item_id: entry.intent.recipe.reference.item_id.as_str().to_owned(),
+                    viewer_id: entry.intent.user_id,
+                })
+            })
+            .take(64)
+            .collect()
+    }
+
+    /// Retire only the exact retained B successor; its ordinary incumbent is
+    /// not selected. The existing retirement owner must confirm Source End.
+    pub(crate) async fn stop_processed_activity(
+        &self,
+        state: Arc<AppState>,
+        id: &str,
+    ) -> Result<bool, ()> {
+        let entry = self
+            .entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .find(|entry| {
+                let owned = entry.state.lock().expect("receiver owner");
+                let Some(owner) = owned.owner.as_ref() else {
+                    return false;
+                };
+                owned.prepared.is_some()
+                    && !owned.retired
+                    && format!(
+                        "receiver-{}",
+                        crate::transcode::session_log_id(&owner.session_id.to_string())
+                    ) == id
+                    && serde_json::from_str::<serde_json::Value>(&entry.intent.recipe.request_json)
+                        .ok()
+                        .and_then(|request| {
+                            request.get("processed_upgrade").and_then(|v| v.as_bool())
+                        })
+                        == Some(true)
+            })
+            .cloned();
+        let Some(entry) = entry else {
+            return Ok(false);
+        };
+        let session = entry
+            .state
+            .lock()
+            .expect("receiver owner")
+            .owner
+            .as_ref()
+            .ok_or(())?
+            .session_id;
+        let actor = ReceiverStartActor(entry);
+        actor.begin_retirement(
+            state,
+            plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Deleted,
+        );
+        actor.wait_confirmed_end(session).await.map_err(|_| ())?;
+        Ok(true)
+    }
     fn confirmed_end(&self, session: Uuid) -> bool {
         // Retirement publishes the actual receipt on its retained entry. The
         // settled cache is populated only when a later Start prunes entries;
@@ -1543,7 +1652,7 @@ impl ReceiverStartActor {
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
-            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", "receiver Source status refused");
+            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", operation = "status", "receiver Source exchange refused");
             return Err(ReceiverStartError::Ending);
         }
         // Current B policy precedes the network operation; every following
@@ -1553,12 +1662,12 @@ impl ReceiverStartActor {
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unknown
             })?
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", operation = "status", "receiver Source exchange refused");
             })?;
         let received = self
             .0
@@ -1569,7 +1678,7 @@ impl ReceiverStartActor {
             .clone()
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", operation = "status", "receiver Source exchange refused");
             })?;
         let expected = plurx_core::sharing::SharingIdentity {
             server_id: self.0.intent.scope.source_server_id,
@@ -1590,7 +1699,7 @@ impl ReceiverStartActor {
         let known = received
             .lineage()
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unresolved
             })?;
         peer.file_status(
@@ -1937,6 +2046,22 @@ async fn run_owner(
     let dispatch_owner = pending.clone();
     let dispatch_entry = entry.clone();
     let retry_entry = entry.clone();
+    // Only B's prepared-successor owner can retain this true bit: public B
+    // ingress rejects it, and ordinary Start retries keep their old policy.
+    let processed_successor = entry
+        .state
+        .lock()
+        .expect("receiver owner")
+        .prepared
+        .is_some()
+        && serde_json::from_str::<serde_json::Value>(&entry.intent.recipe.request_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("processed_upgrade")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            == Some(true);
     let connection_lifetime: Arc<dyn Send + Sync> = entry.bodies.reserve()?;
     let start = state.sharing.start_file_source(
         &state,
@@ -1958,13 +2083,14 @@ async fn run_owner(
         move |retry| {
             // The Source keeps its entry for this request alive; so does B.
             // The waiters present now take this answer, typed, and the owner
-            // re-posts the same Start unless this attempt is being stopped.
+            // re-posts an ordinary Start unless stopped. A processed
+            // successor spends its Source offer on this first typed answer.
             let mut owned = retry_entry.state.lock().expect("receiver owner");
             let count = owned.source_retry.map_or(0, |(count, _)| count) + 1;
             owned.source_retry = Some((count, retry));
             drop(owned);
             retry_entry.changed.notify_waiters();
-            !retry_entry.stop.is_cancelled()
+            !processed_successor && !retry_entry.stop.is_cancelled()
         },
     );
     tokio::pin!(start);
@@ -1981,11 +2107,21 @@ async fn run_owner(
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
                 crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
+                error @ (crate::sharing_client::PeerError::StartNotPrepared { .. }
+                    | crate::sharing_client::PeerError::StartNotYet { .. }
+                    | crate::sharing_client::PeerError::Busy { .. }) if processed_successor => {
+                    ReceiverStartError::NotYet(crate::sharing_client::StartRetry::from_peer(error)
+                        .expect("typed processed Start refusal"))
+                },
                 // A retryable answer that escaped the re-post loop: the
                 // viewer's whole window is spent, and nobody is left to retry.
-                crate::sharing_client::PeerError::StartNotYet { .. }
+                crate::sharing_client::PeerError::StartNotPrepared { .. }
+                | crate::sharing_client::PeerError::StartNotYet { .. }
                 | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::Deadline,
-                _ => ReceiverStartError::Unresolved,
+                other => {
+                    log_source_peer_failure("start", "start_exchange", other);
+                    ReceiverStartError::Unresolved
+                }
             })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {

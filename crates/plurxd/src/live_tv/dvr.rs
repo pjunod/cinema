@@ -71,7 +71,7 @@ const DVR_WRITE_RATE_WINDOW: std::time::Duration = std::time::Duration::from_sec
 pub(crate) const DVR_OBSERVATIONS_MAX: usize = 64;
 /// About 3.3 seconds of a 19.4 Mbit/s ATSC 1.0 multiplex. One stalled disk
 /// costs this much memory, then only that sink ends its current attempt.
-const DVR_SINK_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const DVR_SINK_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
 /// The byte bound is authoritative; this second bound stops a pathological
 /// stream of tiny chunks from allocating an unbounded number of queue nodes.
 const DVR_SINK_QUEUE_CHUNKS: usize = 512;

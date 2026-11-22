@@ -32,6 +32,7 @@ async fn a_create_is_refused_when_the_ask_moves_before_it_activates() {
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: "control-player".into(),
             intent: Some(envelope(1, DesiredQuality::Original)),
             copy: Some(true),
@@ -59,6 +60,7 @@ async fn a_create_is_refused_when_the_ask_moves_before_it_activates() {
                 HeaderMap::new(),
                 super::super::network::RemoteAddress(None),
                 Json(CreateSession {
+            processed_upgrade: None,
                     playback_id: playback.into(),
                     intent: Some(envelope(1, DesiredQuality::Original)),
                     copy: Some(true),
@@ -122,6 +124,7 @@ async fn an_ask_on_create_is_recorded_before_the_create_is_answered() {
     let answer = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-a".into(),
             intent: Some(ask.clone()),
             ..bare_create()
@@ -234,6 +237,7 @@ async fn a_create_refused_before_its_claim_records_no_ask() {
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: playback.into(),
             request_id: Some("no-ask-before-claim".into()),
             copy: Some(true),
@@ -300,6 +304,7 @@ async fn an_overloaded_create_records_no_ask() {
     let answer = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "overloaded-player".into(),
             intent: Some(envelope(1, DesiredQuality::Original)),
             ..bare_create()
@@ -402,6 +407,7 @@ async fn a_peers_stale_answer_ends_a_view_plan_before_any_candidate_is_picked() 
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: "stale-peer-player".into(),
             request_id: Some("stale-peer-request".into()),
             quality_auto: Some(true),
@@ -457,6 +463,7 @@ async fn a_created_playback_points_at_the_ask_its_create_recorded() {
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: "chain-player".into(),
             intent: Some(ask.clone()),
             copy: Some(true),
@@ -544,6 +551,7 @@ async fn overlapping_creates_with_control_off_settle_on_one_ask() {
                 HeaderMap::new(),
                 super::super::network::RemoteAddress(None),
                 Json(CreateSession {
+            processed_upgrade: None,
                     playback_id: playback.into(),
                     intent: Some(envelope(1, quality)),
                     copy: Some(true),
@@ -614,6 +622,7 @@ async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
     let answer = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-bad".into(),
             intent: Some(broken),
             ..bare_create()
@@ -650,6 +659,7 @@ async fn a_create_without_an_ask_records_nothing() {
     let _ = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-legacy".into(),
             ..bare_create()
         },
@@ -1025,6 +1035,7 @@ async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
         .expect("file read")
         .expect("source");
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "geometry-auto".into(),
         copy: Some(true),
         quality_auto: Some(true),
@@ -1075,6 +1086,7 @@ async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
 
 async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "player-a".into(),
         height: asked,
         ..bare_create()
@@ -1180,6 +1192,7 @@ async fn auto_asks_the_ladder_with_everything_it_was_given() {
 
     for hdr10 in [false, true] {
         let body = CreateSession {
+            processed_upgrade: None,
             playback_id: "player-a".into(),
             height: None,
             hdr10: Some(hdr10),
@@ -1225,6 +1238,7 @@ async fn the_intent_fingerprint_ignores_the_review() {
     // deriving `Clone` on it for a test would be the test changing the
     // contract to suit itself.
     let body = || CreateSession {
+            processed_upgrade: None,
         playback_id: "player-a".into(),
         copy: Some(true),
         preserve_dolby_vision: Some(false),
@@ -1310,6 +1324,7 @@ async fn a_reviews_notes_reach_the_resolved_plan() {
         },
         Some(review),
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-a".into(),
             copy: Some(true),
             preserve_dolby_vision: Some(true),
@@ -1336,6 +1351,7 @@ async fn a_reviews_notes_reach_the_resolved_plan() {
 #[test]
 fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         copy: Some(true),
         // The client asks for the opposite of everything the review says.
@@ -1360,6 +1376,7 @@ fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
     // conversion is not a wire field, so no combination of body values can
     // produce it — which is what makes the assignment below the only one.
     let eager = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         copy: Some(true),
         preserve_dolby_vision: Some(true),
@@ -1410,6 +1427,7 @@ fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
     // A transcode request has no Dolby Vision fields to carry, and must
     // still take the notes and the HDR10 answer.
     let mut transcode = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         height: Some(1080),
         ..bare_create()
@@ -1561,6 +1579,7 @@ fn a_client_that_names_profile_7_is_handed_the_dual_layer_as_copied() {
 
     // The review is what the copy reads, and no body can claim it.
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         copy: Some(true),
         preserve_dolby_vision: Some(true),
@@ -2039,6 +2058,7 @@ fn sub(codec: &str, language: &str, title: &str, default: bool, forced: bool) ->
 #[test]
 fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
     let request = CreateSession {
+            processed_upgrade: None,
         source_telemetry: None,
         intent: None,
         control_sequence: None,
@@ -2074,6 +2094,7 @@ fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
 #[test]
 fn bitmap_fallback_still_carries_an_explicit_burn_request() {
     let request = CreateSession {
+            processed_upgrade: None,
         source_telemetry: None,
         intent: None,
         control_sequence: None,
@@ -6017,6 +6038,7 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
             .settings
             .insert(keys::DV_CONVERT.into(), "1".into());
         let body = || CreateSession {
+            processed_upgrade: None,
             playback_id: "real-ingress-p81".into(),
             copy: Some(true),
             preserve_dolby_vision: Some(true),
@@ -6145,6 +6167,7 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
             let mut node = capable_node();
             node.dolby_vision_convert = conversion;
             let body = CreateSession {
+                processed_upgrade: None,
                 copy: Some(copy),
                 caps: Some(current_caps.clone()),
                 ..body()
@@ -6262,6 +6285,7 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
                 )
             };
             let mut body = CreateSession {
+                processed_upgrade: None,
                 playback_id: "ordinary-copy-audio".into(),
                 copy: Some(true),
                 aac: raw_aac,
@@ -6440,6 +6464,7 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
     );
     for aac in [None, Some(false), Some(true)] {
         let body = CreateSession {
+            processed_upgrade: None,
             copy: Some(true),
             aac,
             ..bare_create()
@@ -6455,6 +6480,74 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
             aac == Some(true)
         );
     }
+}
+
+/// Caps that name no audio sinks judge the copy's selected track: an allowed
+/// codec keeps the client's ask, a codec the caps or the copy's MP4 cannot take
+/// converts, a missing selection maps nothing and converts nothing, and a claim
+/// or a Transcode keeps its own resolution. The quality catalog's copy contract
+/// names the same audio as the built request every time.
+#[test]
+fn claimless_copy_audio_converts_what_the_caps_or_copy_mp4_cannot_take() {
+    use crate::transcode::SessionKind;
+    let stream = |index, codec: &str, channels| plurx_core::domain::AudioStream {
+        index, codec: codec.into(), channels: Some(channels), sample_rate: Some(48_000),
+        channel_layout: None, language: None, title: None, default: index == 1,
+    };
+    let mut file = dolby_vision_p7_file();
+    file.audio_streams = vec![stream(1, "aac", 2), stream(3, "truehd", 6), stream(5, "eac3", 6)];
+    let caps = |audio: &str| caps_v2(&format!(
+        r#"{{"v":2,"video":[{{"codec":"hevc","present":["hdr10"]}}],"audio":{audio},"transports":["hls"]}}"#
+    ));
+    for (audio, decoders, aac, expected) in [
+        (None, r#"["aac"]"#, None, false),              // allowed first track
+        (Some(1), r#"["aac"]"#, Some(true), true),      // an ask is kept
+        (Some(5), r#"["aac"]"#, None, true),            // decoder list refuses
+        (Some(5), r#"["aac","eac3"]"#, Some(false), false), // passthrough
+        (Some(3), r#"["aac","truehd"]"#, None, true),   // copy MP4 refuses
+        (Some(9), r#"["aac"]"#, None, false),           // selects no track
+    ] {
+        let caps = caps(decoders);
+        let body = CreateSession {
+            processed_upgrade: None, copy: Some(true), aac, audio, ..bare_create() };
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert!(query.audio_claim.is_none());
+        let mut request = body.into_request(file.id, 2160);
+        reconcile_request_audio(Some(&file), &mut request);
+        reconcile_claimless_copy_audio(
+            Some(&file),
+            Some(&plurx_core::playback::DeviceProfile::from_caps_v2(&caps)),
+            &mut request,
+        );
+        let SessionKind::Copy { aac: built, .. } = request.kind else {
+            panic!("a Copy request stays Copy");
+        };
+        assert_eq!(built, expected, "track {audio:?} with {decoders}");
+        assert_eq!(
+            query.copy_contract.expect("Copy contract").0,
+            built,
+            "the catalog names the audio the copy runs: track {audio:?} with {decoders}"
+        );
+    }
+    // A claim resolves the full delivery; the claimless rule never overrides it.
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]}"#);
+    let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
+    let body = CreateSession {
+        processed_upgrade: None, copy: Some(true), aac: Some(false), audio: Some(5), ..bare_create() };
+    let mut request = body.into_request(file.id, 2160);
+    request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+    assert!(request.audio_claim.is_some());
+    let before = request.kind;
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before, "a claim is left to reconcile_request_audio");
+    // A Transcode has no copied audio to judge.
+    let body = CreateSession { processed_upgrade: None, audio: Some(3), ..bare_create() };
+    let mut request = body.into_request(file.id, 1080);
+    let before = request.kind;
+    assert!(matches!(before, SessionKind::Transcode { .. }));
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before);
 }
 
 /// Compare actual emitted IDs across decision discovery (no retained Copy
@@ -6581,6 +6674,7 @@ async fn ordinary_decision_and_create_catalogs_share_selected_audio_identity() {
             item_title: None,
         };
         let mut body = CreateSession {
+            processed_upgrade: None,
             copy: Some(true),
             audio: selected,
             audio_offset_ms: Some(offset),
@@ -6833,6 +6927,7 @@ async fn required_legacy_auto_discovery_reports_overflow_but_copy_and_manual_sur
         (true, true, None, StatusCode::OK),
     ] {
         let body = CreateSession {
+            processed_upgrade: None,
             playback_id: "legacy-catalog-contract".into(),
             caps: Some(caps.clone()),
             quality_auto: Some(auto),
@@ -7190,6 +7285,7 @@ async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate(
         },
         None,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "ordinary-auto".into(),
             quality_auto: Some(true),
             copy: Some(false),
@@ -7790,6 +7886,7 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
             },
             None,
             CreateSession {
+                processed_upgrade: None,
                 playback_id: "auto-carrier".into(),
                 quality_auto: Some(true),
                 copy,

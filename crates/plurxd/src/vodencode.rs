@@ -189,8 +189,7 @@ pub(crate) fn try_admit_frozen_bundle(
 /// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
 #[derive(Default)]
 pub(crate) struct ProcessedTrialAdmission {
-    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-    claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
+    _claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
     needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
 }
 
@@ -201,7 +200,7 @@ tokio::task_local! {
 impl ProcessedTrialAdmission {
     pub(crate) fn with_claim(claim: Arc<crate::vodserve::TrialClaim>) -> Self {
         Self {
-            claim: std::sync::Mutex::new(Some(claim)),
+            _claim: std::sync::Mutex::new(Some(claim)),
             needed: std::sync::Mutex::new(None),
         }
     }
@@ -218,7 +217,7 @@ impl ProcessedTrialAdmission {
 
     #[cfg(any(target_os = "linux", test))]
     fn claim(&self) -> Option<Arc<crate::vodserve::TrialClaim>> {
-        self.claim.lock().expect("trial admission").clone()
+        self._claim.lock().expect("trial admission").clone()
     }
 }
 

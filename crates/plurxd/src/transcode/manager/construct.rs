@@ -180,6 +180,7 @@ impl TranscodeManager {
             dv_strippable: false,
             dv_convertible: false,
             dovi_reshape: false,
+            dovi_reshape_hardware: Vec::new(),
             dovi_passthrough: false,
             dovi_passthrough_qsv: false,
             hdr10_passthrough: false,
@@ -281,6 +282,14 @@ impl TranscodeManager {
 
     pub fn with_dovi_reshape(mut self, dovi_reshape: bool) -> Self {
         self.dovi_reshape = dovi_reshape;
+        self
+    }
+
+    pub fn with_dovi_reshape_hardware(
+        mut self,
+        proved: Vec<plurx_core::transcode::Encoder>,
+    ) -> Self {
+        self.dovi_reshape_hardware = proved;
         self
     }
 

@@ -492,7 +492,7 @@ extension SharedPlaybackPlan {
         try subject.validate()
         guard request.presentation == "vod", request.intent == nil, request.previousSessionId == nil,
               request.controlSequence == nil, request.reopenReason == nil,
-              request.preserveDolbyVision != true, request.caps == predecessor.caps,
+              request.caps == predecessor.caps,
               request.playbackId == predecessor.request.playbackId, subject.context == predecessor.subject.context
         else { throw APIError.transport("This Shared successor does not match its player.") }
         self.subject = subject; decision = predecessor.decision; caps = predecessor.caps; self.request = request

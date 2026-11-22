@@ -193,7 +193,18 @@ async fn assert_matches_local(
             )
             .await;
             let label = format!("{method} {values:?} if_range={if_range} h2={h2}");
-            assert_eq!(source.status(), local.status(), "{label}");
+            let source_status = source.status();
+            let local_status = local.status();
+            if source_status != local_status {
+                let bytes = axum::body::to_bytes(source.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .expect("bounded Source refusal");
+                panic!(
+                    "{label}: Source status {source_status}, Local status {local_status}; Source refusal: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            assert_eq!(source_status, local_status, "{label}");
             for name in [
                 header::CONTENT_TYPE,
                 header::ACCEPT_RANGES,
