@@ -638,7 +638,17 @@ impl CreateSession {
             audio_delivery: None,
             copy_contract: copy_scope.map(|(preserve, convert)| {
                 (
-                    copy_audio.map_or(self.aac == Some(true), |delivery| delivery.transcodes()),
+                    copy_audio.map_or_else(
+                        || {
+                            claimless_copy_converts_audio(
+                                source,
+                                &plurx_core::playback::DeviceProfile::from_caps_v2(caps),
+                                self.audio,
+                                self.aac == Some(true),
+                            )
+                        },
+                        |delivery| delivery.transcodes(),
+                    ),
                     preserve,
                     convert,
                 )
@@ -991,6 +1001,56 @@ pub(crate) fn reconcile_request_audio(
             request.audio_delivery = Some(delivery);
         }
     }
+}
+
+/// Whether a copy for caps that name no audio sinks converts its audio. With
+/// no claim for [`reconcile_request_audio`] to resolve, the client's `aac` ask
+/// stood alone; the caps' decoder list still bounds what the copy may pass
+/// through, as the plan derived from the same caps says, and the copy's MP4
+/// output must be able to carry the track at all. Either refusal converts.
+/// This only raises the conversion; a client may always ask for it. The
+/// quality catalog's copy contract and the built request both answer here, so
+/// the candidate a selection names is the recipe the copy runs.
+pub(crate) fn claimless_copy_converts_audio(
+    source: &MediaFile,
+    caps: &plurx_core::playback::DeviceProfile,
+    audio_index: Option<i64>,
+    asked: bool,
+) -> bool {
+    // The track the copy's `-map 0:a:N?` takes: the selected one, else the first.
+    let selected = audio_index.map_or_else(
+        || source.audio_streams.first(),
+        |index| {
+            source
+                .audio_streams
+                .iter()
+                .find(|stream| stream.index == index)
+        },
+    );
+    asked
+        || selected.is_some_and(|stream| {
+            !caps.allows_audio_stream(stream)
+                || !plurx_core::transcode::copy_mp4_carries_audio_codec(&stream.codec)
+        })
+}
+
+/// [`claimless_copy_converts_audio`] applied to a built Copy request that has
+/// no audio claim.
+pub(crate) fn reconcile_claimless_copy_audio(
+    source: Option<&MediaFile>,
+    caps: Option<&plurx_core::playback::DeviceProfile>,
+    request: &mut crate::transcode::SessionRequest,
+) {
+    if request.audio_claim.is_some() {
+        return;
+    }
+    let (Some(file), Some(caps)) = (source, caps) else {
+        return;
+    };
+    let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind else {
+        return;
+    };
+    *aac = claimless_copy_converts_audio(file, caps, request.audio_index, *aac);
 }
 
 /// The plan for a build that sends no caps document: its echo, plus the one
@@ -2516,6 +2576,10 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
+    let caps_profile = body
+        .caps
+        .as_ref()
+        .map(plurx_core::playback::DeviceProfile::from_caps_v2);
     let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
@@ -2562,6 +2626,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
+    reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
             Some(previous) => state.transcode.refit_platform_for_session(previous).await,

@@ -3431,7 +3431,11 @@ pub fn sharing_member_guard_predicate(
 
 // A read observes the heartbeat timestamps in its own consistent snapshot and
 // rejects future timestamps against the clock sampled after that read finishes.
-// Mutations retain the exact caller-bound upper timestamp in their SQL guard.
+// A mutation binds the clock it sampled before its reads and its Raft
+// proposal, so a member heartbeat stamped after that sample can commit first.
+// That heartbeat is current, not future-dated: the SQL guard admits it for as
+// long as the write may still use its observation
+// (`SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS`), and refuses a clock further ahead.
 fn sharing_member_guard_with_freshness(
     required: SharingMemberFloor,
     members_parameter: usize,
@@ -3461,9 +3465,10 @@ fn sharing_member_guard_sql(
     let committed = format!("${members_parameter}");
     let cutoff = format!("${cutoff_parameter}");
     let stale = match upper_parameter {
-        Some(parameter) => {
-            format!("present.last_seen_at < {cutoff} OR present.last_seen_at > ${parameter}")
-        }
+        Some(parameter) => format!(
+            "present.last_seen_at < {cutoff} \
+             OR present.last_seen_at > ${parameter} + {SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS}"
+        ),
         None => format!("present.last_seen_at < {cutoff}"),
     };
     let stale = match fresh_parameter {

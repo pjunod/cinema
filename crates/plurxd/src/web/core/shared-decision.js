@@ -115,7 +115,7 @@ const SHARED_DECISION=(()=>{
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
     const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start",false,startupRemainingMs),response=engine(raw);
     if(restart?!authorized(c):!current(c))fail();
-    const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response);accepted.set(bound,c);bases.set(bound,base);
+    const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response,body);accepted.set(bound,c);bases.set(bound,base);
     if(c.watch.pending&&c.watch.pending.session_id!==bound.session_id)c.watch.pending=null;
     Object.defineProperty(response,"_sharedContext",{value:bound,enumerable:false});return response;
   }

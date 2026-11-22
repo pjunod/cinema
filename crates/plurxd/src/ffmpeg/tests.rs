@@ -2834,6 +2834,46 @@ fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
     assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
 }
 
+/// The Main10 decode probe proves the GPU decoded the clip by handing the
+/// picture to a filter that accepts only VA-API surfaces. It must never
+/// download the picture to system memory: that copy, which the renderer
+/// never makes, crashed the shipped FFmpeg in about one probe in nine, and
+/// every crash sent the node's Dolby Vision windows to software decode.
+#[test]
+fn the_main10_decode_probe_keeps_the_picture_on_the_gpu() {
+    let args: Vec<String> = super::hevc_main10_decode_probe_args(
+        "/dev/dri/renderD128",
+        std::path::Path::new("/scratch/main10.mkv"),
+    )
+    .into_iter()
+    .map(|arg| arg.into_string().expect("utf-8 argument"))
+    .collect();
+    let input = args.iter().position(|arg| arg == "-i").expect("input");
+    assert_eq!(args[input + 1], "/scratch/main10.mkv");
+    for pair in [
+        ["-hwaccel", "vaapi"],
+        ["-hwaccel_device", "/dev/dri/renderD128"],
+        ["-hwaccel_output_format", "vaapi"],
+    ] {
+        let at = args.iter().position(|arg| arg == pair[0]).expect(pair[0]);
+        assert!(
+            at < input && args[at + 1] == pair[1],
+            "{pair:?} in {args:?}"
+        );
+    }
+    let filter = args.iter().position(|arg| arg == "-vf").expect("filter");
+    assert!(filter > input, "{args:?}");
+    // A real VA-API render: a same-size, same-format scale_vaapi is a
+    // passthrough that never waits for the decoded surface.
+    assert_eq!(args[filter + 1], "scale_vaapi=w=iw/2:h=ih/2:format=p010");
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.contains("hwdownload") || arg.contains("hwmap")),
+        "the probe copies the picture off the GPU: {args:?}"
+    );
+}
+
 #[tokio::test]
 async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_arguments() {
     let nonce = "0123456789abcdef0123456789ABCDEF";
