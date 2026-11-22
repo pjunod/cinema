@@ -740,6 +740,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_title_readiness",
     "dv_title_demands",
     "dv_title_demands_through",
+    "dv_title_demand_for_file",
     "bind_dv_title_demand",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
@@ -21835,12 +21836,16 @@ fn contract_inventory_matches_every_store_method() {
     // published with chapter evidence (`timeline_annotation_set` is now a
     // provided method over it). Named in `MEDIA_METHODS` and
     // `TIMELINE_ANNOTATION_METHODS`; no new trait or supertrait of `Store`.
-    // 634 -> 636: source-bound token proofs (2c2557edf) add
+    // 634 -> 635: `dv_title_demand_for_file` reads one recent native FEL
+    // title's maintenance demand without moving the title worker's cursor.
+    // Named in BACKGROUND_JOB_METHODS and exercised on both backends by
+    // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
+    // 635 -> 637: source-bound token proofs (2c2557edf) add
     // `put_auth_token_policy` to SETTINGS_METHODS and
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 636, "review the Store method count");
+    assert_eq!(declared.len(), 637, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
