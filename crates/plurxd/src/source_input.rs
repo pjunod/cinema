@@ -270,6 +270,8 @@ struct ByteBudget {
     operation_used: u64,
     grant: Option<SourceServiceGrant>,
     used: u64,
+    /// Bytes issued from the observer's startup burst; never refunded.
+    startup_used: u64,
     window: ReadWindow,
 }
 #[derive(Default)]
@@ -986,6 +988,15 @@ async fn read_source(
         return Err(std::io::Error::other("source authority lost"));
     }
     let mut paced_to_grant_expiry = false;
+    // A new transfer input reads its startup burst at source speed before the
+    // epoch grant paces it, the same burst-then-hold shape as rolling input.
+    let startup_burst_left = observer
+        .filter(|observer| !observer.rolling_policy())
+        .map_or(0, |observer| {
+            observer
+                .startup_burst_bytes()
+                .saturating_sub(budget.startup_used)
+        });
     let allowance_started_at = std::time::Instant::now();
     let allowance = if let Some(allocator) = state.purpose_budget.as_ref() {
         tokio::select! {biased;
@@ -1001,7 +1012,7 @@ async fn read_source(
                     .map_err(std::io::Error::other)?,
             );
         }
-        if !observer.rolling_policy() {
+        if !observer.rolling_policy() && startup_burst_left == 0 {
             if let Some(grant) = &budget.grant {
                 let now = crate::fragment_index_cluster::unix_ms();
                 if budget.used >= grant.foreground_bytes && now < grant.expires_at_ms {
@@ -1030,6 +1041,8 @@ async fn read_source(
         }
         if observer.rolling_policy() {
             wanted
+        } else if startup_burst_left > 0 {
+            startup_burst_left
         } else {
             budget
                 .grant
@@ -1058,7 +1071,11 @@ async fn read_source(
     // Reserve the entire issued window before handing it to a blocking
     // worker. Cancelled/short reads receive no refund and cannot reset an
     // epoch by abandoning their HTTP waiter.
-    budget.used = budget.used.saturating_add(size as u64);
+    if startup_burst_left > 0 {
+        budget.startup_used = budget.startup_used.saturating_add(size as u64);
+    } else {
+        budget.used = budget.used.saturating_add(size as u64);
+    }
     budget.operation_used = budget
         .operation_used
         .checked_add(size as u64)
@@ -1187,6 +1204,7 @@ async fn read_source(
         budget_lock_ms = budget_locked_at.duration_since(requested_at).as_millis() as u64,
         allowance_ms = allowance_ready_at.duration_since(allowance_started_at).as_millis() as u64,
         paced_to_grant_expiry,
+        startup_burst = startup_burst_left > 0,
         admission_ms = admitted_at.duration_since(allowance_ready_at).as_millis() as u64,
         read_ms = read_elapsed.as_millis() as u64,
         total_ms = requested_at.elapsed().as_millis() as u64,

@@ -1048,6 +1048,7 @@ impl Shared {
                 settings.completed_cache_bytes
             },
             materialize_budget: settings.materialize_budget,
+            source_burst_secs: settings.source_burst_secs,
             manifest: Mutex::new(manifest),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage,

@@ -716,3 +716,49 @@ async fn source_input_drop_and_cleanup_revoke_their_publication() {
         assert!(owners.source_observer(13).is_none());
     }
 }
+
+/// A VOD start must build a buffer: a transfer input reads its startup burst
+/// in full source windows before the five-second epoch grant paces it. With
+/// a 1 KiB epoch, a paced read can issue at most 1 KiB (or the control window
+/// before its first grant), so two full 4 MiB windows prove the burst served
+/// them and the capped third read proves pacing resumed after it.
+#[tokio::test]
+async fn transfer_startup_burst_reads_full_windows_before_epoch_pacing() {
+    let window = SOURCE_WINDOW_MAX;
+    let bytes = (0..3 * window)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (observer, owner) = SourceObserver::transfer_fixture(2 * window as u64);
+    let (input, _file, _budget) = input_with_observer(&bytes, window, None, Some(observer)).await;
+    let projections = owner.accept_projections();
+    let first = read_source(&input.state, 0, bytes.len() as u64).await;
+    assert_eq!(
+        first.expect("first burst read"),
+        &bytes[..SOURCE_HTTP_CHUNK]
+    );
+    assert_eq!(input.observation().source_bytes, window as u64);
+    let second = read_source(&input.state, window as u64, (bytes.len() - window) as u64)
+        .await
+        .expect("second burst read");
+    assert_eq!(second, &bytes[window..window + SOURCE_HTTP_CHUNK]);
+    assert_eq!(
+        input.observation().source_bytes,
+        2 * window as u64,
+        "the burst issues a full window although the epoch grant is 1 KiB"
+    );
+    let third = read_source(
+        &input.state,
+        2 * window as u64,
+        (bytes.len() - 2 * window) as u64,
+    )
+    .await
+    .expect("paced read");
+    assert_eq!(third, &bytes[2 * window..2 * window + 1024]);
+    assert_eq!(
+        input.observation().source_bytes,
+        2 * window as u64 + 1024,
+        "after the burst the epoch grant caps the issued window"
+    );
+    input.close_and_wait().await.expect("close source");
+    projections.abort();
+}

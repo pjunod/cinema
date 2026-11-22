@@ -536,6 +536,7 @@ fn settings() -> VodSettings {
         live_recovery: true,
         output_preparation: crate::vodserve::OutputPreparation::Off,
         output_budget_bytes: 50 << 30,
+        source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
     }
 }
 
@@ -1036,6 +1037,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         working_set_budget: 8 << 30,
         completed_cache_budget: 50 << 30,
         materialize_budget: Duration::from_secs(30),
+        source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         manifest: Mutex::new(Manifest::new(plan.clone())),
         output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
         private_storage: None,

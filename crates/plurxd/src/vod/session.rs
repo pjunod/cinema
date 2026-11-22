@@ -36,6 +36,8 @@ pub(super) struct Rendition {
     pub(super) working_set_budget: u64,
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
+    /// Seconds a generation's transfer input reads before epoch pacing.
+    pub(super) source_burst_secs: f64,
     pub(super) manifest: Mutex<Manifest>,
     pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     /// Immutable storage domain. Job release cannot turn private bytes ordinary.

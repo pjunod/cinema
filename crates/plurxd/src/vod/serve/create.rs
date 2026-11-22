@@ -3369,6 +3369,7 @@ mod principal_demand_tests {
             live_recovery: true,
             output_preparation: OutputPreparation::Off,
             output_budget_bytes: 50 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         };
         let viewer = crate::state::PlaybackViewerDemand {
             principal: PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64))

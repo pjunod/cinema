@@ -258,6 +258,7 @@ impl VodServe {
             working_set_budget: 8 << 30,
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
             manifest: Mutex::new(Manifest::new(plan.clone())),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage: None,

@@ -5388,6 +5388,11 @@ impl TranscodeManager {
                 read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
             )
             .unwrap_or(0),
+            // The same burst seconds rolling input pacing reads.
+            source_burst_secs: read(plurx_core::store::keys::HLS_BURST_SECS)
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                .unwrap_or(crate::transcode::HLS_BURST_SECS_DEFAULT),
         })
     }
 

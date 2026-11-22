@@ -3288,6 +3288,7 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
             live_recovery: true,
             output_preparation: crate::vodserve::OutputPreparation::Off,
             output_budget_bytes: 1 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         },
         crate::vodserve::VodAttribution {
             user_name: &user.username,

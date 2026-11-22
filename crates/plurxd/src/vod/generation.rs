@@ -59,6 +59,7 @@ async fn spawn_generation_with_input(
                     plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer
                 },
             )
+            .with_startup_burst(rendition.source_burst_secs)
         });
     let generation_epoch = rendition.gen_epoch.load(Relaxed);
     let resume_work = rendition.resume_preparation_for_epoch(generation_epoch);
