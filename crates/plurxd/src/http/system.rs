@@ -1073,6 +1073,11 @@ pub struct ClientLog {
     pub reason: Option<String>,
     /// Seconds of decoded video ahead of the playhead at the moment reported.
     pub runway: Option<f64>,
+    /// The playhead (`currentTime`) in seconds at the moment reported.
+    pub position: Option<f64>,
+    /// The media element's buffered ranges, `start-end` in seconds, comma
+    /// separated, at most eight.
+    pub buffered: Option<String>,
     /// Time from click to first frame, in ms (the `ttff` event).
     pub ms: Option<i64>,
     /// hls.js's bandwidth estimate, in kb/s.
@@ -2241,6 +2246,20 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     });
     if let Some(r) = runway.filter(|v| v.is_finite() && *v >= 0.0) {
         line.push_str(&format!(" runway={r:.1}s"));
+    }
+    if let Some(position) = ev.position.filter(|v| v.is_finite() && *v >= 0.0) {
+        line.push_str(&format!(" position={position:.2}s"));
+    }
+    // Digits, dots, dashes and commas only: the ranges a media element can
+    // report, never free text from the page.
+    if let Some(buffered) = ev.buffered.as_deref().filter(|ranges| {
+        !ranges.is_empty()
+            && ranges.len() <= 128
+            && ranges
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b','))
+    }) {
+        line.push_str(&format!(" buffered={buffered}"));
     }
     if let Some(b) = bandwidth.filter(|v| *v > 0) {
         line.push_str(&format!(" bw={b}kbps"));

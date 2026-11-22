@@ -6302,7 +6302,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline and cancellation. Five are test sleeps under paused time.
 # Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
 # unchanged delta over Main b6e8efe17; matcher unchanged.
-expected_occurrences = 2323
+# Source copy production meter: +2 tokio::time constructors in the growing
+# copy's production loop (a tokio::time::sleep bounding the one stall report in
+# copyrange::meter::await_reporting_stall, and the observation Instants). They
+# only time and report; no wait, deadline or retry changes. No new task.
+# Cluster remainder + Main c516dd678 union: Main's count plus the remainder's
+# unchanged delta over Main 794ee0fd7; matcher unchanged.
+expected_occurrences = 2325
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -6330,7 +6336,10 @@ pattern = "use\\s+tokio::time"
 # PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
 # +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
 # clock and its handoff tests, each on its owning task (reviewed in #1645).
-expected_occurrences = 8
+# Source copy production meter and receiver relay log: +2 `use tokio::time::
+# Instant` imports (copyrange::meter, shared_receiver_playback::relay_log) so
+# their measurements follow tokio's test clock. Observation only.
+expected_occurrences = 10
 
 # Static fixture lifecycle follow-up (2026-11-17): gap-fill adds two real
 # children (FFmpeg builder and FFprobe) joined by testfixtures::run; TempDir
@@ -7657,7 +7666,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # test. No process launch.
 # Cluster remainder + Main b6e8efe17 union: Main's count plus the remainder's
 # unchanged delta over Main 46619fabd; matcher unchanged.
-expected_occurrences = 986
+# Shared private history guard: +1 `response.status()` read of an HTTP reply
+# in sharing_private_history_answers_pass_the_receiver_content_guard. No
+# process launch.
+# Cluster remainder + Main c516dd678 union: Main's count plus the remainder's
+# unchanged delta over Main 794ee0fd7; matcher unchanged.
+expected_occurrences = 987
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

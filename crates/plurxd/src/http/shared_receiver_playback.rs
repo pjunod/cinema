@@ -2805,7 +2805,18 @@ pub(super) async fn receiver_media_actor(
         Ok(guard) => guard,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let opened = match actor.open_source_resource(&state, &resource).await {
+    let relay_started = tokio::time::Instant::now();
+    let range = request
+        .headers()
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let opened = match actor
+        .open_source_resource(&state, &resource)
+        .await
+        .inspect_err(|error| {
+            relay_log::refused(suffix, range.as_deref(), relay_started.elapsed(), error);
+        }) {
         Ok(opened) => opened,
         Err(ReceiverStartError::Capacity) => return resource_busy_response(1).into_response(),
         // Neither ends the session: the owner and the connection monitors
@@ -2842,8 +2853,16 @@ pub(super) async fn receiver_media_actor(
     };
     let subtitle_complete = opened.subtitle_complete;
     let subtitle_absent = opened.subtitle_absent;
+    let mut relayed = relay_log::Relayed::new(
+        suffix,
+        range,
+        if subtitle_absent { 204 } else { 200 },
+        opened.length,
+        relay_started,
+    );
     let stream = opened.body.into_data_stream().map(move |frame| {
         let _writer_ownership = &guard;
+        relayed.frame(&frame);
         frame
     });
     let mut builder = axum::http::Response::builder()
@@ -4117,5 +4136,182 @@ mod outage_policy_tests {
             observation.matches("SharingObservation::of_term(").count(),
             3
         );
+    }
+}
+
+/// One line per HLS resource B relays from the Source: its name (never its
+/// query), status, bytes sent against the declared length, how long it took,
+/// any `Range` header, and whether the body completed. Debug normally; info
+/// when the body did not complete or took longer than one advertised target
+/// duration, which is when a player can starve on it.
+pub(crate) mod relay_log {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    fn slow() -> Duration {
+        Duration::from_secs(u64::from(
+            plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
+        ))
+    }
+
+    pub(crate) fn refused(
+        resource: &str,
+        range: Option<&str>,
+        elapsed: Duration,
+        error: &super::ReceiverStartError,
+    ) {
+        tracing::info!(
+            target: "plurx::sharing",
+            resource,
+            range = range.unwrap_or(""),
+            error_class = ?error,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "receiver HLS resource refused"
+        );
+    }
+
+    pub(crate) struct Relayed {
+        resource: String,
+        range: Option<String>,
+        status: u16,
+        length: u64,
+        sent: u64,
+        started: Instant,
+        complete: bool,
+        failed: bool,
+    }
+    impl Relayed {
+        pub(crate) fn new(
+            resource: &str,
+            range: Option<String>,
+            status: u16,
+            length: u64,
+            started: Instant,
+        ) -> Self {
+            Self {
+                resource: resource.to_owned(),
+                range,
+                status,
+                length,
+                sent: 0,
+                started,
+                complete: length == 0,
+                failed: false,
+            }
+        }
+        pub(crate) fn frame<E>(&mut self, frame: &Result<bytes::Bytes, E>) {
+            match frame {
+                Ok(bytes) => {
+                    self.sent = self.sent.saturating_add(bytes.len() as u64);
+                    self.complete = self.sent >= self.length;
+                }
+                Err(_) => self.failed = true,
+            }
+        }
+    }
+    impl Drop for Relayed {
+        fn drop(&mut self) {
+            let elapsed = self.started.elapsed();
+            let complete = self.complete && !self.failed;
+            macro_rules! line {
+                ($level:ident) => {
+                    tracing::$level!(
+                        target: "plurx::sharing",
+                        resource = %self.resource,
+                        status = self.status,
+                        bytes = self.sent,
+                        length = self.length,
+                        complete,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        range = self.range.as_deref().unwrap_or(""),
+                        "receiver HLS resource relayed"
+                    )
+                };
+            }
+            if !complete || elapsed > slow() {
+                line!(info);
+            } else {
+                line!(debug);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        fn capture() -> (Arc<crate::logbuf::LogBuffer>, impl Sized) {
+            use tracing_subscriber::prelude::*;
+            let logs = Arc::new(crate::logbuf::LogBuffer::new(16));
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs))),
+            );
+            (logs, guard)
+        }
+
+        /// A segment whose body stops short is reported at info with what was
+        /// sent; a whole, prompt one only at debug. No query value is logged.
+        #[tokio::test(start_paused = true)]
+        async fn relayed_resources_report_bytes_completion_and_slowness() {
+            let (logs, _guard) = capture();
+            let ok: Result<bytes::Bytes, std::io::Error> =
+                Ok(bytes::Bytes::from_static(b"0123456789"));
+            let mut whole = Relayed::new("seg00001.m4s", None, 200, 10, Instant::now());
+            whole.frame(&ok);
+            drop(whole);
+            let mut short = Relayed::new(
+                "seg00002.m4s",
+                Some("bytes=0-".into()),
+                200,
+                40,
+                Instant::now(),
+            );
+            short.frame(&ok);
+            drop(short);
+            let started = Instant::now();
+            let mut slow = Relayed::new("seg00003.m4s", None, 200, 10, started);
+            slow.frame(&ok);
+            tokio::time::advance(Duration::from_secs(17)).await;
+            drop(slow);
+            let lines: Vec<String> = logs
+                .tail("debug", 16)
+                .into_iter()
+                .map(|entry| format!("{} {}", entry.level, entry.message))
+                .collect();
+            assert_eq!(lines.len(), 3, "{lines:?}");
+            assert!(
+                lines[0].starts_with("DEBUG receiver HLS resource relayed"),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("resource=seg00001.m4s") && lines[0].contains("complete=true")
+            );
+            assert!(
+                lines[1].starts_with("INFO receiver HLS resource relayed"),
+                "{}",
+                lines[1]
+            );
+            for field in [
+                "resource=seg00002.m4s",
+                "bytes=10",
+                "length=40",
+                "complete=false",
+                "range=\"bytes=0-\"",
+            ] {
+                assert!(lines[1].contains(field), "{field} in {}", lines[1]);
+            }
+            assert!(
+                lines[2].starts_with("INFO receiver HLS resource relayed"),
+                "{}",
+                lines[2]
+            );
+            assert!(
+                lines[2].contains("complete=true") && lines[2].contains("elapsed_ms=17000"),
+                "{}",
+                lines[2]
+            );
+        }
     }
 }

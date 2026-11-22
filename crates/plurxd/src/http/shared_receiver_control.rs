@@ -177,14 +177,25 @@ impl ReceiverStartActor {
         request: &ControlRequestV1,
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<SharedControlAnswer, ReceiverStartError> {
-        let (_, _, received) = self.current_delivery_attachment(state).await?;
+        // The Source-facing steps below that answer `control_unavailable`
+        // name themselves here, as Start and status already do.
+        let refused = |stage: &'static str| {
+            move |error: &ReceiverStartError| {
+                tracing::warn!(target: "plurx::sharing", operation = "control", stage, error_class = ?error, "receiver Source exchange refused");
+            }
+        };
+        let (_, _, received) = self
+            .current_delivery_attachment(state)
+            .await
+            .inspect_err(refused("attachment"))?;
         let known = received
             .lineage()
             .map_err(|_| ReceiverStartError::Unresolved)?;
         let forwarded = translate_to_source(request, &received)?;
         let mut peer = self
             .verified_source_peer(state, &received, lifetime)
-            .await?;
+            .await
+            .inspect_err(refused("verified_peer"))?;
         let receipt = peer
             .file_control(
                 &received.credential,
@@ -194,7 +205,9 @@ impl ReceiverStartActor {
                 &forwarded,
             )
             .await;
-        self.current_delivery_attachment(state).await?;
+        self.current_delivery_attachment(state)
+            .await
+            .inspect_err(refused("attachment_recheck"))?;
         let receipt = match receipt {
             Ok(receipt) => receipt,
             Err(crate::sharing_client::PeerError::Rejected(status))
@@ -210,7 +223,8 @@ impl ReceiverStartActor {
                     retry_after_ms: None,
                 }));
             }
-            Err(_) => {
+            Err(error) => {
+                super::log_source_peer_failure("control", "control_exchange", error);
                 return Ok(SharedControlAnswer::Refused(SharedControlRefusal {
                     code: SharedControlRefusalCode::Unavailable,
                     retry_after_ms: Some(500),
@@ -222,7 +236,22 @@ impl ReceiverStartActor {
                 rebind_to_receiver(response, tuple, request)
                     .ok_or(ReceiverStartError::Unresolved)?,
             )),
-            Err(refusal) => SharedControlAnswer::Refused(refusal),
+            Err(refusal) => {
+                // Fences and rate limits are the protocol working; the rest
+                // say the Source could not serve control at all.
+                if matches!(
+                    refusal.code,
+                    SharedControlRefusalCode::StaleControl
+                        | SharedControlRefusalCode::OwnerChanged
+                        | SharedControlRefusalCode::RateLimited
+                        | SharedControlRefusalCode::SessionEnded
+                ) {
+                    tracing::debug!(target: "plurx::sharing", operation = "control", stage = "source_refusal", code = ?refusal.code, "receiver Source exchange refused");
+                } else {
+                    tracing::warn!(target: "plurx::sharing", operation = "control", stage = "source_refusal", code = ?refusal.code, "receiver Source exchange refused");
+                }
+                SharedControlAnswer::Refused(refusal)
+            }
         })
     }
 }
