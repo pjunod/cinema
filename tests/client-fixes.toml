@@ -8948,3 +8948,12 @@ source = "clients/linux-player/plurx_player/badges.py"
 source_anchor = "def current_report(session):"
 test = "clients/linux-player/tests/test_badges.py"
 test_anchor = "def test_failed_control_exchange_keeps_the_current_report(self):"
+
+# A dotless changelog mail host stopped every package verification at lintian.
+[[fixes]]
+id = "linux-player.changelog-mail-host-lintian"
+commits = ["ea87b71612be8b23abe5d44d194e5995e3755083"]
+source = "clients/linux-player/debian/changelog"
+source_anchor = "<codex-agent@plurx.invalid>"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_changelog_trailer_names_a_mail_host_lintian_accepts(self):"
