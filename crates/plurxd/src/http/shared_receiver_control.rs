@@ -969,6 +969,7 @@ mod tests {
                 owner_epoch: source_epoch,
             },
             effective_selection: pc::EffectiveSelection {
+                audio_alternates: false,
                 candidate_id: None,
                 quality_auto: true,
                 height: 720,

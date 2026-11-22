@@ -266,6 +266,11 @@ pub struct CreateSession {
     pub copy: Option<bool>,
     /// With `copy`: re-encode the audio the client can't take.
     pub aac: Option<bool>,
+    /// With `copy`: this client selects soundtracks itself (hls.js alternate
+    /// audio). The server may answer with one shared video-only rendition and
+    /// every soundtrack as an alternate audio rendition; the session response
+    /// says which presentation it chose. Absent keeps the muxed copy.
+    pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
     pub preserve_dolby_vision: Option<bool>,
@@ -711,6 +716,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -6567,6 +6573,11 @@ impl PreparedSourcePlayback {
     pub(crate) fn processed_upgrade_ask(&self) -> &crate::transcode::ProcessedUpgradeAsk {
         &self.processed_upgrade_ask
     }
+    /// The rung this plan resolved; a copy's output is still the source's.
+    #[cfg(test)]
+    pub(crate) fn resolved_height(&self) -> i64 {
+        self.resolved.height
+    }
     pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
         &self.resolved.request
     }
@@ -6632,13 +6643,16 @@ impl PreparedSourcePlayback {
     /// against the exact prepared recipe and client. This does not certify
     /// the whole elementary stream; the common kernel/Trace check each range.
     pub(crate) fn validate_copy_head(&self, init: &plurx_core::fmp4::Init) -> Result<(), ApiError> {
-        let refused = || {
-            ApiError::typed(
-                StatusCode::CONFLICT,
-                "vod_source_rescan_required",
-                "The held Source copy head differs from its prepared playback facts",
-            )
-        };
+        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init)
+            .map_err(|_| copy_head_rescan_required())?;
+        self.validate_copy_head_facts(&facts)
+    }
+    /// [`Self::validate_copy_head`] over the head's parsed sample-entry facts.
+    pub(crate) fn validate_copy_head_facts(
+        &self,
+        facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
+    ) -> Result<(), ApiError> {
+        let refused = copy_head_rescan_required;
         let crate::transcode::SessionKind::Copy {
             preserve_dolby_vision,
             convert_dolby_vision,
@@ -6647,13 +6661,11 @@ impl PreparedSourcePlayback {
         else {
             return Err(refused());
         };
-        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init).map_err(|_| refused())?;
         validate_prepared_copy_head(
             &self.file,
-            self.resolved.height,
             &self.copy_head_caps,
             (preserve_dolby_vision, convert_dolby_vision),
-            &facts,
+            facts,
         )
         .map_err(|()| refused())
     }
@@ -6699,6 +6711,8 @@ impl PreparedSourcePlayback {
             || info.start_seconds < 0.0
             || info.duration_ms.is_some_and(|duration| duration < 0)
             || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
+                && !(self.resolved.request.split_audio
+                    && info.playlist_url == format!("/api/v1/hls/{}/master.m3u8", info.session_id))
         {
             return Err(refused());
         }
@@ -7137,9 +7151,16 @@ pub(crate) async fn prepare_source_playback<
 /// transfer is accepted as is. A `dvh1`/`dvhe` sample entry is admitted by
 /// that same Dolby Vision claim: `hls_hevc_sample_entries` can only name the
 /// plain `hvc1`/`hev1` entries.
+fn copy_head_rescan_required() -> ApiError {
+    ApiError::typed(
+        StatusCode::CONFLICT,
+        "vod_source_rescan_required",
+        "The held Source copy head differs from its prepared playback facts",
+    )
+}
+
 fn validate_prepared_copy_head(
     file: &MediaFile,
-    resolved_height: i64,
     caps: &plurx_core::playback::DeviceCaps,
     (preserve_dolby_vision, convert_dolby_vision): (bool, bool),
     facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
@@ -7172,11 +7193,16 @@ fn validate_prepared_copy_head(
     let profile_matches = normalized_profile.as_deref().is_some_and(|value| {
         value == profile || (profile == "baseline" && value == "constrainedbaseline")
     });
+    // A copy delivers the source's own pictures, and the Start reports the
+    // scanned source height as its output, so the geometry checked here is
+    // the source's. The plan's resolved height is a rung (an explicit ask
+    // snapped, or Auto under this node's transcode ceiling, which a Dolby
+    // Vision reshape keeps below 2160) that a processed upgrade encodes to;
+    // it never names a copy's geometry and is not an input here.
     if file.video_codec.as_deref() != Some(codec)
         || !profile_matches
         || file.width != Some(i64::from(facts.width))
         || file.height != Some(i64::from(facts.height))
-        || resolved_height != i64::from(facts.height)
         || file.bit_depth != Some(i64::from(facts.bit_depth))
         || facts.chroma_format_idc != 1
         || facts.width == 0
@@ -7474,28 +7500,22 @@ mod source_copy_head_tests {
         let source = file();
         let caps = caps();
         let good = facts();
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &good).is_ok());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_ok());
         let mut changed = good.clone();
         changed.width = 1280;
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
-        );
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
+        let mut changed = good.clone();
+        changed.height = 720;
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.profile_idc = 77;
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
-        );
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.bit_depth = 10;
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
-        );
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.color = Some((9, 16, 9, false));
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
-        );
-        assert!(validate_prepared_copy_head(&source, 720, &caps, (false, false), &good).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
     }
     /// Production 2026-11-22: an HDTV-720p H.264 ("Kiss Kiss, Cam Cam", M6
     /// file 3057) declares a BT.709 matrix but transfer and primaries 2
@@ -7508,30 +7528,21 @@ mod source_copy_head_tests {
         let caps = caps();
         let mut unspecified = facts();
         unspecified.color = Some((2, 2, 1, false));
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &unspecified).is_ok()
-        );
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &unspecified).is_ok());
         // The real copy of that file writes no `colr` box at all.
         let mut absent = facts();
         absent.color = None;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &absent).is_ok());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &absent).is_ok());
         // A reserved or unknown code still makes no admissible claim.
         let mut reserved = facts();
         reserved.color = Some((1, 3, 1, false));
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &reserved).is_err()
-        );
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &reserved).is_err());
         // An SDR head is not admitted to an HDR-only decoder claim.
         let mut hdr_only = caps.clone();
         hdr_only.video[0].present = vec![plurx_core::playback::Transfer::Pq];
-        assert!(validate_prepared_copy_head(
-            &source,
-            1080,
-            &hdr_only,
-            (false, false),
-            &unspecified
-        )
-        .is_err());
+        assert!(
+            validate_prepared_copy_head(&source, &hdr_only, (false, false), &unspecified).is_err()
+        );
     }
     #[test]
     fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {
@@ -7539,10 +7550,10 @@ mod source_copy_head_tests {
         let good = facts();
         let mut caps = caps();
         caps.video[0].max_width = Some(1280);
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &good).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_err());
         caps.video[0].max_width = Some(1920);
         caps.video[0].profiles = vec!["main".into()];
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &good).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_err());
     }
 
     /// A 4K HEVC Main10 Dolby Vision source with the given profile, base
@@ -7595,29 +7606,26 @@ mod source_copy_head_tests {
         let source = dolby_vision_file(8, 1, "Dolby Vision · Profile 8.1 (HDR10-compatible)");
         let head = dolby_vision_head(*b"hvc1", 16);
         let caps = dolby_vision_caps(&[8]);
-        assert!(validate_prepared_copy_head(&source, 2160, &caps, (true, false), &head).is_ok());
+        assert!(validate_prepared_copy_head(&source, &caps, (true, false), &head).is_ok());
         // An HLG-compatible 8.4 carries an HLG base.
         let hlg = dolby_vision_file(8, 4, "Dolby Vision · Profile 8.4 (HLG-compatible)");
         assert!(validate_prepared_copy_head(
             &hlg,
-            2160,
             &caps,
             (true, false),
             &dolby_vision_head(*b"hvc1", 18)
         )
         .is_ok());
         assert!(
-            validate_prepared_copy_head(&hlg, 2160, &caps, (true, false), &head).is_err(),
+            validate_prepared_copy_head(&hlg, &caps, (true, false), &head).is_err(),
             "a PQ head is not the HLG base the scan recorded"
         );
         // The strip of the same source is an HDR10 head with no record.
         let mut stripped = head.clone();
         stripped.dolby_vision_config = false;
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &stripped).is_ok());
         assert!(
-            validate_prepared_copy_head(&source, 2160, &caps, (false, false), &stripped).is_ok()
-        );
-        assert!(
-            validate_prepared_copy_head(&source, 2160, &caps, (true, false), &stripped).is_err(),
+            validate_prepared_copy_head(&source, &caps, (true, false), &stripped).is_err(),
             "a preserve must carry the Dolby Vision record"
         );
     }
@@ -7629,7 +7637,6 @@ mod source_copy_head_tests {
         // takes it; one that enumerates only 7 does not.
         assert!(validate_prepared_copy_head(
             &source,
-            2160,
             &dolby_vision_caps(&[8]),
             (true, true),
             &head
@@ -7637,7 +7644,6 @@ mod source_copy_head_tests {
         .is_ok());
         assert!(validate_prepared_copy_head(
             &source,
-            2160,
             &dolby_vision_caps(&[7]),
             (true, true),
             &head
@@ -7653,7 +7659,6 @@ mod source_copy_head_tests {
             assert!(
                 validate_prepared_copy_head(
                     &source,
-                    2160,
                     &caps,
                     (true, false),
                     &dolby_vision_head(*b"dvh1", transfer)
@@ -7672,9 +7677,9 @@ mod source_copy_head_tests {
         };
         let mut plain = dolby_vision_head(*b"dvh1", 16);
         plain.dolby_vision_config = false;
-        assert!(validate_prepared_copy_head(&hdr10, 2160, &caps, (false, false), &plain).is_err());
+        assert!(validate_prepared_copy_head(&hdr10, &caps, (false, false), &plain).is_err());
         plain.sample_entry = *b"hvc1";
-        assert!(validate_prepared_copy_head(&hdr10, 2160, &caps, (false, false), &plain).is_ok());
+        assert!(validate_prepared_copy_head(&hdr10, &caps, (false, false), &plain).is_ok());
     }
     #[test]
     fn source_copy_head_requires_a_known_base_for_every_profile_but_5() {
@@ -7690,7 +7695,6 @@ mod source_copy_head_tests {
                 assert!(
                     validate_prepared_copy_head(
                         &source,
-                        2160,
                         &caps,
                         (true, false),
                         &dolby_vision_head(*b"hvc1", transfer)
@@ -7708,7 +7712,6 @@ mod source_copy_head_tests {
         for caps in [dolby_vision_caps(&[]), dolby_vision_caps(&[7])] {
             assert!(validate_prepared_copy_head(
                 &profile8,
-                2160,
                 &caps,
                 (true, false),
                 &dolby_vision_head(*b"hvc1", 16)
@@ -7716,7 +7719,6 @@ mod source_copy_head_tests {
             .is_err());
             assert!(validate_prepared_copy_head(
                 &profile5,
-                2160,
                 &caps,
                 (true, false),
                 &dolby_vision_head(*b"dvh1", 16)

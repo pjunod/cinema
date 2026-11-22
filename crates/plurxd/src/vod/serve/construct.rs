@@ -232,6 +232,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                audio_excluded: false,
                 dv_refit_gain: None,
                 source_telemetry: false,
                 retained_logical: None,
@@ -322,6 +323,7 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                requested_audio_index: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,

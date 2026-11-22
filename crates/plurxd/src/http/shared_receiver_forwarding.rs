@@ -542,12 +542,21 @@ pub(super) async fn relay_public(
             };
             ReceiverForwardOperation::Control { canonical_body }
         }
-        (_, "GET", query) => ReceiverForwardOperation::Resource {
-            relative: match query {
-                Some(query) => format!("{suffix}?{query}"),
-                None => suffix.to_owned(),
-            },
-        },
+        (_, "GET", query) => {
+            // The same public-to-Source mapping the owner applies: the
+            // viewer's login token stays on this node.
+            let Some(resource) = super::receiver_hls_resource(suffix, query) else {
+                return super::unsupported_resource(
+                    &route.incarnation_id,
+                    suffix,
+                    query,
+                    "forward_resource_grammar",
+                );
+            };
+            ReceiverForwardOperation::Resource {
+                relative: resource.as_str().to_owned(),
+            }
+        }
         _ => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
     match relay_operation(state, route, operation, connection).await {

@@ -1642,6 +1642,7 @@ mod tests {
                 owner_epoch: 1,
             },
             effective_selection: crate::playback_control::EffectiveSelection {
+                audio_alternates: false,
                 candidate_id: None,
                 quality_auto: true,
                 height: 720,

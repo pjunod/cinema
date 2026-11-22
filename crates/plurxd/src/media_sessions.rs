@@ -2270,7 +2270,12 @@ impl RemoteStartResponse {
                 .audio_delivery
                 .as_ref()
                 .is_none_or(|audio| audio.valid_snapshot())
-            && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
+            && (self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
+                // A split copy enters through its family master.
+                || self.vod
+                    && matches!(self.kind, SessionKind::Copy { .. })
+                    && self.playlist_url
+                        == format!("/api/v1/hls/{}/master.m3u8", self.session_id))
             && self
                 .duration_ms
                 .is_none_or(|duration| (0..=MAX_MEDIA_MILLIS).contains(&duration))
