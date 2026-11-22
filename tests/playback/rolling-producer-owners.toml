@@ -7599,7 +7599,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
 # the forwarded native-readiness fixture case and one in the typed-refusal
 # test. No process launch.
-expected_occurrences = 981
+# Shared private history guard: +1 `response.status()` read of an HTTP reply
+# in sharing_private_history_answers_pass_the_receiver_content_guard. No
+# process launch.
+expected_occurrences = 982
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

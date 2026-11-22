@@ -921,6 +921,25 @@ enum ReceiverAccess {
     Viewer,
     Administrator,
 }
+/// A success body made only of B's own viewing history (its ordered watch
+/// row and the sequence a beat committed), with nothing read from a Source.
+/// [`receiver_content_guard`] releases it as such: there is no Source content
+/// whose current authority could be checked.
+#[derive(Clone, Copy)]
+struct ReceiverPrivateHistory;
+
+/// B's own history answer, marked for [`receiver_content_guard`].
+fn receiver_private_history(status: StatusCode, value: Value) -> Response {
+    let mut response = (
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(value),
+    )
+        .into_response();
+    response.extensions_mut().insert(ReceiverPrivateHistory);
+    response
+}
+
 #[derive(Clone)]
 struct ReceiverContentAuthority {
     access: ReceiverAccess,
@@ -1282,6 +1301,16 @@ pub(super) async fn receiver_content_guard(
 ) -> Response {
     let response = next.run(request).await;
     if !response.status().is_success() {
+        return response;
+    }
+    // Progress and watched answers carry B-private history only. Without this
+    // they were refused as unauthorized Source content after committing, so
+    // every shared watch-progress beat answered 503.
+    if response
+        .extensions()
+        .get::<ReceiverPrivateHistory>()
+        .is_some()
+    {
         return response;
     }
     let Some(authority) = response
@@ -1982,12 +2011,7 @@ async fn viewer_progress(
             ))
         }
     };
-    Ok((
-        status,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(value),
-    )
-        .into_response())
+    Ok(receiver_private_history(status, value))
 }
 /// Explicit B-private watched state. Current Source membership comes from one
 /// fresh pinned read under current assignment; the Store write then takes the
@@ -2035,12 +2059,10 @@ async fn viewer_watched(
         .await
         .map_err(unavailable)?;
     match (outcome, watch) {
-        (RemoteProgressOutcome::Applied, Some(watch)) => Ok((
+        (RemoteProgressOutcome::Applied, Some(watch)) => Ok(receiver_private_history(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(json!({"updated":1,"watch":watch})),
-        )
-            .into_response()),
+            json!({"updated":1,"watch":watch}),
+        )),
         (RemoteProgressOutcome::Conflict, _) => Err(fail(
             StatusCode::CONFLICT,
             "sharing_history_library_changed",

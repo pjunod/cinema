@@ -498,6 +498,7 @@ mod tests {
                 canonical_dts: 37 + number * duration,
                 duration,
                 next_packet_sequence: (number + 1) * samples,
+                last_muxed_dts: 0,
             },
             av,
         )
@@ -689,6 +690,7 @@ mod tests {
                 .track(init.video().expect("video").id)
                 .expect("video track")
                 .sample_count() as u64,
+            last_muxed_dts: 0,
         };
         assert!(matches!(
             engine.push(&fragment, clock, fragment.clone(), None),

@@ -351,7 +351,16 @@ impl CopyRangeProduction {
             self.changed.notify_waiters();
             Ok::<(),String>(())
         }.await;
-        let observed = observed.map_err(|error| landing_failure(&self.seek_bootstrap, error));
+        let observed = observed.map_err(|error| {
+            let reported = landing_failure(&self.seek_bootstrap, error.clone());
+            // A failed range otherwise surfaces only as a later Unavailable
+            // status or control answer; the cause is named once, here, with
+            // the producer's own code before any landing relabel.
+            if error != "copy_range_cancelled" {
+                tracing::warn!(target: "plurxd::transcode", reason = %error, reported = %reported, wanted_ms = self.wanted_ms, "Source copy range production failed");
+            }
+            reported
+        });
         if observed.is_err() {
             self.publisher.retire();
         }
