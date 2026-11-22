@@ -1734,11 +1734,11 @@ mod peer_status_refusal_tests {
     /// "preparing" on a dead session. It is busy: retried inside the lease.
     #[test]
     fn a_typed_busy_answer_is_retried_not_a_refusal() {
-        let wait = HeaderValue::from_static("1");
+        let wait = HeaderValue::from_static("3");
         assert!(matches!(
             peer_status_refusal(StatusCode::TOO_MANY_REQUESTS, Some(&wait)),
             PeerError::Busy {
-                retry_after_secs: 1
+                retry_after_secs: 3
             }
         ));
         // The renewal loop defers exactly what this maps to.

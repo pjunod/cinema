@@ -4203,7 +4203,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # settle the helper and holds no process or source. Four are joined test
 # tasks in the same module. The helper's stage task and its launch moved into
 # the single/run split without changing count.
-expected_occurrences = 1204
+# Shared status busy wire test: +1 `tokio::spawn` of the HTTP fixture server in
+# sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
+# no production task, timer or process.
+expected_occurrences = 1205
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6258,7 +6261,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # copy's production loop (a tokio::time::sleep bounding the one stall report in
 # copyrange::meter::await_reporting_stall, and the observation Instants). They
 # only time and report; no wait, deadline or retry changes. No new task.
-expected_occurrences = 2321
+# Shared status busy wire test: +1 `Duration::from_secs` join timeout in
+# sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
+# no production task, timer or process.
+expected_occurrences = 2322
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7602,7 +7608,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Shared private history guard: +1 `response.status()` read of an HTTP reply
 # in sharing_private_history_answers_pass_the_receiver_content_guard. No
 # process launch.
-expected_occurrences = 982
+# Shared status busy wire test: +1 `Response::builder().status(...)` fixture reply in
+# sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
+# no production task, timer or process.
+expected_occurrences = 983
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
