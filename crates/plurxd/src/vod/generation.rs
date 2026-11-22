@@ -360,12 +360,17 @@ pub(super) async fn spawn_generation(
                 return;
             };
             let owners = Arc::clone(rendition);
-            let hook = Box::new(move |registration: &crate::prodrun::ProducerRegistration| {
-                owners
-                    .source_owners
-                    .registered(&source_dispatch, registration);
-                drop(source_dispatch);
-            });
+            let hook = Box::new(
+                move |registrations: &[crate::prodrun::ProducerRegistration]| {
+                    // A window run's helper first, so the encoder stays current.
+                    for registration in registrations {
+                        owners
+                            .source_owners
+                            .registered(&source_dispatch, registration);
+                    }
+                    drop(source_dispatch);
+                },
+            );
             let Some(source_custody) = source_custody else {
                 record_failure(
                     shared,

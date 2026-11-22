@@ -374,9 +374,78 @@ pub(crate) struct WindowRun {
     input: Arc<SourceInputLease>,
     reservation: crate::vodencode::EncodePermit,
     source: Arc<SourceFence>,
+    /// The helper process's own registration. Every window registers it with
+    /// the rendition's source owners ahead of its encoder, so a detaching
+    /// viewer settles only after the helper reading its source is reaped.
+    registration: ProducerRegistration,
+}
+
+/// The recipe's slot for its window run. Ending is sticky: a request to end
+/// the run while a window holds it (or while the slot is briefly locked) is
+/// remembered, and that window's run is killed instead of stored.
+#[derive(Default)]
+pub(crate) struct WindowRunSlot {
+    run: tokio::sync::Mutex<Option<(u64, WindowRun)>>,
+    ends: std::sync::atomic::AtomicU64,
+}
+
+impl WindowRunSlot {
+    /// End the run now if it is resting, and in any case before it can be
+    /// continued or stored again.
+    pub(crate) fn end(&self) {
+        self.ends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Ok(mut run) = self.run.try_lock() {
+            run.take();
+        }
+    }
+    /// The current end count; a run stored under an older count is ended.
+    pub(crate) fn ends(&self) -> u64 {
+        self.ends.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Take the stored run for one window, discarding (killing) one whose end
+    /// was requested after it was stored.
+    pub(crate) async fn take(
+        &self,
+    ) -> (
+        tokio::sync::MutexGuard<'_, Option<(u64, WindowRun)>>,
+        Option<WindowRun>,
+    ) {
+        let mut held = self.run.lock().await;
+        let run = match held.take() {
+            Some((stored, run)) if stored == self.ends() => Some(run),
+            Some((_, run)) => {
+                run.kill().await;
+                None
+            }
+            None => None,
+        };
+        (held, run)
+    }
+    /// Store a run that may continue, unless an end was requested since `ends`.
+    pub(crate) async fn store(
+        &self,
+        held: &mut tokio::sync::MutexGuard<'_, Option<(u64, WindowRun)>>,
+        run: WindowRun,
+        ends: u64,
+    ) {
+        if ends == self.ends() {
+            **held = Some((ends, run));
+        } else {
+            run.kill().await;
+        }
+    }
+    /// Is `input` the stored run's source reader?
+    pub(crate) async fn owns_input(&self, input: &Arc<SourceInputLease>) -> bool {
+        self.run
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|(_, run)| run.owns_input(input))
+    }
 }
 
 impl WindowRun {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         launch: RunLaunch,
         frame_cap: u8,
@@ -385,6 +454,7 @@ impl WindowRun {
         cancel: CancellationToken,
         input: Arc<SourceInputLease>,
         source: Arc<SourceFence>,
+        registration: ProducerRegistration,
     ) -> Self {
         Self {
             key: launch.key,
@@ -396,6 +466,7 @@ impl WindowRun {
             input,
             reservation: launch.reservation,
             source,
+            registration,
         }
     }
     pub(crate) fn windows(&self) -> u8 {
@@ -441,6 +512,27 @@ impl WindowRun {
     pub(crate) fn rest(&self, idle: Duration) {
         let _ = self.helper.idle.send_replace(Some(Instant::now() + idle));
     }
+    /// Claim the run for the window just accepted by [`Self::continues`] and
+    /// wait until the helper has begun that window. `Ok(false)` means the run
+    /// ended first (idle expiry, the helper's exit): the caller renders the
+    /// window some other way, it is not this window's failure. An error is
+    /// this window's own cancellation or deadline.
+    pub(crate) async fn ready(
+        &mut self,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<bool, String> {
+        let _ = self.helper.idle.send_replace(None);
+        let Some(output) = self.outputs.front().filter(|_| !self.ended()) else {
+            return Ok(false);
+        };
+        let mut exit = self.helper.exit();
+        match wait_for_output(&output.fifo, &mut exit, cancel, deadline).await {
+            Ok(()) => Ok(true),
+            Err(_) if self.ended() => Ok(false),
+            Err(cause) => Err(cause),
+        }
+    }
     /// Kill the helper and wait until its lane, offset, reservation, source
     /// reader and directories are released.
     pub(crate) async fn kill(self) {
@@ -459,6 +551,9 @@ impl WindowRun {
         let _ = self.helper.idle.send_replace(None);
         if let Some(own) = stream.request.source_input.take() {
             if !Arc::ptr_eq(&own, &self.input) {
+                // The generation published its fresh reader's observer; the
+                // run's reader, which does the reading, takes its place.
+                self.input.adopt_observer_publication(&own).await?;
                 own.close_and_wait()
                     .await
                     .map_err(|error| format!("DV unused window source close: {error}"))?;
@@ -543,6 +638,7 @@ impl WindowRun {
                 directory: output.directory,
                 held: output.held,
             }),
+            run_helper: Some(self.registration.clone()),
         })
     }
 }

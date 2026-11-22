@@ -58,13 +58,11 @@ pub(crate) fn keeps_run<T>(outcome: &Result<WindowOutcome<T>, String>, has_more:
 }
 
 impl RuntimeRecipe {
-    /// Kill the session's window run without waiting. Its helper task still
-    /// settles the run's lane, offset, reservation and source reader on reap.
-    /// A window in flight holds the run; its own failure or cancellation ends it.
+    /// End the session's window run: at once if it is resting, otherwise
+    /// when the window holding it returns. Its helper task still settles the
+    /// run's lane, offset, reservation and source reader on reap.
     pub(crate) fn end_window_run(&self) {
-        if let Ok(mut run) = self.window_run.try_lock() {
-            run.take();
-        }
+        self.window_run.end();
     }
 
     /// The windows after `entry` one helper renders with it.
@@ -94,6 +92,11 @@ impl RuntimeRecipe {
 
     /// Render one requested window's private output, through the live run
     /// when this is its next window.
+    ///
+    /// Only the window's own refusal, cancellation or deadline fails it. A
+    /// run that cannot continue (ended, idle-expired, its helper gone) is
+    /// killed and the window is rendered by a fresh run or a single helper,
+    /// so a run never turns into a refused episode on its own account.
     pub(super) async fn render_window(
         &self,
         request: crate::dv_segment::StreamingSegmentRequest,
@@ -105,16 +108,25 @@ impl RuntimeRecipe {
         let window = request.window.ok_or("processed window has no bounds")?;
         let key = crate::dv_segment::request_key(&request)?;
         let frames = request.request.shape.max_frames;
-        let mut held = self.window_run.lock().await;
-        if let Some(mut run) = held.take() {
-            if run.continues(&window, frames, &key, &request.request.admission) {
+        // An end requested while this window runs is honoured when it returns.
+        let ends = self.window_run.ends();
+        let (mut held, run) = self.window_run.take().await;
+        if let Some(mut run) = run {
+            let continued = run.continues(&window, frames, &key, &request.request.admission)
+                && run
+                    .ready(
+                        &request.request.cancel,
+                        request.request.preparation_deadline,
+                    )
+                    .await?;
+            if continued {
                 let outcome =
                     run_private_window(request, registration_hook, Launch::Continue(&mut run))
                         .await
                         .map(|(outcome, _)| outcome);
                 if keeps_run(&outcome, run.has_more()) {
                     run.rest(self.preparation_budget);
-                    *held = Some(run);
+                    self.window_run.store(&mut held, run, ends).await;
                 } else {
                     run.kill().await;
                 }
@@ -127,16 +139,25 @@ impl RuntimeRecipe {
             crate::dv_segment::SegmentAdmission::Retained(worker) => Some(worker.reservation()),
             crate::dv_segment::SegmentAdmission::Owned(_) => None,
         };
+        // A background caller returns its job and source claim when its
+        // window returns; a run would outlive both, so it renders singly.
         let launch = match reservation {
-            Some(reservation) if !later.is_empty() && request.request.source_input.is_some() => {
+            Some(reservation)
+                if !later.is_empty()
+                    && !request.background
+                    && request.request.source_input.is_some() =>
+            {
                 let windows = u32::try_from(later.len() + 1).unwrap_or(u32::MAX);
                 Launch::Start(crate::dv_segment::RunLaunch {
                     later,
                     reservation,
-                    // Each window keeps its own deadline; this bounds the
-                    // process across every window and the rests between them.
+                    // A backstop only: each window is bounded by its own
+                    // deadline (at most one budget) and each rest by the
+                    // idle bound (one budget), and either ending kills the
+                    // run. N windows and N-1 rests fit in 2N-1 budgets, so
+                    // 2N+2 never fails a window on the run's account.
                     deadline: tokio::time::Instant::now()
-                        + self.preparation_budget.saturating_mul(2 * windows),
+                        + self.preparation_budget.saturating_mul(2 * windows + 2),
                     key,
                 })
             }
@@ -149,7 +170,7 @@ impl RuntimeRecipe {
         if let Some(run) = run {
             if keeps_run(&outcome, run.has_more()) {
                 run.rest(self.preparation_budget);
-                *held = Some(run);
+                self.window_run.store(&mut held, run, ends).await;
             } else {
                 run.kill().await;
             }

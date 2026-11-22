@@ -30,7 +30,7 @@ pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};
 #[cfg(target_os = "linux")]
 mod window_run;
 #[cfg(target_os = "linux")]
-pub(crate) use window_run::{request_key, RunLaunch, WindowRun, RUN_MAX};
+pub(crate) use window_run::{request_key, RunLaunch, WindowRun, WindowRunSlot, RUN_MAX};
 
 const DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
@@ -329,8 +329,21 @@ pub(crate) struct SegmentProducer {
     helper_completion: Option<HelperCompletion>,
     #[cfg(target_os = "linux")]
     evidence: Option<SegmentEvidence>,
+    /// A run window's helper process, which outlives this window's encoder.
+    #[cfg(target_os = "linux")]
+    run_helper: Option<ProducerRegistration>,
 }
 impl SegmentProducer {
+    /// The registrations a source owner must settle for this window: a run's
+    /// helper (still reading the source between windows), then the encoder.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_registrations(&self) -> Vec<ProducerRegistration> {
+        self.run_helper
+            .iter()
+            .chain([&self.registration])
+            .cloned()
+            .collect()
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn take_source_settlement(&mut self) -> Option<SourceInputSettlement> {
         self.source_settlement.take()
@@ -385,6 +398,9 @@ pub(crate) struct SourceInputLease {
     url: String,
     users: std::sync::atomic::AtomicUsize,
     settled: tokio::sync::Notify,
+    /// Held across the one real close, so every concurrent closer returns
+    /// only after the input is actually closed and its reads are joined.
+    closing: tokio::sync::Mutex<()>,
 }
 impl SourceInputLease {
     #[cfg(target_os = "linux")]
@@ -394,7 +410,27 @@ impl SourceInputLease {
             input: std::sync::Mutex::new(Some(input)),
             users: std::sync::atomic::AtomicUsize::new(0),
             settled: tokio::sync::Notify::new(),
+            closing: tokio::sync::Mutex::new(()),
         })
+    }
+    /// Publish this input's foreground observer for the rendition in place of
+    /// `previous`'s, under the generation epoch `previous` was published at.
+    /// A window run's later windows read through the run's input, so the
+    /// observer the driver steers must be the run's, not the window's unused one.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn adopt_observer_publication(&self, previous: &Self) -> Result<(), String> {
+        let update = {
+            let previous = previous.input.lock().expect("DV source input");
+            let mut input = self.input.lock().expect("DV source input");
+            match (previous.as_ref(), input.as_mut()) {
+                (Some(previous), Some(input)) => input.adopt_observer_publication(previous),
+                _ => None,
+            }
+        };
+        match update {
+            Some(update) => update.await,
+            None => Ok(()),
+        }
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn physical_owner(self: &Arc<Self>) -> SourceInputUse {
@@ -411,6 +447,7 @@ impl SourceInputLease {
             }
             settled.await;
         }
+        let _closing = self.closing.lock().await;
         let input = { self.input.lock().expect("DV source input").take() };
         if let Some(input) = input {
             input.close_and_wait().await?;
@@ -992,6 +1029,8 @@ async fn run(
         helper_completion: None,
         #[cfg(target_os = "linux")]
         evidence: None,
+        #[cfg(target_os = "linux")]
+        run_helper: None,
     })
 }
 
@@ -1471,33 +1510,72 @@ async fn launch_streaming(
     let helper_deadline = run
         .as_ref()
         .map_or(stream.renderer_deadline, |launch| launch.deadline);
-    let staged = async move {
-        stage(
-            render,
-            stage_resources,
-            helper_deadline,
-            &stage_cancel,
-            "streaming renderer",
-            WINDOW_TRACE_LIMIT,
-        )
-        .await
-    };
     enum Helper {
         Single(tokio::task::JoinHandle<Result<Vec<u8>, String>>),
-        Run(window_run::RunHelper),
+        Run {
+            helper: window_run::RunHelper,
+            launch: RunLaunch,
+            admission: SegmentAdmission,
+            input: Arc<SourceInputLease>,
+            registration: ProducerRegistration,
+        },
     }
-    let helper = match &source_input {
-        Some(input) if run.is_some() => Helper::Run(window_run::spawn_helper(
-            staged,
-            helper_cancel.clone(),
-            Arc::clone(input),
-            run_outputs
-                .iter()
-                .map(window_run::RunOutput::directory)
-                .chain([Arc::clone(&directory)])
-                .collect(),
-        )),
-        _ => Helper::Single(tokio::spawn(staged)),
+    // Everything the first run window needs is moved into the helper's arm
+    // before its encoder exists, so nothing after the encoder spawn can fail.
+    let helper = match (run, window_admission, &source_input) {
+        (Some(launch), Some(admission), Some(input)) => {
+            let (registered, registration) = tokio::sync::oneshot::channel();
+            let staged = async move {
+                stage_with(
+                    render,
+                    stage_resources,
+                    helper_deadline,
+                    &stage_cancel,
+                    "streaming renderer",
+                    WINDOW_TRACE_LIMIT,
+                    Some(registered),
+                )
+                .await
+            };
+            let helper = window_run::spawn_helper(
+                staged,
+                helper_cancel.clone(),
+                Arc::clone(input),
+                run_outputs
+                    .iter()
+                    .map(window_run::RunOutput::directory)
+                    .chain([Arc::clone(&directory)])
+                    .collect(),
+            );
+            let Ok(registration) = registration.await else {
+                helper_cancel.cancel();
+                drop(resources);
+                helper.settled().await;
+                return Err("DV window run helper was never registered".into());
+            };
+            Helper::Run {
+                helper,
+                launch,
+                admission,
+                input: Arc::clone(input),
+                registration,
+            }
+        }
+        (None, None, _) => Helper::Single(tokio::spawn(async move {
+            stage(
+                render,
+                stage_resources,
+                helper_deadline,
+                &stage_cancel,
+                "streaming renderer",
+                WINDOW_TRACE_LIMIT,
+            )
+            .await
+        })),
+        _ => {
+            // Unreachable: a run always has its first admission and reader.
+            return Err("DV window run launch lost its admission or reader".into());
+        }
     };
     let encoded = check_source(&resources.source).and_then(|()| {
         if cancel.is_cancelled() || Instant::now() >= request.preparation_deadline {
@@ -1528,7 +1606,7 @@ async fn launch_streaming(
                 Helper::Single(helper) => {
                     let _ = helper.await;
                 }
-                Helper::Run(helper) => helper.settled().await,
+                Helper::Run { helper, .. } => helper.settled().await,
             }
             return Err(error);
         }
@@ -1575,13 +1653,18 @@ async fn launch_streaming(
                     unaccepted_cancel: Some(handoff_cancel),
                     helper_completion: Some(completion),
                     evidence: Some(evidence),
+                    run_helper: None,
                 },
                 None,
             ))
         }
-        Helper::Run(helper) => {
-            let launch = run.ok_or("DV window run launch lost")?;
-            let input = source_input.ok_or("a DV window run requires its owned source reader")?;
+        Helper::Run {
+            helper,
+            launch,
+            admission,
+            input,
+            registration: helper_registration,
+        } => {
             // The helper's own stage holds the lane, offset and family
             // reservation; the first window's encoder holds only its own.
             drop(resources);
@@ -1591,7 +1674,7 @@ async fn launch_streaming(
                 request.at,
                 Box::new(WindowResources {
                     _source_input: input.physical_owner(),
-                    _admission: window_admission.ok_or("DV window run lost its first admission")?,
+                    _admission: admission,
                     _directory: Arc::clone(&directory),
                 }),
             );
@@ -1615,6 +1698,7 @@ async fn launch_streaming(
                 helper_cancel,
                 input,
                 watched_source,
+                helper_registration.clone(),
             );
             stages.run_window(0, run.windows());
             Ok((
@@ -1627,6 +1711,7 @@ async fn launch_streaming(
                     unaccepted_cancel: Some(handoff_cancel),
                     helper_completion: Some(completion),
                     evidence: Some(evidence),
+                    run_helper: Some(helper_registration),
                 },
                 Some(run),
             ))
@@ -1680,6 +1765,28 @@ async fn stage<R: Send + Sync + 'static>(
     name: &str,
     trace_limit: u64,
 ) -> Result<Vec<u8>, String> {
+    stage_with(
+        spawned,
+        resources,
+        deadline,
+        cancel,
+        name,
+        trace_limit,
+        None,
+    )
+    .await
+}
+/// [`stage`], also handing out the child's registration once it is attached,
+/// so an owner can settle on that exact process's reap.
+async fn stage_with<R: Send + Sync + 'static>(
+    spawned: Spawned,
+    resources: Arc<R>,
+    deadline: Instant,
+    cancel: &CancellationToken,
+    name: &str,
+    trace_limit: u64,
+    registered: Option<tokio::sync::oneshot::Sender<ProducerRegistration>>,
+) -> Result<Vec<u8>, String> {
     let slot = ProducerSlot::new();
     let (registration, writers) = slot
         .attach_registered_job_owned(
@@ -1689,6 +1796,9 @@ async fn stage<R: Send + Sync + 'static>(
             Some(Box::new(resources)),
         )
         .await;
+    if let Some(registered) = registered {
+        let _ = registered.send(registration.clone());
+    }
     let result = {
         let pipes = async {
             tokio::try_join!(

@@ -10,7 +10,9 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-type RegistrationHook = Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>;
+/// Called with a window's registrations, in order: a window run's helper
+/// (which keeps reading the source between windows), then the encoder.
+type RegistrationHook = Box<dyn FnOnce(&[crate::prodrun::ProducerRegistration]) + Send>;
 
 #[cfg(target_os = "linux")]
 fn trace_window_stage(entry: u32, stage: &'static str, since: &mut std::time::Instant) {
@@ -1063,7 +1065,7 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) shader_cache: Arc<tempfile::TempDir>,
     pub(crate) prepared: std::sync::Mutex<Option<(u32, VerifiedWindow)>>,
     /// The live window run whose helper renders this session's next windows.
-    pub(crate) window_run: tokio::sync::Mutex<Option<crate::dv_segment::WindowRun>>,
+    pub(crate) window_run: crate::dv_segment::WindowRunSlot,
     pub(crate) failure_episode: DvDigest,
     pub(crate) preparation_budget: std::time::Duration,
     pub(crate) report_revision: std::sync::atomic::AtomicU64,
@@ -1401,13 +1403,7 @@ impl RuntimeRecipe {
         // helper and encoder reap; no caller can release it by returning early.
         // A window run that started from this input owns it from here on and
         // closes it when its helper is reaped.
-        let run_owned = self
-            .window_run
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|run| run.owns_input(&source_input));
-        if !run_owned {
+        if !self.window_run.owns_input(&source_input).await {
             source_input
                 .close_and_wait()
                 .await
@@ -1908,9 +1904,10 @@ async fn run_private_window(
         let helper = producer
             .take_helper_completion()
             .ok_or("missing helper completion")?;
+        let source_registrations = producer.source_registrations();
         let (registration, writers, stdout, stderr) = producer.into_parts();
         if let Some(registered) = registration_hook {
-            registered(&registration);
+            registered(&source_registrations);
         }
         let captured = capture_private_output(
             &slot,
