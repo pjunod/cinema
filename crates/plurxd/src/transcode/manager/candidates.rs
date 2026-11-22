@@ -1680,7 +1680,18 @@ impl TranscodeManager {
             )
             .await
             .ok()?;
-        source.unchanged().then_some(collected)
+        if !source.unchanged() {
+            return None;
+        }
+        // Persist the verdict for this source revision, so the next plan reads
+        // it from stored facts instead of probing the source again.
+        if let Some(evidence) = collected.hevc_scan_evidence() {
+            let _ = self
+                .store
+                .merge_file_probe_hevc_scan(file.id, file.size, file.mtime, &evidence.to_string())
+                .await;
+        }
+        Some(collected)
     }
 
     pub(crate) async fn quality_source_facts(

@@ -593,6 +593,7 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_chapters",
     "merge_file_probe_chapters_if_missing",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
@@ -21831,7 +21832,11 @@ fn contract_inventory_matches_every_store_method() {
     // published with chapter evidence (`timeline_annotation_set` is now a
     // provided method over it). Named in `MEDIA_METHODS` and
     // `TIMELINE_ANNOTATION_METHODS`; no new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 634, "review the Store method count");
+    // 634 -> 635 for the Apple TV startup fix: `MediaStore`'s
+    // `merge_file_probe_hevc_scan` grafts a probed HEVC scan verdict onto the
+    // measured probe revision, exercised on both backends by
+    // media_contract_runs_through_dyn_store. Named in `MEDIA_METHODS`.
+    assert_eq!(declared.len(), 635, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -33779,6 +33784,34 @@ async fn media_contract_runs_through_dyn_store() {
             .merge_file_probe_hevc_parameter_sets(empty_file, 2_000, 20, census)
             .await
             .expect("unprobed census"));
+        // A probed HEVC scan verdict is grafted the same way: fenced to the
+        // measured revision, keyed so stored facts can read it back.
+        let scan = r#"{"stream_index":0,"progressive_frame_only":true}"#;
+        assert!(!store
+            .merge_file_probe_hevc_scan(movie_file, measured.size + 1, measured.mtime, scan)
+            .await
+            .expect("fenced scan verdict"));
+        assert!(store
+            .merge_file_probe_hevc_scan(movie_file, measured.size, measured.mtime, scan)
+            .await
+            .expect("scan verdict"));
+        let scanned: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(movie_file)
+                .await
+                .expect("probe JSON")
+                .expect("probe JSON"),
+        )
+        .expect("probe JSON parses");
+        assert_eq!(
+            scanned[plurx_core::transcode::HEVC_SCAN_PROBE_KEY]["progressive_frame_only"],
+            true
+        );
+        assert_eq!(scanned["plurx_hevc_parameter_sets"]["verdict"], "varying");
+        assert!(!store
+            .merge_file_probe_hevc_scan(empty_file, 2_000, 20, scan)
+            .await
+            .expect("unprobed scan verdict"));
         assert!(store
             .get_file_probe_json(movie_file)
             .await

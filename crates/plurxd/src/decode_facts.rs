@@ -5882,12 +5882,15 @@ pub(crate) fn legacy_ordinal_facts(
 ) -> Result<DecodeFacts, plurx_core::transcode::PlanError> {
     // The catalog row describes the film. Applied to an attached picture it
     // would claim that a JPEG is Dolby Vision.
-    match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
+    let facts = match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
         Some(catalog) => {
             DecodeFacts::from_ffprobe_json_at_with_catalog(json, source_identity, index, catalog)
         }
         None => DecodeFacts::from_ffprobe_json_at(json, source_identity, index),
-    }
+    }?;
+    // A scan verdict an earlier probe persisted for this revision answers the
+    // missing scan metadata without probing the source again.
+    Ok(facts.with_stored_hevc_scan(json))
 }
 
 pub(crate) fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32> {

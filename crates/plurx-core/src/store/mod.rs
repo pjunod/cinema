@@ -3715,6 +3715,16 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         census_json: &str,
     ) -> Result<bool, StoreError>;
+    /// Graft a probed HEVC scan verdict onto a file's stored probe JSON under
+    /// `transcode::HEVC_SCAN_PROBE_KEY`, fenced to the measured size and mtime
+    /// like the parameter-set census. Answers `false` when nothing was written.
+    async fn merge_file_probe_hevc_scan(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        scan_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Persist a bounded, measured encoding result only for the source revision
     /// that was analyzed. Reprobing replaces the containing JSON and invalidates it.
     async fn merge_file_probe_content_encoding(
