@@ -85,6 +85,37 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared titles play again in the web player. Every web shared Start runs
+  the Source's growing copy, which answered with a 60-second control lease that
+  the receiver refused, so the viewer saw "The sharing host could not confirm
+  playback preparation" and the copy expired a minute later without serving a
+  byte. The growing copy now keeps the 300-second lease every shared client is
+  promised, on its Start, its control replies and its own retirement, and
+  counts any resource fetch or authenticated control exchange the receiver
+  relays as viewer activity (the receiver's own status checks are not). The
+  web player also accepts the bounded view such a Start returns, as the Apple
+  and Android players already did. The Source and the receiver both need this
+  release: a receiver still refuses the 60-second lease an older Source sends.
+- A shared Start whose claim the Source refuses (sharing unavailable, at
+  capacity, or in conflict) no longer leaves a cleanup that can never finish.
+  The refusal wrote nothing for that Start, so the receiver's End now settles at once instead
+  of answering 503 on every retry, and the refused Start no longer holds one of
+  the Source's eight start slots until the node restarts. A Dolby Vision title
+  started through a Source node that forwards to another is no longer noted as
+  "receiver does not relay Dolby Vision" when the receiver said it does. Every
+  refusal on the Source's forwarding paths, a growing copy that fails to start,
+  a refused claim, and a receiver about to tell its viewer only "could not
+  confirm playback preparation" now log one line naming the step that refused.
+- A shared title's Start, and every other membership-guarded Source write, no
+  longer refuses as "sharing unavailable" when a member's routine heartbeat
+  commits while the write is in flight. The write's guard counted that
+  heartbeat as a future-dated clock because it was stamped after the write
+  sampled its own clock. A heartbeat is now accepted up to the five seconds a
+  write may use its membership observation. A clock further ahead is still
+  refused. A heartbeat still goes stale 120 seconds after the time it carries,
+  so a member whose clock runs up to five seconds ahead stays fresh for up to
+  125 seconds. A viewer saw "The sharing host could not confirm playback
+  preparation".
 - 4K Dolby Vision titles played as HDR10-E or with display mapping no
   longer stall in the browser on Intel nodes. The node's Main10 GPU decode
   probe copied its test picture to system memory, which crashed the shipped

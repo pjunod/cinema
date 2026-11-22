@@ -163,6 +163,16 @@ pub(super) fn resource_busy_response(retry_after_secs: u64) -> super::error::Api
     }
 }
 fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
+    log_source_peer_failure("status", stage, error);
+}
+/// What the Source answered when this receiver is about to tell its viewer
+/// only "unresolved". The viewer's message cannot tell one Source refusal
+/// from another; this line can.
+fn log_source_peer_failure(
+    operation: &'static str,
+    stage: &'static str,
+    error: crate::sharing_client::PeerError,
+) {
     use crate::sharing_client::PeerError;
     let (error_class, http_status) = match error {
         PeerError::Unavailable => ("unavailable", None),
@@ -176,7 +186,7 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
         PeerError::StartNotPrepared { .. } => ("source_not_prepared", Some(503)),
     };
-    tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
+    tracing::warn!(target: "plurx::sharing", operation, stage, error_class, http_status, "receiver Source exchange refused");
 }
 
 #[derive(Default)]
@@ -1642,7 +1652,7 @@ impl ReceiverStartActor {
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
-            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", "receiver Source status refused");
+            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", operation = "status", "receiver Source exchange refused");
             return Err(ReceiverStartError::Ending);
         }
         // Current B policy precedes the network operation; every following
@@ -1652,12 +1662,12 @@ impl ReceiverStartActor {
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unknown
             })?
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", operation = "status", "receiver Source exchange refused");
             })?;
         let received = self
             .0
@@ -1668,7 +1678,7 @@ impl ReceiverStartActor {
             .clone()
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", operation = "status", "receiver Source exchange refused");
             })?;
         let expected = plurx_core::sharing::SharingIdentity {
             server_id: self.0.intent.scope.source_server_id,
@@ -1689,7 +1699,7 @@ impl ReceiverStartActor {
         let known = received
             .lineage()
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unresolved
             })?;
         peer.file_status(
@@ -2108,7 +2118,10 @@ async fn run_owner(
                 crate::sharing_client::PeerError::StartNotPrepared { .. }
                 | crate::sharing_client::PeerError::StartNotYet { .. }
                 | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::Deadline,
-                _ => ReceiverStartError::Unresolved,
+                other => {
+                    log_source_peer_failure("start", "start_exchange", other);
+                    ReceiverStartError::Unresolved
+                }
             })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {

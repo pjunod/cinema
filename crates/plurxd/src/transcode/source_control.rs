@@ -497,7 +497,7 @@ impl SourceGrowingBacking {
             );
             state.snapshot = Some(control.snapshot);
             state.lease_expires_at_unix_ms = crate::media_sessions::unix_ms()
-                .saturating_add(i64::from(crate::playback_control::VOD_LEASE_TIMEOUT_MS));
+                .saturating_add(i64::from(GROWING_LEASE_TIMEOUT_MS));
         }
         let mark_rendered = state.presented.presented();
         let lease_expires_at_unix_ms = state.lease_expires_at_unix_ms;
@@ -524,7 +524,7 @@ impl SourceGrowingBacking {
             action_suppressed,
             preparation_directive: None,
             lease_expires_at_unix_ms,
-            lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            lease_timeout_ms: GROWING_LEASE_TIMEOUT_MS,
             lease_state: "active",
             status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
             platform,

@@ -1162,6 +1162,7 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
                     SourceStartTaskStage::ReadingIntent { .. } => "reading_intent".to_owned(),
                     SourceStartTaskStage::IntentReady { .. } => "intent_ready".to_owned(),
                     SourceStartTaskStage::Claiming { .. } => "claiming".to_owned(),
+                    SourceStartTaskStage::Unclaimed { .. } => "claim_refused".to_owned(),
                     SourceStartTaskStage::Acquired(_) => "acquired".to_owned(),
                     SourceStartTaskStage::Assigning(_) => "assigning".to_owned(),
                     SourceStartTaskStage::Assigned(_) => "assigned".to_owned(),
@@ -1207,6 +1208,727 @@ async fn sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end() {
         SourceFixtureMode::DolbyVisionStripped,
     ))
     .await;
+}
+/// A claim the Store answers "unavailable" wrote no binding. Its Start is
+/// refused, and the receiver's cleanup End must then settle: nothing durable
+/// is owed, so there is no row for a release to find. Before this, End
+/// answered 503 for ever and the entry held one of the registry's eight
+/// slots until the node restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_refused_claim_settles_end_and_frees_its_registry_slot() {
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Copy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("Source preparation finished before a refused claim");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let (url, headers, body) = (
+        sessions.clone(),
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    );
+    let starting =
+        tokio::spawn(
+            async move { actual_resource_request(address, true, &url, headers, body).await },
+        );
+    let held = pause.reached().await;
+    // Preparation passed with sharing on. The claim's own guard reads the
+    // switch again in its transaction and now refuses, writing nothing.
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "0")
+        .await
+        .expect("sharing switched off before the claim");
+    held.release();
+    let response = starting.await.expect("refused Start task");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .expect("refusal body");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let refusal: Value = serde_json::from_slice(&bytes).expect("typed refusal");
+    assert_eq!(refusal["code"], "sharing_start_unavailable");
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+        .await
+        .expect("sharing switched back on");
+    assert_eq!(fixture.active_source_sessions().await, 0);
+    assert_eq!(
+        fixture.state.transcode.source_http_starts.live_entries(),
+        0,
+        "a claim that wrote nothing holds no registry slot"
+    );
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"].as_str().expect("request");
+    for _ in 0..2 {
+        // The receiver's cleanup End, and its exact replay.
+        let response = actual_resource_request(
+            address,
+            true,
+            &format!("{sessions}/{request}/end"),
+            fixture.headers.clone(),
+            fixture.request.clone(),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("End receipt");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "End after a refused claim: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let receipt: Value = serde_json::from_slice(&bytes).expect("End receipt");
+        assert_eq!(receipt["settled"], json!(true));
+        assert_eq!(receipt["state"], json!("settled"));
+        assert!(receipt.get("session_id").is_none());
+    }
+    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
+/// The production web shape on one node: range caps through a receiver that
+/// affirms ranges, Dolby Vision relay and processed upgrades. The Source runs
+/// its growing copy owner, and Start, the receiver's confirming Status, the
+/// session playlist and End all answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(SourceFixtureMode::RangeCopy)).await;
+}
+/// The same for a title with text subtitles, started with native subtitles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_native_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeNativeCopy,
+    ))
+    .await;
+}
+/// A scanned remux's shape: Matroska with an E-AC-3 5.1 track.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_audio_copy_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeAudioCopy,
+    ))
+    .await;
+}
+/// A scanned Dolby Vision Profile 7 remux with TrueHD audio, started without
+/// an `aac` ask by caps that name no audio sinks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_range_dolby_vision_converted_start_status_playlist_and_end() {
+    Box::pin(actual_source_range_delivery(
+        SourceFixtureMode::RangeDolbyVisionConverted,
+    ))
+    .await;
+}
+/// One resource of the range session, named relative to `base`'s resource.
+async fn actual_range_resource(
+    address: std::net::SocketAddr,
+    operation: &str,
+    fixture: &RealSourceStartFixture,
+    base: &Value,
+    uri: &str,
+) -> (Value, axum::body::Bytes) {
+    let mut request = base.clone();
+    request["resource"] = json!(base["resource"]
+        .as_str()
+        .expect("base resource")
+        .rsplit_once('/')
+        .map_or_else(|| uri.to_owned(), |(dir, _)| format!("{dir}/{uri}")));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/resources"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&request).expect("resource body"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "range resource {uri}");
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("resource bytes");
+    (request, bytes)
+}
+
+/// The served initialization segment the range playlist names (through its
+/// first variant when it is a multivariant playlist), parsed.
+async fn actual_range_init(
+    address: std::net::SocketAddr,
+    operation: &str,
+    fixture: &RealSourceStartFixture,
+    playlist: &Value,
+    playlist_bytes: &[u8],
+) -> plurx_core::fmp4::Init {
+    let mut base = playlist.clone();
+    let mut text = std::str::from_utf8(playlist_bytes)
+        .expect("playlist text")
+        .to_owned();
+    if text.contains("#EXT-X-STREAM-INF") {
+        let variant = text
+            .lines()
+            .skip_while(|line| !line.starts_with("#EXT-X-STREAM-INF"))
+            .nth(1)
+            .expect("a variant follows its stream info")
+            .to_owned();
+        let (request, bytes) =
+            actual_range_resource(address, operation, fixture, &base, &variant).await;
+        base = request;
+        text = String::from_utf8(bytes.to_vec()).expect("variant text");
+    }
+    let map = text
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the range playlist names its initialization segment")
+        .to_owned();
+    let (_, bytes) = actual_range_resource(address, operation, fixture, &base, &map).await;
+    let mut reader = plurx_core::fmp4::FragmentReader::new();
+    reader.push(&bytes);
+    match reader.next_unit().expect("served init parses") {
+        Some(plurx_core::fmp4::Unit::Init(init)) => init,
+        _ => panic!("the range init is an initialization segment"),
+    }
+}
+
+async fn actual_source_range_delivery(mode: SourceFixtureMode) {
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let response = actual_resource_request(
+        address,
+        true,
+        &sessions,
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Start envelope");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} range Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source envelope");
+    assert!(!decoded.response().vod, "a growing copy is a bounded view");
+    assert!(receiver_presentation::response_presentable(
+        decoded.response(),
+        true,
+        true
+    ));
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"]
+        .as_str()
+        .expect("request")
+        .to_owned();
+    recipe["incarnation_id"] = json!(decoded.incarnation_id());
+    recipe["session_id"] = json!(decoded.response().session_id);
+    recipe["control_epoch"] = json!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .control_epoch
+    );
+    let operation = format!("{sessions}/{request}");
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/status"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("status body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Status envelope");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} Status after Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let confirmed = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source status envelope");
+    assert_eq!(confirmed.incarnation_id(), decoded.incarnation_id());
+    assert_eq!(
+        confirmed.response().session_id,
+        decoded.response().session_id
+    );
+    let mut playlist = recipe.clone();
+    playlist["resource"] = json!(decoded
+        .response()
+        .playlist_url
+        .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
+        .expect("session playlist"));
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/resources"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&playlist).expect("playlist body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("playlist bytes");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} playlist: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(bytes.starts_with(b"#EXTM3U"));
+    if matches!(
+        mode,
+        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeDolbyVisionConverted
+    ) {
+        let init = actual_range_init(address, &operation, &fixture, &playlist, &bytes).await;
+        let has = |needle: &[u8]| init.bytes.windows(needle.len()).any(|w| w == needle);
+        let video = init.video().expect("the AV init carries its video");
+        assert_eq!(init.tracks.len(), 2, "{mode:?}: video and audio");
+        if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
+            // E-AC-3 passes through, so the muxer's Dolby brand reached this
+            // output: the case the canonical/AV companion check must accept.
+            assert!(has(b"ec-3") && has(b"dec3"), "E-AC-3 passes through");
+            assert!(!has(b"mp4a"), "E-AC-3 is not converted");
+            assert!(!video.dolby_vision_config, "SDR video");
+        } else {
+            // TrueHD converts to AAC; the Profile 8.1 conversion keeps its
+            // Dolby Vision record and brand on the served video.
+            let master = String::from_utf8_lossy(&bytes);
+            assert!(
+                master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
+                "Profile 8.1 signalled: {master}"
+            );
+            assert!(has(b"mp4a") && !has(b"mlpa"), "TrueHD converts to AAC");
+            assert!(video.dolby_vision_config, "Dolby Vision record kept");
+            assert!(has(b"dby1"), "Dolby Vision brand kept");
+        }
+    }
+    let response = actual_resource_request(
+        address,
+        true,
+        &format!("{operation}/end"),
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("End body"),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .expect("End receipt");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{mode:?} End: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let receipt: Value = serde_json::from_slice(&bytes).expect("End receipt");
+    assert_eq!(receipt["settled"], json!(true));
+    assert_eq!(receipt["incarnation_id"], json!(decoded.incarnation_id()));
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
+/// The receiver half of the production web Start (2026-11-21: published on
+/// the Source, never fetched, `sharing_start_unresolved` at the viewer). The
+/// receiver's own pinned-connection client sends the range Start with the
+/// viewer's start clock and all three affirmations, re-posts typed "not yet"
+/// answers as its owner does, confirms with Status on a fresh connection, and
+/// then runs the owner's acceptance and B's public projection on what came
+/// back. The bounded view is the Source's growing copy with its rolling
+/// control lease, and the reply B publishes must be one a shared client binds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_receiver_consumes_the_range_copy_start_the_source_published() {
+    use crate::sharing_client::{PeerConnection, SourcePeerLineage, SourcePeerSession, StartRetry};
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let endpoint = plurx_core::sharing::Endpoint {
+        ipv4: std::net::Ipv4Addr::LOCALHOST,
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: address.port(),
+        spki_sha256: "0".repeat(64),
+    };
+    let credential = plurx_core::secrets::Secret::from_cleartext(
+        fixture.headers["authorization"]
+            .to_str()
+            .expect("credential header")
+            .strip_prefix("CinemaShare ")
+            .expect("CinemaShare credential"),
+    );
+    let viewer = fixture.headers["cinemashare-viewer"]
+        .to_str()
+        .expect("viewer header")
+        .to_owned();
+    let wrapper = String::from_utf8(fixture.request.clone()).expect("canonical wrapper");
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    // B retains the viewer's own request; the wrapper's session is that
+    // request with B's request and playback identities.
+    let request_json = recipe["session"].to_string();
+    let connect = || async {
+        PeerConnection::fixture_verified(
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("pinned Source connection"),
+            endpoint.clone(),
+        )
+        .await
+        .expect("receiver peer connection")
+    };
+    let mut peer = connect().await;
+    let viewer_end = tokio::time::Instant::now() + Duration::from_secs(120);
+    let decoded = loop {
+        let remaining = viewer_end.saturating_duration_since(tokio::time::Instant::now());
+        match peer
+            .file_start(
+                &credential,
+                &fixture.reference,
+                &viewer,
+                &wrapper,
+                Some(remaining),
+            )
+            .await
+        {
+            Err(error) if StartRetry::from_peer(error).is_some() => {
+                let retry = StartRetry::from_peer(error).expect("typed retry");
+                assert!(
+                    tokio::time::Instant::now() < viewer_end,
+                    "the Source never published the range Start"
+                );
+                tokio::time::sleep(Duration::from_secs(retry.retry_after_secs)).await;
+            }
+            result => break result.expect("receiver Start exchange"),
+        }
+    };
+    let affirmed = peer.receiver_presentation_affirmed();
+    assert!(affirmed, "the receiver's Start affirms bounded ranges");
+    let crate::http::sharing_direct_wire::DecodedSourceStart::Hls(decoded) = decoded else {
+        panic!("an HLS range Start");
+    };
+    let (_, incarnation, response) = (*decoded).into_parts();
+    assert!(!response.vod, "a range Start runs the growing copy");
+    // The owner's acceptance of the received Start (`run_owner`).
+    let client_range = receiver_presentation::client_supports_range(&request_json);
+    assert!(receiver_presentation::response_presentable(
+        &response,
+        client_range,
+        affirmed
+    ));
+    assert!(
+        crate::http::sharing_start_decode::delivered_range_presentable(&request_json, &response)
+    );
+    let known = SourcePeerLineage::from_start(incarnation, &response).expect("Source lineage");
+    let session = SourcePeerSession::new(fixture.reference.clone(), &fixture.request)
+        .expect("receiver peer session");
+    // Status on a fresh pinned connection, as the owner's confirmation opens.
+    let status = connect()
+        .await
+        .file_status(&credential, &viewer, &session, &known)
+        .await
+        .expect("receiver Status after Start");
+    let confirmed = status.response().expect("HLS Status").clone();
+    // The copy advertises the lease it keeps: the shared session lease.
+    let source_control = response.control.clone().expect("Source control bootstrap");
+    assert_eq!(
+        source_control.lease_timeout_ms,
+        crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS
+    );
+    // One control exchange, relayed as B relays its viewer's, on a fresh
+    // pinned connection: the Source accepts it and reports the same lease.
+    // The copy may start on the keyframe before zero; a control position is
+    // never negative, and zero is inside the produced range either way.
+    let origin = response
+        .media_origin_ms
+        .expect("signed bounded origin")
+        .max(0);
+    let exchange = {
+        use crate::playback_control as pc;
+        pc::ControlRequestV1 {
+            intent: None,
+            protocol: pc::PROTOCOL_V1.to_owned(),
+            generation: source_control.generation.clone(),
+            control_epoch: source_control.control_epoch,
+            client_instance_id: "6f1c2d1e-7f9a-4b8e-9d3c-2a1b0c9d8e7f".to_owned(),
+            sequence: 1,
+            demand: pc::PlaybackDemand::Active,
+            position_ms: origin,
+            buffered_from_ms: Some(origin),
+            buffered_through_ms: origin + 500,
+            playback_rate: 1.0,
+            render_state: pc::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: pc::ClientSelection {
+                quality: pc::QualitySelection::Original,
+                audio_track: None,
+                subtitle: pc::SubtitleSelection {
+                    mode: pc::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: pc::CodecPolicy::Auto,
+                dynamic_range: pc::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(pc::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
+                platform: pc::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![pc::CodecPolicy::H264],
+                dynamic_ranges: vec![pc::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: Some(vec!["hold".to_owned(), "retry_resource".to_owned()]),
+        }
+    };
+    // The live copy's own expiry, read at chosen instants: a renewal at or
+    // after `before` keeps it alive one lease past `before`; without one, it
+    // has expired by then. No wall-clock wait or tolerance is involved.
+    let request_id = Uuid::parse_str(
+        recipe["session"]["request_id"]
+            .as_str()
+            .expect("Source request"),
+    )
+    .expect("Source request id");
+    let backing = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .growing_backing(request_id)
+        .expect("the range Start is served from a growing copy");
+    let lease = Duration::from_millis(u64::from(
+        crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS,
+    ));
+    let renewed_since = |before: std::time::Instant| !backing.activity_expired_at(before + lease);
+    let before = std::time::Instant::now();
+    let accepted = connect()
+        .await
+        .file_control(&credential, &viewer, &session, &known, &exchange)
+        .await
+        .expect("relayed control exchange")
+        .into_outcome()
+        .expect("the Source accepts the exchange");
+    assert_eq!(accepted.accepted_sequence, 1);
+    assert!(
+        renewed_since(before),
+        "an accepted exchange renews the copy"
+    );
+    let kept = accepted.lease.expires_at_unix_ms - accepted.server_time_unix_ms;
+    let advertised = i64::from(crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS);
+    assert!(
+        kept > i64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS) && kept <= advertised,
+        "the copy reports the lease it advertised, not the rolling one: {kept} ms"
+    );
+    // (d) B's own Status says B's owner is alive, not that anyone watches.
+    let before = std::time::Instant::now();
+    connect()
+        .await
+        .file_status(&credential, &viewer, &session, &known)
+        .await
+        .expect("receiver Status");
+    assert!(!renewed_since(before), "Status does not renew the copy");
+    // (c) Every resource the viewer fetches renews it: the playlist, and the
+    // initialization segment it names.
+    let operation = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions/{request_id}",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let mut lineage = recipe.clone();
+    lineage["incarnation_id"] = json!(incarnation);
+    lineage["session_id"] = json!(response.session_id);
+    lineage["control_epoch"] = json!(source_control.control_epoch);
+    let prefix = format!("/api/v1/hls/{}/", response.session_id);
+    let fetch = |resource: String| {
+        let mut body = lineage.clone();
+        body["resource"] = json!(resource);
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/resources");
+        async move {
+            let response = actual_resource_request(
+                address,
+                true,
+                &url,
+                headers,
+                serde_json::to_vec(&body).expect("resource body"),
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("resource bytes");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            bytes
+        }
+    };
+    let before = std::time::Instant::now();
+    let playlist = fetch(
+        response
+            .playlist_url
+            .strip_prefix(&prefix)
+            .expect("session playlist")
+            .to_owned(),
+    )
+    .await;
+    assert!(renewed_since(before), "a playlist fetch renews the copy");
+    let playlist = String::from_utf8(playlist.to_vec()).expect("playlist text");
+    let init = playlist
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the copy's playlist names its initialization segment")
+        .to_owned();
+    let before = std::time::Instant::now();
+    fetch(init).await;
+    assert!(renewed_since(before), "an init fetch renews the copy");
+    // (a) Exchanges whose anchor is past everything produced are refused,
+    // as B's 500 ms retries of one would be, and renew nothing. (b) So the
+    // copy that serves nothing more retires one lease after it last served,
+    // yet still outlives the old 60 s window.
+    let last_served = std::time::Instant::now();
+    let beyond = response.duration_ms.expect("fixture duration") + 1_000;
+    for sequence in 2..=4 {
+        let mut refused = exchange.clone();
+        refused.sequence = sequence;
+        refused.position_ms = beyond;
+        refused.buffered_from_ms = Some(beyond);
+        refused.buffered_through_ms = beyond;
+        let answer = connect()
+            .await
+            .file_control(&credential, &viewer, &session, &known, &refused)
+            .await
+            .map(|receipt| receipt.into_outcome());
+        assert!(
+            !matches!(answer, Ok(Ok(_))),
+            "an anchor past the produced range is refused"
+        );
+    }
+    assert!(
+        !renewed_since(last_served),
+        "refusals do not renew the copy"
+    );
+    assert!(
+        !backing.activity_expired_at(last_served + Duration::from_secs(61)),
+        "the copy outlives 60 s after it last served"
+    );
+    assert!(
+        backing.activity_expired_at(last_served + lease),
+        "it retires one lease after it last served"
+    );
+    assert_eq!(confirmed.session_id, response.session_id);
+    let source_session = Uuid::parse_str(&response.session_id).expect("Source session");
+    let receiver_session = Uuid::new_v4();
+    let receiver_incarnation = Uuid::new_v4();
+    let public = crate::http::sharing_playback_wire::project_shared_start_with_receiver(
+        confirmed,
+        source_session,
+        receiver_session,
+        receiver_incarnation,
+        1,
+        affirmed && client_range,
+    )
+    .expect("B projects the Start the Source published");
+    // What every shared client binds (web `sharedPlaybackStartContext`,
+    // Apple and Android `bindInitial`): B's session, control and lease.
+    assert!(!public.vod);
+    assert!(public.media_origin_ms.is_some());
+    assert_eq!(public.session_id, receiver_session.to_string());
+    let control = public.control.expect("B control bootstrap");
+    assert_eq!(
+        control.url,
+        format!("/api/v1/hls/{receiver_session}/control")
+    );
+    assert_eq!(control.generation, receiver_incarnation.to_string());
+    assert_eq!(control.next_exchange_ms, 5000);
+    assert_eq!(
+        control.lease_timeout_ms,
+        crate::playback_control::VOD_LEASE_TIMEOUT_MS
+    );
+    connect()
+        .await
+        .file_end(&credential, &viewer, &session, Some(&known))
+        .await
+        .expect("receiver End");
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end() {
