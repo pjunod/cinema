@@ -2603,11 +2603,12 @@ pub(super) fn receiver_hls_resource(
 ) -> Option<plurx_core::sharing_resources::SharingHlsResource> {
     let mut token = false;
     let mut kept = Vec::new();
-    for pair in query
-        .unwrap_or("")
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-    {
+    // An empty query or pair (`index.m3u8?`, `?&native=1`) is refused, as the
+    // Source grammar refuses it, rather than silently normalized away.
+    for pair in query.map(|query| query.split('&')).into_iter().flatten() {
+        if pair.is_empty() {
+            return None;
+        }
         if pair.split_once('=').map(|(key, _)| key) == Some("token") {
             if std::mem::replace(&mut token, true) {
                 return None;
@@ -2622,6 +2623,47 @@ pub(super) fn receiver_hls_resource(
         format!("{suffix}?{}", kept.join("&"))
     };
     plurx_core::sharing_resources::SharingHlsResource::parse(&relative).ok()
+}
+/// B's answer to a public HLS request it will not relay: a typed 422 and one
+/// line naming the step. The line carries the B incarnation, never the B
+/// session UUID (the viewer's bearer capability), and only the query's key
+/// names, never a value, so the viewer's login token cannot reach a log.
+pub(super) fn unsupported_resource(
+    incarnation: &str,
+    suffix: &str,
+    query: Option<&str>,
+    stage: &'static str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let named = |text: &str, extra: &[u8], limit: usize| {
+        !text.is_empty()
+            && text.len() <= limit
+            && text.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || b"_-".contains(&byte) || extra.contains(&byte)
+            })
+    };
+    let keys = query
+        .unwrap_or("")
+        .split('&')
+        .take(16)
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if named(key, b"", 32) => key,
+            _ => "<invalid>",
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let suffix = if named(suffix, b"./", 96) {
+        suffix
+    } else {
+        "<invalid>"
+    };
+    tracing::warn!(target: "plurx::sharing", stage, incarnation, suffix, query_keys = %keys, "receiver HLS resource refused");
+    super::error::ApiError::typed(
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        "sharing_resource_unsupported",
+        "This shared playback resource is unavailable",
+    )
+    .into_response()
 }
 pub(super) async fn receiver_media_actor(
     state: AppState,
@@ -2737,7 +2779,12 @@ pub(super) async fn receiver_media_actor(
             .into_response();
     }
     let Some(resource) = receiver_hls_resource(suffix, request.uri().query()) else {
-        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+        return unsupported_resource(
+            &actor.0.intent.recipe.source_request_id.to_string(),
+            suffix,
+            request.uri().query(),
+            "resource_grammar",
+        );
     };
     let Some(connection) = request
         .extensions()
@@ -2778,7 +2825,12 @@ pub(super) async fn receiver_media_actor(
                     | plurx_core::sharing_resources::SharingHlsResourceKind::SubtitleSegment { .. }
             ) =>
         {
-            return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+            return unsupported_resource(
+                &actor.0.intent.recipe.source_request_id.to_string(),
+                suffix,
+                request.uri().query(),
+                "subtitle_unsupported",
+            );
         }
         Err(_) => {
             actor.begin_retirement(
@@ -2874,6 +2926,8 @@ impl ReceiverStartRegistry {
 
 #[cfg(test)]
 mod tests {
+
+    use super::*;
     /// Safari's native HLS element cannot set headers, so the web player
     /// carries its login as `?token=` on every playlist URL it fetches
     /// (`core/api.js` `tok`, `player.js` `nativeHlsResourceUrl`). A shared
@@ -2895,6 +2949,13 @@ mod tests {
         assert!(super::receiver_hls_resource("master.m3u8", Some("token=a&token=b")).is_none());
         assert!(super::receiver_hls_resource("master.m3u8", Some("session=a")).is_none());
         assert!(super::receiver_hls_resource("seg1.m4s", Some("token=a")).is_some());
+        // An empty query or pair is refused, exactly as the Source refuses it.
+        for query in ["", "&native=1", "native=1&&token=a", "token=a&"] {
+            assert!(
+                super::receiver_hls_resource("index.m3u8", Some(query)).is_none(),
+                "{query:?}"
+            );
+        }
         assert_eq!(
             super::receiver_hls_resource("index.m3u8", None)
                 .expect("plain index")
@@ -2902,8 +2963,27 @@ mod tests {
             "index.m3u8"
         );
     }
-
-    use super::*;
+    /// A request B will not relay is answered with a typed refusal the web
+    /// player can name, not a bare status.
+    #[tokio::test]
+    async fn unrelayed_hls_resource_answers_a_typed_refusal() {
+        let response = super::unsupported_resource(
+            "00000000-0000-4000-8000-000000000000",
+            "master.m3u8",
+            Some("token=secret&url=x"),
+            "resource_grammar",
+        );
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("bounded refusal");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("typed refusal");
+        assert_eq!(body["code"], "sharing_resource_unsupported");
+        assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+    }
     use plurx_core::{
         sharing::SourceId,
         sharing_catalogue::SharedReference,

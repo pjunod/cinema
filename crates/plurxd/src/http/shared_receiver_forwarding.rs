@@ -546,7 +546,12 @@ pub(super) async fn relay_public(
             // The same public-to-Source mapping the owner applies: the
             // viewer's login token stays on this node.
             let Some(resource) = super::receiver_hls_resource(suffix, query) else {
-                return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+                return super::unsupported_resource(
+                    &route.incarnation_id,
+                    suffix,
+                    query,
+                    "forward_resource_grammar",
+                );
             };
             ReceiverForwardOperation::Resource {
                 relative: resource.as_str().to_owned(),
