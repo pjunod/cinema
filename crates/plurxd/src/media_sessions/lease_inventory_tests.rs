@@ -345,6 +345,73 @@ fn publication_reconciliation_excludes_only_the_exact_newly_fenced_owner() {
 }
 
 #[test]
+fn an_undispatched_renewal_keeps_renewable_leases_and_fails_the_rest_closed() {
+    // A slow inventory spent the shared cycle before this chunk dispatched.
+    // A lease renewed one tick ago, after a three-second interval and a
+    // four-second inventory, still has about five seconds: no write was
+    // issued, so it waits for the next tick instead of being fenced.
+    let now = 10_000;
+    assert!(undispatched_renewal_keeps_lease(
+        now + LEASE_TTL_MS - 3_000 - 4_000,
+        now
+    ));
+    // Too little runway to renew safely fails closed now, not after expiry.
+    assert!(!undispatched_renewal_keeps_lease(
+        now + LEASE_RENEWAL_MIN_REMAINING_MS,
+        now
+    ));
+    assert!(!undispatched_renewal_keeps_lease(now, now));
+    // The kept set is exactly what a dispatched chunk would have sent.
+    let open_cycle = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+    for remaining in (-2_000..=LEASE_TTL_MS).step_by(250) {
+        assert_eq!(
+            undispatched_renewal_keeps_lease(now + remaining, now),
+            renewal_has_full_runway(now + remaining, now, open_cycle),
+            "remaining {remaining} ms"
+        );
+    }
+
+    let source = include_str!("../media_sessions.rs");
+    let loop_body = source
+        .split_once("pub(crate) async fn lease_loop(state: AppState) {")
+        .expect("the actual lease owner")
+        .1
+        .split_once("const TAKEOVER_SETTINGS_REFRESH:")
+        .expect("lease owner end")
+        .0;
+    // Dispatch is decided once, at the same point the Store call is skipped.
+    assert!(loop_body.contains("let dispatched = tokio::time::Instant::now() < renewal_deadline;"));
+    assert!(loop_body.contains("let outcome = if !dispatched {"));
+    let outcomes = loop_body
+        .split_once("in renewal_outcomes {")
+        .expect("renewal outcome pass")
+        .1;
+    let undispatched = outcomes
+        .split_once("if !dispatched {")
+        .expect("undispatched chunks are classified first")
+        .1
+        .split_once("match outcome {")
+        .expect("dispatched outcomes follow")
+        .0;
+    assert!(undispatched.contains("undispatched_renewal_keeps_lease("));
+    assert!(undispatched.contains("frontiers.contains_key(&route.session_id)"));
+    assert!(undispatched.contains("\"cluster lease lost\""));
+    assert!(!undispatched.contains("renewal ambiguous"));
+    assert!(undispatched.contains("continue;"));
+    // A dispatched chunk that errors or times out is still commit-unknown.
+    let dispatched = outcomes
+        .split_once("match outcome {")
+        .expect("dispatched")
+        .1;
+    assert_eq!(
+        dispatched
+            .matches("\"cluster lease renewal ambiguous\"")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn a_late_renewal_receipt_keeps_its_original_expiry_and_fences_after_it() {
     let dispatched = 1_000;
     let fixed_expiry = dispatched + LEASE_TTL_MS;
