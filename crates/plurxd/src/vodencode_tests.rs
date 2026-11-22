@@ -721,6 +721,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .expect("audio admits without a video hardware slot");
     assert_eq!(encoding.admissions.software_in_use(), 3);
     let recipe = Recipe {
+        audio_excluded: false,
         source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
@@ -842,6 +843,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         role: crate::transcode::ContinuousMediaRole::Video,
     }));
     let attach = || VodRecipeRequest {
+        split_soundtracks: Vec::new(),
         admission_priority: crate::admission::Priority::Live,
         root_admission: None,
         measured_candidate: None,
@@ -1021,6 +1023,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
     let autonomous = || VodRecipeRequest {
+        split_soundtracks: Vec::new(),
         admission_priority: crate::admission::Priority::Live,
         root_admission: None,
         measured_candidate: None,
@@ -1725,6 +1728,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             "candidate-cache",
             None,
             Recipe {
+                audio_excluded: false,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -1856,6 +1860,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             "legacy-candidate-cache",
             None,
             Recipe {
+                audio_excluded: false,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -2067,6 +2072,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
         VodRecipeRequest {
+            split_soundtracks: Vec::new(),
             admission_priority: crate::admission::Priority::Live,
             root_admission: None,
             measured_candidate: None,
@@ -2120,6 +2126,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let refused = new
         .try_create(
             VodRecipeRequest {
+                split_soundtracks: Vec::new(),
                 admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 measured_candidate: None,
@@ -2182,6 +2189,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     });
     new.try_create(
         VodRecipeRequest {
+            split_soundtracks: Vec::new(),
             admission_priority: crate::admission::Priority::Live,
             root_admission: None,
             measured_candidate: None,
@@ -2338,6 +2346,7 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
         supersession_user: "user",
     };
     let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
+        split_soundtracks: Vec::new(),
         admission_priority: crate::admission::Priority::Live,
         root_admission: Some(PreparedRootAdmission {
             reuse_scope: None,
@@ -2845,6 +2854,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
+                audio_excluded: false,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -3007,6 +3017,7 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
             "capacity-verdict",
             None,
             Recipe {
+                audio_excluded: false,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -3133,6 +3144,7 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
             "verdict-read",
             None,
             Recipe {
+                audio_excluded: false,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -3472,6 +3484,7 @@ async fn encoded_pair(
     serve
         .try_create(
             VodRecipeRequest {
+                split_soundtracks: Vec::new(),
                 admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 measured_candidate: None,
@@ -3906,6 +3919,7 @@ async fn assert_encoded_restarts(
         let started = serve
             .try_create(
                 VodRecipeRequest {
+                    split_soundtracks: Vec::new(),
                     admission_priority: crate::admission::Priority::Live,
                     root_admission: None,
                     measured_candidate: None,
@@ -4409,6 +4423,7 @@ async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_att
             let refusal = serve
                 .try_create(
                     VodRecipeRequest {
+                        split_soundtracks: Vec::new(),
                         admission_priority: crate::admission::Priority::Live,
                         root_admission: None,
                         measured_candidate: None,
@@ -4579,6 +4594,7 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
     serve
         .try_create(
             VodRecipeRequest {
+                split_soundtracks: Vec::new(),
                 admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 measured_candidate: None,

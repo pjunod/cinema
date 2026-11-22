@@ -2038,7 +2038,11 @@ pattern = "VodPublication"
 # F1/N2 landing repair: +1 test-only VodPublication match in
 # an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere. It inspects the
 # existing owner-bearing refusal; no producer or response owner is created.
-expected_occurrences = 54
+# P49 split copy: +2 in vod/serve/split.rs. `split_copy_master_before`
+# returns the master as a VodPublication bound to the session's captured
+# ResponseOwner, beside the continuous master. It creates no producer or
+# response owner and transfers none.
+expected_occurrences = 56
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -7585,7 +7589,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # mux child. No production launch, kill or wait.
 # Source range init check: +1 response.status() assertion on the fixture's
 # HTTP resource reply in actual_range_resource. No process launch, kill or wait.
-expected_occurrences = 979
+# Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
+# the forwarded native-readiness fixture case and one in the typed-refusal
+# test. No process launch.
+expected_occurrences = 981
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

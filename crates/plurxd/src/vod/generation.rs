@@ -993,15 +993,24 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         }
         args
     } else {
-        let mut args = plurx_core::transcode::copy_pipe_args_with_audio_delivery(
-            &recipe.file,
-            start_seconds,
-            recipe.audio_index,
-            recipe.aac,
-            Pacing::unpaced(),
-            recipe.video,
-            recipe.audio_delivery.as_ref(),
-        );
+        let mut args = if recipe.audio_excluded {
+            plurx_core::transcode::copy_video_only_pipe_args(
+                &recipe.file,
+                start_seconds,
+                Pacing::unpaced(),
+                recipe.video,
+            )
+        } else {
+            plurx_core::transcode::copy_pipe_args_with_audio_delivery(
+                &recipe.file,
+                start_seconds,
+                recipe.audio_index,
+                recipe.aac,
+                Pacing::unpaced(),
+                recipe.video,
+                recipe.audio_delivery.as_ref(),
+            )
+        };
         if attested {
             replace_inputs_with_attested_descriptor(&mut args);
         }

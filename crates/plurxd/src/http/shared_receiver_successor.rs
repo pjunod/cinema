@@ -426,6 +426,7 @@ pub(super) fn successor_request(
 fn successor_effective(request_json: &str, start: &StartResponse) -> EffectiveSelection {
     let request: Value = serde_json::from_str(request_json).unwrap_or(Value::Null);
     EffectiveSelection {
+        audio_alternates: false,
         candidate_id: None,
         quality_auto: request["quality_auto"].as_bool().unwrap_or(false),
         height: start.height,
