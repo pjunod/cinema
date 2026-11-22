@@ -5936,7 +5936,10 @@ fn shared_timeout_budgets_the_first_individual_index_retry() {
         reason: measured.reason.clone(),
         rows: 900,
         transient_allowlisted: false,
-        diagnostic: measured.diagnostic.clone().unwrap(),
+        diagnostic: measured
+            .diagnostic
+            .clone()
+            .expect("measured budget diagnostic"),
     };
     let retry = index_file_budget_after_shared_pass(
         duration_ms,

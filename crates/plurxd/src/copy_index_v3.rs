@@ -576,6 +576,7 @@ enum Loaded {
 /// The variant's exact bytes: this node's verified blob, or one hydrated from
 /// a listed holder. A hydrating node installs under the publisher's staged
 /// write and disk budget and then records itself as a verified location.
+#[allow(clippy::too_many_arguments)] // one variant's exact store, peer, directory and resolve inputs
 async fn load_blob(
     store: &dyn Store,
     calls: Option<&PeerTransport>,

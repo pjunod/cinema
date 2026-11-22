@@ -180,7 +180,7 @@ impl ResumePreparation {
         self.is_live()
             && self
                 .remaining_bytes
-                .fetch_update(AcqRel, Acquire, |remaining| remaining.checked_sub(bytes))
+                .try_update(AcqRel, Acquire, |remaining| remaining.checked_sub(bytes))
                 .is_ok()
     }
 }
