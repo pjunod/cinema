@@ -539,9 +539,48 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
         self.assertNotIn("builder prune -af", commands)
-        self.assertIn("leaving the rest of Docker for the next pass", result.stdout)
-        # Still short, and said so: the next pass finishes it.
+        self.assertNotIn("image prune -f", commands)
+        self.assertIn("until the next pass", result.stdout)
+        # Deferred is not exhausted: a pass cut short by a job is not a host
+        # pruning cannot fix, so it must not read as one.
+        self.assertEqual(self.last_run()["short_after"], 0)
+        self.assertNotIn("cannot reach it by pruning", result.stderr)
+
+    def test_dry_run_never_escalates_the_docker_pass(self):
+        self._short_docker_host(avail_after_full_gb=33)
+
+        result = self.run_janitor("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would prune Docker", result.stdout)
+        self.assertFalse(Path(self.environment["FIXTURE_DOCKER_LOG"]).exists())
+
+    def test_a_shared_volume_a_reset_left_short_and_docker_rescued_is_not_short(self):
+        """Short is measured at the end, once per filesystem: the runner reset
+        ran first and left the volume short, then the Docker pass freed it."""
+        self._short_docker_host(avail_after_full_gb=33)
+        self.procs.write_text("4242\n", encoding="utf-8")       # idle: the reset happens
+        self.environment["FIXTURE_USED_KB"] = str(2 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = self.last_run()
+        self.assertEqual(receipt["reset"], 1)
+        self.assertEqual(receipt["short_after"], 0)
+        self.assertNotIn("cannot reach it by pruning", result.stderr)
+
+    def test_a_shared_volume_short_after_both_passes_counts_once(self):
+        self._short_docker_host(avail_after_full_gb=24)
+        self.procs.write_text("4242\n", encoding="utf-8")
+        self.environment["FIXTURE_USED_KB"] = str(2 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.last_run()["reset"], 1)
         self.assertEqual(self.last_run()["short_after"], 1)
+        self.assertEqual(result.stderr.count("cannot reach it by pruning"), 1)
 
     def test_a_runner_that_will_not_stop_is_never_left_stopped(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
