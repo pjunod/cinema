@@ -83,11 +83,24 @@ static int64_t source_origin_ticks;
 static const char *source_origin_provenance;
 struct coded_input {
   int64_t pts, duration;
-  char packet_sha[65], rpu_sha[65];
+  char packet_sha[65], rpu_sha[65], base_sha[65];
   bool emitted;
 };
-static struct coded_input coded_window[64];
-static unsigned coded_count;
+// A window run renders consecutive windows in one process (--window-run).
+// Window 0 is the argv window; each later window starts where the previous
+// ends and has its own private directory and NUT output. Per-window state
+// below always describes the current window; coded inputs are kept per
+// window because demux runs ahead of the renderer.
+#define RUN_MAX 8
+static int run_windows = 1, run_current;
+static struct rational run_ends[RUN_MAX];
+static int run_dirs[RUN_MAX];
+static const char *run_nuts[RUN_MAX], *run_dir_paths[RUN_MAX];
+static uint64_t run_bytes_base;
+static struct coded_input coded_sets[RUN_MAX][64];
+static unsigned coded_counts[RUN_MAX], coded_printed[RUN_MAX];
+#define coded_window coded_sets[run_current]
+#define coded_count coded_counts[run_current]
 
 struct layer {
   AVBSFContext *split;
@@ -215,7 +228,7 @@ static void movie_reader_interrupt(void *opaque) {
   struct budget_io *io = opaque;
   if (io->interrupt) movie_source_interrupt_stop(io->interrupt);
 }
-static const struct source_reader_io movie_reader_source = {
+static struct source_reader_io movie_reader_source = {
   .context = &movie_io, .read = movie_reader_raw_read, .seek = movie_reader_raw_seek,
   .charged = movie_reader_charged, .limit = WINDOW_READ_LIMIT,
   .exhausted = &movie_io.exhausted, .prepare = movie_reader_prepare,
@@ -489,6 +502,16 @@ static void hash_bytes(const uint8_t *bytes, size_t size, char hex[65]) {
   for (int i = 0; i < 32; i++)
     snprintf(hex + 2 * i, 3, "%02x", out[i]);
 }
+static void print_coded_inputs(void) {
+  while (coded_printed[run_current] < coded_count) {
+    const struct coded_input *input = &coded_window[coded_printed[run_current]++];
+    printf("{\"kind\":\"coded_window_input\",\"pts_ticks\":%lld,\"duration_"
+           "ticks\":%lld,\"packet_sha256\":\"%s\",\"rpu_sha256\":\"%s\","
+           "\"base_vcl_sha256\":\"%s\"}\n",
+           (long long)input->pts, (long long)input->duration, input->packet_sha,
+           input->rpu_sha, input->base_sha);
+  }
+}
 // Four-byte hvcC packet framing, one first slice per BL/EL picture and one
 // fresh RPU. This independent coded-stage trace predates either decoder or GPU.
 static void inspect_coded(AVPacket *packet) {
@@ -496,9 +519,14 @@ static void inspect_coded(AVPacket *packet) {
        "coded AU needs original PTS/positive duration");
   // Decode-order references can follow the requested presentation interval.
   // Their Dolby metadata does not describe any picture this window emits.
-  if (compare_window(packet->pts, window_end) >= 0)
+  int run_window = run_current;
+  while (run_window < run_windows &&
+         compare_window(packet->pts, run_ends[run_window]) >= 0)
+    run_window++;
+  if (run_window == run_windows)
     return;
-  const int in_window = compare_window(packet->pts, window_start) >= 0;
+  const int in_window = run_window > run_current ||
+                        compare_window(packet->pts, window_start) >= 0;
   struct AVSHA *base_sha = in_window ? av_sha_alloc() : NULL;
   need(!in_window || (base_sha && av_sha_init(base_sha, 256) == 0),
        "base-layer source witness SHA256");
@@ -546,11 +574,13 @@ static void inspect_coded(AVPacket *packet) {
            (base_only ? (source_profile == 7 ? el <= 1 : el == 0) : el == 1),
        "one required source picture and fresh RPU per coded AU");
   if (in_window) {
-    need(coded_count < (unsigned)frame_cap && coded_count < 64,
+    unsigned *count = &coded_counts[run_window];
+    struct coded_input *set = coded_sets[run_window];
+    need(*count < (unsigned)frame_cap && *count < 64,
          "coded window frame cap exhausted");
-    for (unsigned i = 0; i < coded_count; i++)
-      need(coded_window[i].pts != packet->pts, "duplicate coded window PTS");
-    struct coded_input *input = &coded_window[coded_count++];
+    for (unsigned i = 0; i < *count; i++)
+      need(set[i].pts != packet->pts, "duplicate coded window PTS");
+    struct coded_input *input = &set[(*count)++];
     input->pts = packet->pts;
     input->duration = packet->duration;
     hash_bytes(packet->data, packet->size, input->packet_sha);
@@ -561,12 +591,103 @@ static void inspect_coded(AVPacket *packet) {
     av_free(base_sha);
     for (int i = 0; i < 32; i++)
       snprintf(base_hex + 2 * i, 3, "%02x", base_digest[i]);
-    printf("{\"kind\":\"coded_window_input\",\"pts_ticks\":%lld,\"duration_"
-           "ticks\":%lld,\"packet_sha256\":\"%s\",\"rpu_sha256\":\"%s\","
-           "\"base_vcl_sha256\":\"%s\"}\n",
-           (long long)input->pts, (long long)input->duration, input->packet_sha,
-           input->rpu_sha, base_hex);
+    memcpy(input->base_sha, base_hex, sizeof(input->base_sha));
+    // A later run window's inputs are printed into its own observations
+    // when that window begins.
+    if (run_window == run_current)
+      print_coded_inputs();
   }
+}
+static const char *current_decoder_mode(void) {
+  return !hw_device       ? "software"
+         : hw_fell_back    ? "vaapi-software-fallback"
+         : dv_hw_host_copy ? "vaapi-host-copy"
+                           : "vaapi";
+}
+static const char *current_decoder_reason(void) {
+  return !hw_device       ? software_reason
+         : hw_fell_back    ? "no-gpu-surface-offered"
+         : dv_hw_host_copy ? "surface-import-failed"
+                           : "";
+}
+static void print_window_complete(void) {
+  printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
+         "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
+         "%d\",\"origin_provenance\":\"%s\","
+         "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
+         "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
+         "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
+         "ticks\":%lld,\"source_time_base\":\"%d/"
+         "%d\",\"source_bytes_read\":%llu,\"duration_provenance\":\"decoder_"
+         "observed\",\"membership\":\"frame_pts_in_half_open_window_"
+         "durations_unclipped\",\"production_qualified\":false}\n",
+         (long long)window_start.num, window_start.den,
+         (long long)window_end.num, window_end.den,
+         (long long)source_origin.num, source_origin.den, source_origin_provenance,
+         emitted, preroll, paired,
+         (long long)boundary_pts, window_done ? "true" : "false",
+         source_eof ? "true" : "false", (long long)first_emitted_pts,
+         (long long)last_emitted_end, source_time_base.num,
+         source_time_base.den, (unsigned long long)(movie_io.bytes - run_bytes_base));
+}
+static void print_window_trailer(const char *decoder_mode, const char *decoder_reason) {
+  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
+         decoder_mode, decoder_reason);
+  printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
+         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
+         "\"production_qualified\":false}\n",
+         emitted, dv_target_policy_name());
+  if (base_only)
+    printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
+           "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
+           "\"fel_contributed\":false,"
+           "\"production_qualified\":false}\n", source_profile, emitted);
+}
+// Finish the current window of a window run at its observed boundary and
+// make the boundary picture the next window's first. The window's
+// observations, timing rows and RPUs are complete before its NUT output
+// closes, so its encoder's end of input means the window is fully written.
+static bool run_advance(int64_t boundary) {
+  if (run_current + 1 >= run_windows)
+    return false;
+  writer_wait_idle();
+  release_held();
+  need(emitted > 0, "nonempty complete pair coverage");
+  need(coded_count == (unsigned)emitted, "missing decoded coded-window picture");
+  for (unsigned i = 0; i < coded_count; i++)
+    need(coded_window[i].emitted, "coded window picture never emitted");
+  boundary_pts = boundary;
+  window_done = true;
+  print_window_complete();
+  print_window_trailer(current_decoder_mode(), current_decoder_reason());
+  need(fflush(stdout) == 0, "observations flush");
+  need(fclose(timing_output) == 0, "close completed outputs");
+  timing_output = NULL;
+  need(av_write_trailer(nut_output) >= 0, "NUT trailer");
+  need(avio_closep(&nut_output->pb) >= 0, "NUT output close");
+  avformat_free_context(nut_output);
+  nut_output = NULL;
+  run_current++;
+  run_bytes_base = movie_io.bytes;
+  window_start = window_end;
+  window_end = run_ends[run_current];
+  emitted = 0;
+  preroll = 0;
+  paired = 1;
+  window_done = false;
+  boundary_pts = first_emitted_pts = last_emitted_end = AV_NOPTS_VALUE;
+  need(fchdir(run_dirs[run_current]) == 0, "next window output directory enter");
+  need(mkdir("rpus", 0700) == 0, "fresh accepted RPU directory");
+  timing_output = fopen("timing.tsv", "wx");
+  int events = open("renderer.jsonl",
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  need(timing_output && events >= 0, "exclusive private output files");
+  need(dup2(events, STDOUT_FILENO) == STDOUT_FILENO && close(events) == 0,
+       "next window observations");
+  need(fputs(dv_gpu_runtime_line, stdout) >= 0, "window GPU runtime line");
+  print_coded_inputs();
+  open_nut(run_nuts[run_current]);
+  return true;
 }
 static void render_pairs(void) {
   while (layers[0].count && (base_only || layers[1].count)) {
@@ -588,13 +709,15 @@ static void render_pairs(void) {
       }
       // Observe the exclusive boundary before interpreting its RPU. A fresh
       // unsupported RPU belongs to the next window, which must refuse it there.
-      if (compare_window(bl->pts, window_end) >= 0) {
+      if (compare_window(bl->pts, window_end) >= 0 && !run_advance(bl->pts)) {
         last_pts = bl->pts;
         boundary_pts = bl->pts;
         window_done = true;
         drop_pair();
         return;
       }
+      need(compare_window(bl->pts, window_end) < 0,
+           "window run picture inside its next window");
     }
     AVFrameSideData *raw =
         av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_RPU_BUFFER);
@@ -869,6 +992,22 @@ int main(int argc, char **argv) {
     supplied_origin = rational(argv[argc - 1]);
     argc -= 2;
   }
+  // --window-run N then N-1 triples END DIR NUT: the windows after the argv
+  // window, each starting where the previous one ends.
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--window-run"))
+      continue;
+    need(i + 1 < argc, "window run count");
+    run_windows = number(argv[i + 1], 2, RUN_MAX);
+    need(argc == i + 2 + 3 * (run_windows - 1), "window run layout");
+    for (int w = 1; w < run_windows; w++) {
+      run_ends[w] = rational(argv[i + 2 + 3 * (w - 1)]);
+      run_dir_paths[w] = argv[i + 3 + 3 * (w - 1)];
+      run_nuts[w] = argv[i + 4 + 3 * (w - 1)];
+    }
+    argc = i;
+    break;
+  }
   need(argc == 11 || argc == 12 || argc == 15 ||
            (argc == 16 && !strcmp(argv[15], "base-rpu")) ||
            ((argc == 19 || argc == 21) && (!strcmp(argv[15], "base-rpu") ||
@@ -881,6 +1020,8 @@ int main(int argc, char **argv) {
   base_only = argc >= 16 && !strcmp(argv[15], "base-rpu");
   window_mode = argc >= 15;
   need(!held_origin || window_mode, "held source origin requires a bounded window");
+  need(run_windows == 1 || (window_mode && streaming),
+       "window run requires streamed bounded windows");
   if (window_mode) {
     window_start = rational(argv[12]);
     window_end = rational(argv[13]);
@@ -892,6 +1033,16 @@ int main(int argc, char **argv) {
                      (__int128)window_start.num * window_end.den;
     need(delta <= (__int128)3 * window_start.den * window_end.den,
          "initial window duration at most three seconds");
+    run_ends[0] = window_end;
+    for (int w = 1; w < run_windows; w++) {
+      struct rational from = run_ends[w - 1], to = run_ends[w];
+      need(av_compare_ts(from.num, (AVRational){1, from.den}, to.num,
+                         (AVRational){1, to.den}) < 0,
+           "ordered nonempty run window");
+      __int128 span = (__int128)to.num * from.den - (__int128)from.num * to.den;
+      need(span <= (__int128)3 * from.den * to.den,
+           "run window duration at most three seconds");
+    }
     av_max_alloc(64ULL * 1024 * 1024);
   }
   int stream_index = number(argv[3], 0, 255);
@@ -941,6 +1092,21 @@ int main(int argc, char **argv) {
   need(stat(argv[2], &st) == 0 && S_ISDIR(st.st_mode),
        "private output directory");
   need(chdir(argv[2]) == 0, "output directory enter");
+  if (run_windows > 1) {
+    run_dirs[0] = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    need(run_dirs[0] >= 0, "private output directory");
+    for (int w = 1; w < run_windows; w++) {
+      run_dirs[w] = open(run_dir_paths[w], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      need(run_dirs[w] >= 0, "private run window output directory");
+    }
+    // Every window of a run, the first included, writes its observations to
+    // its own directory; the daemon reads each when that window's encoder ends.
+    int events = open("renderer.jsonl",
+                      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    need(events >= 0 && dup2(events, STDOUT_FILENO) == STDOUT_FILENO &&
+             close(events) == 0,
+         "window run observations");
+  }
   if (window_mode) {
     stage_started_us = av_gettime_relative();
     stage_output = fopen("stages.tsv", "wx");
@@ -959,8 +1125,12 @@ int main(int argc, char **argv) {
   input->max_analyze_duration = AV_TIME_BASE;
   input->max_probe_packets = 32;
   input->max_streams = 256;
-  if (window_mode)
+  if (window_mode) {
     open_movie_io(input, argv[1]);
+    // Each window of a run keeps the single window's read envelope.
+    movie_io.read_limit = WINDOW_READ_LIMIT * (uint64_t)run_windows;
+    movie_reader_source.limit = movie_io.read_limit;
+  }
   int opened = avformat_open_input(&input, argv[1], NULL, NULL);
   need(!movie_io.exhausted, "window source read budget exhausted");
   need(opened >= 0, "timestamped segment open");
@@ -1075,11 +1245,14 @@ int main(int argc, char **argv) {
   int result;
   unsigned packets = 0, video_packets = 0;
   while ((result = av_read_frame(input, packet)) >= 0) {
-    need(++packets <= 4096 && packet->size <= 16 * 1024 * 1024,
+    need(++packets <= 4096U * (unsigned)run_windows &&
+             packet->size <= 16 * 1024 * 1024,
          "finite segment packet/byte envelope");
     if (packet->stream_index == stream_index) {
       need(++video_packets <=
-               (window_mode ? 2 * (preroll_cap + frame_cap + 1) : 256),
+               (window_mode ? 2 * (preroll_cap + (unsigned)run_windows *
+                                                     ((unsigned)frame_cap + 1))
+                            : 256),
            "bounded video access units");
       if (window_mode)
         inspect_coded(packet);
@@ -1168,14 +1341,8 @@ int main(int argc, char **argv) {
     av_bsf_free(&layers[k].split);
     avcodec_free_context(&layers[k].decoder);
   }
-  const char *decoder_mode = !hw_device       ? "software"
-                             : hw_fell_back     ? "vaapi-software-fallback"
-                             : dv_hw_host_copy  ? "vaapi-host-copy"
-                                                : "vaapi";
-  const char *decoder_reason = !hw_device       ? software_reason
-                               : hw_fell_back    ? "no-gpu-surface-offered"
-                               : dv_hw_host_copy ? "surface-import-failed"
-                                                 : "";
+  const char *decoder_mode = current_decoder_mode();
+  const char *decoder_reason = current_decoder_reason();
   av_buffer_unref(&hw_device);
   av_packet_free(&packet);
   avformat_close_input(&input);
@@ -1187,36 +1354,9 @@ int main(int argc, char **argv) {
   source_reader_destroy(&movie_reader);
   if (movie_interrupt_initialized) movie_source_interrupt_destroy(&movie_interrupt);
   if (window_mode) {
-    printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
-           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
-           "%d\",\"origin_provenance\":\"%s\","
-           "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
-           "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
-           "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
-           "ticks\":%lld,\"source_time_base\":\"%d/"
-           "%d\",\"source_bytes_read\":%llu,\"duration_provenance\":\"decoder_"
-           "observed\",\"membership\":\"frame_pts_in_half_open_window_"
-           "durations_unclipped\",\"production_qualified\":false}\n",
-           (long long)window_start.num, window_start.den,
-           (long long)window_end.num, window_end.den,
-           (long long)source_origin.num, source_origin.den, source_origin_provenance,
-           emitted, preroll, paired,
-           (long long)boundary_pts, window_done ? "true" : "false",
-           source_eof ? "true" : "false", (long long)first_emitted_pts,
-           (long long)last_emitted_end, source_time_base.num,
-           source_time_base.den, (unsigned long long)movie_io.bytes);
+    print_window_complete();
   }
-  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
-         decoder_mode, decoder_reason);
-  printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
-         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
-         "\"production_qualified\":false}\n",
-         emitted, dv_target_policy_name());
-  if (base_only)
-    printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
-           "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
-           "\"fel_contributed\":false,"
-           "\"production_qualified\":false}\n", source_profile, emitted);
+  print_window_trailer(decoder_mode, decoder_reason);
   need(fflush(stdout) == 0, "observations flush");
   mark_stage("complete");
   if (stage_output)
