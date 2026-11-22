@@ -150,6 +150,180 @@ local function audio_format(p)
     return joined(observed(p['hr-channels']) or observed(p.channels),
         measurement(p.samplerate,'%.0f Hz'),observed(p.format))
 end
+-- ---- quality pills: the web player's fact badges, drawn inside mpv --------
+-- crates/plurxd/src/web/detail/dynamic-range.js `playerFactBadges`: resolution,
+-- dynamic range (source → what is delivered), the active Dolby Vision
+-- enhancements, then audio. The launcher supplies what only it knows
+-- (badges.py: the file's grade, the server's enhancement, the renderer line);
+-- everything about the current picture is read from mpv here.
+local PILL = {res='6EA8FE', hdr='12B3A6', dv='C99A2B', audio='7F8FE0', enh='4BB9B2'}
+local RANGE_SHORT = {dolby_vision='DV', hdr10='HDR10', hlg='HLG', sdr='SDR'}
+local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
+-- EL is this player's own fact: the dual-layer stream reached the private
+-- build, which pairs its enhancement layer. Neither plurx nor mpv reports
+-- whether that layer is full (FEL) or minimal (MEL), so FEL stays the server's
+-- claim alone.
+local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
+local function table_of(value) return type(value)=='table' and value or {} end
+-- One read of each property per render; the info timer runs at 5 Hz.
+local function snapshot()
+    local view={facts=table_of(prop('user-data/cinema-video')),p=table_of(prop('video-params'))}
+    for _,track in ipairs(table_of(prop('track-list'))) do
+        if type(track)=='table' and track.selected then
+            if track.type=='video' and not view.video then view.video=track end
+            if track.type=='audio' and not view.audio then view.audio=track end
+        end
+    end
+    view.source=table_of(view.facts.source)
+    view.renderer=type(view.facts.renderer)=='table' and view.facts.renderer or nil
+    view.enhancement=type(view.facts.enhancement)=='table' and view.facts.enhancement or nil
+    return view
+end
+-- detail/helpers.js resLabel, on the frame mpv decodes rather than the file.
+local function resolution(w,h)
+    if not (number(w) and number(h)) or w<=0 or h<=0 then return nil end
+    local short,long=math.min(w,h),math.max(w,h)
+    if long>=3200 or short>=1700 then return '2160p' end
+    if long>=2300 or short>=1300 then return '1440p' end
+    if long>=1600 or short>=900 then return '1080p' end
+    if long>=1100 or short>=650 then return '720p' end
+    if long>=700 or short>=400 then return '480p' end
+    return string.format('%dp',short)
+end
+-- dynamic-range.js sourceDynamicRange / sourceDolbyVisionProfile.
+local function source_range(s)
+    local f=clean(s.hdr_format):lower()
+    if s.hdr=='dolby_vision' or f:find('dolby',1,true) then return 'dolby_vision' end
+    if clean(s.hdr)~='' then return s.hdr end
+    if f:find('hlg',1,true) then return 'hlg' end
+    if f~='' then return 'hdr10' end
+end
+local function source_profile(s)
+    if number(s.dv_profile) then return s.dv_profile end
+    local m=clean(s.hdr_format):lower():match('profile%s*(%d+)')
+    return m and tonumber(m) or nil
+end
+-- What mpv renders now, from its decoded colour matrix and transfer.
+local function delivered_range(p)
+    if p.colormatrix=='dolbyvision' then return 'dolby_vision' end
+    if p.gamma=='pq' then return 'hdr10' end
+    if p.gamma=='hlg' then return 'hlg' end
+    if SDR_GAMMA[p.gamma] then return 'sdr' end
+end
+local function delivered_profile(track)
+    local value=track and track['dolby-vision-profile']
+    return number(value) and value>0 and value or nil
+end
+local function range_pill(view)
+    local s,p=view.source,view.p
+    local source=source_range(s)
+    if not source then return nil end
+    local profile,base=source_profile(s)
+    if source=='dolby_vision' then base=profile and ('DV P'..profile) or 'DV'
+    else
+        local f=clean(s.hdr_format)
+        base=(f~='' and #f<=12) and f or RANGE_SHORT[source] or source:upper()
+    end
+    local pill={text=base,colour=source=='dolby_vision' and PILL.dv or PILL.hdr}
+    -- playerRangeBadge: a current server-processing report names what arrives.
+    local processed=view.enhancement and view.enhancement.processed
+    if processed=='HDR10-E' or processed=='SDR-E' then
+        local same=source==(processed=='SDR-E' and 'sdr' or 'hdr10')
+        pill.text=same and processed or (base..' → '..processed)
+        return pill
+    end
+    local delivered=delivered_range(p)
+    if not delivered then return pill end
+    if delivered==source then
+        local now=delivered_profile(view.video)
+        if source=='dolby_vision' and now and profile and now~=profile then pill.text=base..' → DV P'..now end
+        return pill
+    end
+    pill.text=base..' → '..(RANGE_SHORT[delivered] or delivered:upper()); pill.off=true
+    return pill
+end
+-- The server's enhancement for this session, then what mpv did on this device.
+-- A carried Dolby Vision route's server pills describe what the display does
+-- with the stream, and here the display is mpv: they hold only while mpv
+-- renders Dolby Vision and the private build has not said the frame had no
+-- RPU. A processed route's pills (FEL/RPU/DYN baked in by the server, proved
+-- by its current report) describe the picture and stand as stated. mpv applies
+-- RPU and DYN itself; RPU is not claimed on a Profile 7 → 8.1 delivery, whose
+-- reshaping is a pass-through without the enhancement layer.
+local function enhancement_state(view)
+    local s,r,p=view.source,view.renderer,view.p
+    local rendering=delivered_range(p)=='dolby_vision' and not (r and r.kind=='none')
+    local details,order={},{}
+    local function put(badge,active,value)
+        if not details[badge] then order[#order+1]=badge end
+        details[badge]={active=active,text=value}
+    end
+    local server=view.enhancement
+    if server then
+        for _,d in ipairs(table_of(server.details)) do
+            if type(d)=='table' and type(d.badge)=='string' and type(d.text)=='string' then put(d.badge,false,d.text) end
+        end
+        local holds=server.processed or rendering or (delivered_range(p)==nil and not (r and r.kind=='none'))
+        for _,badge in ipairs(table_of(server.active)) do
+            if type(badge)=='string' and holds then
+                if details[badge] then details[badge].active=true else put(badge,true,badge) end
+            end
+        end
+    end
+    if rendering then
+        local how=({native="plurx Player's Dolby renderer",closed_form="plurx Player's closed-form mapping",
+            libplacebo="libplacebo's built-in Dolby Vision mapping"})[r and r.kind] or "mpv's Dolby Vision mapping"
+        local target=r and number(r.target_nits) and string.format(' for a %d-nit target',r.target_nits) or ''
+        local now,was=delivered_profile(view.video),source_profile(s)
+        if not (was==7 and now==8) then put('RPU',true,'RPU: reshaping applied on this device by '..how) end
+        put('DYN',true,'DYN: per-shot Dolby display mapping on this device'..target..' by '..how)
+        if r and now==7 and s.dv_el_present==true then
+            put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer (full or minimal is not reported)')
+        end
+    end
+    -- Display order: FEL, EL, RPU, DYN, then any badge a newer server adds.
+    local active,sorted,known={},{},{}
+    for _,badge in ipairs(ENHANCEMENTS) do
+        known[badge]=true
+        if details[badge] then
+            sorted[#sorted+1]=badge
+            if details[badge].active then active[#active+1]=badge end
+        end
+    end
+    for _,badge in ipairs(order) do if not known[badge] then sorted[#sorted+1]=badge end end
+    return active,details,sorted
+end
+local CHANNELS={[8]='7.1',[7]='6.1',[6]='5.1',[2]='2.0',[1]='Mono'}
+-- dynamic-range.js playbackAudioChip, on the track mpv is playing.
+local function audio_pill(track)
+    if not track then return nil end
+    local codec,mark=clean(track.codec):lower(),nil
+    if clean(track.title):lower():find('atmos',1,true) then mark='ATMOS'
+    elseif codec=='eac3' or codec=='e-ac-3' then mark='DD+'
+    elseif codec=='ac3' or codec=='ac-3' then mark='DD'
+    elseif codec=='truehd' then mark='TRUEHD'
+    elseif codec=='dts' or codec=='dca' then mark='DTS'
+    elseif codec~='' then mark=codec:upper():sub(1,12) end
+    if not mark then return nil end
+    local n=track['demux-channel-count']
+    if not number(n) then n=table_of(prop('audio-params'))['channel-count'] end
+    local channels=number(n) and (CHANNELS[n] or (n>0 and string.format('%dch',n))) or nil
+    return {text=channels and (mark..' '..channels) or mark,colour=PILL.audio}
+end
+-- Pills in display order, each tagged with the priority it keeps in a narrow
+-- window: range first, then the enhancement group (all of it or none, since
+-- a missing pill reads as "not active"), then resolution, then audio.
+local function quality_pills(view)
+    local pills={}
+    local res=resolution(view.p.w,view.p.h)
+    if res then pills[#pills+1]={text=res,colour=PILL.res,rank=3} end
+    local range=range_pill(view)
+    if range then range.rank=1; pills[#pills+1]=range end
+    for _,badge in ipairs((enhancement_state(view))) do pills[#pills+1]={text=badge,colour=PILL.enh,rank=2} end
+    local audio=audio_pill(view.audio)
+    if audio then audio.rank=4; pills[#pills+1]=audio end
+    return pills
+end
 local function playback_info()
     local r={}
     local columns=math.max(20,math.floor((math.min(680,W-48)-32)/9))
@@ -204,6 +378,22 @@ local function playback_info()
     row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
     row('VO target peak',number(target['max-luma']) and target['max-luma']>0
         and measurement(target['max-luma'],'%.0f nits') or nil)
+    local view=snapshot()
+    local source=view.source
+    row('Source dynamic range',joined(observed(source.hdr_format) or RANGE_SHORT[source_range(source) or ''],
+        source.dv_el_present==true and 'enhancement layer present' or nil))
+    row('Dolby Vision mapper',observed((view.renderer or {}).label))
+    local active,details,order=enhancement_state(view)
+    if #order==0 then
+        row('Dolby Vision enhancements',source_range(source)=='dolby_vision' and 'None reported' or 'Not a Dolby Vision source')
+    else
+        row('Dolby Vision enhancements',#active>0 and table.concat(active,' · ') or 'None active')
+        for _,badge in ipairs(order) do
+            for _,line in ipairs(wrapped((details[badge].active and '● ' or '○ ')..details[badge].text,columns)) do
+                r[#r+1]={text=line}
+            end
+        end
+    end
     row('Renderer',joined(observed(prop('current-vo')),observed(prop('current-gpu-context'))))
     local hw=observed(prop('hwdec-current'))
     row('Decoder',hw=='no' and 'Software (mpv)' or hw)
@@ -294,6 +484,19 @@ local function draw_rect(a, x, y, w, h, colour, alpha)
     a:new_event(); a:append(string.format('{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&}', colour or 'FFFFFF', alpha or 0))
     a:draw_start(); a:rect_cw(x, y, x+w, y+h); a:draw_stop()
 end
+local function pill_width(value)
+    local count=0
+    for _ in value:gmatch('[^\128-\191][\128-\191]*') do count=count+1 end
+    return math.floor(count*8.4+18)
+end
+local function pill(a, x, y, value, rgb, off)
+    local w, c = pill_width(value), bgr(rgb)
+    a:new_event(); a:append(string.format('{\\an7\\pos(0,0)\\bord1\\shad0\\1c&H%s&\\1a&H%02X&\\3c&H%s&\\3a&H50&}', c, off and 255 or 200, c))
+    a:draw_start(); a:round_rect_cw(x, y, x+w, y+22, 11); a:draw_stop()
+    a:new_event(); a:append(string.format('{\\an5\\pos(%g,%g)\\fnDejaVu Sans\\b1\\fs13\\bord0\\shad0\\1c&H%s&%s}', x+w/2, y+11, c, off and '\\1a&H50&' or ''))
+    a:append(escape(value))
+    return w
+end
 local function text(a, x, y, value, size, colour, align)
     a:new_event(); a:append(string.format('{\\an%d\\pos(%g,%g)\\fnDejaVu Sans\\fs%d\\bord0\\shad0\\1c&H%s&}', align or 7, x, y, size or 18, colour or 'FFFFFF'))
     a:append(escape(value))
@@ -341,9 +544,26 @@ render = function()
         draw_rect(a, 0, n*4, W, 4, '000000', math.floor(65+n*190/24))
         draw_rect(a, 0, H-(n+1)*6, W, 6, '000000', math.floor(40+n*215/24))
     end
+    local pill_x = 24
     if cinema().tone_mapping == true then
         draw_rect(a, 24, 58, 132, 26, '303030', 25)
         text(a, 90, 71, 'Tone mapping', 15, 'FFFFFF', 5)
+        pill_x = 164
+    end
+    -- What is playing, beside the title, before the header buttons. A narrow
+    -- window drops whole priority groups (audio, then resolution, then the
+    -- enhancement group) instead of cutting one in the middle.
+    local pills = quality_pills(snapshot())
+    for rank = 4, 1, -1 do
+        local width = pill_x - 6
+        for _, q in ipairs(pills) do width = width + pill_width(q.text) + 6 end
+        if width <= W-235 then break end
+        local kept = {}
+        for _, q in ipairs(pills) do if q.rank < rank then kept[#kept+1] = q end end
+        pills = kept
+    end
+    for _, q in ipairs(pills) do
+        pill_x = pill_x + pill(a, pill_x, 60, q.text, q.colour, q.off) + 6
     end
     local movie_title = title()
     -- Clip long or hostile file titles to the title region (ASS escapes above).
@@ -536,7 +756,7 @@ for _, pair in ipairs({{'TAB','tab'},{'Shift+TAB','backtab'},{'ENTER','enter'},{
 end
 mp.add_forced_key_binding('WHEEL_UP','cinema-wheel-up',function() if S.menu then key('up') else mp.commandv('add','volume',5); activity() end end)
 mp.add_forced_key_binding('WHEEL_DOWN','cinema-wheel-down',function() if S.menu then key('down') else mp.commandv('add','volume',-5); activity() end end)
-for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params'}) do
+for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params'}) do
     mp.observe_property(name,'native',function() render() end)
 end
 mp.observe_property('user-data/cinema','native',function()
