@@ -86,7 +86,10 @@ BUILD_SPECS = {
     # native build recipe changed.
     # PR #1666 adds only `node --test tests/playback/prepared-successor-chase.test.js`
     # to the web-unit-check recipe (a Node web test); no native recipe changes.
-    'Makefile': 'a7b767c0bc813c46c2fedd64fe465cc44748fb660f088c78a13e30d9a528440b',
+    # P49 adds only `node --test tests/playback/audio-alternation.test.js` to
+    # the web-unit-check recipe (a Node playback-lab observer test); no native
+    # recipe changes.
+    'Makefile': 'b67747c8937a551fa2a80ef71435b97cd9893f0b214c2258effe9240035b5185',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag

@@ -16,6 +16,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -203,6 +204,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -289,6 +291,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -362,6 +365,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -2893,6 +2897,7 @@ scope = "test"
     #[test]
     fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
         let mut request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

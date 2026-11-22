@@ -1445,6 +1445,10 @@ pub(crate) struct EffectiveSelection {
     pub quality_auto: bool,
     pub height: i64,
     pub audio_track: Option<i64>,
+    /// A split copy presentation carries every soundtrack of its source as an
+    /// alternate on the one attachment: choosing another is not a new recipe.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio_alternates: bool,
     pub subtitle_burn: Option<i64>,
     pub audio_offset_ms: i64,
     pub codec: String,
@@ -1478,6 +1482,19 @@ impl EffectiveSelection {
         effective
     }
 
+    /// Bind `audio_alternates` to the presentation this start actually
+    /// served. A request may negotiate split audio and still be admitted as
+    /// the muxed copy (too many soundtracks, a refused soundtrack); only a
+    /// start whose entry point is its family master delivers alternates.
+    pub(crate) fn started_as(mut self, playlist_url: &str) -> Self {
+        let path = playlist_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(playlist_url);
+        self.audio_alternates &= path.ends_with("/master.m3u8");
+        self
+    }
+
     /// The same view, from the request alone.
     ///
     /// A *candidate* recipe has no `RemoteStartRequest` — that carries the
@@ -1507,6 +1524,8 @@ impl EffectiveSelection {
             quality_auto: request.automatic,
             height: delivered_height,
             audio_track: request.audio_index,
+            audio_alternates: request.split_audio
+                && matches!(request.kind, SessionKind::Copy { .. }),
             subtitle_burn: request.subtitle_burn,
             audio_offset_ms: request.audio_offset_ms,
             codec: codec.to_owned(),
@@ -1839,7 +1858,10 @@ fn decide_preparation_given_client(
     if delivered_grade != candidate_grade {
         cross(PreparationAxis::DynamicRange);
     }
-    if delivered.audio_track != candidate.audio_track
+    // Selecting another alternate of a split copy is served in place on the
+    // same attachment; an offset still changes the soundtracks' bytes.
+    let in_place_audio = delivered.audio_alternates && candidate.audio_alternates;
+    if delivered.audio_track != candidate.audio_track && !in_place_audio
         || delivered.audio_offset_ms != candidate.audio_offset_ms
     {
         cross(PreparationAxis::AudioTrackOrOffset);
@@ -1847,7 +1869,13 @@ fn decide_preparation_given_client(
     if delivered.subtitle_burn != candidate.subtitle_burn {
         cross(PreparationAxis::SubtitleBurn);
     }
-    if delivered.height != candidate.height || delivered.quality_auto != candidate.quality_auto {
+    // A copy is not a rung: copy to copy delivers the same source bytes at
+    // any height or Auto/Original answer, so neither is a recipe change.
+    let copy_to_copy = delivered.codec == "source" && candidate.codec == "source";
+    if !copy_to_copy
+        && (delivered.height != candidate.height
+            || delivered.quality_auto != candidate.quality_auto)
+    {
         cross(PreparationAxis::ResolutionOrBitrate);
     }
 
@@ -3153,6 +3181,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             owner_epoch: 1,
         },
         effective_selection: EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 720,

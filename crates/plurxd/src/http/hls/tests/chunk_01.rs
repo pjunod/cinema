@@ -733,6 +733,7 @@
     /// A minimal delivered selection; only `height` matters to these tests.
     fn sample_effective_selection() -> crate::playback_control::EffectiveSelection {
         crate::playback_control::EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             height: 1080,
             quality_auto: false,
@@ -1025,6 +1026,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 source_telemetry: None,
                 dv_processing_destination: None,
         retain_output: None,
@@ -2233,6 +2235,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 source_telemetry: None,
                 dv_processing_destination: None,
         retain_output: None,
@@ -2517,6 +2520,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    split_audio: false,
                     source_telemetry: None,
                     dv_processing_destination: None,
         retain_output: None,
@@ -2732,6 +2736,7 @@
                     owner_epoch: 1,
                 },
                 effective_selection: crate::playback_control::EffectiveSelection {
+                    audio_alternates: false,
                     candidate_id,
                     quality_auto: true,
                     height: 720,

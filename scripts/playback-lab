@@ -718,6 +718,22 @@ function fixtureCommand(fixture, output, directory, fixtures) {
         "-disposition:a:0", "default", "-disposition:a:1", "0", "-shortest", output,
       ];
     }
+    case "h264_dual_aac_mkv_clocked": { // two language soundtracks over one copy-compatible clocked picture
+      const tone = (hz) => `aevalsrc='0.3*sin(2*PI*${hz}*t)+0.6*sin(2*PI*1000*t)*lt(mod(t\\,1)\\,0.02)':s=48000:d=${seconds}:c=stereo`;
+      return [
+        ...ffmpegPrefix(),
+        "-f", "lavfi", "-i", `testsrc2=size=1920x1080:rate=24:duration=${seconds}`,
+        "-f", "lavfi", "-i", tone(440), "-f", "lavfi", "-i", tone(660),
+        "-filter_complex_threads", "1", "-filter_complex", frameClockFilter(duration),
+        "-map", "[clocked_video]", "-map", "1:a:0", "-map", "2:a:0",
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-g", "48", "-keyint_min", "48", "-sc_threshold", "0", "-b:v", "8M",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=English",
+        "-metadata:s:a:1", "language=fre", "-metadata:s:a:1", "title=French",
+        "-disposition:a:0", "default", "-disposition:a:1", "0", "-shortest", output,
+      ];
+    }
     case "mpeg4_mp3_avi":
       return [
         ...ffmpegPrefix(),
@@ -835,6 +851,7 @@ function verifyFixture(fixture, file) {
     mpeg4_aac_mp4_caption_copy: { video: "mpeg4", audio: ["aac"], subtitles: 1, width: 1920, height: 1080, minDuration: 1800 },
     mpeg4_aac_mp4_continuous: { video: "mpeg4", audio: ["aac"], width: 1920, height: 1080, minDuration: 1800 },
     h264_multitrack_mkv: { video: "h264", audio: ["aac", "ac3"], subtitles: 1, width: 1920, height: 1080, minDuration: 20 },
+    h264_dual_aac_mkv_clocked: { video: "h264", audio: ["aac"], audioCount: 2, width: 1920, height: 1080, minDuration: 90 },
     mpeg4_mp3_avi: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 20 },
     mpeg4_mp3_avi_long: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 200 },
     vp9_opus_webm: { video: "vp9", audio: ["opus"], width: 1280, height: 720, minDuration: 20 },
@@ -845,6 +862,7 @@ function verifyFixture(fixture, file) {
     failures.push(`dimensions ${video.width}x${video.height}, want ${want.width}x${want.height}`);
   }
   for (const codec of want.audio) if (!audio.some((stream) => stream.codec_name === codec)) failures.push(`missing ${codec} audio`);
+  if (want.audioCount && audio.length !== want.audioCount) failures.push(`audio streams ${audio.length}, want ${want.audioCount}`);
   if (want.subtitles && subtitles.length < want.subtitles) failures.push(`subtitle streams ${subtitles.length}, want ${want.subtitles}`);
   if (want.hdr && video && video.color_transfer !== "smpte2084") failures.push(`transfer ${video.color_transfer || "none"}, want smpte2084`);
   const bitrate = Number(probe.format.bit_rate || video?.bit_rate || 0);
@@ -3063,6 +3081,9 @@ async function performOperation(driver, testCase, start) {
         state.started && state.video.ready_state >= 2 && state.video.current_time > 0.1) ? state : null;
     }, 30_000, "alternate audio playback");
     return { audio_index: 1 };
+  }
+  if (testCase.operation === "audio-alternation") {
+    return require("./playback-audio-alternation").runAlternation(driver, testCase, start, { waitFor });
   }
   if (testCase.operation === "subtitle-toggle") {
     if (start.subtitle_count < 1) throw new Error("fixture has no subtitle track");
