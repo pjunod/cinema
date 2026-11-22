@@ -73,12 +73,15 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
 # CI Fleet registers a runner with this exact label for one approved attempt
-# and removes the registration after the job.
+# and removes the registration after the job. It trusts the attempt by the
+# reviewed bytes of the workflow and its inputs at the run commit; the switch
+# variable only routes the job (a `commit_variable` instead pins one commit).
 [[ephemeral_jobs]]
 workflow = ".github/workflows/validation-marker-units.yml"
 job = "validation-markers"
 label = "ci-fleet-plurx-markers-v1"
-commit_variable = "CI_FLEET_MARKER_UNITS_SHA"
+switch_variable = "CI_FLEET_MARKER_UNITS"
+switch_value = "firecracker"
 
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]

@@ -4985,8 +4985,13 @@ assert.equal(context.ACT_TIMER, null);
                                      [declaration])
                     ephemeral_declarations.append(declaration)
                     self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
+                    # A job is either pinned to one commit or routed by an
+                    # explicit switch while CI Fleet checks its reviewed content.
+                    self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
+                    route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
+                             else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
                     expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
-                                f" && github.sha == vars.{profile['commit_variable']}")
+                                f" && {route}")
                     self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
                 for labels in self_hosted_label_sets(block):
                     parsed.append(labels)
