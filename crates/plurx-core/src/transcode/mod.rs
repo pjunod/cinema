@@ -2913,6 +2913,14 @@ fn append_copy_mp4_output_with_timeline(
 /// express the seek preroll; AVPlayer accepts that file directly but rejects
 /// the same rendition during multivariant HLS validation. Keep the normalized
 /// fragment decode times and suppress those movie-level edits.
+/// Whether a copy's fragmented MP4 output can carry `codec`'s packets as they
+/// are. FFmpeg's MP4 muxer has no sample entry for MLP and writes TrueHD only
+/// under `-strict experimental`, which the copy never passes, so either one
+/// fails the output's header and must be converted instead.
+pub fn copy_mp4_carries_audio_codec(codec: &str) -> bool {
+    !matches!(codec.to_ascii_lowercase().as_str(), "truehd" | "mlp")
+}
+
 pub fn copy_pipe_args(
     source: &MediaFile,
     start_seconds: f64,

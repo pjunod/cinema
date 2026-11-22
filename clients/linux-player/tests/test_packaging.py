@@ -182,6 +182,26 @@ class PrivateBuild(unittest.TestCase):
         self.assertLess(snapshot.index('if [ -f "$marker" ]'), snapshot.index("apt-get -q -o APT::Update::Error-Mode=any"))
         self.assertIn('flock -n 9', build)
 
+    def test_every_changelog_trailer_names_a_mail_host_lintian_accepts(self):
+        # lintian's bogus-mail-host-in-debian-changelog is an error, and the
+        # package verification runs lintian before its install checks: a
+        # dotless host anywhere in the shipped changelog stops all of them.
+        trailers = re.findall(r"^ -- (.+?) <([^>]*)>  ", read("debian/changelog"), re.MULTILINE)
+        self.assertTrue(trailers)
+        for name, address in trailers:
+            host = address.rpartition("@")[2]
+            self.assertIn(".", host, f"{name} <{address}>")
+
+    def test_no_changelog_entry_is_dated_in_the_future(self):
+        # dpkg-buildpackage takes SOURCE_DATE_EPOCH from the newest entry and
+        # only clamps file times later than it: a future date leaves every
+        # file at its build time, so two builds of one source differ.
+        from email.utils import parsedate_to_datetime
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for stamp in re.findall(r"^ -- .+?>  (.+)$", read("debian/changelog"), re.MULTILINE):
+            self.assertLessEqual(parsedate_to_datetime(stamp), now, stamp)
+
     def test_package_version_names_only_the_frontend(self):
         version = re.match(r"plurx-player \(([^)]+)\)", read("debian/changelog")).group(1)
         self.assertEqual(version, f"{VERSION}-1")

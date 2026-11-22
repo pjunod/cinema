@@ -18,6 +18,7 @@ from threading import Thread
 from .caps import control_capabilities
 from .api import ApiError, error_text
 from .mpv import CLOSED, MpvError
+from .badges import NATIVE_MAPPER, video_facts
 from .cinema import context as cinema_context, display_title, quality_choices
 
 PROTOCOL = "plurx-playback-control-v1"
@@ -37,7 +38,6 @@ NATIVE_TARGET = re.compile(
     rf"encoding {_DV_NUMBER}\.\.{_DV_NUMBER}; reference {_DV_NUMBER}; "
     rf"PQ transport gain {_DV_NUMBER} -> signal {_DV_NUMBER}\.\.{_DV_NUMBER}; "
     r"generation (?P<generation>\d{1,20})")
-NATIVE_MAPPER = "shared native Dolby renderer"
 NATIVE_TARGET_STATE = "native-dovi-target-state"
 
 
@@ -117,6 +117,7 @@ class Playback:
         self.seeking = False
         self.last_position_ms = None
         self.mapper = None
+        self._video_published = None
         self.physical_target_nits = None
         self.physical_target_generation = None
         self.tone_mapping_session = None
@@ -263,6 +264,23 @@ class Playback:
     def reset_renderer_facts(self):
         self.mapper = self.physical_target_nits = self.facts = None
         self.physical_target_generation = None
+        self.publish_video()
+
+    def publish_video(self):
+        """Cinema's quality pills: whitelisted source, enhancement and renderer facts (badges.py).
+
+        A separate property from user-data/cinema, whose every update releases
+        the overlay's request fence: a renderer line arriving mid-request must
+        not. Unchanged facts are not re-sent.
+        """
+        value = video_facts(self.decision, self.session, self.mapper, self.physical_target_nits)
+        if value == self._video_published:
+            return
+        try:
+            self.mpv.set("user-data/cinema-video", value)
+        except MpvError:
+            return
+        self._video_published = value
 
     def read_native_target_state(self):
         state = self.mpv.get(NATIVE_TARGET_STATE)
@@ -458,6 +476,7 @@ class Playback:
         self.publish_chrome()
 
     def publish_chrome(self):
+        self.publish_video()
         self.chrome_revision += 1
         data = self.context or {}
         info = data.get("metadata") or {}
@@ -783,21 +802,27 @@ class Playback:
         if not isinstance(control, dict) or not control.get("url"):
             self.refresh_tone_mapping()
             return
-        self.session.pop("effective_processing", None)
+        # An answered exchange states the current report (or that there is
+        # none); a failed one says nothing, so the last report for this
+        # generation stands until it is superseded rather than flickering off.
+        previous = {key: self.session.pop(key, None) for key in ("effective_processing", "processing_skip")}
         try:
             status, body = self.http.request("POST", control["url"], self.control_body(),
                                              auth=False, timeout=4.5)
         except ApiError as error:
             self.log(f"control exchange failed: {error}")
-            self.refresh_tone_mapping()
-            return
+            status, body = None, None
         if status in (404, 410):
             raise ServerStop(error_text(body, "Playback was stopped on the server"))
-        if status != 200:
-            self.log(f"control exchange answered {status}: {error_text(body, '')}")
-        elif isinstance(body, dict) and body.get("protocol") == PROTOCOL \
+        if status == 200 and isinstance(body, dict) and body.get("protocol") == PROTOCOL \
                 and body.get("generation") == control.get("generation"):
             self.session["effective_processing"] = body.get("effective_processing")
+            self.session["processing_skip"] = body.get("processing_skip")
+        elif status is None or status != 200:
+            if status is not None:
+                self.log(f"control exchange answered {status}: {error_text(body, '')}")
+            self.session.update({key: value for key, value in previous.items() if value is not None})
+        self.publish_video()
         self.refresh_tone_mapping()
 
     def progress(self, reason):
@@ -836,15 +861,23 @@ class Playback:
                 if state == (True, generation):
                     self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak
                     self.physical_target_generation = generation
+                    self.publish_video()
                 return
         if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
                 and text.startswith("Error opening/initializing the"):
             self.vo_failed = True
+        # Only the VO's info lines describe the mapping; its warnings (a
+        # screenshot it could not map) and other components' text do not.
+        if event.get("level") != "info" or not prefix.startswith("vo"):
+            return
         match = EXPLICIT_MAPPER.search(text)
-        if match is None and ("placebo" in prefix or prefix.startswith("vo")):
+        if match is None and "placebo" in prefix:
             match = BARE_MAPPER.search(text)
         if match:
             self.mapper = match.group(1)[:80]
+            # The native renderer's physical peak does not describe this mapping.
+            self.physical_target_nits = self.physical_target_generation = None
+            self.publish_video()
 
     def capture_facts(self):
         if self.mpv.closed:

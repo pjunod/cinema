@@ -187,7 +187,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 &boot,
                 &mut title_cursor,
                 &mut live_title_after,
-                true,
+                title_work::TitleDispatch::Playback,
             );
             match drive_playback_admission(admission, requested, &mut refit, &shutdown).await {
                 Some(Ok(work)) => title = work,
@@ -209,6 +209,25 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 }
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error,"F+ priority observation unavailable"),
+            }
+        }
+        // The most recent native title uses the same ordinary admission but
+        // must not wait for the general probe cursor to finish a library pass.
+        #[cfg(target_os = "linux")]
+        if title.is_none() && refit.is_none() && !yielded && !shutdown.is_cancelled() {
+            if let Some(file_id) = state.transcode.take_due_native_fel_prewarm() {
+                match title_work::TitleTask::start(
+                    &state,
+                    &boot,
+                    &mut title_cursor,
+                    &mut live_title_after,
+                    title_work::TitleDispatch::NativePrewarm(file_id),
+                )
+                .await
+                {
+                    Ok(work) => title = work,
+                    Err(error) => tracing::warn!(%error, "native FEL prewarm demand unavailable"),
+                }
             }
         }
         #[cfg(target_os = "linux")]
@@ -240,7 +259,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 &boot,
                 &mut title_cursor,
                 &mut live_title_after,
-                false,
+                title_work::TitleDispatch::Maintenance,
             )
             .await
             {

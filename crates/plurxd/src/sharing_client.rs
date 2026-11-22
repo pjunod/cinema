@@ -392,6 +392,19 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    /// The receiver's own connection over an already-open fixture stream, as
+    /// though `verified_with_lifetime` had pinned `endpoint`: what a Source
+    /// fixture on loopback uses to drive the exact receiver exchanges.
+    #[cfg(test)]
+    pub(crate) async fn fixture_verified(
+        stream: tokio::net::TcpStream,
+        endpoint: Endpoint,
+    ) -> Result<Self, PeerError> {
+        let host = format!("{}:{}", endpoint.ts_fqdn, endpoint.port);
+        let mut peer = Self::from_stream(stream, host).await?;
+        peer.verified_endpoint = Some(endpoint);
+        Ok(peer)
+    }
     #[cfg(test)]
     async fn from_stream<
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -1660,6 +1673,19 @@ fn source_start_refusal(
             }
         }
     }
+    // The receiver's viewer is told only "unresolved" for this answer. Keep
+    // the Source's closed code here: an identifier, never its prose.
+    let source_code = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("code")?.as_str().map(str::to_owned))
+        .filter(|code| {
+            (1..=64).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+        .unwrap_or_else(|| "unrecognized".to_owned());
+    tracing::warn!(target: "plurx::sharing", operation = "start", stage = "source_refusal", error_class = "rejected", http_status = status.as_u16(), source_code = %source_code, "receiver Source exchange refused");
     PeerError::Rejected(status)
 }
 
