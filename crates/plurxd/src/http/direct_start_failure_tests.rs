@@ -179,8 +179,9 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
     );
     assert_eq!(
         state
-            .serving
-            .restart_drain_status(0)
+            .cluster
+            .operations()
+            .drain_status(0)
             .await
             .admissions_in_flight,
         1
@@ -204,8 +205,9 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
     .expect("FAILURE watchdog: original unpublished ticket was stranded");
     assert_eq!(
         state
-            .serving
-            .restart_drain_status(0)
+            .cluster
+            .operations()
+            .drain_status(0)
             .await
             .admissions_in_flight,
         1,

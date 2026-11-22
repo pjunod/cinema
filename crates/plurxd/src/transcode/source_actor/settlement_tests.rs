@@ -189,8 +189,9 @@ pub(super) async fn exercise(
     );
     assert_eq!(
         state
-            .serving
-            .restart_drain_status(0)
+            .cluster
+            .operations()
+            .drain_status(0)
             .await
             .admissions_in_flight,
         1,

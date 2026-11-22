@@ -597,8 +597,9 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
     let response = parked_body(&fixture, &session, &peer, &gate).await;
     let fence = fixture
         .state
-        .serving
-        .begin_restart_preparation_until(crate::state::clock_ms() as u64 + 60_000)
+        .cluster
+        .operations()
+        .prepare_restart_fence(crate::state::clock_ms() as u64 + 60_000)
         .await
         .expect("actual planned-outage fence");
     let status = fixture.state.cluster.operations().drain_status(0).await;
@@ -639,8 +640,9 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
     assert_eq!(
         fixture
             .state
-            .serving
-            .restart_drain_status(0)
+            .cluster
+            .operations()
+            .drain_status(0)
             .await
             .admissions_in_flight,
         1
@@ -767,8 +769,9 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
                 assert_eq!(
                     fixture
                         .state
-                        .serving
-                        .restart_drain_status(0)
+                        .cluster
+                        .operations()
+                        .drain_status(0)
                         .await
                         .admissions_in_flight,
                     1
@@ -798,8 +801,9 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
     assert!(settled.drained);
     fixture
         .state
-        .serving
-        .cancel_planned_outage_preparation(fence, 0)
+        .cluster
+        .operations()
+        .cancel_outage_fence(fence, 0)
         .await;
     peer.stop().await;
     fixture.shutdown().await;

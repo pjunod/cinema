@@ -2252,7 +2252,7 @@ impl super::TranscodeManager {
     ) -> Result<FundedPreparedReply, String> {
         if std::time::Instant::now() >= deadline
             || !state
-                .serving
+                .cluster
                 .authority()
                 .is_current(entry.serving_generation())
         {

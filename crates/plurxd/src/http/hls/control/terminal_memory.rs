@@ -176,6 +176,7 @@ fn device_caps(v: &plurx_core::playback::DeviceCaps) -> Option<usize> {
 fn start_response(v: &StartResponse) -> Option<usize> {
     // Exhaustive inventory: an added field must force accounting review.
     let StartResponse {
+        processed_upgrade: _,
         delivered_audio: _,
         quality_catalog_status: _,
         display_aware_auto_protocol: _,
@@ -215,7 +216,11 @@ fn start_response(v: &StartResponse) -> Option<usize> {
     if let Some(value) = &v.quality_catalog_status {
         n = add(n, json_value(value)?)?;
     }
-    for value in [&v.display_aware_auto_protocol, &v.delivered_dynamic_range] {
+    for value in [
+        &v.processed_upgrade,
+        &v.display_aware_auto_protocol,
+        &v.delivered_dynamic_range,
+    ] {
         n = add(n, opt_string(value))?;
     }
     if let Some(candidates) = &v.quality_candidates {
@@ -483,10 +488,9 @@ pub(super) fn preparation_services_value(value: &PreparationSettlementServices) 
         transcode: _,
         media_sessions: _,
         media_pool: _,
-        membership: _,
+        cluster: _,
         link_receipts: _,
         hls_route_hooks: _,
-        serving: _,
         node_id,
         _allocation: _,
         _lifetime: _,

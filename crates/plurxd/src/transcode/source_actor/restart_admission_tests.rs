@@ -35,8 +35,9 @@ async fn source_genuine_lost_native_summary_keeps_restart_admission_and_p_charge
 
 pub(super) async fn before_factory(state: &Arc<crate::state::AppState>) -> PlannedOutageFenceToken {
     state
-        .serving
-        .begin_restart_preparation_until(crate::state::clock_ms() as u64 + 60_000)
+        .cluster
+        .operations()
+        .prepare_restart_fence(crate::state::clock_ms() as u64 + 60_000)
         .await
         .expect("actual local planned-outage fence")
 }
@@ -65,8 +66,9 @@ pub(super) async fn refused_factory(
     );
     assert_eq!(
         state
-            .serving
-            .restart_drain_status(0)
+            .cluster
+            .operations()
+            .drain_status(0)
             .await
             .admissions_in_flight,
         0
@@ -81,8 +83,9 @@ pub(super) async fn refused_factory(
         plurx_core::sharing_source_sessions::SourceReleaseOutcome::Released
     );
     state
-        .serving
-        .cancel_planned_outage_preparation(fence, 0)
+        .cluster
+        .operations()
+        .cancel_outage_fence(fence, 0)
         .await;
 }
 
@@ -154,7 +157,8 @@ pub(super) async fn after_factory(
         assert!(manager.lookup_source_worker(assignment).is_some());
     }
     state
-        .serving
-        .cancel_planned_outage_preparation(fence, 0)
+        .cluster
+        .operations()
+        .cancel_outage_fence(fence, 0)
         .await;
 }

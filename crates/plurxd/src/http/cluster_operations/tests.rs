@@ -2743,22 +2743,27 @@ mod adaptive_outage_http_regressions {
         ) -> (Arc<ClusterOperationLease>, PlannedOutageFenceToken) {
             let state = self.state().clone();
             let claim = Arc::new(
-                MembershipManager::prepare_restart_preparation_claim(&state.node_id, duration)
+                state
+                    .cluster
+                    .operations()
+                    .prepare_restart_claim(&state.node_id, duration)
                     .expect("original opaque HTTP restart claim"),
             );
             // Retain the original claim before its first cancellable commit.
             self.outages.push((Arc::clone(&claim), None));
             state
-                .membership
-                .commit_cluster_operation_lease(&claim)
+                .cluster
+                .operations()
+                .commit_outage_claim(&claim)
                 .await
                 .expect("actual original claim commit");
             let expiry = claim
                 .preparation_expiry_unix_ms(Duration::from_secs(60))
                 .expect("original live claim deadline");
             let token = state
-                .serving
-                .begin_restart_preparation_until(expiry)
+                .cluster
+                .operations()
+                .prepare_restart_fence(expiry)
                 .await
                 .expect("original timed HTTP restart token");
             self.outages.last_mut().expect("registered exact claim").1 = Some(token);
@@ -2782,8 +2787,9 @@ mod adaptive_outage_http_regressions {
                         Ok(Ok(ClusterOperationCleanupOutcome::Confirmed)) => {
                             if let Some(token) = token {
                                 state
-                                    .serving
-                                    .cancel_planned_outage_preparation(*token, 0)
+                                    .cluster
+                                    .operations()
+                                    .cancel_outage_fence(*token, 0)
                                     .await;
                             }
                         }
@@ -2921,15 +2927,17 @@ mod adaptive_outage_http_regressions {
     ) {
         assert!(matches!(
             state
-                .membership
-                .release_cluster_operation_lease(claim)
+                .cluster
+                .operations()
+                .release_outage_claim(claim)
                 .await
                 .expect("actual exact original release"),
             ClusterOperationCleanupOutcome::Confirmed
         ));
         state
-            .serving
-            .cancel_planned_outage_preparation(token, 0)
+            .cluster
+            .operations()
+            .cancel_outage_fence(token, 0)
             .await;
     }
 
@@ -3003,8 +3011,9 @@ mod adaptive_outage_http_regressions {
                     .expect("actual original fresh zero");
                 assert!(matches!(
                     state
-                        .membership
-                        .release_cluster_operation_lease(&original)
+                        .cluster
+                        .operations()
+                        .release_outage_claim(&original)
                         .await
                         .expect("actual original revocation"),
                     ClusterOperationCleanupOutcome::Confirmed
@@ -3022,8 +3031,9 @@ mod adaptive_outage_http_regressions {
                     status: StatusCode::CONFLICT, code, ..
                 } if code == MembershipError::ClusterOperationPending.code()));
                 state
-                    .serving
-                    .cancel_planned_outage_preparation(token, 0)
+                    .cluster
+                    .operations()
+                    .cancel_outage_fence(token, 0)
                     .await;
                 let (replacement, replacement_token) =
                     fixture.outage(Duration::from_secs(60)).await;
@@ -3055,8 +3065,9 @@ mod adaptive_outage_http_regressions {
                 ));
                 assert!(
                     state
-                        .serving
-                        .planned_outage_is_current(replacement_token)
+                        .cluster
+                        .operations()
+                        .outage_is_current(replacement_token)
                         .await
                 );
                 release_exact(&state, &replacement, replacement_token).await;
