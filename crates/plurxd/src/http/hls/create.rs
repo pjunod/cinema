@@ -7172,7 +7172,10 @@ fn validate_prepared_copy_head(
     {
         return Err(());
     }
-    let (_, transfer, _, _) = facts.color.ok_or(())?;
+    // `None`: the copied sample entry carries no `colr` box. A stream copy
+    // writes one only when the source's colour is specified; otherwise the
+    // colour stays in the original SPS (see the Source copy tests).
+    let transfer = facts.color.map(|(_, transfer, _, _)| transfer);
     let range = plurx_core::playback::delivered_dynamic_range(
         file,
         PlaybackMethod::Remux,
@@ -7180,9 +7183,9 @@ fn validate_prepared_copy_head(
         OutputGrade::Sdr,
     );
     let actual_transfer = match transfer {
-        16 => Some(Transfer::Pq),
-        18 => Some(Transfer::Hlg),
-        1 | 6 | 13 | 14 | 15 => Some(Transfer::Sdr),
+        Some(16) => Some(Transfer::Pq),
+        Some(18) => Some(Transfer::Hlg),
+        Some(1 | 6 | 13 | 14 | 15) => Some(Transfer::Sdr),
         _ => None,
     };
     // The Dolby Vision profile the delivered bytes carry; `None` for every
@@ -7206,15 +7209,16 @@ fn validate_prepared_copy_head(
         "dolby_vision" => dolby_vision_base_transfer(file),
         _ => return Err(()),
     };
-    // H.273 code 2 is an explicit "unspecified": the head makes no transfer
-    // claim. Many SDR encodes ship it (e.g. an HDTV H.264 with only a BT.709
-    // matrix). When the scan found no HDR or Dolby Vision signalling, the
-    // prepared delivery is SDR, and the copied bytes are exactly what Local
-    // plays as SDR. Any HDR, HLG or Dolby Vision expectation still needs its
-    // explicit code, and a head with no colour description still refuses.
-    let actual_transfer = match actual_transfer {
-        None if transfer == 2 && expected_transfer == Some(Transfer::Sdr) => Some(Transfer::Sdr),
-        actual => actual,
+    // A head that makes no transfer claim: no `colr` box at all, or H.273
+    // code 2 ("unspecified"). Many SDR encodes ship this way (an HDTV H.264
+    // with only a BT.709 matrix copies with no `colr`). When the scan found
+    // no HDR or Dolby Vision signalling, the prepared delivery is SDR, and the
+    // copied bytes are exactly what Local plays as SDR. An HDR, HLG or Dolby
+    // Vision expectation still needs its explicit code, and a reserved or
+    // unknown code still refuses.
+    let actual_transfer = match (actual_transfer, transfer) {
+        (None, None | Some(2)) if expected_transfer == Some(Transfer::Sdr) => Some(Transfer::Sdr),
+        (actual, _) => actual,
     };
     match (expected_transfer, actual_transfer) {
         (Some(expected), Some(actual)) if expected == actual => {}
@@ -7477,17 +7481,13 @@ mod source_copy_head_tests {
         assert!(
             validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
         );
-        let mut changed = good.clone();
-        changed.color = None;
-        assert!(
-            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
-        );
         assert!(validate_prepared_copy_head(&source, 720, &caps, (false, false), &good).is_err());
     }
     /// Production 2026-11-22: an HDTV-720p H.264 ("Kiss Kiss, Cam Cam", M6
     /// file 3057) declares a BT.709 matrix but transfer and primaries 2
-    /// ("unspecified"). Every shared growing start refused it as
-    /// `vod_source_rescan_required` at `growing.copy_head_caps`.
+    /// ("unspecified"), and its stream copy writes no `colr` box. Every shared
+    /// growing start refused it as `vod_source_rescan_required` at
+    /// `growing.copy_head_caps`.
     #[test]
     fn prepared_copy_head_accepts_an_unspecified_transfer_for_an_sdr_delivery() {
         let source = file();
@@ -7497,6 +7497,10 @@ mod source_copy_head_tests {
         assert!(
             validate_prepared_copy_head(&source, 1080, &caps, (false, false), &unspecified).is_ok()
         );
+        // The real copy of that file writes no `colr` box at all.
+        let mut absent = facts();
+        absent.color = None;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &absent).is_ok());
         // A reserved or unknown code still makes no admissible claim.
         let mut reserved = facts();
         reserved.color = Some((1, 3, 1, false));

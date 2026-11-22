@@ -604,6 +604,40 @@ fn check_parameter_links([vps, sps, pps]: [&[u8]; 3]) -> Result<u32, Fmp4Error> 
     pps_id.ok_or_else(|| unsupported("splice PPS id is invalid"))
 }
 
+/// `(bit_depth, chroma_format_idc)` from an AVC SPS NAL (header byte
+/// included), for an `avcC` that omits its optional High-profile
+/// depth/chroma extension. Reads only the leading fields: profile, the
+/// parameter-set id and, for the high profiles, `chroma_format_idc` and the
+/// two bit depths. `None` when the fields are truncated or out of range, or
+/// when luma and chroma depths differ (the extension path refuses that too).
+pub(super) fn avc_sps_depth_chroma(nal: &[u8]) -> Option<(u8, u8)> {
+    let mut bits = SliceBits::new(nal.get(1..)?);
+    let profile = bits.read(8)?;
+    bits.read(16)?; // constraint flags and level_idc
+    if bits.ue()? > 31 {
+        return None;
+    }
+    if !matches!(
+        profile,
+        100 | 110 | 122 | 144 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134
+    ) {
+        return Some((8, 1));
+    }
+    let chroma = bits.ue()?;
+    if chroma > 3 {
+        return None;
+    }
+    if chroma == 3 {
+        bits.read(1)?; // separate_colour_plane_flag
+    }
+    let luma = bits.ue()?;
+    let chroma_depth = bits.ue()?;
+    if luma != chroma_depth || luma > 6 {
+        return None;
+    }
+    Some((8 + luma as u8, chroma as u8))
+}
+
 /// Remove HEVC emulation-prevention bytes.
 struct Rbsp<'a> {
     raw: std::slice::Iter<'a, u8>,
@@ -676,5 +710,32 @@ impl<'a> SliceBits<'a> {
             }
         }
         Some((1 << zeros) - 1 + self.read(zeros)?)
+    }
+}
+
+#[cfg(test)]
+mod avc_sps_depth_chroma_tests {
+    use super::avc_sps_depth_chroma;
+
+    /// The SPS of "Kiss Kiss, Cam Cam" (M6 file 3057): High profile, level
+    /// 4.1, copied from Matroska into an avcC with no depth/chroma extension.
+    const KISS_KISS_SPS: &str = "67640029acd9805005ba6a040402800001f480005dc0478c18cd";
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    #[test]
+    fn a_high_profile_sps_declares_its_depth_and_chroma() {
+        assert_eq!(avc_sps_depth_chroma(&bytes(KISS_KISS_SPS)), Some((8, 1)));
+        // Truncated right after level_idc: no declaration to trust.
+        assert_eq!(avc_sps_depth_chroma(&bytes(&KISS_KISS_SPS[..8])), None);
+        // Main profile (77) carries no extension fields: 8-bit 4:2:0.
+        let mut main = bytes(KISS_KISS_SPS);
+        main[1] = 77;
+        assert_eq!(avc_sps_depth_chroma(&main), Some((8, 1)));
     }
 }
