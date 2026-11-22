@@ -1373,6 +1373,7 @@ pub(super) fn preserve_prepared_audio(
 pub(super) fn qualified_upgrade_selection(
     selection: &crate::playback_control::ClientSelection,
     height: u32,
+    candidate: Option<plurx_core::playback::candidate::CandidateId>,
 ) -> crate::playback_control::ClientSelection {
     let mut selection = selection.clone();
     if matches!(
@@ -1381,10 +1382,21 @@ pub(super) fn qualified_upgrade_selection(
     ) {
         selection.quality = crate::playback_control::QualitySelection::Auto {
             height: Some(i64::from(height)),
-            candidate_id: None,
+            candidate_id: candidate,
         };
     }
     selection
+}
+
+pub(super) enum QualifiedUpgradeReplanError {
+    Retry,
+    Terminal(String),
+}
+
+impl From<&str> for QualifiedUpgradeReplanError {
+    fn from(reason: &str) -> Self {
+        Self::Terminal(reason.to_owned())
+    }
 }
 
 /// Re-resolve a completed FEL qualification against the current authority and
@@ -1401,59 +1413,58 @@ pub(super) async fn replan_qualified_upgrade(
     capabilities: Option<&crate::playback_control::DynamicCapabilities>,
     source: &MediaFile,
     previous_target_height: u32,
-) -> Result<crate::transcode::SessionRequest, String> {
+) -> Result<crate::transcode::SessionRequest, QualifiedUpgradeReplanError> {
     let mut recipe = predecessor.clone();
     if let Ok(start) = serde_json::from_str::<StartResponse>(&route.response_json) {
         if let Some(audio) = start.delivered_audio {
             recipe.request.audio_delivery = Some(audio);
         }
     }
-    let mut pinned = qualified_upgrade_selection(selection, previous_target_height);
-    // The retained rolling splice keeps the ordinary copy recipe. A completed
-    // measurement changes the catalog's snapshot binding, so ask the current
-    // catalog to rebind that exact ordinary candidate before using the result.
-    let native_incumbent = if state
+    use crate::playback_control::QualitySelection;
+    use plurx_core::playback::candidate::CandidateRoute;
+    let native_split = state
         .transcode
         .native_split_owns_fel(&route.session_id)
-        .await
-    {
-        use plurx_core::playback::candidate::CandidateRoute;
-        let ordinary = recipe
-            .candidate_catalog
-            .as_ref()
-            .map(|catalog| &catalog.candidate)
-            .or_else(|| {
-                recipe
-                    .request
-                    .candidate_context
-                    .as_ref()
-                    .map(|context| &context.selected_candidate)
-            })
-            .filter(|candidate| {
-                candidate.identity_matches()
-                    && !candidate.processed_dv
-                    && candidate.route == CandidateRoute::Remux
-                    && candidate.target_height == previous_target_height
-            })
-            .ok_or("the incumbent native copy has no exact ordinary candidate")?;
-        let crate::playback_control::QualitySelection::Auto { candidate_id, .. } =
-            selection.quality
-        else {
-            return Err("native splice qualification requires the incumbent Auto selection".into());
-        };
-        if candidate_id.is_some_and(|id| id != ordinary.id)
-            || recipe.request.presentation != crate::transcode::Presentation::Vod
-        {
-            return Err("native splice qualification no longer selects the incumbent copy".into());
-        }
-        pinned.quality = crate::playback_control::QualitySelection::Auto {
-            height: Some(i64::from(previous_target_height)),
-            candidate_id: Some(ordinary.id),
-        };
-        Some(ordinary)
-    } else {
-        None
-    };
+        .await;
+    let ordinary = recipe
+        .candidate_catalog
+        .as_ref()
+        .map(|catalog| &catalog.candidate)
+        .or_else(|| {
+            recipe
+                .request
+                .candidate_context
+                .as_ref()
+                .map(|context| &context.selected_candidate)
+        })
+        .filter(|candidate| {
+            matches!(selection.quality, QualitySelection::Auto { .. })
+                && recipe.request.presentation == crate::transcode::Presentation::Vod
+                && !candidate.processed_dv
+                && candidate.route == CandidateRoute::Remux
+        });
+    if native_split && ordinary.is_none() {
+        return Err("native splice qualification has no exact incumbent Auto copy".into());
+    }
+    if ordinary.is_some_and(|candidate| {
+        !candidate.identity_matches()
+            || candidate.target_height != previous_target_height
+            || recipe.candidate_id.is_some_and(|id| id != candidate.id)
+            || matches!(
+                selection.quality,
+                QualitySelection::Auto { candidate_id: Some(id), .. } if id != candidate.id
+            )
+    }) {
+        return Err("FEL qualification no longer selects the incumbent copy".into());
+    }
+    // Even when the first master selected muxed HLS, an unpinned Auto copy
+    // can build a ladder without binding a candidate. Always ask the fresh
+    // catalog to rebind the ordinary recipe retained by the accepted route.
+    let pinned = qualified_upgrade_selection(
+        selection,
+        previous_target_height,
+        ordinary.map(|candidate| candidate.id),
+    );
     let mut caps = recipe
         .request
         .candidate_context
@@ -1493,10 +1504,18 @@ pub(super) async fn replan_qualified_upgrade(
         delivered.height,
     )
     .await
-    .map_err(|_| "the current playback representation could not be freshly planned")?;
-    if native_incumbent.is_some_and(|incumbent| {
+    .map_err(|error| {
+        if error.http_status() == StatusCode::SERVICE_UNAVAILABLE {
+            return QualifiedUpgradeReplanError::Retry;
+        }
+        let code = error.code().unwrap_or("untyped");
+        QualifiedUpgradeReplanError::Terminal(format!(
+            "the current playback representation could not be freshly planned ({code})"
+        ))
+    })?;
+    if ordinary.is_some_and(|incumbent| {
         fresh.candidate_context.as_ref().is_none_or(|context| {
-            context.owner_node_id.as_deref() != Some(state.node_id.as_str())
+            (native_split && context.owner_node_id.as_deref() != Some(route.owner_node_id.as_str()))
                 || context.selected_candidate.id != incumbent.id
                 || context.selected_candidate.recipe_digest != incumbent.recipe_digest
                 || context.selected_candidate.route != incumbent.route
@@ -1504,7 +1523,7 @@ pub(super) async fn replan_qualified_upgrade(
                 || fresh.transport != recipe.request.transport
         })
     }) {
-        return Err("fresh native splice planning no longer binds the incumbent copy".into());
+        return Err("fresh FEL qualification planning no longer binds the incumbent copy".into());
     }
     let target = fresh
         .candidate_context

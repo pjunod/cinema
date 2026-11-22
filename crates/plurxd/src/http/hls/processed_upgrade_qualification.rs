@@ -244,11 +244,18 @@ impl Check {
         }
         let playback_id = wait.intent.playback_id.clone();
         let generation = wait.intent.incarnation_id.clone();
-        let reason = reason
+        let reason: String = reason
             .chars()
             .filter(|c| !c.is_control())
             .take(512)
             .collect();
+        tracing::info!(
+            target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(&self.session),
+            file_id = self.wait.file_id,
+            %reason,
+            "FEL qualification continuation stopped"
+        );
         entries.insert(
             self.session.clone(),
             Entry::Skipped {
@@ -470,9 +477,13 @@ async fn resolve_current(
         inputs.previous_target_height,
     )
     .await;
+    use super::super::preparation::QualifiedUpgradeReplanError;
     let fresh = match fresh {
         Ok(request) => request,
-        Err(reason) => return Ok(Resolution::Terminal(reason)),
+        Err(QualifiedUpgradeReplanError::Retry) => return Ok(Resolution::Pending),
+        Err(QualifiedUpgradeReplanError::Terminal(reason)) => {
+            return Ok(Resolution::Terminal(reason));
+        }
     };
     let current = state
         .transcode
