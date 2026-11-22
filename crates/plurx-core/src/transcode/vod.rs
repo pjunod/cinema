@@ -909,7 +909,7 @@ impl VodCopyVideoRendition {
         {
             return Err(refuse());
         }
-        let facts = crate::fmp4::avc_sample_entry_facts(init)?.ok_or_else(refuse)?;
+        let facts = crate::fmp4::avc_copy_sample_entry_facts(init)?.ok_or_else(refuse)?;
         Ok(Self {
             rendition_id: rendition_id.to_owned(),
             init_id: hex::encode(Sha256::digest(&init.bytes)),

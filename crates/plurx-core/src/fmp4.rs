@@ -147,6 +147,68 @@ pub fn avc_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>
     }))
 }
 
+/// Facts of a copied source's one AVC sample entry. A copy carries whatever
+/// the source signalled: `avc1` or `avc3`, and a colour record only when the
+/// source had one. Absent colour is reported as ITU-T H.273 "unspecified"
+/// (2), never invented; the encoder's stricter contract stays above.
+pub fn avc_copy_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>, Fmp4Error> {
+    let Some(codec) = avc_rfc6381_codec(init)? else {
+        return Ok(None);
+    };
+    let video = init.video().expect("AVC codec requires video");
+    let (count, entries) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    if count != 1 || entries.len() != 1 || !matches!(&entries[0].sample_entry, b"avc1" | b"avc3") {
+        return Err(Fmp4Error::Unsupported(
+            "copied AVC requires one avc1 or avc3 sample entry".into(),
+        ));
+    }
+    let entry = &entries[0];
+    let header = peek_box(&init.bytes, entry.entry.start)?
+        .ok_or_else(|| Fmp4Error::Malformed("missing AVC sample entry".into()))?;
+    let body = entry.entry.start + entry.entry.header_len;
+    let end = entry.entry.start + header.size;
+    if end < body + 78 {
+        return malformed("copied AVC sample entry is truncated");
+    }
+    let width = u16::from_be_bytes([init.bytes[body + 24], init.bytes[body + 25]]);
+    let height = u16::from_be_bytes([init.bytes[body + 26], init.bytes[body + 27]]);
+    if width == 0 || height == 0 {
+        return malformed("copied AVC has an empty raster");
+    }
+    let unspecified = (2, 2, 2, false);
+    let colors = find_children(&init.bytes, body + 78..end, b"colr")?;
+    let (primaries, transfer, matrix, full_range) = match colors.as_slice() {
+        [(at, color)] => {
+            let data = &init.bytes[at.start + color.header_len..at.start + color.size];
+            if data.len() == 11 && &data[..4] == b"nclx" {
+                (
+                    u16::from_be_bytes([data[4], data[5]]),
+                    u16::from_be_bytes([data[6], data[7]]),
+                    u16::from_be_bytes([data[8], data[9]]),
+                    data[10] & 0x80 != 0,
+                )
+            } else {
+                unspecified
+            }
+        }
+        [] => unspecified,
+        _ => {
+            return Err(Fmp4Error::Unsupported(
+                "copied AVC has ambiguous colour records".into(),
+            ))
+        }
+    };
+    Ok(Some(AvcSampleEntryFacts {
+        codec,
+        width,
+        height,
+        color_primaries: primaries,
+        color_transfer: transfer,
+        color_matrix: matrix,
+        full_range,
+    }))
+}
+
 /// Actual configuration of the initial shared soundtrack family. This parser
 /// accepts the production AAC-LC/48 kHz/1024-sample shape, not an arbitrary
 /// audio entry whose filename happens to end in MP4.

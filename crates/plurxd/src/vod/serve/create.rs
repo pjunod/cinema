@@ -1714,6 +1714,18 @@ impl VodServe {
             }
             _ => None,
         };
+        // Every split soundtrack's readers, in key order like the build gates.
+        let mut split_order = split_renditions.iter().collect::<Vec<_>>();
+        split_order.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        let mut split_readers = Vec::with_capacity(split_order.len());
+        for audio in split_order {
+            if !previous_rendition
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, audio))
+            {
+                split_readers.push((Arc::clone(audio), audio.readers.lock().await));
+            }
+        }
         let mut replacement_readers = rendition.readers.lock().await;
         let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
@@ -1798,13 +1810,24 @@ impl VodServe {
                     reader
                 });
             } else {
-                let readers = if companion_rendition
+                let split = split_readers
+                    .iter_mut()
+                    .find(|(audio, _)| Arc::ptr_eq(audio, &child.rendition))
+                    .map(|(_, readers)| readers);
+                let readers = if let Some(readers) = split {
+                    Some(readers)
+                } else if companion_rendition
                     .as_ref()
                     .is_some_and(|companion| Arc::ptr_eq(companion, &child.rendition))
                 {
                     companion_readers.as_mut().or(previous_readers.as_mut())
-                } else {
+                } else if audio_rendition
+                    .as_ref()
+                    .is_some_and(|audio| Arc::ptr_eq(audio, &child.rendition))
+                {
                     audio_readers.as_mut().or(previous_readers.as_mut())
+                } else {
+                    previous_readers.as_mut()
                 }
                 .expect("private media reader guard");
                 readers.insert(child.reader_id.clone(), {
@@ -1863,6 +1886,7 @@ impl VodServe {
         // would let one viewer's recipe change stall every other reader of the
         // rendition they left or the one they joined.
         drop(replacement_readers);
+        drop(split_readers);
         drop(audio_readers);
         drop(companion_readers);
         drop(previous_readers);
@@ -1881,6 +1905,9 @@ impl VodServe {
         }
         if let Some(companion) = companion_rendition.as_ref() {
             companion.kick();
+        }
+        for audio in &split_renditions {
+            audio.kick();
         }
         if outgoing_children.is_empty() && obsolete_window_flight.is_none() {
             self.emit_lifecycle(
@@ -2031,7 +2058,13 @@ impl ReservedSourceVodRendition {
                 degraded_processing: None,
                 processing_note: None,
                 session_id: session_id.into(),
-                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                // A split copy's entry point is its family master: the
+                // video-only index alone would play without any soundtrack.
+                playlist_url: if self.rendition.recipe.audio_excluded {
+                    format!("/api/v1/hls/{session_id}/master.m3u8")
+                } else {
+                    format!("/api/v1/hls/{session_id}/index.m3u8")
+                },
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,

@@ -6626,6 +6626,8 @@ impl PreparedSourcePlayback {
             || info.start_seconds < 0.0
             || info.duration_ms.is_some_and(|duration| duration < 0)
             || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
+                && !(self.resolved.request.split_audio
+                    && info.playlist_url == format!("/api/v1/hls/{}/master.m3u8", info.session_id))
         {
             return Err(refused());
         }

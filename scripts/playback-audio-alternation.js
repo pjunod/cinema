@@ -78,11 +78,23 @@ function installAlternationCapture(clock, tones, block, decodeSource) {
     return true;
   })();
   capture.mark = (kind, detail) => capture.marks.push({kind, at_ms: performance.now(), ...detail});
+  // Engine audio events, for diagnosis only; scoring never reads them.
+  capture.engine = [];
+  const engineHls = typeof PLAYER !== "undefined" && PLAYER && PLAYER.hls;
+  if (engineHls && typeof Hls !== "undefined") {
+    const note = (type, data) => { if (capture.engine.length < 2000) capture.engine.push({type, at_ms: performance.now(), ...data}); };
+    engineHls.on(Hls.Events.AUDIO_TRACK_SWITCHING, (_, d) => note("switching", {id: d.id}));
+    engineHls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_, d) => note("switched", {id: d.id}));
+    engineHls.on(Hls.Events.FRAG_LOADING, (_, d) => d.frag.type === "audio" && note("audio_loading", {sn: d.frag.sn, level: d.frag.level, start: d.frag.start}));
+    engineHls.on(Hls.Events.FRAG_BUFFERED, (_, d) => d.frag.type === "audio" && note("audio_buffered", {sn: d.frag.sn, level: d.frag.level, start: d.frag.start}));
+    engineHls.on(Hls.Events.BUFFER_FLUSHING, (_, d) => note("flushing", {type: d.type, start: d.startOffset, end: d.endOffset}));
+    engineHls.on(Hls.Events.ERROR, (_, d) => note("error", {details: d.details, fatal: d.fatal, frag: d.frag ? {type: d.frag.type, sn: d.frag.sn, level: d.frag.level} : null, code: d.response && d.response.code}));
+  }
   capture.stop = () => { capture.stopped = true; try { capture.audio_context && capture.audio_context.close(); } catch (e) {} };
   capture.drain = () => {
     const out = {frames: capture.frames, audio: capture.audio, marks: capture.marks, errors: capture.errors,
-      hls_objects: capture.hls_objects};
-    capture.frames = []; capture.audio = []; capture.marks = [];
+      hls_objects: capture.hls_objects, engine: capture.engine};
+    capture.frames = []; capture.audio = []; capture.marks = []; capture.engine = [];
     return out;
   };
   globalThis.__plurxLabAlternation = capture;
@@ -179,12 +191,14 @@ async function runAlternation(driver, testCase, start, {waitFor}) {
   // Calibrate the uninterrupted picture before the first switch.
   const calibrationMs = Number(testCase.calibration_ms || 4000);
   await new Promise(r => setTimeout(r, calibrationMs));
-  const capture = {frames: [], audio: [], errors: []};
-  const absorb = (part) => { capture.frames.push(...part.frames); capture.audio.push(...part.audio); capture.errors.push(...part.errors); };
+  const capture = {frames: [], audio: [], errors: [], engine: []};
+  const absorb = (part) => { capture.frames.push(...part.frames); capture.audio.push(...part.audio); capture.errors.push(...part.errors); capture.engine.push(...(part.engine || [])); };
   absorb(await driver.eval("globalThis.__plurxLabAlternation.drain()"));
   const calibrationEnd = capture.frames.at(-1)?.at_ms;
   const baseline = capture.frames.length ? analyzeFrameClock(capture.frames,
     {startMs: capture.frames[0].at_ms, endMs: calibrationEnd, maximumSamplingGapMs: DISPLAY_SAMPLE_GAP_MS}) : null;
+  // What the attached engine advertises: the split presentation's own evidence.
+  const engine = await driver.eval(`(()=>{const h=PLAYER&&PLAYER.hls;return h?{audio_tracks:(h.audioTracks||[]).map(t=>({id:t.id,name:t.name,lang:t.lang,default:!!t.default,stable:t.attrs&&t.attrs["STABLE-RENDITION-ID"]||null,url:t.url?String(t.url).split("/").slice(-3).join("/"):null})),audio_track:h.audioTrack,levels:(h.levels||[]).length,muted:document.getElementById("video").muted,volume:document.getElementById("video").volume}:null})()`);
   const switches = [];
   for (let i = 0; i < count; i++) {
     const target = (Number(start.current_audio || 0) + i + 1) % 2;
@@ -195,7 +209,7 @@ async function runAlternation(driver, testCase, start, {waitFor}) {
   }
   await driver.exec("globalThis.__plurxLabAlternation.stop();return true;");
   const score = scoreAlternation(capture, switches, {baselineHoldMs: baseline ? baseline.maximum_hold_lower_ms : null});
-  return {calibration: baseline, ...score};
+  return {calibration: baseline, engine, engine_events: capture.engine, ...score};
 }
 
 module.exports = {TONES, BLOCK, installAlternationCapture, pageInstaller, confirmedAudio, silenceBetween,
