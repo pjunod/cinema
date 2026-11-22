@@ -159,13 +159,25 @@ end
 local PILL = {res='6EA8FE', hdr='12B3A6', dv='C99A2B', audio='7F8FE0', enh='4BB9B2'}
 local RANGE_SHORT = {dolby_vision='DV', hdr10='HDR10', hlg='HLG', sdr='SDR'}
 local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
-local ENHANCEMENTS = {'FEL','RPU','DYN'}
+-- EL is this player's own fact: the dual-layer stream reached the private
+-- build, which pairs its enhancement layer. Neither plurx nor mpv reports
+-- whether that layer is full (FEL) or minimal (MEL), so FEL stays the server's
+-- claim alone.
+local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
 local function table_of(value) return type(value)=='table' and value or {} end
-local function video_facts() return table_of(prop('user-data/cinema-video')) end
-local function selected_track(kind)
+-- One read of each property per render; the info timer runs at 5 Hz.
+local function snapshot()
+    local view={facts=table_of(prop('user-data/cinema-video')),p=table_of(prop('video-params'))}
     for _,track in ipairs(table_of(prop('track-list'))) do
-        if type(track)=='table' and track.type==kind and track.selected then return track end
+        if type(track)=='table' and track.selected then
+            if track.type=='video' and not view.video then view.video=track end
+            if track.type=='audio' and not view.audio then view.audio=track end
+        end
     end
+    view.source=table_of(view.facts.source)
+    view.renderer=type(view.facts.renderer)=='table' and view.facts.renderer or nil
+    view.enhancement=type(view.facts.enhancement)=='table' and view.facts.enhancement or nil
+    return view
 end
 -- detail/helpers.js resLabel, on the frame mpv decodes rather than the file.
 local function resolution(w,h)
@@ -202,7 +214,8 @@ local function delivered_profile(track)
     local value=track and track['dolby-vision-profile']
     return number(value) and value>0 and value or nil
 end
-local function range_pill(s,p,track)
+local function range_pill(view)
+    local s,p=view.source,view.p
     local source=source_range(s)
     if not source then return nil end
     local profile,base=source_profile(s)
@@ -212,50 +225,63 @@ local function range_pill(s,p,track)
         base=(f~='' and #f<=12) and f or RANGE_SHORT[source] or source:upper()
     end
     local pill={text=base,colour=source=='dolby_vision' and PILL.dv or PILL.hdr}
+    -- playerRangeBadge: a current server-processing report names what arrives.
+    local processed=view.enhancement and view.enhancement.processed
+    if processed=='HDR10-E' or processed=='SDR-E' then
+        local same=source==(processed=='SDR-E' and 'sdr' or 'hdr10')
+        pill.text=same and processed or (base..' → '..processed)
+        return pill
+    end
     local delivered=delivered_range(p)
     if not delivered then return pill end
     if delivered==source then
-        local now=delivered_profile(track)
+        local now=delivered_profile(view.video)
         if source=='dolby_vision' and now and profile and now~=profile then pill.text=base..' → DV P'..now end
         return pill
     end
     pill.text=base..' → '..(RANGE_SHORT[delivered] or delivered:upper()); pill.off=true
     return pill
 end
--- The server's enhancement for this session, then what mpv did on this device:
--- the web's "carried to the display, which applies it" is, here, mpv. RPU and
--- DYN are claimed only while mpv renders Dolby Vision and the private build has
--- not said the frame had no RPU; FEL only when mpv received the dual-layer
--- Profile 7 stream and the private build (which pairs the enhancement layer)
--- is the renderer.
-local function enhancement_state()
-    local v=video_facts()
-    local s,r=table_of(v.source),type(v.renderer)=='table' and v.renderer or nil
-    local p,track=table_of(prop('video-params')),selected_track('video')
+-- The server's enhancement for this session, then what mpv did on this device.
+-- A carried Dolby Vision route's server pills describe what the display does
+-- with the stream, and here the display is mpv: they hold only while mpv
+-- renders Dolby Vision and the private build has not said the frame had no
+-- RPU. A processed route's pills (FEL/RPU/DYN baked in by the server, proved
+-- by its current report) describe the picture and stand as stated. mpv applies
+-- RPU and DYN itself; RPU is not claimed on a Profile 7 → 8.1 delivery, whose
+-- reshaping is a pass-through without the enhancement layer.
+local function enhancement_state(view)
+    local s,r,p=view.source,view.renderer,view.p
+    local rendering=delivered_range(p)=='dolby_vision' and not (r and r.kind=='none')
     local details,order={},{}
     local function put(badge,active,value)
         if not details[badge] then order[#order+1]=badge end
         details[badge]={active=active,text=value}
     end
-    if type(v.enhancement)=='table' then
-        for _,d in ipairs(table_of(v.enhancement.details)) do
+    local server=view.enhancement
+    if server then
+        for _,d in ipairs(table_of(server.details)) do
             if type(d)=='table' and type(d.badge)=='string' and type(d.text)=='string' then put(d.badge,false,d.text) end
         end
-        for _,badge in ipairs(table_of(v.enhancement.active)) do
-            if details[badge] then details[badge].active=true else put(badge,true,badge) end
+        local holds=server.processed or rendering or (delivered_range(p)==nil and not (r and r.kind=='none'))
+        for _,badge in ipairs(table_of(server.active)) do
+            if type(badge)=='string' and holds then
+                if details[badge] then details[badge].active=true else put(badge,true,badge) end
+            end
         end
     end
-    if delivered_range(p)=='dolby_vision' and not (r and r.kind=='none') then
+    if rendering then
         local how=({native="plurx Player's Dolby renderer",closed_form="plurx Player's closed-form mapping",
             libplacebo="libplacebo's built-in Dolby Vision mapping"})[r and r.kind] or "mpv's Dolby Vision mapping"
         local target=r and number(r.target_nits) and string.format(' for a %d-nit target',r.target_nits) or ''
-        put('RPU',true,'RPU: reshaping applied on this device by '..how)
+        local now,was=delivered_profile(view.video),source_profile(s)
+        if not (was==7 and now==8) then put('RPU',true,'RPU: reshaping applied on this device by '..how) end
         put('DYN',true,'DYN: per-shot Dolby display mapping on this device'..target..' by '..how)
-        if r and delivered_profile(track)==7 and s.dv_el_present==true then
-            put('FEL',true,'FEL: enhancement layer composed on this device before mapping')
+        if r and now==7 and s.dv_el_present==true then
+            put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer (full or minimal is not reported)')
         end
     end
-    -- Display order: FEL, RPU, DYN, then any badge a newer server adds.
+    -- Display order: FEL, EL, RPU, DYN, then any badge a newer server adds.
     local active,sorted,known={},{},{}
     for _,badge in ipairs(ENHANCEMENTS) do
         known[badge]=true
@@ -284,16 +310,18 @@ local function audio_pill(track)
     local channels=number(n) and (CHANNELS[n] or (n>0 and string.format('%dch',n))) or nil
     return {text=channels and (mark..' '..channels) or mark,colour=PILL.audio}
 end
-local function quality_pills()
+-- Pills in display order, each tagged with the priority it keeps in a narrow
+-- window: range first, then the enhancement group (all of it or none, since
+-- a missing pill reads as "not active"), then resolution, then audio.
+local function quality_pills(view)
     local pills={}
-    local p=table_of(prop('video-params'))
-    local res=resolution(p.w,p.h)
-    if res then pills[#pills+1]={text=res,colour=PILL.res} end
-    local range=range_pill(table_of(video_facts().source),p,selected_track('video'))
-    if range then pills[#pills+1]=range end
-    for _,badge in ipairs((enhancement_state())) do pills[#pills+1]={text=badge,colour=PILL.enh} end
-    local audio=audio_pill(selected_track('audio'))
-    if audio then pills[#pills+1]=audio end
+    local res=resolution(view.p.w,view.p.h)
+    if res then pills[#pills+1]={text=res,colour=PILL.res,rank=3} end
+    local range=range_pill(view)
+    if range then range.rank=1; pills[#pills+1]=range end
+    for _,badge in ipairs((enhancement_state(view))) do pills[#pills+1]={text=badge,colour=PILL.enh,rank=2} end
+    local audio=audio_pill(view.audio)
+    if audio then audio.rank=4; pills[#pills+1]=audio end
     return pills
 end
 local function playback_info()
@@ -350,13 +378,12 @@ local function playback_info()
     row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
     row('VO target peak',number(target['max-luma']) and target['max-luma']>0
         and measurement(target['max-luma'],'%.0f nits') or nil)
-    local facts=video_facts()
-    local source=table_of(facts.source)
+    local view=snapshot()
+    local source=view.source
     row('Source dynamic range',joined(observed(source.hdr_format) or RANGE_SHORT[source_range(source) or ''],
         source.dv_el_present==true and 'enhancement layer present' or nil))
-    local renderer=type(facts.renderer)=='table' and facts.renderer or {}
-    row('Dolby Vision mapper',observed(renderer.label))
-    local active,details,order=enhancement_state()
+    row('Dolby Vision mapper',observed((view.renderer or {}).label))
+    local active,details,order=enhancement_state(view)
     if #order==0 then
         row('Dolby Vision enhancements',source_range(source)=='dolby_vision' and 'None reported' or 'Not a Dolby Vision source')
     else
@@ -523,9 +550,19 @@ render = function()
         text(a, 90, 71, 'Tone mapping', 15, 'FFFFFF', 5)
         pill_x = 164
     end
-    -- What is playing, beside the title: the pills stop before the header buttons.
-    for _, q in ipairs(quality_pills()) do
-        if pill_x + pill_width(q.text) > W-235 then break end
+    -- What is playing, beside the title, before the header buttons. A narrow
+    -- window drops whole priority groups (audio, then resolution, then the
+    -- enhancement group) instead of cutting one in the middle.
+    local pills = quality_pills(snapshot())
+    for rank = 4, 1, -1 do
+        local width = pill_x - 6
+        for _, q in ipairs(pills) do width = width + pill_width(q.text) + 6 end
+        if width <= W-235 then break end
+        local kept = {}
+        for _, q in ipairs(pills) do if q.rank < rank then kept[#kept+1] = q end end
+        pills = kept
+    end
+    for _, q in ipairs(pills) do
         pill_x = pill_x + pill(a, pill_x, 60, q.text, q.colour, q.off) + 6
     end
     local movie_title = title()

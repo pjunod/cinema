@@ -25,10 +25,16 @@ generation-matched effective-processing report holds) and the private build's
 renderer line. The overlay reads the picture itself from mpv: resolution from
 decoded `video-params`, delivered range from its colour matrix and transfer,
 delivered profile from the selected track. RPU and DYN are claimed while mpv
-renders Dolby Vision, unless the private build said the frame had no RPU. FEL
-is claimed only for a Profile 7 track whose source has an enhancement layer,
-with the private build's renderer line present. No colour, decoder or renderer
-option changes.
+renders Dolby Vision, unless the private build said the frame had no RPU (RPU
+not on a Profile 7 → 8.1 delivery). EL is claimed for a Profile 7 track whose
+source has an enhancement layer, with the private build's renderer line
+present; FEL stays the server's claim, because no fact distinguishes a full
+from a minimal layer on this path. A carried route's server pills hold only
+while mpv renders Dolby Vision; a processed route's hold while its report does.
+No colour, decoder or renderer option changes.
+
+Open: a renderer line (or source fact) naming the layer type and that it was
+composed would let this player claim FEL itself.
 
 ## Session control sequence repair (0.5.1)
 

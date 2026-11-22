@@ -273,8 +273,7 @@ class Playback:
         the overlay's request fence: a renderer line arriving mid-request must
         not. Unchanged facts are not re-sent.
         """
-        report = (self.session or {}).get("effective_processing") if self.effective_tone_mapping() else None
-        value = video_facts(self.decision, self.session, self.mapper, self.physical_target_nits, report)
+        value = video_facts(self.decision, self.session, self.mapper, self.physical_target_nits)
         if value == self._video_published:
             return
         try:
@@ -797,29 +796,33 @@ class Playback:
         if active != self.tone_mapping_session:
             self.tone_mapping_session = active
             self.publish_chrome()
-        else:
-            self.publish_video()  # A new report can change the processed pills.
 
     def heartbeat(self):
         control = (self.session or {}).get("control")
         if not isinstance(control, dict) or not control.get("url"):
             self.refresh_tone_mapping()
             return
-        self.session.pop("effective_processing", None)
+        # An answered exchange states the current report (or that there is
+        # none); a failed one says nothing, so the last report for this
+        # generation stands until it is superseded rather than flickering off.
+        previous = {key: self.session.pop(key, None) for key in ("effective_processing", "processing_skip")}
         try:
             status, body = self.http.request("POST", control["url"], self.control_body(),
                                              auth=False, timeout=4.5)
         except ApiError as error:
             self.log(f"control exchange failed: {error}")
-            self.refresh_tone_mapping()
-            return
+            status, body = None, None
         if status in (404, 410):
             raise ServerStop(error_text(body, "Playback was stopped on the server"))
-        if status != 200:
-            self.log(f"control exchange answered {status}: {error_text(body, '')}")
-        elif isinstance(body, dict) and body.get("protocol") == PROTOCOL \
+        if status == 200 and isinstance(body, dict) and body.get("protocol") == PROTOCOL \
                 and body.get("generation") == control.get("generation"):
             self.session["effective_processing"] = body.get("effective_processing")
+            self.session["processing_skip"] = body.get("processing_skip")
+        elif status is None or status != 200:
+            if status is not None:
+                self.log(f"control exchange answered {status}: {error_text(body, '')}")
+            self.session.update({key: value for key, value in previous.items() if value is not None})
+        self.publish_video()
         self.refresh_tone_mapping()
 
     def progress(self, reason):
@@ -863,11 +866,17 @@ class Playback:
         if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
                 and text.startswith("Error opening/initializing the"):
             self.vo_failed = True
+        # Only the VO's info lines describe the mapping; its warnings (a
+        # screenshot it could not map) and other components' text do not.
+        if event.get("level") != "info" or not prefix.startswith("vo"):
+            return
         match = EXPLICIT_MAPPER.search(text)
-        if match is None and ("placebo" in prefix or prefix.startswith("vo")):
+        if match is None and "placebo" in prefix:
             match = BARE_MAPPER.search(text)
         if match:
             self.mapper = match.group(1)[:80]
+            # The native renderer's physical peak does not describe this mapping.
+            self.physical_target_nits = self.physical_target_generation = None
             self.publish_video()
 
     def capture_facts(self):

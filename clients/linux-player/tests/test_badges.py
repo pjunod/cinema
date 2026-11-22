@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from plurx_player.badges import renderer_facts, server_enhancement, source_facts, video_facts
+from plurx_player.api import ApiError
 from plurx_player.playback import Playback
 
 TOKEN = "secret-token-value"
@@ -37,16 +38,45 @@ class ServerEnhancement(unittest.TestCase):
         self.assertIsNone(server_enhancement({"enhancement": {"active": "DYN"}}))
         self.assertIsNone(server_enhancement(None))
 
+    def session(self, report, delivered="hdr10", **extra):
+        return dict({"enhancement": dict(self.NATIVE, requires_effective_processing=True),
+                     "control": {"generation": GENERATION}, "delivered_dynamic_range": delivered,
+                     "effective_processing": report}, **extra)
+
     def test_processed_route_needs_its_current_report(self):
-        raw = dict(self.NATIVE, requires_effective_processing=True)
-        self.assertIsNone(server_enhancement({"enhancement": raw}))
-        report = {"fel_contributed": True, "sdr_processed": False,
+        report = {"generation": GENERATION, "hdr10_enhanced": True, "fel_contributed": True,
                   "applied_operations": ["PolynomialReshape", {"DisplayTargetMapping": {"nits": 1000}}]}
-        shown = server_enhancement({"enhancement": raw}, report)
-        self.assertEqual(shown["active"], ["FEL", "RPU", "DYN"])
+        self.assertIsNone(server_enhancement(self.session(None)))
+        shown = server_enhancement(self.session(report))
+        self.assertEqual((shown["active"], shown["processed"]), (["FEL", "RPU", "DYN"], "HDR10-E"))
         self.assertIn("1000-nit", next(d["text"] for d in shown["details"] if d["badge"] == "DYN"))
-        report = {"fel_contributed": False, "applied_operations": ["TargetMapping"]}
-        self.assertEqual(server_enhancement({"enhancement": raw}, report)["active"], [])
+        for stale in (dict(report, generation="0f8fad5b-d9cb-469f-a165-000000000000"),
+                      dict(report, applied_operations=[{"DisplayTargetMapping": {"nits": 999}}]),
+                      dict(report, fel_contributed="yes")):
+            self.assertIsNone(server_enhancement(self.session(stale)))
+        sdr = {"generation": GENERATION, "sdr_processed": True, "hdr10_enhanced": False, "fel_contributed": False,
+               "applied_operations": ["Bt709Gamma24Conversion", {"DisplayTargetMapping": {"nits": 100}}]}
+        shown = server_enhancement(self.session(sdr, "sdr"))
+        self.assertEqual((shown["active"], shown["processed"]), (["DYN"], "SDR-E"))
+
+    def test_reconstructed_profile81_shows_fel_only(self):
+        report = {"generation": GENERATION, "profile81_reconstructed": True, "hdr10_enhanced": False,
+                  "fel_contributed": True, "applied_operations": ["LinearNlqResidual"]}
+        shown = server_enhancement(self.session(report, "dolby_vision"))
+        self.assertEqual((shown["active"], shown["processed"]), (["FEL"], "P81"))
+        self.assertEqual([d["badge"] for d in shown["details"]], ["FEL"])
+        report["applied_operations"].append({"DisplayTargetMapping": {"nits": 1000}})
+        self.assertIsNone(server_enhancement(self.session(report, "dolby_vision")))
+
+    def test_processing_skip_explains_unused_enhancements_for_this_generation(self):
+        session = {"enhancement": {"active": [], "details": [
+            {"badge": "FEL", "active": False, "text": "FEL: not used because processing is off"}]},
+            "control": {"generation": GENERATION},
+            "processing_skip": {"generation": GENERATION, "reason": "the GPU is busy"}}
+        self.assertEqual(server_enhancement(session)["details"][0]["text"],
+                         "FEL: not used for this play — the GPU is busy")
+        session["processing_skip"]["generation"] = "other"
+        self.assertEqual(server_enhancement(session)["details"][0]["text"], "FEL: not used because processing is off")
 
 
 class RendererFacts(unittest.TestCase):
@@ -60,6 +90,7 @@ class RendererFacts(unittest.TestCase):
                          "libplacebo")
         self.assertIsNone(renderer_facts(None))
         self.assertIsNone(renderer_facts("closed-form CM v4.0 target=bad")["target_nits"])
+        self.assertEqual(renderer_facts("closed-form CM v4.0 target=5e-05-1000 nits gamut=P3")["target_nits"], 1000)
 
 
 class PublishVideo(unittest.TestCase):
@@ -93,18 +124,39 @@ class PublishVideo(unittest.TestCase):
         self.assertEqual(self.published(mpv)[-1]["source"]["dv_profile"], 7)
         self.assertEqual(mpv.set.call_args.args[0], "user-data/cinema")
 
-    def test_processed_pills_follow_the_generation_matched_report(self):
+    def test_vo_warnings_and_other_components_never_replace_the_mapper(self):
+        player, mpv = self.player()
+        player.physical_target_nits = 616
+        player.on_log({"prefix": "vo/gpu-next", "level": "info", "text": "plurx mapper: closed-form CM v4.0 target=0.005-1000 nits"})
+        self.assertIsNone(player.physical_target_nits, "a closed-form line supersedes the native peak")
+        for event in ({"prefix": "vo/gpu-next", "level": "warn", "text": "plurx mapper: screenshot not mapped (x)"},
+                      {"prefix": "demux", "level": "info", "text": "title: plurx mapper: none (spoofed)"}):
+            player.on_log(event)
+        self.assertEqual(self.published(mpv)[-1]["renderer"]["kind"], "closed_form")
+        self.assertEqual(self.published(mpv)[-1]["renderer"]["target_nits"], 1000)
+
+    def test_failed_control_exchange_keeps_the_current_report(self):
         player, mpv = self.player()
         report = {"generation": GENERATION, "hdr10_enhanced": True, "fel_contributed": True,
                   "applied_operations": ["MmrReshape", {"DisplayTargetMapping": {"nits": 1000}}]}
         player.session = {"session_id": "s", "delivered_dynamic_range": "hdr10",
-                          "control": {"generation": GENERATION}, "effective_processing": report,
+                          "control": {"generation": GENERATION, "url": "/api/v1/hls/s/control"},
+                          "effective_processing": report,
                           "enhancement": {"active": ["FEL"], "details": [], "requires_effective_processing": True}}
+        player.control_body = mock.Mock(return_value={})
+        player.refresh_tone_mapping = mock.Mock()
         player.publish_video()
         self.assertEqual(self.published(mpv)[-1]["enhancement"]["active"], ["FEL", "RPU", "DYN"])
-        player.session["effective_processing"] = dict(report, generation="other")
-        player.publish_video()
-        self.assertIsNone(self.published(mpv)[-1]["enhancement"])
+        for answer in (ApiError("timed out"), (503, {})):
+            player.http.request.side_effect = answer if isinstance(answer, Exception) else None
+            player.http.request.return_value = None if isinstance(answer, Exception) else answer
+            player.heartbeat()
+            self.assertIs(player.session["effective_processing"], report)
+            self.assertEqual(self.published(mpv)[-1]["enhancement"]["active"], ["FEL", "RPU", "DYN"])
+        player.http.request.side_effect = None
+        player.http.request.return_value = 200, {"protocol": "plurx-playback-control-v1", "generation": GENERATION}
+        player.heartbeat()
+        self.assertIsNone(self.published(mpv)[-1]["enhancement"], "an answered exchange without a report clears it")
 
 
 if __name__ == "__main__":
