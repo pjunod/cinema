@@ -1,6 +1,6 @@
 # One video for two VOD soundtracks
 
-**Status** · Building on `effort/shared-video-vod` (Claude Opus 5.5 owns). Playback-lab baseline instrument committed; implementation and device qualification are open. Project effort `E-70D9217053` owns progress and evidence.
+**Status** · Built on `effort/shared-video-vod` (Claude Opus 5.5 owns). Lab-qualified for the AAC/AAC fixture on desktop Chrome: Proof A 20/20 in-place switches, Proof B one stored video. Hardening and canary (AC-5) and the DTS→AAC fixture are open. Project effort `E-70D9217053` owns progress and evidence.
 
 A viewer starts an English-language movie, then selects French. Cinema keeps the same pictures moving while the sound changes. A second viewer can watch the same interval in English while both sessions read the same packaged video from one cache owner. Each viewer still receives the video over their own connection.
 
@@ -62,3 +62,15 @@ Compare matched cold and warm runs for time to first visible frame, audio-switch
 Start with the server able to read both formats and the web client able to consume either plan. Admit split playback only for the tested combination. Older builds, direct play, native Apple/Android, shared libraries, offline assets, Jellyfin, rolling, burns, HDR/DV and other rungs continue through their existing delivery paths. On admission failure use the ordinary muxed route. During playback a failed optional language change keeps the incumbent audible with an explicit result. If an actual media failure requires existing recovery, record the replacement separately from successful in-place switches.
 
 Rollback stops new split admissions, drains existing sessions on their frozen manifests, and retains the split reader until their leases expire. Gate wider rollout on both proofs and matched performance evidence. Record implementation, lab acceptance and deployed qualification as distinct milestones in this ledger.
+
+## Ledger
+
+| Milestone | State | Evidence |
+|---|---|---|
+| Baseline (muxed) | Measured 2026-11-21: 1/20 healthy, 21 session creates, holds to 1.7 s, silence to 1.5 s | Effort E-70D9217053, EV-dd0c719dc7 |
+| Implementation | Built: video-only copy, per-language shared AAC, split family master, in-place hls.js switch, control selection | `effort/shared-video-vod` |
+| Proof A, AAC/AAC, desktop Chrome | Passed: 20/20 healthy, p50 267 ms, p95 278 ms, worst 286 ms | EV-37ab84f36a |
+| Proof B, AAC/AAC | Passed: one video rendition, one producer spawn, every video packet stored once; muxed and copy negative controls fail, hard-link alias passes (`scripts/vod-storage-audit`) | EV-1d4e88af61 |
+| DTS→AAC fixture, failure/eviction/authorization, restart, canary | Open (AC-5) | — |
+
+Known limits of the first release: two or three soundtracks per title (the family's atomic encode reservation holds three roles), soundtracks are re-encoded to AAC even from AAC sources, and an older node refuses a split request rather than degrading it because `split_audio` and `audio_alternates` are new fields on deny-unknown types.

@@ -1256,6 +1256,8 @@ paths = [
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
   "scripts/playback-frame-clock.js",
+  "scripts/playback-audio-alternation.js",
+  "scripts/vod-storage-audit",
   "scripts/playback-optical-attribution",
   "scripts/playback-x11-acquisition",
   "scripts/continuous-quality-qualification",
