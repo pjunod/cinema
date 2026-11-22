@@ -353,6 +353,7 @@ fn preparation_row(
         ..staged_candidate_request()
     };
     let response = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
         delivered_audio: None,
@@ -508,6 +509,7 @@ async fn activate_superseding_route(
         request: request.clone(),
     };
     let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
         delivered_audio: None,
@@ -1501,7 +1503,8 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
         "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
         "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
             {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
-    let body = CreateSession { playback_id: playback.clone(), copy: Some(true), audio: Some(2), caps: Some(caps.clone()), ..bare_create() };
+    let body = CreateSession {
+            processed_upgrade: None, playback_id: playback.clone(), copy: Some(true), audio: Some(2), caps: Some(caps.clone()), ..bare_create() };
     let query = body.selection_catalog_request(source, &caps, body.reviewed_copy_scope(None));
     assert!(query.copy_contract.is_some(), "the source route really is Copy");
     let candidate = QualityCandidate {
@@ -2639,6 +2642,7 @@ async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
             .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
             response_json: serde_json::to_string(&StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
                 delivered_audio: None,

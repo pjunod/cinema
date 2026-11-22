@@ -261,7 +261,28 @@ def job_body(raw, job, next_job):
     return raw[start:finish]
 
 
+def continuation_preflight_recipe(raw):
+    if b'SOURCE_GATE_REPAIR_SELECTION_SHA256' not in raw:
+        return raw
+    import hashlib
+    from validation import source_gate_repair as continuation
+    receipts.require(hashlib.sha256(raw).hexdigest() == continuation.WORKFLOW_SHA256,
+                     'Unreviewed ordinary source-gate continuation workflow')
+    original = retention.git_bytes(continuation.PREDECESSOR['head'], '.github/workflows/ci.yml')
+    preflight = job_body(raw, 'preflight', 'rust_compile')
+    previous = job_body(original, 'preflight', 'rust_compile')
+    hdr_guard = (b'      - name: Validate HDR measurement colour conversion\n'
+                 b"        if: needs.preflight.outputs.hdr_rgb_retained != 'true'\n")
+    hdr_original = b'      - name: Validate HDR measurement colour conversion\n'
+    check = job_body(raw, 'check', 'cluster_store_legacy')
+    receipts.require(hdr_guard in check and check.replace(hdr_guard, hdr_original) ==
+                     job_body(original, 'check', 'cluster_store_legacy'),
+                     'Ordinary continuation changed the reviewed Rust recipe')
+    return raw.replace(preflight, previous).replace(hdr_guard, hdr_original)
+
+
 def selected_preflight_projection(raw):
+    raw = continuation_preflight_recipe(raw)
     if not any(marker in raw for marker in (
         b'root_ownership_retained', b'NODE_SELECTION', b'formal_worker_refinement_retained', b'apple_native_retained',
     )):
@@ -280,6 +301,14 @@ def selected_preflight_projection(raw):
 
 def source_gate_workflow_compatible(before, after):
     try:
+        import hashlib
+        from validation import source_gate_repair as continuation
+        if hashlib.sha256(after).hexdigest() == continuation.WORKFLOW_SHA256:
+            # This exact reviewed workflow keeps the original Python producer
+            # under its ordinary dispatch. Package custody is outside that
+            # producer, and enrolled continuation uses a distinct step path.
+            continuation_preflight_recipe(after)
+            after = retention.git_bytes(continuation.PREDECESSOR['head'], '.github/workflows/ci.yml')
         return metadata_only_workflow(before, selected_preflight_projection(after))
     except receipts.ReceiptError:
         return False
@@ -314,6 +343,10 @@ def authenticate(api, descriptor, binding, candidate, *, current_run=None):
     uuid, digest = descriptor['attachment_uuid'], descriptor['sha256']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, digest)
     record, _, repository, _ = retention.verify_identity(api, raw, digest, binding, candidate, attachment, uuid)
+    if record.get('version') == 'workspace-nextest-fel-base-bridge-v1':
+        from validation import nextest_base_bridge
+        proof = nextest_base_bridge.authenticate(api, record, binding, candidate, repository, current_run=current_run)
+        return {**proof, 'digest': digest}
     if record.get('version') == 'workspace-nextest-shards-v1':
         from validation import nextest_shard_continuation as nextest
         proof = nextest.authenticate(api, record, binding, candidate, repository, current_run=current_run)

@@ -18,11 +18,20 @@ use plurx_core::{
             CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
             JobKind, JobPayload, JobRequest, JobSettlement,
         },
-        dv_title_jobs::{TitleDemand, TitleOutput},
+        dv_title_jobs::{TitleDemand, TitleMaintenanceCursor, TitleOutput},
     },
 };
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(super) enum TitleDispatch {
+    Playback,
+    /// Dispatched only by the Linux native FEL prewarm.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    NativePrewarm(i64),
+    Maintenance,
+}
 
 pub(super) struct TitleTask {
     pub(super) work: Pin<Box<dyn Future<Output = bool> + Send>>,
@@ -53,16 +62,15 @@ impl TitleTask {
     pub(super) async fn start(
         state: &AppState,
         boot: &str,
-        after: &mut i64,
+        maintenance: &mut TitleMaintenanceCursor,
         #[cfg(target_os = "linux")] live_after: &mut i64,
-        #[cfg(target_os = "linux")] playback_only: bool,
+        dispatch: TitleDispatch,
     ) -> Result<Option<Self>, StoreError> {
+        let playback_only = dispatch == TitleDispatch::Playback;
         let authority = state.jobs.execution_authority();
         if !authority.may_execute_job(JobKind::DvTitleScan).await {
             return Ok(None);
         }
-        #[cfg(not(target_os = "linux"))]
-        let playback_only = false;
         // Maintenance retains its early physical idle check; only a real
         // viewer request may use the companion admission below.
         let mut ordinary_admission = if playback_only {
@@ -119,8 +127,6 @@ impl TitleTask {
         } else {
             None
         };
-        #[cfg(not(target_os = "linux"))]
-        let live_demands = None;
         let tools = match ToolSet::capture().await {
             Ok(Some(tools)) => tools,
             Ok(None) => return Ok(None),
@@ -144,22 +150,15 @@ impl TitleTask {
         let fel: Option<String> = None;
         #[cfg(target_os = "linux")]
         state.transcode.observe_native_fel_backend(fel.clone());
-        let demands = match live_demands {
-            Some(demands) => demands,
-            None => {
-                state
-                    .store
-                    .dv_title_demands(&scanner, *after, now_ms())
-                    .await?
-            }
-        };
-        if demands.is_empty() {
-            if playback_only {
-                return Ok(None);
-            }
-            *after = 0;
+        let (demands, mut after): (Vec<TitleDemand>, Option<&mut i64>) = match dispatch {
             #[cfg(target_os = "linux")]
-            {
+            TitleDispatch::Playback => (live_demands.unwrap_or_default(), Some(live_after)),
+            // Viewer-requested and prewarm work is dispatched only on Linux;
+            // other hosts walk maintenance pages.
+            #[cfg(not(target_os = "linux"))]
+            TitleDispatch::Playback | TitleDispatch::NativePrewarm(_) => (Vec::new(), None),
+            #[cfg(target_os = "linux")]
+            TitleDispatch::NativePrewarm(file_id) => {
                 if let Err(error) = state
                     .transcode
                     .queue_missing_native_fel_head(&state.node_id, &tools, &scanner, now_ms())
@@ -167,20 +166,35 @@ impl TitleTask {
                 {
                     tracing::debug!(target:"plurxd::dv", %error, "native FEL head request deferred");
                 }
-                requalify_stale_fel_titles(state, &tools, &scanner).await;
+                // A targeted lookup moves neither discovery position.
+                let demands = state
+                    .store
+                    .dv_title_demand_for_file(&scanner, file_id, now_ms())
+                    .await?
+                    .into_iter()
+                    .collect();
+                (demands, None)
             }
-            return Ok(None);
+            TitleDispatch::Maintenance => {
+                let (demands, after) = maintenance
+                    .next_page(state.store.as_ref(), &scanner, now_ms())
+                    .await?;
+                (demands, Some(after))
+            }
+        };
+        #[cfg(target_os = "linux")]
+        if demands.is_empty() && dispatch == TitleDispatch::Maintenance {
+            requalify_stale_fel_titles(state, &tools, &scanner).await;
         }
         for mut demand in demands {
-            #[cfg(target_os = "linux")]
+            if let Some(after) = after.as_deref_mut() {
+                *after = demand.probe_revision;
+            }
             if playback_only {
-                *live_after = demand.probe_revision;
                 if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
                     continue;
                 }
-            }
-            if !playback_only {
-                *after = demand.probe_revision;
+            } else {
                 // Live work was considered independently above; an ordinary
                 // turn must not acquire its more permissive companion class
                 // or claim a retained FEL head assigned to another node.
@@ -812,8 +826,20 @@ async fn execute(
     let source_version = crate::fragment_index_cluster::inspect_source(&file)
         .await
         .ok();
+    // Native FEL prewarm targets exist only where the native backend runs.
+    #[cfg(target_os = "linux")]
+    let prewarm_target = state.transcode.native_fel_head_target_file() == Some(file.id);
+    #[cfg(not(target_os = "linux"))]
+    let prewarm_target = false;
+    let mode = if demand.playback_requested {
+        TitleAcquisitionMode::Playback
+    } else if prewarm_target {
+        TitleAcquisitionMode::NativePrewarm
+    } else {
+        TitleAcquisitionMode::Maintenance
+    };
     let result = acquire_title(
-        demand.playback_requested,
+        mode,
         reused,
         super::run_source_admitted_probe(
             &state.transcode,
@@ -1039,21 +1065,24 @@ async fn qualify_owned(
                 )
                 .await
             } else {
-                let verdict = if demand.fel_head_target.is_some() {
-                    // Same-generation rebuilds were enqueued only after proving
-                    // this title already has its admitting quality verdict.
-                    Ok(super::fel_qualification::Qualification::NotDue)
+                use super::fel_qualification::MaintenanceRecipe;
+                let recipe = if state.transcode.native_fel_head_target_file() == Some(file.id)
+                    || demand.fel_head_recipe.is_some()
+                {
+                    MaintenanceRecipe::Native(demand.fel_head_recipe.as_deref())
                 } else {
-                    super::fel_qualification::qualify_if_due(
-                        state,
-                        file,
-                        &demand.probe_json,
-                        tools,
-                        admission,
-                        &qualification,
-                    )
-                    .await
+                    MaintenanceRecipe::PendingOrNative
                 };
+                let verdict = super::fel_qualification::qualify_maintenance_if_due(
+                    state,
+                    file,
+                    &demand.probe_json,
+                    tools,
+                    admission,
+                    &qualification,
+                    recipe,
+                )
+                .await;
                 if verdict.is_ok() {
                     if let Some(version) = source_version.as_deref() {
                         let prepared = Box::pin(state.transcode.prepare_native_fel_head(
@@ -1097,8 +1126,14 @@ enum TitleAcquisition {
     Complete(plurx_core::scan::dv_title::DvTitleStats),
 }
 
+enum TitleAcquisitionMode {
+    Playback,
+    NativePrewarm,
+    Maintenance,
+}
+
 async fn acquire_title<S, Q>(
-    playback_requested: bool,
+    mode: TitleAcquisitionMode,
     reused: Option<plurx_core::scan::dv_title::DvTitleStats>,
     scan: S,
     qualify: Q,
@@ -1107,14 +1142,26 @@ where
     S: Future<Output = Result<plurx_core::scan::dv_title::DvTitleStats, String>>,
     Q: Future<Output = ()>,
 {
-    if playback_requested {
-        qualify.await;
-        return Ok(TitleAcquisition::QualificationOnly(reused));
-    }
-    let stats = match reused {
-        Some(stats) => stats,
-        None => scan.await?,
+    let scan = async {
+        match reused {
+            Some(stats) => Ok(stats),
+            None => scan.await,
+        }
     };
-    qualify.await;
+    let stats = match mode {
+        TitleAcquisitionMode::Playback => {
+            qualify.await;
+            return Ok(TitleAcquisition::QualificationOnly(reused));
+        }
+        TitleAcquisitionMode::NativePrewarm => {
+            qualify.await;
+            scan.await?
+        }
+        TitleAcquisitionMode::Maintenance => {
+            let stats = scan.await?;
+            qualify.await;
+            stats
+        }
+    };
     Ok(TitleAcquisition::Complete(stats))
 }

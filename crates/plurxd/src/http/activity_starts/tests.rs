@@ -441,7 +441,7 @@ mod fleet {
             Duration::from_secs(45),
             Box::pin(select_daemon_store_observing(
                 &learner_config,
-                Some(startup.as_ref()),
+                Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
             )),
         )
         .await
@@ -501,9 +501,12 @@ mod fleet {
         let startup = Arc::new(crate::StartupObservationHttp::new(
             source_config.server.bind,
         ));
-        let selected = select_daemon_store_observing(&source_config, Some(startup.as_ref()))
-            .await
-            .expect("actual singleton activation");
+        let selected = select_daemon_store_observing(
+            &source_config,
+            Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
+        )
+        .await
+        .expect("actual singleton activation");
         let leader = selected.membership_manager();
         let mut ingress = crate::http::tests::test_state_without_router();
         ingress.node_id = selected.identity.node_id.clone();
@@ -617,7 +620,12 @@ mod fleet {
                         .heartbeat()
                         .await
                         .expect("learner heartbeat");
-                    let peers = leader.operations_peers().await.expect("directory");
+                    let peers = leader
+                        .cluster_access()
+                        .administrative()
+                        .targets()
+                        .await
+                        .expect("directory");
                     if peers
                         .iter()
                         .any(|p| p.node_id == answering_id && p.reachable)
@@ -632,7 +640,9 @@ mod fleet {
             .expect("both learners are committed members");
             assert!(
                 leader
-                    .activity_peers()
+                    .cluster_access()
+                    .directory(None)
+                    .voter_observation()
                     .await
                     .expect("voters")
                     .iter()
@@ -706,7 +716,9 @@ mod fleet {
         node_id: &str,
     ) -> String {
         leader
-            .operations_peers()
+            .cluster_access()
+            .administrative()
+            .targets()
             .await
             .expect("directory")
             .into_iter()

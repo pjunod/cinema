@@ -33,6 +33,11 @@ on:
         description: "Authenticated prior preflight and reviewed Python source coverage"
         required: false
         default: ""
+      predecessor_run:
+        type: string
+        description: "Earlier interrupted source gate identified in the live PR enrollment"
+        required: false
+        default: ""
       promotion_pr:
         type: string
         description: "Optional open same-repo effort/integration promotion PR to main"
@@ -132,12 +137,14 @@ jobs:
         id: promotion
         if: >-
           github.event_name == 'workflow_dispatch' &&
-          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != '')
+          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' ||
+           inputs.promotion_base_sha != '' || inputs.predecessor_run != '')
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
           PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
+          PLURX_PREDECESSOR_RUN: ${{ inputs.predecessor_run }}
         run: python3 -m validation.qualification --bind-manual >> "$GITHUB_OUTPUT"
       - name: Verify retained unit outcomes against this exact promotion
         id: retention
@@ -293,6 +300,11 @@ jobs:
       root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}
       apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}
       apple_current_reader_required: ${{ steps.python-continuation.outputs.apple_current_reader_required }}
+      android_device_retained: ${{ steps.python-continuation.outputs.android_device_retained }}
+      topology_retained: ${{ steps.python-continuation.outputs.topology_retained }}
+      store_retained: ${{ steps.python-continuation.outputs.store_retained }}
+      hdr_rgb_retained: ${{ steps.python-continuation.outputs.hdr_rgb_retained }}
+      android_continuation_image: ${{ steps.python-continuation.outputs.android_continuation_image }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -309,7 +321,7 @@ jobs:
         run: make history-check
       - name: Prepare authenticated Python test selection
         id: python-continuation
-        if: inputs.python_unit_evidence != ''
+        if: inputs.python_unit_evidence != '' || inputs.predecessor_run != ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
@@ -317,8 +329,16 @@ jobs:
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
           RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
-        run: python3 -m validation.native_python_execute prepare
+          PLURX_PREDECESSOR_RUN: ${{ inputs.predecessor_run }}
+          PLURX_CONTINUATION_STORE_MODE: ${{ needs.scope.outputs.execution_mode }}
+        run: |
+          if [ -n "$PLURX_PREDECESSOR_RUN" ]; then
+            python3 -m validation.source_gate_repair prepare
+          else
+            python3 -m validation.native_python_execute prepare
+          fi
       - name: Check validation catalog and contract unit tests
+        if: inputs.predecessor_run == ''
         env:
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
           PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
@@ -349,15 +369,15 @@ jobs:
           fi
           python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
       - name: Provision the pinned formal toolchain
-        if: steps.formal-inputs.outputs.affected == 'true'
+        if: steps.formal-inputs.outputs.affected == 'true' && inputs.predecessor_run == ''
         run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
       - name: Complete the bounded formal smoke configuration
         id: formal-smoke
-        if: steps.formal-inputs.outputs.affected_durable == 'true'
+        if: steps.formal-inputs.outputs.affected_durable == 'true' && inputs.predecessor_run == ''
         run: python3 scripts/check-formal smoke --package durable-jobs --cache-dir target/formal-toolchain
       - name: Complete operation-progress formal smoke configurations
         id: formal-progress-smoke
-        if: steps.formal-inputs.outputs.affected_progress == 'true'
+        if: steps.formal-inputs.outputs.affected_progress == 'true' && inputs.predecessor_run == ''
         run: python3 scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
       - name: Complete worker-refinement formal smoke configurations
         id: formal-worker-refinement-smoke
@@ -381,6 +401,7 @@ jobs:
           timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
           printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
       - name: Check CI, deploy, and shipping contracts
+        if: inputs.predecessor_run == ''
         env:
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
           PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
@@ -393,6 +414,7 @@ jobs:
             make operations-check
           fi
       - name: Check the shared player input contract
+        if: inputs.predecessor_run == ''
         env:
           RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
           NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}
@@ -406,6 +428,22 @@ jobs:
             node tests/playback/player-input-contract.test.js
             node tests/web/player-dom.test.js
           fi
+      - name: Execute only the authenticated continuation test selection
+        if: inputs.predecessor_run != ''
+        env:
+          SOURCE_GATE_REPAIR_SELECTION_SHA256: ${{ steps.python-continuation.outputs.repair_selection_sha256 }}
+        run: |
+          unset GITHUB_TOKEN FORGEJO_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL ACTIONS_RESULTS_URL
+          make validation-lint
+          python3 -m validation.source_gate_repair test
+      - name: Preserve the authenticated Android class and runtime inputs
+        if: inputs.predecessor_run != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: source-gate-repair-inputs-${{ github.run_id }}
+          path: target/validation/source-gate-repair-inputs/
+          if-no-files-found: error
+          retention-days: 14
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
@@ -641,6 +679,7 @@ jobs:
           major: "8"
           binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - name: Validate HDR measurement colour conversion
+        if: needs.preflight.outputs.hdr_rgb_retained != 'true'
         env:
           PLURX_FFMPEG: /usr/lib/jellyfin-ffmpeg/ffmpeg
         run: make dv-rgb-conversion-check
@@ -700,7 +739,8 @@ jobs:
     needs: [scope, preflight]
     if: >-
       needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode != 'accelerated'
+      needs.scope.outputs.execution_mode != 'accelerated' &&
+      needs.preflight.outputs.store_retained != 'true'
     runs-on: [ci-nonvoter-store]
     # Run 6867 reached 418 of 430 serial controls at the 95m cutoff.
     # Measured compile + full suite + the separate lineage bridge need about
@@ -795,7 +835,7 @@ jobs:
       - preflight
       - cluster_store_legacy
       - cluster_store_shards
-    if: always() && needs.scope.outputs.cluster_auth == 'true'
+    if: always() && needs.scope.outputs.cluster_auth == 'true' && needs.preflight.outputs.store_retained != 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -848,8 +888,9 @@ jobs:
     name: replicated topology contracts
     needs: [scope, preflight]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' ||
-      needs.scope.outputs.hiqlite_spike == 'true'
+      needs.preflight.outputs.topology_retained != 'true' &&
+      (needs.scope.outputs.cluster_auth == 'true' ||
+       needs.scope.outputs.hiqlite_spike == 'true')
     runs-on: [ci-nonvoter-store]
     # A cold runner builds the command-profile dependency graph before the
     # three-voter proof. Persistent non-voter caches shorten later runs.
@@ -1814,6 +1855,7 @@ jobs:
       # sdkmanager downloads — on every run. Keyed on the Dockerfile hash, a
       # pull replaces the rebuild; any failure falls back to the local build.
       - name: Reuse the pinned Android toolchain image from Forgejo
+        if: inputs.predecessor_run == ''
         env:
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
@@ -1829,6 +1871,7 @@ jobs:
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
+        if: inputs.predecessor_run == ''
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -1837,6 +1880,7 @@ jobs:
           key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Run unit tests and lint in the pinned Android toolchain
+        if: inputs.predecessor_run == ''
         env:
           RETAIN_JVM_LANE: ${{ needs.scope.outputs.retain_android_jvm }}
           RETAIN_JVM_UNITS: ${{ needs.scope.outputs.retain_android_jvm_units }}
@@ -1848,7 +1892,34 @@ jobs:
           else
             BUILDX_CONFIG=target/validation/buildx make android-test
           fi
-
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        if: inputs.predecessor_run != ''
+        with:
+          name: source-gate-repair-inputs-${{ github.run_id }}
+          path: .
+      - name: Authenticate the pinned Android toolchain image
+        if: inputs.predecessor_run != ''
+        env:
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+          ANDROID_IMAGE_DIGEST: ${{ needs.preflight.outputs.android_continuation_image }}
+        run: |
+          set -eu
+          image="$REGISTRY/noirr/android-build@$ANDROID_IMAGE_DIGEST"
+          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
+          docker pull "$image"
+          echo "ANDROID_REPAIR_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Check the source-equivalent class roster with Android's runtime
+        if: inputs.predecessor_run != ''
+        run: |
+          set -eu
+          export PLURX_RETAINED_UNITS="$(cat source-gate-android-units.json)"
+          docker run --rm --platform linux/amd64 \
+            -u "$(id -u):$(id -g)" -e GITHUB_SHA -e PLURX_RETAINED_UNITS \
+            -e GRADLE_USER_HOME=/workspace/target/validation/source-gate-gradle \
+            -v "$GITHUB_WORKSPACE":/workspace:ro -w /workspace "$ANDROID_REPAIR_IMAGE" \
+            sh -ec 'test "$(python3 -c "import sys; print(sys.version_info[:2])")" = "(3, 10)"; python3 -B -m validation.jvm_unit_discovery --verify-adopted --source-commit "$GITHUB_SHA"'
+          echo "Android repair unit binding $(sha256sum source-gate-android-units.json | cut -d' ' -f1)"
   apple:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
@@ -1972,7 +2043,7 @@ jobs:
   android_apks:
     name: Build Android instrumentation APKs
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true'
+    if: needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' && needs.preflight.outputs.android_device_retained != 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 25
     steps:
@@ -2017,7 +2088,7 @@ jobs:
   android_device:
     name: Android instrumented UI tests
     needs: [scope, preflight, android_apks]
-    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.preflight.result == 'success' && needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' }}
+    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.preflight.result == 'success' && needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' && needs.preflight.outputs.android_device_retained != 'true' }}
     runs-on: [self-hosted, macOS, ARM64, lab, apple, primary]
     concurrency:
       group: plurx-apple-silicon-heavy
@@ -2250,6 +2321,8 @@ jobs:
           python3 -m validation.release_dockerfile --binary-export \
             Dockerfile Dockerfile.binaries
           echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Preflight package workspace space
+        run: scripts/release-package-candidate --check-space .
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -2280,6 +2353,33 @@ jobs:
               exit 1
             }
           done
+      - name: Retain candidate binaries for push, tag, and qualification runs
+        if: needs.scope.outputs.qualification == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/*.dwp
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain candidate binaries for non-qualification push and tag runs
+        if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/*.dwp
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
       # Dockerfile.release starts FROM the private, digest-pinned media
       # runtime; its builder needs the same fleet credential the publishers use.
       - name: Authenticate the runtime build to the private media-runtime registry
@@ -2334,33 +2434,6 @@ jobs:
             release-bin/*.sha256
           if-no-files-found: error
           retention-days: 14
-      - name: Retain candidate binaries for push, tag, and qualification runs
-        if: needs.scope.outputs.qualification == 'true'
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-binaries-${{ matrix.arch }}
-          path: |
-            release-bin/plurxd
-            release-bin/plurx-cluster-check
-            release-bin/*.dwp
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 1
-      - name: Retain candidate binaries for non-qualification push and tag runs
-        if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
-        continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: package-smoke-binaries-${{ matrix.arch }}
-          path: |
-            release-bin/plurxd
-            release-bin/plurx-cluster-check
-            release-bin/*.dwp
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 1
       - name: Bound persistent BuildKit state
         if: always() && steps.buildx-cache.outputs.local == 'true'
         env:
@@ -2631,13 +2704,27 @@ jobs:
             echo "PLURX_CURRENT_BASE_SHA=$(git rev-parse --verify 'refs/plurx/current-base^{commit}')"
           } >> "$GITHUB_ENV"
       - name: Check current ordinary-PR source-gate paperwork
-        if: github.event_name == 'workflow_dispatch' && inputs.workspace_rust_evidence != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.workspace_rust_evidence != '' && inputs.predecessor_run == ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
         run: python3 -m validation.source_gate_landing paperwork
+      - name: Write the exact-tree ordinary source-gate continuation record
+        if: inputs.predecessor_run != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PLURX_PREDECESSOR_RUN: ${{ inputs.predecessor_run }}
+        run: python3 -m validation.source_gate_repair finish
+      - name: Retain the authenticated source-gate continuation record
+        if: inputs.predecessor_run != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: source-gate-repair-${{ github.run_id }}
+          path: target/validation/source-gate-repair/receipt.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Write the exact-tree effort qualification record
-        if: needs.scope.outputs.qualification == 'true'
+        if: needs.scope.outputs.qualification == 'true' && inputs.predecessor_run == ''
         env:
           PLURX_PULL_REQUEST: ${{ github.event.pull_request.number }}
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -2662,7 +2749,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Retain the authenticated manual qualification record
-        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'workflow_dispatch' && inputs.predecessor_run == ''
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: effort-qualification-${{ needs.scope.outputs.promotion_pr }}

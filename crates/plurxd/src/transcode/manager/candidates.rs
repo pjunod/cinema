@@ -1,6 +1,56 @@
 use super::*;
 use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
+// Scoped to the test's original decision future; never shared across tests.
+#[cfg(test)]
+tokio::task_local! {
+    static CATALOG_OMISSIONS: std::cell::RefCell<Vec<String>>;
+}
+
+#[cfg(test)]
+fn note_catalog_omission(height: i64, stage: &str, detail: &str) {
+    let _ = CATALOG_OMISSIONS.try_with(|rows| {
+        let mut rows = rows.borrow_mut();
+        if rows.len() < 64 {
+            rows.push(format!("height={height} stage={stage}: {detail}"));
+        }
+    });
+}
+
+#[cfg(test)]
+impl TranscodeManager {
+    pub(crate) fn note_catalog_result(result: &crate::media_pool::QualityCatalogResult) {
+        let _ = CATALOG_OMISSIONS.try_with(|rows| {
+            let mut rows = rows.borrow_mut();
+            if rows.len() == 64 {
+                rows.pop();
+            }
+            rows.insert(
+                0,
+                format!(
+                    "catalog complete={} authority_refused={} candidates={} causes={:?}",
+                    result.complete,
+                    result.authority_refused,
+                    result.candidates.len(),
+                    result.causes
+                ),
+            );
+        });
+    }
+
+    pub(crate) async fn capture_catalog_omissions<T>(
+        future: impl std::future::Future<Output = T>,
+    ) -> (T, Vec<String>) {
+        CATALOG_OMISSIONS
+            .scope(std::cell::RefCell::new(Vec::new()), async move {
+                let result = future.await;
+                let rows = CATALOG_OMISSIONS.with(|rows| rows.take());
+                (result, rows)
+            })
+            .await
+    }
+}
+
 /// Descriptions only: no source descriptor, executable, parent or admission.
 /// A query can retain several full recipe identities at distinct rung ceilings.
 #[cfg(any(target_os = "linux", test))]
@@ -106,7 +156,7 @@ impl TranscodeManager {
         )
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(crate) fn processed_enhancement_envelope_with_source_rate(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         request: &SessionRequest,
@@ -116,18 +166,41 @@ impl TranscodeManager {
         destination: plurx_core::transcode::dv_processing::DvDestination,
         held_video_bps: Option<u64>,
     ) -> Result<transcode::EnhancementRateEnvelope, String> {
-        let context = request
+        let ask = request
             .candidate_context
-            .as_ref()
+            .as_deref()
+            .map(ProcessedUpgradeAsk::from_candidate)
             .ok_or("processed rate requires its current candidate context")?;
+        Self::processed_enhancement_envelope_with_ask(
+            snapshot,
+            request,
+            options,
+            input_has_audio,
+            strip_dovi,
+            destination,
+            held_video_bps,
+            &ask,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn processed_enhancement_envelope_with_ask(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        options: &TranscodeOptions,
+        input_has_audio: bool,
+        strip_dovi: bool,
+        destination: plurx_core::transcode::dv_processing::DvDestination,
+        held_video_bps: Option<u64>,
+        context: &ProcessedUpgradeAsk,
+    ) -> Result<transcode::EnhancementRateEnvelope, String> {
         let caps = context
             .canonical_caps
             .as_ref()
             .ok_or("processed rate requires current client capabilities")?;
         let file = &snapshot.file;
-        let rung = if !context.selected_candidate.processed_dv
-            && context.selected_candidate.route == CandidateRoute::Encode
-        {
+        let rung = if !context.names_processed && context.route == CandidateRoute::Encode {
             options.video_bitrate_kbps
         } else {
             super::bitrate_for_height(options.target_height)
@@ -235,10 +308,9 @@ impl TranscodeManager {
             }
             Ok(envelope)
         };
-        let selected = &context.selected_candidate;
-        if !selected.processed_dv {
+        if !context.names_processed {
             return if matches!(
-                selected.route,
+                context.route,
                 CandidateRoute::Original | CandidateRoute::Remux
             ) {
                 source_envelope()
@@ -247,8 +319,8 @@ impl TranscodeManager {
             };
         }
         let costs_match = |envelope: transcode::EnhancementRateEnvelope| {
-            selected.average_bps == Some(u64::from(envelope.target_kbps()) * 1000 + audio_bps)
-                && selected.peak_bps == Some(envelope.peak_bps() + audio_bps)
+            context.average_bps == Some(u64::from(envelope.target_kbps()) * 1000 + audio_bps)
+                && context.peak_bps == Some(envelope.peak_bps() + audio_bps)
         };
         // Bandwidth descriptions select only independently derived recipes;
         // fresh full recipe identity is still mandatory after preparation.
@@ -288,17 +360,16 @@ impl TranscodeManager {
     /// original service-reviewed conversion scope can restore its P81 intent;
     /// source tags, client preferences and a serialized description cannot.
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn processed_qualification_destination(
+    pub(super) fn processed_qualification_destination_with_ask(
         request: &SessionRequest,
+        ask: Option<&ProcessedUpgradeAsk>,
     ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
         use plurx_core::transcode::dv_processing::DvDestination;
         let (_, destination, _) = request.dv_processing_route()?;
         if request.dv_processing_destination.is_none()
             && matches!(request.kind, SessionKind::Transcode { .. })
         {
-            match request
-                .candidate_context
-                .as_ref()
+            match ask
                 .and_then(|context| context.catalog_query.as_ref())
                 .and_then(|query| query.copy_contract)
             {
@@ -310,9 +381,7 @@ impl TranscodeManager {
         if request.dv_processing_destination.is_none()
             && matches!(request.kind, SessionKind::Transcode { .. })
             && !request.hdr10
-            && request
-                .candidate_context
-                .as_ref()
+            && ask
                 .and_then(|context| context.canonical_caps.as_ref())
                 .and_then(|caps| caps.display.as_ref())
                 .is_some_and(|display| !display.hdr && !display.dolby_vision)
@@ -325,18 +394,30 @@ impl TranscodeManager {
     /// Pure qualification-input seam shared with ingress regressions. Its
     /// caller must still validate current planning authority and acquire the
     /// admitted local producer; this grants no prepared lease or executable.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(crate) fn processed_qualification_input(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         request: &SessionRequest,
         height: i64,
     ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
-        let destination = Self::processed_qualification_destination(request)?
-            .ok_or("native Dolby Vision copy has no processed destination")?;
-        let original = request
+        let ask = request
             .candidate_context
-            .as_ref()
+            .as_deref()
+            .map(ProcessedUpgradeAsk::from_candidate)
             .ok_or("processed trial context missing")?;
+        Self::processed_qualification_input_with_ask(snapshot, request, height, &ask)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn processed_qualification_input_with_ask(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        height: i64,
+        original: &ProcessedUpgradeAsk,
+    ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
+        let destination =
+            Self::processed_qualification_destination_with_ask(request, Some(original))?
+                .ok_or("native Dolby Vision copy has no processed destination")?;
         let query = original
             .catalog_query
             .as_ref()
@@ -1172,6 +1253,10 @@ impl TranscodeManager {
             {
                 Ok(resolved) => resolved,
                 Err(error) => {
+                    #[cfg(test)]
+                    if normalized_geometry {
+                        note_catalog_omission(height, "encoder_and_grade", &error);
+                    }
                     if selected.is_some() {
                         selected_unavailable = Some(error);
                     }
@@ -1209,7 +1294,13 @@ impl TranscodeManager {
                 options,
             ) {
                 Ok(options) => options,
-                Err(_) => continue,
+                Err(_error) => {
+                    #[cfg(test)]
+                    if normalized_geometry {
+                        note_catalog_omission(height, "audio_options", &_error);
+                    }
+                    continue;
+                }
             };
             if normalized_geometry && grade == OutputGrade::Sdr && height == 1440 {
                 let profile = transcode::AutoQualityRateProfile::H264Sdr1440P30V1;
@@ -1231,21 +1322,40 @@ impl TranscodeManager {
                 }
             }
             let Some(facts) = source_facts.as_ref() else {
+                #[cfg(test)]
+                if normalized_geometry {
+                    note_catalog_omission(height, "facts", "source facts unavailable");
+                }
                 continue;
             };
-            let Ok(plan) = self.resolve_movie_plan_with_facts(
+            let plan = match self.resolve_movie_plan_with_facts(
                 file,
                 &options,
                 encoder,
                 facts,
                 &AttemptRestrictions::none(),
-            ) else {
-                continue;
+            ) {
+                Ok(plan) => plan,
+                Err(_error) => {
+                    #[cfg(test)]
+                    if normalized_geometry {
+                        note_catalog_omission(height, "resolve_movie_plan_with_facts", &_error);
+                    }
+                    continue;
+                }
             };
             let contract = plan.output_contract();
             let (Some(width), Some(height_px)) =
                 (contract.effective_width(), contract.effective_height())
             else {
+                #[cfg(test)]
+                if normalized_geometry {
+                    note_catalog_omission(
+                        height,
+                        "output_contract",
+                        "effective dimensions unavailable",
+                    );
+                }
                 continue;
             };
             if height == 1440 && height_px <= 1080 {
@@ -1260,6 +1370,10 @@ impl TranscodeManager {
                 match self.candidate_recipe_digest(&plan, presentation, reorder_frames) {
                     Ok(digest) => digest,
                     Err(error) => {
+                        #[cfg(test)]
+                        if normalized_geometry {
+                            note_catalog_omission(height, "candidate_recipe_digest", &error);
+                        }
                         if selected.is_some() {
                             selected_unavailable = Some(error);
                         }

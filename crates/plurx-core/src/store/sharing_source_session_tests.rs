@@ -3044,3 +3044,51 @@ async fn sharing_source_designation_settled_anchor_re_elects_only_after_all_file
         assert_eq!(count(&store, "copy_source_designation_bindings").await, 2);
     }
 }
+
+/// Move every member's heartbeat, and the proofs published with it, to `at`.
+async fn heartbeat_at(store: &SqliteStore, at: i64) {
+    store
+        .sharing_txn(vec![
+            (
+                "UPDATE cluster_node_capabilities SET last_seen_at=$1 WHERE node_id IN (SELECT node_id FROM cluster_nodes WHERE removed_at IS NULL)".into(),
+                vec![at.into()],
+            ),
+            (
+                "UPDATE cluster_nodes SET last_seen_at=$1 WHERE removed_at IS NULL".into(),
+                vec![at.into()],
+            ),
+        ])
+        .await
+        .expect("member heartbeat");
+}
+
+/// Production, 2026-11-21T17:01:11Z: file 3122's claim refused `Unavailable` while
+/// every persistent row it reads admitted it. A claim samples its clock, reads,
+/// and only then commits; a member heartbeat stamped after that sample can
+/// commit first. That heartbeat is current, not future-dated, and must admit.
+#[tokio::test]
+async fn sharing_source_claim_admits_a_heartbeat_committed_after_its_clock_sample() {
+    let store = SqliteStore::open_in_memory().expect("Store");
+    let (grant, credential) = setup(&store).await;
+    let members = proof();
+    let claim = intent(&store, grant, &credential, "heartbeat-in-flight").await;
+    heartbeat_at(&store, now_ms().expect("clock") + 2_000).await;
+    assert!(matches!(
+        store
+            .claim_source_media_session(&claim, &members)
+            .await
+            .expect("claim"),
+        SourceClaimOutcome::Acquired(_)
+    ));
+    // A heartbeat further ahead than any admitted write can be in flight is
+    // still a future-dated clock, and still refuses.
+    let future = intent(&store, grant, &credential, "heartbeat-future").await;
+    heartbeat_at(&store, now_ms().expect("clock") + 600_000).await;
+    assert!(matches!(
+        store
+            .claim_source_media_session(&future, &proof())
+            .await
+            .expect("claim"),
+        SourceClaimOutcome::Unavailable
+    ));
+}

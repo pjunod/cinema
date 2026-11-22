@@ -42,6 +42,28 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+/// The committed voter ids `MembershipManager::local_node_is_committed_voter`
+/// decides on, read from a Raft metrics `membership_config`
+/// (`openraft::StoredMembership`): `voter_ids()`, the union over a joint
+/// configuration. A macro rather than a function because `openraft` is not a
+/// normal dependency of this crate, so production code cannot name the type;
+/// the lifecycle agreement test applies the same read to the stored
+/// memberships it builds, and the core capability's coherent committed read
+/// (`access::LocalNode::committed`) applies it too. Defined before `mod access`
+/// so that child module sees it.
+macro_rules! committed_voter_ids {
+    ($membership_config:expr) => {
+        $membership_config.voter_ids()
+    };
+}
+
+mod access;
+pub use access::{
+    ActiveVoterAuthority, AdministrativeObservation, ClockChanges, ClockProtocol, ClusterAccess,
+    ClusterNames, CommittedMembership, Deployment, JobControl, LocalFacts, LocalNode,
+    RevocationExclusion,
+};
+
 pub mod directory;
 pub mod lifecycle;
 mod sharing_source_schema;
@@ -1931,6 +1953,7 @@ async fn bootstrap_purpose_admission_schema(
         local_raft_id,
         SharingMemberFloor::PurposeKeys,
         false,
+        FloorFreshness::AllMembers,
     )
     .await?
     else {
@@ -3301,19 +3324,6 @@ fn reduction_reference_key(reference: &hiqlite::ReductionFenceReference) -> Stri
     )
 }
 
-/// The committed voter ids `MembershipManager::local_node_is_committed_voter`
-/// decides on, read from a Raft metrics `membership_config`
-/// (`openraft::StoredMembership`): `voter_ids()`, the union over a joint
-/// configuration. A macro rather than a function because `openraft` is not a
-/// normal dependency of this crate, so production code cannot name the type;
-/// the lifecycle agreement test applies the same read to the stored
-/// memberships it builds.
-macro_rules! committed_voter_ids {
-    ($membership_config:expr) => {
-        $membership_config.voter_ids()
-    };
-}
-
 /// "Every active node proves `capability` with the binary it is running now."
 fn capability_ready_predicate(capability: &str) -> String {
     format!(
@@ -3375,20 +3385,52 @@ pub fn sharing_member_guard_predicate(
 
 // A read observes the heartbeat timestamps in its own consistent snapshot and
 // rejects future timestamps against the clock sampled after that read finishes.
-// Mutations retain the exact caller-bound upper timestamp in their SQL guard.
+// A mutation binds the clock it sampled before its reads and its Raft
+// proposal, so a member heartbeat stamped after that sample can commit first.
+// That heartbeat is current, not future-dated: the SQL guard admits it for as
+// long as the write may still use its observation
+// (`SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS`), and refuses a clock further ahead.
 fn sharing_member_guard_with_freshness(
     required: SharingMemberFloor,
     members_parameter: usize,
     cutoff_parameter: usize,
     upper_parameter: Option<usize>,
 ) -> String {
+    sharing_member_guard_sql(
+        required,
+        members_parameter,
+        cutoff_parameter,
+        upper_parameter,
+        None,
+    )
+}
+
+/// `fresh_parameter`, when present, binds a JSON array of Raft ids and limits
+/// the heartbeat-freshness term to those members. Only the serving-read floor
+/// passes one (the applied membership's voters plus the serving member). Every write,
+/// admission and transition guard passes `None` and keeps the all-member rule.
+fn sharing_member_guard_sql(
+    required: SharingMemberFloor,
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    upper_parameter: Option<usize>,
+    fresh_parameter: Option<usize>,
+) -> String {
     let committed = format!("${members_parameter}");
     let cutoff = format!("${cutoff_parameter}");
     let stale = match upper_parameter {
-        Some(parameter) => {
-            format!("present.last_seen_at < {cutoff} OR present.last_seen_at > ${parameter}")
-        }
+        Some(parameter) => format!(
+            "present.last_seen_at < {cutoff} \
+             OR present.last_seen_at > ${parameter} + {SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS}"
+        ),
         None => format!("present.last_seen_at < {cutoff}"),
+    };
+    let stale = match fresh_parameter {
+        Some(parameter) => format!(
+            "({stale}) AND present.raft_id IN \
+             (SELECT CAST(scope.value AS INTEGER) FROM json_each(${parameter}) AS scope)"
+        ),
+        None => stale,
     };
     format!(
         "EXISTS (SELECT 1 FROM json_each({committed})) \
@@ -3455,17 +3497,67 @@ pub async fn sharing_member_floor_ready(
     .await
 }
 
-/// The three public observations above, on the manager's counted client.
+/// Quorum observation of the serving-read floor: what a Source may consult
+/// before it answers an authenticated catalogue, scope or content read from
+/// state it already holds. It differs from [`sharing_member_floor_ready`] in
+/// one term only. Heartbeat freshness is required of the Raft voters and
+/// of the serving member, not of every registered learner.
+///
+/// The all-member freshness rule exists so that a node that is down cannot
+/// come back on a rolled-back binary into a cluster that has narrowed onto a
+/// protocol (see `no_absent_node_predicate`). That protects replicated
+/// writes and transitions, and those keep it: every admission, custody and
+/// transition guard still embeds the strict predicate. A read narrows nothing.
+/// An offline learner serves nothing, holds no quorum vote, and writes nothing
+/// until it heartbeats again. When it does, it is in scope again. Capability
+/// proofs, the committed roster, joins and removals in flight, a known leader,
+/// and a stable membership log remain required of every member exactly as
+/// before. A lost quorum still fails the consistent read and refuses.
+pub async fn sharing_member_serving_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    member_serving_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        required,
+    )
+    .await
+}
+
+async fn member_serving_floor_ready(
+    client: &CountedClient,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    Ok(sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        false,
+        FloorFreshness::VotersAndServingMember,
+    )
+    .await?
+    .is_some())
+}
+
+/// The strict public observations above (every member fresh), on the
+/// manager's counted client.
 async fn member_floor_ready(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
-    Ok(
-        sharing_member_floor_observation(client, local_raft_id, required, false)
-            .await?
-            .is_some(),
+    Ok(sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        false,
+        FloorFreshness::AllMembers,
     )
+    .await?
+    .is_some())
 }
 
 const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
@@ -3788,12 +3880,30 @@ fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
     ))
 }
 
+/// Which members the heartbeat-freshness term covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloorFreshness {
+    /// Every non-removed member: the rule for writes, admission, custody and
+    /// protocol transitions.
+    AllMembers,
+    /// The voters of the applied membership and the serving member: serving
+    /// reads only. The oldest/newest heartbeat bounds are narrowed with it, so
+    /// a learner's future-dated heartbeat (clock skew) no longer refuses a read.
+    VotersAndServingMember,
+}
+
 async fn sharing_member_floor_observation(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
     require_transition_absence: bool,
+    freshness: FloorFreshness,
 ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    // A narrowed freshness scope is a read policy. Anything that will feed a
+    // transition or admission write must observe every member.
+    if require_transition_absence && freshness != FloorFreshness::AllMembers {
+        return Err(MembershipError::Incompatible);
+    }
     let before = client.metrics_db().await?;
     let members = before
         .membership_config
@@ -3819,7 +3929,27 @@ async fn sharing_member_floor_observation(
     let members_json = bounded_committed_raft_ids_json(&members)?;
     let now = unix_ms()?;
     let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-    let mut guard = sharing_member_guard_with_freshness(required, 1, 2, None);
+    // Binding $3 for the serving-read scope: the applied membership's voters plus the
+    // serving member. Raft's own voter set decides, not the SQL `role` column,
+    // which a node that joined as a voter leaves NULL.
+    let fresh_json = match freshness {
+        FloorFreshness::AllMembers => None,
+        FloorFreshness::VotersAndServingMember => {
+            let mut scope = before
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>();
+            scope.insert(local_raft_id);
+            Some(bounded_committed_raft_ids_json(&scope)?)
+        }
+    };
+    let fresh_parameter = fresh_json.as_ref().map(|_| 3);
+    let fresh_rows = if fresh_parameter.is_some() {
+        " AND node.raft_id IN (SELECT CAST(scope.value AS INTEGER) FROM json_each($3) AS scope)"
+    } else {
+        ""
+    };
+    let mut guard = sharing_member_guard_sql(required, 1, 2, None, fresh_parameter);
     let generation_projection = if require_transition_absence {
         let present = client.query_consistent_map::<CountRow,_>(
             "sharing_member_floor_observation",
@@ -3854,7 +3984,11 @@ async fn sharing_member_floor_observation(
             required.capabilities().iter().map(|capability| capability_ready_predicate(capability)).collect::<Vec<_>>().join(" AND "),
             no_join_in_flight_predicate().to_owned(),
             no_removal_in_flight_predicates(),
-            "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2))".to_owned(),
+            if fresh_parameter.is_some() {
+                "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2) AND present.raft_id IN (SELECT CAST(scope.value AS INTEGER) FROM json_each($3) AS scope))".to_owned()
+            } else {
+                "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2))".to_owned()
+            },
             if require_transition_absence { sharing_member_transition_absence_predicate().to_owned() } else { "1".to_owned() },
             if require_transition_absence { sharing_membership_generation_shape_predicate() } else { "1".to_owned() },
             "EXISTS(SELECT 1 FROM json_each($1)) AND NOT EXISTS(SELECT 1 FROM json_each($1) committed WHERE NOT EXISTS(SELECT 1 FROM cluster_nodes member WHERE member.raft_id=CAST(committed.value AS INTEGER) AND member.removed_at IS NULL))".to_owned(),
@@ -3873,10 +4007,13 @@ async fn sharing_member_floor_observation(
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
                  MIN(node.last_seen_at) AS oldest_heartbeat, MAX(node.last_seen_at) AS newest_heartbeat, {generation_projection} AS generation{diagnostic_projection} \
-                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
+                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL{fresh_rows}",
                 guard,
             ),
-            params!(members_json.as_str(), cutoff),
+            match fresh_json.as_deref() {
+                Some(scope) => params!(members_json.as_str(), cutoff, scope),
+                None => params!(members_json.as_str(), cutoff),
+            },
         )
         .await?;
     let after = client.metrics_db().await?;
@@ -3966,6 +4103,7 @@ async fn purpose_key_member_observation(
         local_raft_id,
         SharingMemberFloor::PurposeKeys,
         true,
+        FloorFreshness::AllMembers,
     )
     .await?
     else {
@@ -4034,8 +4172,14 @@ async fn source_member_observation(
     } else {
         SharingMemberFloor::PrincipalAndCatalogue
     };
-    let Some(mut observation) =
-        sharing_member_floor_observation(client, local_raft_id, required, true).await?
+    let Some(mut observation) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        true,
+        FloorFreshness::AllMembers,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -5674,8 +5818,15 @@ impl MembershipManager {
             && self.authenticated_clock_request_still_fresh(auth)?)
     }
 
+    /// Construct domain services over this exact manager for server composition.
+    /// The returned aggregate exposes no manager getter or arbitrary callback.
     #[must_use]
-    pub fn is_replicated(&self) -> bool {
+    pub fn cluster_access(&self) -> ClusterAccess {
+        ClusterAccess::new(self.clone())
+    }
+
+    #[must_use]
+    pub(super) fn is_replicated(&self) -> bool {
         self.inner.is_some()
     }
 
@@ -8105,7 +8256,7 @@ impl MembershipManager {
 
     /// Whether this process is both present in the committed Raft voter set
     /// and non-tombstoned in replicated membership state.
-    pub async fn local_node_is_active_voter(&self) -> Result<bool, MembershipError> {
+    pub(super) async fn local_node_is_active_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         if !self.local_node_is_committed_voter().await? {
             return Ok(false);
@@ -8137,7 +8288,7 @@ impl MembershipManager {
     /// clustered process whose membership cannot be read right now is refused:
     /// duplicating a provider pass or a scan is the failure this exists to
     /// prevent, and skipping a tick costs at most one interval.
-    pub async fn may_run_cluster_jobs(&self) -> bool {
+    pub(super) async fn may_run_cluster_jobs(&self) -> bool {
         if self.inner.is_none() {
             return true;
         }
@@ -8151,7 +8302,7 @@ impl MembershipManager {
     /// quorum read on an HTTP request path; heartbeat acknowledgement is what
     /// proves the process has already refreshed it from local applied state.
     #[must_use]
-    pub fn local_maintenance_active(&self) -> bool {
+    pub(super) fn local_maintenance_active(&self) -> bool {
         self.inner
             .as_deref()
             .is_some_and(|inner| inner.local_maintenance.load(Ordering::Acquire))
@@ -8177,7 +8328,7 @@ impl MembershipManager {
         Ok(committed)
     }
 
-    pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
+    pub(super) async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         Ok(lifecycle::committed_voter(
@@ -8194,7 +8345,7 @@ impl MembershipManager {
     /// promoted out of its intermediate learner state. Anything that reads
     /// "carries no vote" as "was removed" stops work a healthy member still
     /// has to do.
-    pub async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {
+    pub(super) async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let is_member = metrics
@@ -8207,7 +8358,7 @@ impl MembershipManager {
     /// Effective role for request admission from the heartbeat-refreshed
     /// atomic projection. Membership metrics, local SQL, and promotion-role
     /// persistence all happen before publication, never on the HTTP path.
-    pub async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {
+    pub(super) async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(LocalServingRole::Unclustered);
         };
@@ -9261,7 +9412,7 @@ impl MembershipManager {
     /// `cluster.artwork_url` must name an address a household client can
     /// actually reach. The ordinary membership status still omits addresses,
     /// and no unauthenticated route exposes them.
-    pub async fn reachable_peer_http_urls(&self) -> Result<Vec<String>, MembershipError> {
+    pub(super) async fn reachable_peer_http_urls(&self) -> Result<Vec<String>, MembershipError> {
         let Some(inner) = self.inner.as_ref() else {
             return Ok(Vec::new());
         };
@@ -9338,48 +9489,6 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
-    /// Resolve peer daemon endpoints without widening the public node status.
-    pub async fn activity_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        let Some(inner) = self.inner.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let now = unix_ms()?;
-        let voters = inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .voter_ids()
-            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
-            .collect::<BTreeSet<_>>();
-        let rows = inner
-            .client
-            .query_map::<ActivityPeerRow, _>(
-                "activity_peers",
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
-                        http.public_http_url \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
-                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                     WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id LIMIT $2",
-                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
-            )
-            .await?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| voters.contains(&row.raft_id))
-            .take(MAX_ACTIVITY_PEERS)
-            .map(|row| ActivityPeer {
-                http_base: row.http_base,
-                node_id: row.node_id,
-                raft_id: row.raft_id,
-                reachable: node_is_reachable(now, row.last_seen_at),
-            })
-            .collect())
-    }
-
     /// Machine names for the roster, keyed by node id.
     ///
     /// *Cheaper* than [`Self::status`], not a subset of it: a caller that only
@@ -9402,7 +9511,7 @@ impl MembershipManager {
     /// the first heartbeat interval after start. `status` has no such override,
     /// so during that window the two reads disagree about this one node — in
     /// the direction of the page knowing more, not less.
-    pub async fn node_hostnames(&self) -> Result<BTreeMap<String, String>, MembershipError> {
+    pub(super) async fn node_hostnames(&self) -> Result<BTreeMap<String, String>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(BTreeMap::new());
         };
@@ -9432,7 +9541,7 @@ impl MembershipManager {
     ///
     /// Unlike media placement this deliberately retains stale/unready rows:
     /// the aggregator must render silence as unreachable, not quietly omit it.
-    pub async fn operations_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+    pub(super) async fn operations_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
@@ -9460,7 +9569,7 @@ impl MembershipManager {
     /// Exact bounded clock roster, including stale and pending-removal members.
     /// Missing identity or endpoint invalidates the whole round; reachability
     /// never shortens clock coverage. No credential-guard mutation is involved.
-    pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
+    pub(super) async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
         self.clock_peers_for_request(None, true).await
     }
 
@@ -9468,7 +9577,7 @@ impl MembershipManager {
     /// member set, query and fail-closed directory as [`Self::clock_peers`],
     /// read locally with no consensus. A hint that says whether a held
     /// `clock_peers` proof is still current, never a proof itself.
-    pub async fn clock_peers_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
+    pub(super) async fn clock_peers_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
         self.clock_peers_for_request(None, false).await
     }
 
@@ -9484,7 +9593,7 @@ impl MembershipManager {
     /// Last awaited response check after ordinary exact-request authorization.
     /// Does not consume a nonce again. Directory and sender removal fence must
     /// be from the same consistent read, not two snapshots separated by await.
-    pub async fn clock_peers_after_authenticated_request(
+    pub(super) async fn clock_peers_after_authenticated_request(
         &self,
         auth: &InternalPeerAuth,
     ) -> Result<ClockPeerRoster, MembershipError> {
@@ -9579,7 +9688,7 @@ impl MembershipManager {
     /// A pending removal is still a serving authority until Raft membership no
     /// longer contains it, so omission, missing identity, or missing endpoint
     /// fails the credential mutation closed instead of shortening the fanout.
-    pub async fn cache_admin_revocation_peers(
+    pub(super) async fn cache_admin_revocation_peers(
         &self,
         claim_id: &str,
     ) -> Result<Vec<ActivityPeer>, MembershipError> {
@@ -9673,58 +9782,7 @@ impl MembershipManager {
             .collect()
     }
 
-    /// Ready media-capacity targets, including committed learners.
-    ///
-    /// Activity aggregation and rollout unanimity deliberately remain
-    /// voter-only. Placement is different: a learner is useful precisely as a
-    /// non-voting node-local worker. The replicated removal fence ejects it
-    /// from this directory before owned work is settled, and the progress row
-    /// keeps a lagged learner out even while its heartbeat is fresh.
-    pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        self.media_peers_for_route(true).await
-    }
-
-    /// Ready media targets restricted by the caller's learner route policy.
-    /// Read admission role with the endpoint/progress row, rather than joining
-    /// an independently fetched status snapshot onto this directory.
-    pub async fn media_peers_for_route(
-        &self,
-        allow_learners: bool,
-    ) -> Result<Vec<ActivityPeer>, MembershipError> {
-        let Some(inner) = self.inner.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let now = unix_ms()?;
-        let members = inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .nodes()
-            .map(|(raft_id, _)| *raft_id)
-            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
-            .collect::<BTreeSet<_>>();
-        let rows = inner
-            .client
-            .query_map::<MediaPeerRow, _>(
-                "media_peers_for_route",
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, node.role, \
-                        http.public_http_url, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                     WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id LIMIT $2",
-                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
-            )
-            .await?;
-        Self::media_peer_directory(now, &members, rows, allow_learners)
-    }
-
+    #[cfg(test)]
     fn media_peer_directory(
         now: i64,
         members: &BTreeSet<u64>,
@@ -9752,23 +9810,6 @@ impl MembershipManager {
             }
         }
         Ok(peers)
-    }
-
-    /// Number of committed voters, including this node. Media rollout gates
-    /// compare this with the bounded peer directory so a missing, legacy, or
-    /// over-limit voter fails closed instead of being silently omitted.
-    pub async fn activity_voter_count(&self) -> Result<usize, MembershipError> {
-        let Some(inner) = self.inner.as_deref() else {
-            return Ok(1);
-        };
-        Ok(inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .voter_ids()
-            .take(MAX_ACTIVITY_PEERS.saturating_add(2))
-            .count())
     }
 
     /// Sign one short-lived, sender-and-target-bound activity request with
@@ -12367,6 +12408,10 @@ impl MembershipManager {
     /// its serving fence is ready, so a published outage discards the answer
     /// at once; `None` (not ready, or a loss still pending) reads fresh and
     /// keeps nothing.
+    ///
+    /// This is the serving-read floor (`sharing_member_serving_floor_ready`):
+    /// a registered learner whose heartbeat went stale does not refuse it.
+    /// No write may admit on this answer. Writes embed the strict guard.
     pub async fn sharing_member_floor_advisory(
         &self,
         required: SharingMemberFloor,
@@ -12374,7 +12419,8 @@ impl MembershipManager {
     ) -> Result<bool, MembershipError> {
         let inner = Arc::clone(self.inner.as_ref().ok_or(MembershipError::Unavailable)?);
         let Some(epoch) = epoch else {
-            return member_floor_ready(&inner.client, inner.identity.raft_id, required).await;
+            return member_serving_floor_ready(&inner.client, inner.identity.raft_id, required)
+                .await;
         };
         let advisory = Arc::clone(&inner.floor_advisories[required.index()]);
         let keyed = Arc::clone(&inner);
@@ -12388,7 +12434,7 @@ impl MembershipManager {
                 async move {
                     tokio::time::timeout(
                         SHARING_FLOOR_ADVISORY_READ_BOUND,
-                        member_floor_ready(&inner.client, inner.identity.raft_id, required),
+                        member_serving_floor_ready(&inner.client, inner.identity.raft_id, required),
                     )
                     .await
                     .map_err(|_| MembershipError::Unavailable)?
@@ -12410,6 +12456,7 @@ impl MembershipManager {
             inner.identity.raft_id,
             SharingMemberFloor::IngressCustody,
             true,
+            FloorFreshness::AllMembers,
         )
         .await?
         .map(|members| IngressCustodyMembers { members }))

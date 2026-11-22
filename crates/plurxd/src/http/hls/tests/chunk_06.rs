@@ -32,6 +32,7 @@ async fn a_create_is_refused_when_the_ask_moves_before_it_activates() {
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: "control-player".into(),
             intent: Some(envelope(1, DesiredQuality::Original)),
             copy: Some(true),
@@ -59,6 +60,7 @@ async fn a_create_is_refused_when_the_ask_moves_before_it_activates() {
                 HeaderMap::new(),
                 super::super::network::RemoteAddress(None),
                 Json(CreateSession {
+            processed_upgrade: None,
                     playback_id: playback.into(),
                     intent: Some(envelope(1, DesiredQuality::Original)),
                     copy: Some(true),
@@ -122,6 +124,7 @@ async fn an_ask_on_create_is_recorded_before_the_create_is_answered() {
     let answer = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-a".into(),
             intent: Some(ask.clone()),
             ..bare_create()
@@ -234,6 +237,7 @@ async fn a_create_refused_before_its_claim_records_no_ask() {
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: playback.into(),
             request_id: Some("no-ask-before-claim".into()),
             copy: Some(true),
@@ -300,6 +304,7 @@ async fn an_overloaded_create_records_no_ask() {
     let answer = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "overloaded-player".into(),
             intent: Some(envelope(1, DesiredQuality::Original)),
             ..bare_create()
@@ -402,6 +407,7 @@ async fn a_peers_stale_answer_ends_a_view_plan_before_any_candidate_is_picked() 
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: "stale-peer-player".into(),
             request_id: Some("stale-peer-request".into()),
             quality_auto: Some(true),
@@ -457,6 +463,7 @@ async fn a_created_playback_points_at_the_ask_its_create_recorded() {
         HeaderMap::new(),
         super::super::network::RemoteAddress(None),
         Json(CreateSession {
+            processed_upgrade: None,
             playback_id: "chain-player".into(),
             intent: Some(ask.clone()),
             copy: Some(true),
@@ -544,6 +551,7 @@ async fn overlapping_creates_with_control_off_settle_on_one_ask() {
                 HeaderMap::new(),
                 super::super::network::RemoteAddress(None),
                 Json(CreateSession {
+            processed_upgrade: None,
                     playback_id: playback.into(),
                     intent: Some(envelope(1, quality)),
                     copy: Some(true),
@@ -614,6 +622,7 @@ async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
     let answer = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-bad".into(),
             intent: Some(broken),
             ..bare_create()
@@ -650,6 +659,7 @@ async fn a_create_without_an_ask_records_nothing() {
     let _ = create_with(
         &state,
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-legacy".into(),
             ..bare_create()
         },
@@ -974,6 +984,7 @@ async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
         .expect("file read")
         .expect("source");
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "geometry-auto".into(),
         copy: Some(true),
         quality_auto: Some(true),
@@ -1024,6 +1035,7 @@ async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
 
 async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "player-a".into(),
         height: asked,
         ..bare_create()
@@ -1129,6 +1141,7 @@ async fn auto_asks_the_ladder_with_everything_it_was_given() {
 
     for hdr10 in [false, true] {
         let body = CreateSession {
+            processed_upgrade: None,
             playback_id: "player-a".into(),
             height: None,
             hdr10: Some(hdr10),
@@ -1174,6 +1187,7 @@ async fn the_intent_fingerprint_ignores_the_review() {
     // deriving `Clone` on it for a test would be the test changing the
     // contract to suit itself.
     let body = || CreateSession {
+            processed_upgrade: None,
         playback_id: "player-a".into(),
         copy: Some(true),
         preserve_dolby_vision: Some(false),
@@ -1259,6 +1273,7 @@ async fn a_reviews_notes_reach_the_resolved_plan() {
         },
         Some(review),
         CreateSession {
+            processed_upgrade: None,
             playback_id: "player-a".into(),
             copy: Some(true),
             preserve_dolby_vision: Some(true),
@@ -1285,6 +1300,7 @@ async fn a_reviews_notes_reach_the_resolved_plan() {
 #[test]
 fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         copy: Some(true),
         // The client asks for the opposite of everything the review says.
@@ -1309,6 +1325,7 @@ fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
     // conversion is not a wire field, so no combination of body values can
     // produce it — which is what makes the assignment below the only one.
     let eager = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         copy: Some(true),
         preserve_dolby_vision: Some(true),
@@ -1359,6 +1376,7 @@ fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
     // A transcode request has no Dolby Vision fields to carry, and must
     // still take the notes and the HDR10 answer.
     let mut transcode = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         height: Some(1080),
         ..bare_create()
@@ -1500,6 +1518,7 @@ fn a_client_that_names_profile_7_is_handed_the_dual_layer_as_copied() {
 
     // The review is what the copy reads, and no body can claim it.
     let body = CreateSession {
+            processed_upgrade: None,
         playback_id: "p".into(),
         copy: Some(true),
         preserve_dolby_vision: Some(true),
@@ -1991,6 +2010,7 @@ fn sub(codec: &str, language: &str, title: &str, default: bool, forced: bool) ->
 #[test]
 fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
     let request = CreateSession {
+            processed_upgrade: None,
         source_telemetry: None,
         intent: None,
         control_sequence: None,
@@ -2026,6 +2046,7 @@ fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
 #[test]
 fn bitmap_fallback_still_carries_an_explicit_burn_request() {
     let request = CreateSession {
+            processed_upgrade: None,
         source_telemetry: None,
         intent: None,
         control_sequence: None,
@@ -5884,6 +5905,7 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
         snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
         snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
         let body = || CreateSession {
+            processed_upgrade: None,
             playback_id: "real-ingress-p81".into(), copy: Some(true),
             preserve_dolby_vision: Some(true), audio: Some(2), audio_offset_ms: Some(175),
             caps: Some(caps.clone()), ..bare_create()
@@ -5951,7 +5973,8 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
             if native { current_caps.video[0].dv_profiles.push(7); }
             let mut node = capable_node();
             node.dolby_vision_convert = conversion;
-            let body = CreateSession { copy: Some(copy), caps: Some(current_caps.clone()), ..body() };
+            let body = CreateSession {
+            processed_upgrade: None, copy: Some(copy), caps: Some(current_caps.clone()), ..body() };
             let review = review_client_plan(&current_caps, None, &file, &node, true, hdr, NOW_MS);
             let query = body.selection_catalog_request(&file, &current_caps, body.reviewed_copy_scope(Some(&review)));
             let mut ordinary = body.into_request(file.id, 180);
@@ -6016,7 +6039,8 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
             }
             let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(caps_json).expect("caps");
             let review = || review_client_plan(&caps, None, &file, &capable_node(), route != "dv-declined", false, NOW_MS);
-            let mut body = CreateSession { playback_id: "ordinary-copy-audio".into(),
+            let mut body = CreateSession {
+            processed_upgrade: None, playback_id: "ordinary-copy-audio".into(),
                 copy: Some(true), aac: raw_aac, audio: Some(7), audio_offset_ms: Some(offset),
                 preserve_dolby_vision: Some(route != "dv-declined"), caps: Some(caps.clone()), ..bare_create() };
             let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
@@ -6096,7 +6120,8 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
     // No canonical audio claim preserves the old raw Copy contract.
     let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"]}"#);
     for aac in [None, Some(false), Some(true)] {
-        let body = CreateSession { copy: Some(true), aac, ..bare_create() };
+        let body = CreateSession {
+            processed_upgrade: None, copy: Some(true), aac, ..bare_create() };
         let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
         assert!(query.audio_claim.is_none());
         let mut request = body.into_request(file.id, 2160);
@@ -6105,6 +6130,74 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
         assert_eq!(request.kind, before);
         assert_eq!(query.copy_contract.expect("legacy Copy").0, aac == Some(true));
     }
+}
+
+/// Caps that name no audio sinks judge the copy's selected track: an allowed
+/// codec keeps the client's ask, a codec the caps or the copy's MP4 cannot take
+/// converts, a missing selection maps nothing and converts nothing, and a claim
+/// or a Transcode keeps its own resolution. The quality catalog's copy contract
+/// names the same audio as the built request every time.
+#[test]
+fn claimless_copy_audio_converts_what_the_caps_or_copy_mp4_cannot_take() {
+    use crate::transcode::SessionKind;
+    let stream = |index, codec: &str, channels| plurx_core::domain::AudioStream {
+        index, codec: codec.into(), channels: Some(channels), sample_rate: Some(48_000),
+        channel_layout: None, language: None, title: None, default: index == 1,
+    };
+    let mut file = dolby_vision_p7_file();
+    file.audio_streams = vec![stream(1, "aac", 2), stream(3, "truehd", 6), stream(5, "eac3", 6)];
+    let caps = |audio: &str| caps_v2(&format!(
+        r#"{{"v":2,"video":[{{"codec":"hevc","present":["hdr10"]}}],"audio":{audio},"transports":["hls"]}}"#
+    ));
+    for (audio, decoders, aac, expected) in [
+        (None, r#"["aac"]"#, None, false),              // allowed first track
+        (Some(1), r#"["aac"]"#, Some(true), true),      // an ask is kept
+        (Some(5), r#"["aac"]"#, None, true),            // decoder list refuses
+        (Some(5), r#"["aac","eac3"]"#, Some(false), false), // passthrough
+        (Some(3), r#"["aac","truehd"]"#, None, true),   // copy MP4 refuses
+        (Some(9), r#"["aac"]"#, None, false),           // selects no track
+    ] {
+        let caps = caps(decoders);
+        let body = CreateSession {
+            processed_upgrade: None, copy: Some(true), aac, audio, ..bare_create() };
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert!(query.audio_claim.is_none());
+        let mut request = body.into_request(file.id, 2160);
+        reconcile_request_audio(Some(&file), &mut request);
+        reconcile_claimless_copy_audio(
+            Some(&file),
+            Some(&plurx_core::playback::DeviceProfile::from_caps_v2(&caps)),
+            &mut request,
+        );
+        let SessionKind::Copy { aac: built, .. } = request.kind else {
+            panic!("a Copy request stays Copy");
+        };
+        assert_eq!(built, expected, "track {audio:?} with {decoders}");
+        assert_eq!(
+            query.copy_contract.expect("Copy contract").0,
+            built,
+            "the catalog names the audio the copy runs: track {audio:?} with {decoders}"
+        );
+    }
+    // A claim resolves the full delivery; the claimless rule never overrides it.
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]}"#);
+    let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
+    let body = CreateSession {
+        processed_upgrade: None, copy: Some(true), aac: Some(false), audio: Some(5), ..bare_create() };
+    let mut request = body.into_request(file.id, 2160);
+    request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+    assert!(request.audio_claim.is_some());
+    let before = request.kind;
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before, "a claim is left to reconcile_request_audio");
+    // A Transcode has no copied audio to judge.
+    let body = CreateSession { processed_upgrade: None, audio: Some(3), ..bare_create() };
+    let mut request = body.into_request(file.id, 1080);
+    let before = request.kind;
+    assert!(matches!(before, SessionKind::Transcode { .. }));
+    reconcile_claimless_copy_audio(Some(&file), Some(&profile), &mut request);
+    assert_eq!(request.kind, before);
 }
 
 /// Compare actual emitted IDs across decision discovery (no retained Copy
@@ -6160,6 +6253,7 @@ async fn ordinary_decision_and_create_catalogs_share_selected_audio_identity() {
             generation: 1, item_title: None,
         };
         let mut body = CreateSession {
+            processed_upgrade: None,
             copy: Some(true), audio: selected, audio_offset_ms: Some(offset),
             caps: Some(caps.clone()), ..bare_create()
         };
@@ -6258,7 +6352,7 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
 async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let state = resolver_state();
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     let digest = [0x5a; 32];
     let candidate = QualityCandidate {
         processed_dv: false,
@@ -6306,7 +6400,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
         request: staged_candidate_request(),
     };
     // Every `accepting_new_media` read now waits: the catalog cannot finish.
-    let held = state.serving.hold_planned_outage_reads_for_test().await;
+    let held = state.cluster.test_fence().hold_planned_outage_reads_for_test().await;
     let started = tokio::time::Instant::now();
     let owner = tokio::time::timeout(
         Duration::from_secs(10),
@@ -6346,6 +6440,7 @@ async fn required_legacy_auto_discovery_reports_overflow_but_copy_and_manual_sur
         (true, true, None, StatusCode::OK),
     ] {
         let body = CreateSession {
+            processed_upgrade: None,
             playback_id: "legacy-catalog-contract".into(),
             caps: Some(caps.clone()),
             quality_auto: Some(auto),
@@ -6643,7 +6738,8 @@ async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate(
     predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"));
     let selection = crate::playback_control::ClientSelection { quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None }, audio_track: None, subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None }, audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
     let ordinary = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None,
-        CreateSession { playback_id: "ordinary-auto".into(), quality_auto: Some(true), copy: Some(false), caps: Some(caps.clone()), ..bare_create() }).await.expect("unbounded ordinary Auto");
+        CreateSession {
+            processed_upgrade: None, playback_id: "ordinary-auto".into(), quality_auto: Some(true), copy: Some(false), caps: Some(caps.clone()), ..bare_create() }).await.expect("unbounded ordinary Auto");
     assert!(ordinary.height > incumbent_height, "the ordinary Auto control must be a genuine upgrade over the incumbent");
     // The control decoder snapshot has no sink facts. Only the accepted
     // initial playback claim supplies audio authority during a quality replan.
@@ -6954,7 +7050,8 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
     let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","profiles":["high"],"present":["sdr"],"max_width":3840,"max_height":2160,"max_frame_rate":{"numerator":60,"denominator":1}}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
     for copy in [None,Some(false),Some(true)] {
         let result = resolve_plan(PlanInputs { snapshot:None,state:&state,user_id:1,file_id:id,source:Some(&source),network_prior:None,network_identity:None,incumbent_receipt:None },None,
-            CreateSession { playback_id:"auto-carrier".into(),quality_auto:Some(true),copy,caps:Some(caps.clone()),..bare_create() }).await.expect("selection chooses a carrier it can execute");
+            CreateSession {
+            processed_upgrade: None, playback_id:"auto-carrier".into(),quality_auto:Some(true),copy,caps:Some(caps.clone()),..bare_create() }).await.expect("selection chooses a carrier it can execute");
         if copy==Some(true) {
             assert!(matches!(result.request.kind,crate::transcode::SessionKind::Copy { .. }),"explicit Copy remains Copy");
         } else {
@@ -6965,4 +7062,199 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
             assert!(matches!(result.request.kind,crate::transcode::SessionKind::Transcode { .. }));
         }
     }
+}
+
+
+#[tokio::test]
+async fn qualified_auto_copy_rebinds_the_incumbent_with_muxed_hls() {
+    use super::preparation;
+    use crate::playback_control::{
+        ClientSelection, CodecPolicy, DynamicRangePolicy, EffectiveSelection, QualitySelection,
+        SubtitleMode, SubtitleSelection,
+    };
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::playback::candidate::CandidateRoute;
+
+    prepare_catalog_test_encoder().await;
+    let state = resolver_state();
+    let dir = crate::test_tempdir().expect("source dir");
+    let path = dir.path().join("ordinary.mkv");
+    std::fs::write(&path, [0_u8; 4096]).expect("candidate source");
+    let mtime = std::fs::metadata(&path)
+        .expect("metadata")
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs() as i64;
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Qualified copy".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Qualified copy".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let id = state
+        .store
+        .upsert_file(
+            item,
+            path.to_str().expect("source path"),
+            4096,
+            mtime,
+            &ProbeResult {
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(3840),
+                height: Some(2160),
+                bit_depth: Some(8),
+                raw_json: Some(
+                    serde_json::json!({"streams":[{
+                        "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                        "width":3840,"height":2160,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1",
+                        "avg_frame_rate":"24/1","r_frame_rate":"24/1"
+                    }]})
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let source = state
+        .store
+        .get_file(id)
+        .await
+        .expect("read")
+        .expect("source");
+    let caps = caps_v2(
+        r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls"]}"#,
+    );
+    let create = CreateSession {
+        playback_id: "qualified-auto-copy".into(),
+        quality_auto: Some(true),
+        copy: Some(true),
+        height: Some(2160),
+        caps: Some(caps.clone()),
+        presentation: Some("vod".into()),
+        transport: Some("native".into()),
+        ..bare_create()
+    };
+    let query = create.selection_catalog_request(&source, &caps, create.reviewed_copy_scope(None));
+    let catalog = state
+        .media_pool
+        .quality_catalog(&state, query.clone())
+        .await;
+    let row = catalog
+        .candidates
+        .iter()
+        .find(|row| {
+            row.node_id == state.node_id
+                && row.candidate.route == CandidateRoute::Remux
+                && row.candidate.target_height == 2160
+                && row.candidate.playable()
+        })
+        .expect("ordinary copy row");
+    let candidate = &row.candidate;
+    let mut route = crate::media_sessions::takeover_eligible_route(
+        "qualified-muxed",
+        "00000000-0000-4000-8000-0000000000a1",
+    );
+    route.owner_node_id = state.node_id.clone();
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.source_mtime = mtime;
+    predecessor.request = create.into_request(id, 2160);
+    reconcile_request_audio(Some(&source), &mut predecessor.request);
+    predecessor.candidate_id = Some(candidate.id);
+    predecessor.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
+        catalog_query: Some(query),
+        candidate: candidate.clone(),
+        caps: caps.clone(),
+        binding: row.binding.clone().expect("authoritative copy binding"),
+    });
+    predecessor.decoder_caps = Some(
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+            .expect("retained playback decoder"),
+    );
+    route.recipe_json = serde_json::to_string(&predecessor).expect("durable worker recipe");
+    route.response_json = serde_json::json!({"planning_caps":caps}).to_string();
+    let predecessor: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("parse durable route");
+    assert!(predecessor.request.candidate_context.is_none());
+    let delivered = EffectiveSelection::from_recipe(&predecessor, 2160, None);
+    let mut selection = ClientSelection {
+        quality: QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        },
+        codec: CodecPolicy::Auto,
+        dynamic_range: DynamicRangePolicy::Auto,
+        audio_track: None,
+        subtitle: SubtitleSelection {
+            mode: SubtitleMode::Off,
+            track: None,
+        },
+        audio_offset_ms: 0,
+    };
+    let fresh = preparation::replan_qualified_upgrade(
+        &state,
+        &route,
+        &predecessor,
+        &selection,
+        &delivered,
+        None,
+        &source,
+        2160,
+    )
+    .await
+    .unwrap_or_else(|error| match error {
+        preparation::QualifiedUpgradeReplanError::Retry => panic!("candidate unavailable"),
+        preparation::QualifiedUpgradeReplanError::Terminal(reason) => panic!("{reason}"),
+    });
+    let bound = fresh
+        .candidate_context
+        .expect("fresh copy binding after qualification");
+    assert_eq!(bound.candidate_id, candidate.id);
+    assert_eq!(bound.recipe_digest, candidate.recipe_digest);
+    assert_eq!(
+        fresh.kind.copy_contract(),
+        predecessor.request.kind.copy_contract()
+    );
+    assert_eq!(fresh.transport, predecessor.request.transport);
+    selection.quality = QualitySelection::Auto {
+        height: Some(2160),
+        candidate_id: Some(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([17; 32]),
+        ),
+    };
+    assert!(matches!(
+        preparation::replan_qualified_upgrade(
+            &state,
+            &route,
+            &predecessor,
+            &selection,
+            &delivered,
+            None,
+            &source,
+            2160,
+        )
+        .await,
+        Err(preparation::QualifiedUpgradeReplanError::Terminal(_))
+    ));
 }

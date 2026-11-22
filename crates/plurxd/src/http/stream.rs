@@ -14,6 +14,8 @@ use plurx_core::tracks::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -1893,71 +1895,43 @@ fn markers_from_annotation_set(set: plurx_core::segplan::TimelineAnnotationSet) 
 }
 
 #[cfg(test)]
-fn marker_fallback_pauses() -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>,
-> {
-    static PAUSES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>>,
-    > = std::sync::OnceLock::new();
-    PAUSES.get_or_init(Default::default)
+struct ChapterProbeFixture {
+    pause: std::sync::Arc<tokio::sync::Barrier>,
+    timeout: Option<std::time::Duration>,
 }
 
-/// Pause one request after its authoritative miss and before fallback
-/// publication. Keying by the unique fixture path keeps parallel HTTP tests
-/// isolated even though their in-memory stores reuse file ids.
 #[cfg(test)]
-pub(super) fn pause_next_marker_fallback_for_test(
+fn chapter_probe_fixtures(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, ChapterProbeFixture>> {
+    static FIXTURES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, ChapterProbeFixture>>,
+    > = std::sync::OnceLock::new();
+    FIXTURES.get_or_init(Default::default)
+}
+
+/// Pause one background chapter probe by its unique fixture path.
+#[cfg(test)]
+pub(super) fn pause_next_chapter_probe_for_test(
     path: &Path,
+    timeout: Option<std::time::Duration>,
 ) -> std::sync::Arc<tokio::sync::Barrier> {
     let pause = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    marker_fallback_pauses()
+    chapter_probe_fixtures()
         .lock()
-        .expect("marker fallback pause registry")
+        .expect("chapter probe fixture registry")
         .insert(
-            path.to_string_lossy().into_owned(),
-            std::sync::Arc::clone(&pause),
+            path.to_owned(),
+            ChapterProbeFixture {
+                pause: std::sync::Arc::clone(&pause),
+                timeout,
+            },
         );
     pause
 }
 
-#[cfg(test)]
-async fn pause_marker_fallback_for_test(path: &Path) {
-    let key = path.to_string_lossy().into_owned();
-    let pause = marker_fallback_pauses()
-        .lock()
-        .expect("marker fallback pause registry")
-        .get(&key)
-        .cloned();
-    if let Some(pause) = pause {
-        pause.wait().await;
-        pause.wait().await;
-        marker_fallback_pauses()
-            .lock()
-            .expect("marker fallback pause registry")
-            .remove(&key);
-    }
-}
-
-/// Shared planning reads evidence only. Missing scan-time chapters never launch
-/// an unadmitted probe or mutate the revision captured by the Source request.
-async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Marker> {
-    let identity = annotation_source_identity(file);
-    match state
-        .store
-        .timeline_annotation_set(file.id, &identity)
-        .await
-    {
-        Ok(Some(set)) => markers_from_annotation_set(set),
-        Ok(None) => markers_from_chapters(
-            &stored_chapters(state, file.id).await.unwrap_or_default(),
-            file.duration_ms,
-        ),
-        Err(error) => {
-            tracing::warn!(file_id=file.id, %error, "could not read Source timeline annotations");
-            Vec::new()
-        }
-    }
-}
+/// Base sets at this version are published only after a successful chapter
+/// read. The source identity stays unchanged so that manual edits still apply.
+pub(crate) const CHAPTER_EVIDENCE_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 enum PlanningReadPolicy {
@@ -1966,115 +1940,84 @@ enum PlanningReadPolicy {
 }
 
 pub(crate) async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
-    let source_identity = annotation_source_identity(file);
-    match state
-        .store
-        .timeline_annotation_set(file.id, &source_identity)
-        .await
-    {
-        // The persisted set wins outright. A "re-derive it if its classifier
-        // was superseded" branch stood here briefly and was removed: it could
-        // never fire, because the version that would mark a set superseded is
-        // the same version hashed into the identity this lookup selects on, so
-        // a set from an older classifier is not stale here — it is *absent*.
-        // And had it fired, `put_timeline_annotation_set_if_missing` refuses a
-        // same-identity replacement, so the re-derivation would have been
-        // discarded and the stale set served anyway, at the cost of a full
-        // chapter pass on every play forever. See `CHAPTER_ANNOTATION_VERSION`
-        // for why the identity is not bumped to force the miss.
-        Ok(Some(set)) => return markers_from_annotation_set(set),
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(file_id = file.id, %error, "could not read timeline annotations");
-            // The read composes automatic evidence with the manual authority.
-            // On uncertainty, offering a derived automatic boundary could
-            // silently skip over a manual correction that we failed to read.
-            return Vec::new();
-        }
-    }
-
-    #[cfg(test)]
-    pause_marker_fallback_for_test(&file.path).await;
-
-    let markers = if let Some(chapters) = stored_chapters(state, file.id).await {
-        markers_from_chapters(&chapters, file.duration_ms)
-    } else {
-        let probed = probe_chapters(&file.path).await;
-        if let Some(chapters) = &probed {
-            // Best-effort backfill: a failure here costs one more probe next time,
-            // not correctness.
-            if let Ok(json) = serde_json::to_string(chapters) {
-                if let Err(e) = state.store.merge_file_probe_chapters(file.id, &json).await {
-                    tracing::warn!(file_id = file.id, error = %e, "could not cache file chapters");
-                }
-            }
-        }
-        markers_from_chapters(&probed.unwrap_or_default(), file.duration_ms)
-    };
-
-    let Some(duration_ms) = file.duration_ms.filter(|duration| *duration > 0) else {
-        return markers;
-    };
-    let set = annotation_set_from_markers(source_identity, &markers);
-    match state
-        .store
-        .put_timeline_annotation_set_if_missing(file.id, duration_ms, &set)
-        .await
-    {
-        Ok(_) => match state
-            .store
-            .timeline_annotation_set(file.id, &set.source_identity)
-            .await
-        {
-            Ok(Some(winner)) => markers_from_annotation_set(winner),
-            Ok(None) => {
-                let source_is_still_current = state
-                    .store
-                    .get_file(file.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|current| {
-                        annotation_source_identity(&current) == set.source_identity
-                    });
-                if source_is_still_current {
-                    markers
-                } else {
-                    Vec::new()
-                }
-            }
-            Err(error) => {
-                tracing::warn!(file_id = file.id, %error, "could not read winning timeline annotations");
-                Vec::new()
-            }
-        },
-        Err(error) => {
-            tracing::warn!(file_id = file.id, %error, "could not persist timeline annotations");
-            Vec::new()
-        }
-    }
+    markers_for_policy(state, file, PlanningReadPolicy::LocalDerivation).await
 }
 
-/// Chapters from the stored scan probe. `None` means "this probe predates
-/// chapter capture", which is distinct from `Some(vec![])` — "probed, and this
-/// file genuinely has none".
-async fn stored_chapters(state: &AppState, file_id: i64) -> Option<Vec<serde_json::Value>> {
+async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+    markers_for_policy(state, file, PlanningReadPolicy::StoredSourceEvidence).await
+}
+
+async fn markers_for_policy(
+    state: &AppState,
+    file: &MediaFile,
+    policy: PlanningReadPolicy,
+) -> Vec<Marker> {
+    let identity = annotation_source_identity(file);
+    let (set, verified) = match state
+        .store
+        .timeline_annotation_set_with_evidence(file.id, &identity)
+        .await
+    {
+        Ok(Some((set, verified))) => (Some(set), verified),
+        Ok(None) => (None, false),
+        Err(error) => {
+            // Without the composed read, we cannot know whether an automatic
+            // boundary would contravene a manual correction.
+            tracing::warn!(file_id = file.id, %error, "could not read timeline annotations");
+            return Vec::new();
+        }
+    };
+    if verified {
+        return set.map(markers_from_annotation_set).unwrap_or_default();
+    }
+    if let Some(chapters) = stored_chapters(state, file).await {
+        match set {
+            Some(set) if chapters.is_empty() => return markers_from_annotation_set(set),
+            Some(set) => {
+                // A later scan can record named chapters without replacing an
+                // old fallback set. Use that new evidence and keep manual
+                // markers authoritative for their own kinds.
+                let mut markers = markers_from_chapters(&chapters, file.duration_ms);
+                let manual = manual_markers(Some(set));
+                markers
+                    .retain(|marker| !manual.iter().any(|override_| override_.kind == marker.kind));
+                markers.extend(manual);
+                markers.sort_by_key(|marker| marker.start_ms);
+                return markers;
+            }
+            None => return markers_from_chapters(&chapters, file.duration_ms),
+        }
+    }
+
+    // Old estimate-only (or empty) sets can be either a genuine chapterless
+    // result or a failed probe. Keep the row until a fenced successful read
+    // can publish evidence, and serve any manual correction in the meantime.
+    if matches!(policy, PlanningReadPolicy::LocalDerivation)
+        && file.duration_ms.is_some_and(|duration| duration > 0)
+    {
+        state.jobs.request_playback_chapters(file);
+    }
+    manual_markers(set)
+}
+
+fn manual_markers(set: Option<plurx_core::segplan::TimelineAnnotationSet>) -> Vec<Marker> {
+    set.map(markers_from_annotation_set)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|marker| marker.provenance.as_deref() == Some("manual"))
+        .collect()
+}
+
+/// A stored empty chapter array is evidence. A missing, malformed or stale
+/// probe document leaves chapters unknown.
+async fn stored_chapters(state: &AppState, file: &MediaFile) -> Option<Vec<serde_json::Value>> {
     let raw = state
         .store
-        .get_file_probe_chapters_json(file_id)
+        .get_file_probe_chapters_json(file.id, file.size, file.mtime)
         .await
         .ok()
         .flatten()?;
     bounded_chapter_array(&raw).ok()
-}
-
-/// One live `ffprobe -show_chapters`. `None` when ffprobe failed, so the caller
-/// can tell "no chapters" from "could not ask" and decline to cache the latter.
-pub(crate) async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
-    let cancel = tokio_util::sync::CancellationToken::new();
-    probe_chapters_until(path, &cancel, std::time::Duration::from_secs(30))
-        .await
-        .ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2122,34 +2065,42 @@ pub(crate) fn bounded_chapter_array(
 }
 
 pub(crate) async fn probe_chapters_until(
-    path: &Path,
+    #[cfg(test)] path: &Path,
+    source: &std::fs::File,
     cancel: &tokio_util::sync::CancellationToken,
     timeout: std::time::Duration,
 ) -> Result<Vec<serde_json::Value>, ChapterProbeFailure> {
-    tokio::select! {
-        result = run_chapter_probe(path) => result,
-        () = cancel.cancelled() => Err(ChapterProbeFailure::Cancelled),
-        () = crate::state::wait_analysis_deadline(timeout) => Err(ChapterProbeFailure::Timeout),
+    #[cfg(test)]
+    let fixture = chapter_probe_fixtures()
+        .lock()
+        .expect("chapter probe fixture registry")
+        .remove(path);
+    #[cfg(test)]
+    let timeout = fixture
+        .as_ref()
+        .and_then(|fixture| fixture.timeout)
+        .unwrap_or(timeout);
+    let deadline = tokio::time::Instant::now() + timeout;
+    #[cfg(test)]
+    if let Some(fixture) = fixture {
+        tokio::select! {
+            () = async {
+                fixture.pause.wait().await;
+                fixture.pause.wait().await;
+            } => {},
+            () = cancel.cancelled() => return Err(ChapterProbeFailure::Cancelled),
+            () = tokio::time::sleep_until(deadline) => return Err(ChapterProbeFailure::Timeout),
+        }
     }
-}
 
-async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, ChapterProbeFailure> {
-    #[cfg(windows)]
-    let source = {
-        let path = path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
-        })
-        .await
-        .map_err(|_| ChapterProbeFailure::Failed)?
-        .map_err(|_| ChapterProbeFailure::Failed)?
-    };
     #[cfg(windows)]
     let input =
-        crate::ffmpeg::windows_source_path(&source).map_err(|_| ChapterProbeFailure::Failed)?;
-    #[cfg(not(windows))]
-    let input = path.to_owned();
+        crate::ffmpeg::windows_source_path(source).map_err(|_| ChapterProbeFailure::Failed)?;
+    #[cfg(unix)]
+    let input = Path::new("/dev/fd/3");
     let mut command = tokio::process::Command::new(ffprobe_bin());
+    #[cfg(unix)]
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
     command
         .args([
             "-v",
@@ -2159,13 +2110,13 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
             "-show_chapters",
             "-i",
         ])
-        .arg(&input)
+        .arg(input.as_os_str())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
     #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(&source, &input)
+    crate::ffmpeg::verify_windows_source_path(source, &input)
         .map_err(|_| ChapterProbeFailure::Failed)?;
     let (mut child, _child_job) = crate::process_control::spawn_job_owned(
         &mut command,
@@ -2174,22 +2125,26 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
     .map_err(|_| ChapterProbeFailure::Failed)?;
     let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
     let mut bytes = Vec::new();
-    stdout
-        .take((MAX_CHAPTER_PROBE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| ChapterProbeFailure::Failed)?;
-    if bytes.len() > MAX_CHAPTER_PROBE_BYTES {
+    let read_result = tokio::select! {
+        read = async {
+            stdout.take((MAX_CHAPTER_PROBE_BYTES + 1) as u64)
+                .read_to_end(&mut bytes).await.map_err(|_| ChapterProbeFailure::Failed)?;
+            if bytes.len() > MAX_CHAPTER_PROBE_BYTES {
+                return Err(ChapterProbeFailure::Failed);
+            }
+            let status = child.wait().await.map_err(|_| ChapterProbeFailure::Failed)?;
+            if !status.success() {
+                return Err(ChapterProbeFailure::Failed);
+            }
+            Ok(())
+        } => read,
+        () = cancel.cancelled() => Err(ChapterProbeFailure::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(ChapterProbeFailure::Timeout),
+    };
+    if let Err(failure) = read_result {
         let _ = child.kill().await;
         let _ = child.wait().await;
-        return Err(ChapterProbeFailure::Failed);
-    }
-    let status = child
-        .wait()
-        .await
-        .map_err(|_| ChapterProbeFailure::Failed)?;
-    if !status.success() {
-        return Err(ChapterProbeFailure::Failed);
+        return Err(failure);
     }
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| ChapterProbeFailure::Failed)?;
@@ -2562,7 +2517,14 @@ async fn decision_for_file(
         // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
-    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
+    // Source planning uses the node's boot-measured `dovi_rpu` — the value
+    // the strip decision above was made from and Source preparation cuts
+    // with — so a Dolby Vision copy indexed locally is the one it finds.
+    let have_dovi = if local_derivation {
+        crate::ffmpeg::has_dovi_rpu().await
+    } else {
+        state.system.dovi_rpu
+    };
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
@@ -3495,7 +3457,7 @@ async fn serve_stream_mp4(
         runtime_cache: &state.runtime_cache_dir,
         readrate,
         tracked,
-        serving: state.serving.subscribe(),
+        serving: state.cluster.subscribe_authority(),
     })
     .await
 }
@@ -4272,11 +4234,11 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     } else {
         0
     };
-    // Optional video + the chosen audio track, no subtitles into the MP4.
-    // Audio-only books share this remux path when their source codec needs AAC.
+    // Match the scanner's first playable video. Uppercase V excludes attached
+    // pictures, and the optional map leaves audio-only books without a video track.
     args.extend([
         "-map".to_owned(),
-        "0:v:0?".to_owned(),
+        "0:V:0?".to_owned(),
         "-map".to_owned(),
         format!("{audio_input}:a:{audio_index}?"),
         "-sn".to_owned(),

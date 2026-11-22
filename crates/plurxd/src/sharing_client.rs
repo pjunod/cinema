@@ -86,6 +86,10 @@ fn peer_retry_after_secs(value: Option<&HeaderValue>) -> u64 {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PeerError {
     Unavailable,
+    /// This completed optional Start is waiting on Source title qualification.
+    StartNotPrepared {
+        retry_after_secs: u64,
+    },
     IdentityMismatch,
     ProtocolUnsupported,
     Authentication,
@@ -127,6 +131,8 @@ pub(crate) struct StartRetry {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartRetryCode {
+    /// Source title qualification has not completed.
+    SourceNotPrepared,
     /// The owner is still working: `startup_timeout`.
     StartupTimeout,
     /// No start slot is free right now: `media_session_overloaded`.
@@ -136,6 +142,7 @@ impl StartRetryCode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::StartupTimeout => "startup_timeout",
+            Self::SourceNotPrepared => "sharing_source_not_prepared",
             Self::Overloaded => "media_session_overloaded",
         }
     }
@@ -144,6 +151,10 @@ impl StartRetry {
     /// The retryable answer a budgeted Start's peer refusal carries, if any.
     pub(crate) fn from_peer(error: PeerError) -> Option<Self> {
         match error {
+            PeerError::StartNotPrepared { retry_after_secs } => Some(Self {
+                code: StartRetryCode::SourceNotPrepared,
+                retry_after_secs,
+            }),
             PeerError::StartNotYet { retry_after_secs } => Some(Self {
                 code: StartRetryCode::StartupTimeout,
                 retry_after_secs,
@@ -381,6 +392,19 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    /// The receiver's own connection over an already-open fixture stream, as
+    /// though `verified_with_lifetime` had pinned `endpoint`: what a Source
+    /// fixture on loopback uses to drive the exact receiver exchanges.
+    #[cfg(test)]
+    pub(crate) async fn fixture_verified(
+        stream: tokio::net::TcpStream,
+        endpoint: Endpoint,
+    ) -> Result<Self, PeerError> {
+        let host = format!("{}:{}", endpoint.ts_fqdn, endpoint.port);
+        let mut peer = Self::from_stream(stream, host).await?;
+        peer.verified_endpoint = Some(endpoint);
+        Ok(peer)
+    }
     #[cfg(test)]
     async fn from_stream<
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -472,7 +496,17 @@ impl PeerConnection {
                 .method(method)
                 .uri(path)
                 .header(header::HOST, &self.host)
-                .header(header::ACCEPT, "application/json");
+                .header(header::ACCEPT, "application/json")
+                // This receiver relays a Dolby Vision Start; the Source's
+                // shared decision plans Dolby Vision only when it is told so.
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+                )
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+                );
             if let Some(secret) = credential {
                 let mut value = HeaderValue::from_str(&format!("CinemaShare {}", secret.expose()))
                     .map_err(|_| PeerError::InvalidResponse)?;
@@ -703,6 +737,16 @@ impl PeerConnection {
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE,
+                )
+                // This receiver's Start decoder admits a Dolby Vision range
+                // and profile (see `sharing_start_decode`).
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+                )
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
                 );
             // Outside the canonical body: the Source's Start identity is the
             // digest of those bytes, so a re-post with less time left is
@@ -1606,13 +1650,17 @@ fn source_start_refusal(
         if status == StatusCode::TOO_MANY_REQUESTS {
             return PeerError::Busy { retry_after_secs };
         }
-        if status == StatusCode::SERVICE_UNAVAILABLE
-            && serde_json::from_slice::<Refusal>(bytes).is_ok_and(|refusal| {
-                refusal.code == StartRetryCode::StartupTimeout.as_str()
-                    && refusal.message.len() <= 4096
-            })
-        {
-            return PeerError::StartNotYet { retry_after_secs };
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            if let Ok(refusal) = serde_json::from_slice::<Refusal>(bytes) {
+                if refusal.message.len() <= 4096 {
+                    if refusal.code == StartRetryCode::StartupTimeout.as_str() {
+                        return PeerError::StartNotYet { retry_after_secs };
+                    }
+                    if refusal.code == StartRetryCode::SourceNotPrepared.as_str() {
+                        return PeerError::StartNotPrepared { retry_after_secs };
+                    }
+                }
+            }
         }
     }
     if status == StatusCode::UNPROCESSABLE_ENTITY {
@@ -1625,6 +1673,19 @@ fn source_start_refusal(
             }
         }
     }
+    // The receiver's viewer is told only "unresolved" for this answer. Keep
+    // the Source's closed code here: an identifier, never its prose.
+    let source_code = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("code")?.as_str().map(str::to_owned))
+        .filter(|code| {
+            (1..=64).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+        .unwrap_or_else(|| "unrecognized".to_owned());
+    tracing::warn!(target: "plurx::sharing", operation = "start", stage = "source_refusal", error_class = "rejected", http_status = status.as_u16(), source_code = %source_code, "receiver Source exchange refused");
     PeerError::Rejected(status)
 }
 
@@ -1662,6 +1723,59 @@ mod peer_status_refusal_tests {
 #[cfg(test)]
 mod source_start_refusal_tests {
     use super::*;
+    #[test]
+    fn source_not_prepared_is_a_bounded_retry_only_for_budgeted_start() {
+        let body = br#"{"code":"sharing_source_not_prepared","message":"Source has not prepared"}"#;
+        let oversized_wait = HeaderValue::from_static("3600");
+        let refusal = source_start_refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            body,
+            Some(Some(&oversized_wait)),
+        );
+        assert!(matches!(
+            refusal,
+            PeerError::StartNotPrepared {
+                retry_after_secs: PEER_BUSY_MAX_RETRY_AFTER_SECS
+            }
+        ));
+        assert_eq!(
+            StartRetry::from_peer(refusal),
+            Some(StartRetry {
+                code: StartRetryCode::SourceNotPrepared,
+                retry_after_secs: PEER_BUSY_MAX_RETRY_AFTER_SECS,
+            })
+        );
+
+        let missing_wait = source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, Some(None));
+        assert!(matches!(
+            StartRetry::from_peer(missing_wait),
+            Some(StartRetry {
+                code: StartRetryCode::SourceNotPrepared,
+                retry_after_secs: PEER_BUSY_DEFAULT_RETRY_AFTER_SECS,
+            })
+        ));
+
+        for (status, budgeted) in [
+            (StatusCode::SERVICE_UNAVAILABLE, None),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some(None)),
+        ] {
+            assert!(matches!(
+                source_start_refusal(status, body, budgeted),
+                PeerError::Rejected(rejected) if rejected == status
+            ));
+        }
+        let unknown_field =
+            br#"{"code":"sharing_source_not_prepared","message":"pending","extra":true}"#;
+        assert!(matches!(
+            source_start_refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                unknown_field,
+                Some(Some(&oversized_wait)),
+            ),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+    }
+
     #[test]
     fn sharing_source_start_preserves_only_the_authenticated_dv_refusal_code() {
         let body =

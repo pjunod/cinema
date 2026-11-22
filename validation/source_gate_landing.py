@@ -33,6 +33,14 @@ JOB_NAMES = {
 
 
 
+def require_manual_workflow(workflow):
+    from validation import source_gate_repair as continuation
+
+    r.require(workflow is not None and hashlib.sha256(workflow).hexdigest()
+              in {WORKFLOW_SHA256, continuation.WORKFLOW_SHA256},
+              'Unreviewed manual source-gate workflow')
+
+
 def semantic_pr_title(title):
     """Only the forge's draft-control prefix is excluded from title identity."""
     r.require(isinstance(title, str), 'Missing source-gate PR title')
@@ -174,16 +182,33 @@ def completion_census(proof, completion, listing, config, listing_sha256):
     return current, due
 
 
+def worker_proof(api, head, main, proof, root, repository, owner):
+    # Full ci.yml covers compiled web/native clients and their tests. The one
+    # fast-lane-only worker proof requires identical complete governed inputs
+    # against both current main and its actual authenticated origin.
+    worker_inputs_sha256 = require_unchanged_worker_inputs(head, main, proof['prior'], root)
+    previous_jobs = api.pages(f"/actions/runs/{proof['run']}/jobs")
+    worker = one_job(previous_jobs, 'production worker controller proof', proof['run'], repository, owner)
+    r.require(worker['status'] == 'success', 'Missing applicable production worker controller proof')
+    worker_log = api.bytes(f"/actions/jobs/{worker['id']}/logs").decode()
+    worker_task = nextest.units.TASK_LINE.search(worker_log[:4096])
+    r.require(worker_task is not None and worker_task[1] == 'worker_control_proof'
+              and worker_task[2] == 'pull_request', 'Worker proof execution identity differs')
+    return worker_inputs_sha256
+
+
 def verify(api, number, head, main, root, run_id):
     repo = api.get('')
     repository, owner = r.positive(repo['id']), r.positive(repo['owner']['id'])
     pull = api.get(f'/pulls/{number}')
     run = api.get(f'/actions/runs/{r.positive(run_id)}')
-    if run['workflow_id'] == 'source-gate-repair.yml':
-        from validation import source_gate_repair
-        return source_gate_repair.verify(api, number, head, main, root, run_id)
     event = r.bounded_json(run['event_payload'].encode())
     inputs = event['inputs']
+    from validation import paperwork_continuation as paperwork
+    body = pull.get('body')
+    if inputs.get('predecessor_run') or (paperwork.is_enrolled(body) and paperwork.enrollment(body)['version'] == 2):
+        from validation import source_gate_repair
+        return source_gate_repair.verify(api, number, head, main, root, run_id)
     branch = pull['head']['ref']
     r.require(run['id'] == run_id and run['workflow_id'] == 'ci.yml' and run['status'] == 'success'
               and run['repository']['id'] == repository and run['trigger_event'] == 'workflow_dispatch'
@@ -195,8 +220,7 @@ def verify(api, number, head, main, root, run_id):
     r.require(api.get('/branches/main')['commit']['id'] == main
               and [row['commit']['id'] for row in api.pages('/branches') if row['name'] == branch] == [head],
               'Source-gate main or branch moved')
-    r.require(retention.digest(retention.git_bytes(head, '.github/workflows/ci.yml')) == WORKFLOW_SHA256,
-              'Unreviewed manual source-gate workflow')
+    require_manual_workflow(retention.git_bytes(head, '.github/workflows/ci.yml'))
     environment = dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_RUN_ATTEMPT='1',
         GITHUB_REPOSITORY=repo['full_name'], PLURX_PROMOTION_PR=str(number),
         PLURX_PROMOTION_HEAD_SHA=head, PLURX_PROMOTION_BASE_SHA=main,
@@ -232,17 +256,7 @@ def verify(api, number, head, main, root, run_id):
         r.require(refreshed == retained, 'Required surface retention changed or is not authenticated')
         environment['PLURX_RETAINED_UNITS'] = json.dumps(refreshed)
     require_surfaces(jobs, record, run_id, repository, owner, retained)
-    # Full ci.yml covers compiled web/native clients and their tests. The one
-    # fast-lane-only worker proof requires identical complete governed inputs
-    # against both current main and its actual authenticated origin.
-    worker_inputs_sha256 = require_unchanged_worker_inputs(head, main, proof['prior'], root)
-    previous_jobs = api.pages(f"/actions/runs/{proof['run']}/jobs")
-    worker = one_job(previous_jobs, 'production worker controller proof', proof['run'], repository, owner)
-    r.require(worker['status'] == 'success', 'Missing applicable production worker controller proof')
-    worker_log = api.bytes(f"/actions/jobs/{worker['id']}/logs").decode()
-    worker_task = nextest.units.TASK_LINE.search(worker_log[:4096])
-    r.require(worker_task is not None and worker_task[1] == 'worker_control_proof'
-              and worker_task[2] == 'pull_request', 'Worker proof execution identity differs')
+    worker_inputs_sha256 = worker_proof(api, head, main, proof, root, repository, owner)
     paperwork = record['source_gate_paperwork']
     paperwork_env = {**environment, 'GITHUB_RUN_ID': str(run_id)}
     r.require(paperwork == expected_paperwork(api, pull, binding, paperwork_env, root),

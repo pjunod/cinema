@@ -90,6 +90,7 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
         playback_recipes: Vec::new(),
         scanner_digest: Some("scanner-fixture".into()),
         fel_head_target: Some("title-node".into()),
+        fel_head_recipe: None,
     };
     let aggregate = TitleOutput {
         file_id: demand.file_id,

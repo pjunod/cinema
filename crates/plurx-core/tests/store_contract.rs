@@ -591,6 +591,7 @@ const MEDIA_METHODS: &[&str] = &[
     "playback_planning_snapshot",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
+    "merge_file_probe_chapters_if_missing",
     "merge_file_probe_hevc_parameter_sets",
     "merge_file_probe_content_encoding",
     "files_missing_probe",
@@ -734,6 +735,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_fel_stale_titles",
     "dv_title_readiness",
     "dv_title_demands",
+    "dv_title_demands_through",
+    "dv_title_demand_for_file",
     "bind_dv_title_demand",
     "publish_dv_title_job",
     "record_dv_m7_receipt",
@@ -853,6 +856,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "cancel_unshared_output_job",
     // The verdict alone, for dv_title_scan before it binds (same test file).
     "claim_verdict",
+    "explain_job_claim",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -989,6 +993,7 @@ const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
     "put_timeline_annotation_set",
     "put_timeline_annotation_set_if_missing",
     "timeline_annotation_set",
+    "timeline_annotation_set_with_evidence",
     "forget_timeline_annotation_set",
     "set_manual_timeline_annotation",
     "discard_manual_timeline_annotation",
@@ -6868,10 +6873,15 @@ async fn stored_chapter_projection_does_not_materialize_unrelated_probe_metadata
             .await
             .unwrap_or_else(|error| panic!("{backend}: store large probe: {error}"));
         let chapters = store
-            .get_file_probe_chapters_json(file_id)
+            .get_file_probe_chapters_json(file_id, 10_000, 1)
             .await
             .unwrap_or_else(|error| panic!("{backend}: project chapters: {error}"))
             .unwrap_or_else(|| panic!("{backend}: projected chapter array"));
+        assert!(store
+            .get_file_probe_chapters_json(file_id, 10_000, 2)
+            .await
+            .expect("get file probe chapters json")
+            .is_none());
         assert!(chapters.len() < 1_024, "backend {backend}");
         assert_eq!(
             serde_json::from_str::<Vec<serde_json::Value>>(&chapters)
@@ -13166,6 +13176,84 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
 }
 
+/// Reinstall the two published v124 definitions in an owned cluster, then
+/// exercise the replicated predecessor guard and repeat bootstrap after upgrade.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("dispatch upgrade client");
+    let telemetry = cluster._root.path().join("dispatch-turn-upgrade.db");
+    let bootstrap =
+        || HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry);
+    drop(bootstrap().await.expect("install current catalog"));
+    let catalog =
+        "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
+    let current = replicated_fixture_shape(&client, catalog).await;
+    let original = include_str!("../src/store/background_job_turns.sql");
+    let old_objects: Vec<_> = original
+        .split("-- next statement")
+        .filter(|sql| {
+            sql.contains("CREATE TRIGGER dispatch_turn_job ")
+                || sql.contains("CREATE VIEW dispatch_turn_protected_jobs ")
+        })
+        .collect();
+    assert_eq!(old_objects.len(), 2);
+    let mut rewind = vec![
+        (
+            "DROP TRIGGER dispatch_turn_job".to_owned(),
+            hiqlite::params!(),
+        ),
+        (
+            "DROP VIEW dispatch_turn_protected_jobs".to_owned(),
+            hiqlite::params!(),
+        ),
+    ];
+    rewind.extend(
+        old_objects
+            .into_iter()
+            .map(|sql| (sql.trim().to_owned(), hiqlite::params!())),
+    );
+    rewind.push(("INSERT INTO dispatch_turn_wait(owner,work,keys_json,queued_ms,last_seen_ms,credits) VALUES('job','old-wait','[]',1,2,3)".to_owned(), hiqlite::params!()));
+    client
+        .txn(rewind)
+        .await
+        .expect("restore deployed definitions")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete old catalog and wait");
+    let deployed = replicated_fixture_shape(&client, catalog).await;
+    assert_eq!(current.len(), deployed.len());
+    assert_eq!(
+        current
+            .iter()
+            .zip(&deployed)
+            .filter(|(a, b)| a != b)
+            .count(),
+        2
+    );
+    for _ in 0..2 {
+        drop(bootstrap().await.expect("upgrade or reopen"));
+        assert_eq!(replicated_fixture_shape(&client, catalog).await, current);
+        let rows: Vec<I64Value> = client.query_consistent_map(
+            "SELECT credits AS value FROM dispatch_turn_wait WHERE owner='job' AND work='old-wait'",
+            hiqlite::params!(),
+        ).await.expect("pending wait credits");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, 3);
+    }
+}
+
 /// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
 /// passes through v5 on bootstrap and reaches the exact current v6 view
 /// and marker, with managed receipts kept. Later bootstrap is a no-op.
@@ -13428,6 +13516,7 @@ async fn replicated_source_tail_drops(
         .chain(validated_source_tail_drops(
             &source_shape,
             &source_counts,
+            true,
             true,
             remove,
         ))
@@ -21739,11 +21828,23 @@ fn contract_inventory_matches_every_store_method() {
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
-    // +1 for request_dv_fel_head, exercised on each backend by
+    // +3: claim diagnostics, targeted FEL head work, and bounded title revisits.
+    // FEL head is exercised on both backends by
+    // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
+    // 632 -> 634 for the Cinema chapter-evidence fix: `MediaStore`'s
+    // `merge_file_probe_chapters_if_missing` backfills a verified chapter array
+    // into the matching probe revision only, and `TimelineAnnotationStore`'s
+    // `timeline_annotation_set_with_evidence` reports whether the base set was
+    // published with chapter evidence (`timeline_annotation_set` is now a
+    // provided method over it). Named in `MEDIA_METHODS` and
+    // `TIMELINE_ANNOTATION_METHODS`; no new trait or supertrait of `Store`.
+    // 634 -> 635: `dv_title_demand_for_file` reads one recent native FEL
+    // title's maintenance demand without moving the title worker's cursor.
+    // Named in BACKGROUND_JOB_METHODS and exercised on both backends by
     // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
     // +6: fenced M7 receipt write and lookup, title facts, and candidate
     // anchoring, listing, and reservation on each backend.
-    assert_eq!(declared.len(), 636, "review the Store method count");
+    assert_eq!(declared.len(), 641, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -24770,6 +24871,146 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
 }
 
 #[tokio::test]
+async fn legacy_chapter_publication_evidence_survives_manual_generation() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "legacy-chapter-publication").await;
+        assert!(store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("raw probe")
+            .is_none());
+        let identity = SourceIdentity::new(10_000, 1, "chapter-classifier-v1");
+        let manual = TimelineAnnotation {
+            kind: AnnotationKind::Intro,
+            start_ticks: 0,
+            end_ticks: 40_000,
+            timescale: 1_000,
+            start_ms: 0,
+            end_ms: 40_000,
+            provenance: AnnotationProvenance::Manual,
+            confidence_millis: 1_000,
+            detector_version: "manual-v1".to_owned(),
+            manual_override_revision: Some(1),
+        };
+        store
+            .set_manual_timeline_annotation(
+                file_id,
+                600_000,
+                &identity,
+                &manual,
+                "manual-generation",
+            )
+            .await
+            .expect("manual correction");
+        let (_, verified) = store
+            .timeline_annotation_set_with_evidence(file_id, &identity)
+            .await
+            .expect("manual-only annotation")
+            .expect("composed annotation");
+        assert!(
+            !verified,
+            "{backend}: manual evidence alone does not verify the base"
+        );
+
+        let credits = TimelineAnnotation {
+            kind: AnnotationKind::Credits,
+            start_ticks: 550_000,
+            end_ticks: 600_000,
+            timescale: 1_000,
+            start_ms: 550_000,
+            end_ms: 600_000,
+            provenance: AnnotationProvenance::Estimated,
+            confidence_millis: 250,
+            detector_version: "chapter-classifier-v1".to_owned(),
+            manual_override_revision: None,
+        };
+        store
+            .put_timeline_annotation_set(
+                file_id,
+                600_000,
+                &TimelineAnnotationSet {
+                    source_identity: identity.clone(),
+                    generation_id: "legacy-authored-chapter-generation".to_owned(),
+                    version: 1,
+                    annotations: vec![
+                        TimelineAnnotation {
+                            provenance: AnnotationProvenance::Authored,
+                            detector_version: "chapter-classifier-v1".to_owned(),
+                            manual_override_revision: None,
+                            ..manual.clone()
+                        },
+                        credits.clone(),
+                    ],
+                },
+            )
+            .await
+            .expect("store normal legacy base");
+        let (set, verified) = store
+            .timeline_annotation_set_with_evidence(file_id, &identity)
+            .await
+            .expect("read authored base evidence")
+            .expect("composed annotation");
+        assert!(
+            verified,
+            "{backend}: replacing the authored intro preserves base proof"
+        );
+        assert_eq!(set.generation_id, "manual-generation", "{backend}");
+        assert_eq!(set.annotations, vec![manual.clone(), credits], "{backend}");
+
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "forced-chapters".to_owned(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
+                requested_generation: "forced-chapter-generation".to_owned(),
+                priority: "forced".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: true,
+                target_node_id: String::new(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("enqueue forced analysis");
+        let request = store
+            .claim_analysis_request("analysis-node", 11, 1000)
+            .await
+            .expect("claim force analysis")
+            .expect("queued force analysis");
+        assert!(store
+            .publish_timeline_annotation_set_for_request(
+                &request,
+                600_000,
+                &TimelineAnnotationSet {
+                    source_identity: identity.clone(),
+                    generation_id: request.requested_generation.clone(),
+                    version: 1,
+                    annotations: Vec::new(),
+                },
+                12,
+            )
+            .await
+            .expect("publish chapterless analysis"));
+        let (set, verified) = store
+            .timeline_annotation_set_with_evidence(file_id, &identity)
+            .await
+            .expect("read publication evidence")
+            .expect("composed annotation");
+        assert!(
+            verified,
+            "{backend}: verified chapterless base survives manual overlay"
+        );
+        assert_eq!(set.generation_id, "manual-generation", "{backend}");
+        assert_eq!(set.annotations, vec![manual], "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn timeline_annotation_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "timeline-annotations").await;
@@ -25292,8 +25533,8 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 timescale: 1_000,
                 start_ms: 0,
                 end_ms: 90_000,
-                provenance: AnnotationProvenance::Authored,
-                confidence_millis: 1_000,
+                provenance: AnnotationProvenance::Estimated,
+                confidence_millis: 250,
                 detector_version: "chapter-classifier-v1".to_owned(),
                 manual_override_revision: None,
             }],
@@ -25321,6 +25562,15 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: current semantic publish: {error}")),
             "backend {backend}: current semantic owner publishes"
+        );
+        assert!(
+            store
+                .timeline_annotation_set_with_evidence(file_id, &identity)
+                .await
+                .expect("read ready publication evidence")
+                .expect("published semantic set")
+                .1,
+            "{backend}: matching ready request verifies normal legacy base"
         );
         let attempts = store
             .analysis_attempts(&semantic_request_id, 10)
@@ -25449,6 +25699,81 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
             attempts[0].terminal_code, "source_deleted",
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn skip_markers_claim_mode_leaves_fragment_requests_queued() {
+    use plurx_core::store::AnalysisClaimMode;
+
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "chapter-only-analysis").await;
+        for (component, pipeline, target, created) in [
+            ("fragment_index", "fragment-engine", "analysis-node", 10),
+            ("skip_markers", "chapter-classifier-v1", "", 11),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: component.into(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: component.into(),
+                    pipeline_version: pipeline.into(),
+                    video_identity: String::new(),
+                    requested_generation: format!("{component}-generation"),
+                    priority: "normal".into(),
+                    trigger: "background".into(),
+                    force_rebuild: false,
+                    target_node_id: target.into(),
+                    not_before_ms: created,
+                    created_at_ms: created,
+                })
+                .await
+                .expect("enqueue analysis");
+        }
+        let claim = store
+            .claim_analysis_request_for_capacity_in_mode(
+                "analysis-node",
+                None,
+                12,
+                1012,
+                false,
+                false,
+                false,
+                &[],
+                AnalysisClaimMode::SkipMarkersOnly,
+            )
+            .await
+            .expect("marker-only claim")
+            .expect("queued marker work");
+        assert_eq!(claim.component, "skip_markers", "{backend}");
+        assert!(
+            store
+                .claim_analysis_request_for_capacity_in_mode(
+                    "analysis-node",
+                    None,
+                    13,
+                    1013,
+                    false,
+                    false,
+                    false,
+                    &[],
+                    AnalysisClaimMode::SkipMarkersOnly,
+                )
+                .await
+                .expect("second marker-only claim")
+                .is_none(),
+            "{backend}"
+        );
+        let fragment = store
+            .analysis_request("fragment_index")
+            .await
+            .expect("read fragment request")
+            .expect("fragment request remains");
+        assert_eq!(fragment.state, "queued", "{backend}");
+        assert_eq!(fragment.attempts, 0, "{backend}");
     })
     .await;
 }
@@ -29445,6 +29770,216 @@ async fn active_legacy_identity_blocks_exact_forced_successor() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn analysis_admission_rejected_force_keeps_the_other_generation() {
+    use plurx_core::error::{
+        AnalysisAdmissionRefusal::GenerationConflict, StoreError::AnalysisAdmission,
+    };
+    use plurx_core::store::NewAnalysisRequest;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "rejected-force").await;
+        let original = NewAnalysisRequest {
+            request_id: "existing-force".into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "engine".into(),
+            video_identity: "identity-a".into(),
+            requested_generation: "forced-a".into(),
+            priority: "forced".into(),
+            trigger: "admin".into(),
+            force_rebuild: true,
+            target_node_id: "node-a".into(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        let pending = NewAnalysisRequest {
+            request_id: "valid-queue-entry".into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            video_identity: "identity-b".into(),
+            requested_generation: "normal-b".into(),
+            ..original.clone()
+        };
+        store
+            .enqueue_analysis_request(&original)
+            .await
+            .expect("first force");
+        store
+            .enqueue_analysis_request(&pending)
+            .await
+            .expect("ordinary work");
+        let colliding = NewAnalysisRequest {
+            video_identity: pending.video_identity.clone(),
+            requested_generation: "forced-b".into(),
+            ..original
+        };
+        assert!(
+            matches!(
+                store.enqueue_analysis_request(&colliding).await,
+                Err(AnalysisAdmission(GenerationConflict))
+            ),
+            "{backend}: conflicting id"
+        );
+        let kept = store
+            .analysis_request(&pending.request_id)
+            .await
+            .expect("read")
+            .expect("entry");
+        assert_eq!(
+            kept.state, "queued",
+            "{backend}: refused force preserves ordinary work"
+        );
+    })
+    .await;
+}
+
+/// A single replicated fixture write fills the queue, so this test exercises
+/// the real transaction and leader reads without thousands of setup commits.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn replicated_analysis_admission_reports_fences_and_drains_at_capacity() {
+    use plurx_core::error::{AnalysisAdmissionRefusal::*, StoreError::AnalysisAdmission};
+    use plurx_core::store::{NewAnalysisRequest, MAX_ACTIVE_ANALYSIS_REQUESTS};
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("cluster client");
+    let telemetry = cluster._root.path().join("analysis-admission-telemetry.db");
+    let store: Arc<dyn Store> = Arc::new(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("replicated schema"),
+    );
+    let (_, file_id) = seed_file(&store, "saturated-analysis").await;
+    let base = NewAnalysisRequest {
+        request_id: "original".into(),
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        component: "fragment_index".into(),
+        pipeline_version: "engine-a".into(),
+        video_identity: "video".into(),
+        requested_generation: "one".into(),
+        priority: "normal".into(),
+        trigger: "background".into(),
+        force_rebuild: false,
+        target_node_id: "node-a".into(),
+        not_before_ms: 1,
+        created_at_ms: 1,
+    };
+    store
+        .enqueue_analysis_request(&base)
+        .await
+        .expect("admit original");
+    let running = store
+        .claim_analysis_request_compatible("node-a", Some("engine-a"), 10, 1000)
+        .await
+        .expect("claim")
+        .expect("original");
+    let stale = NewAnalysisRequest {
+        source_size: 10_001,
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&stale).await,
+        Err(AnalysisAdmission(SourceChanged))
+    ));
+    let stale_prediction = NewAnalysisRequest {
+        request_id: "expired-prediction".into(),
+        requested_generation: "predict:expired".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&stale_prediction).await,
+        Err(AnalysisAdmission(PredictionExpired))
+    ));
+    // A reused request id with a different generation cannot silently join.
+    let conflict = NewAnalysisRequest {
+        requested_generation: "two".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&conflict).await,
+        Err(AnalysisAdmission(GenerationConflict))
+    ));
+    client.execute("WITH RECURSIVE n(i) AS (VALUES (1) UNION ALL SELECT i+1 FROM n WHERE i < $1)
+        INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,priority,trigger,force_rebuild,target_node_id,state,not_before_ms,created_at_ms,updated_at_ms)
+        SELECT 'fill-'||i,$2,10000,1,'fragment_index','engine-b','video-'||i,'one','normal','background',0,'node-b','queued',1,1,1 FROM n",
+        hiqlite::params!(MAX_ACTIVE_ANALYSIS_REQUESTS - 1, file_id)).await.expect("fill queue");
+    let next = NewAnalysisRequest {
+        request_id: "next".into(),
+        video_identity: "next".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&next).await,
+        Err(AnalysisAdmission(QueueFull))
+    ));
+    let duplicate = NewAnalysisRequest {
+        request_id: "duplicate".into(),
+        ..base.clone()
+    };
+    assert_eq!(
+        store
+            .enqueue_analysis_request(&duplicate)
+            .await
+            .expect("join at cap")
+            .request_id,
+        base.request_id
+    );
+    let viewer = NewAnalysisRequest {
+        request_id: "viewer".into(),
+        video_identity: "viewer".into(),
+        priority: "foreground".into(),
+        trigger: "playback".into(),
+        ..base
+    };
+    store
+        .enqueue_analysis_request(&viewer)
+        .await
+        .expect("playback headroom");
+    assert!(store
+        .complete_analysis_request(&running, "published-result", 11)
+        .await
+        .expect("finish at cap"));
+    assert!(matches!(
+        store.enqueue_analysis_request(&next).await,
+        Err(AnalysisAdmission(QueueFull))
+    ));
+    assert!(matches!(
+        store.enqueue_analysis_request(&conflict).await,
+        Err(AnalysisAdmission(GenerationConflict))
+    ));
+    let viewer = store
+        .claim_analysis_request_compatible("node-a", Some("engine-a"), 12, 1000)
+        .await
+        .expect("viewer claim")
+        .expect("viewer");
+    assert!(store
+        .complete_analysis_request(&viewer, "viewer-result", 13)
+        .await
+        .expect("finish viewer"));
+    assert_eq!(
+        store
+            .enqueue_analysis_request(&next)
+            .await
+            .expect("refill freed slot")
+            .request_id,
+        "next"
+    );
 }
 
 #[tokio::test]

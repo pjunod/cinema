@@ -981,7 +981,16 @@ fn sharing_principal_floor_requires_every_current_voter_and_learner() {
 
 #[test]
 fn sharing_principal_floor_refuses_stale_future_join_and_orphan_removal() {
-    for heartbeat in [879999_i64, 1000001] {
+    // The write guard binds the clock its caller sampled before proposing. A
+    // heartbeat committed while that write is in flight is current; a clock
+    // further ahead than the observation's lifetime is future-dated.
+    let in_flight = 1000000 + SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS;
+    for (heartbeat, allowed) in [
+        (879999_i64, false),
+        (1000001, true),
+        (in_flight, true),
+        (in_flight + 1, false),
+    ] {
         let connection = sharing_principal_floor_fixture();
         connection
             .execute(
@@ -995,7 +1004,11 @@ fn sharing_principal_floor_refuses_stale_future_join_and_orphan_removal() {
                 [heartbeat],
             )
             .expect("floor fixture mutation");
-        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        assert_eq!(
+            sharing_principal_floor_allows(&connection, "[1,2]"),
+            allowed,
+            "heartbeat {heartbeat}"
+        );
     }
     for mutation in [
         "INSERT INTO cluster_node_join_staging VALUES ('learner')",
@@ -9295,7 +9308,7 @@ fn a_local_node_that_cannot_name_itself_is_omitted_not_sentinelled() {
 fn the_hostname_read_stays_cheap_and_delegates_its_naming_rules() {
     let source = production_source();
     let accessor = source
-        .split_once("pub async fn node_hostnames(")
+        .split_once("pub(super) async fn node_hostnames(")
         .expect("node_hostnames accessor")
         .1
         .split_once("\n    /// Resolve the directly observable")

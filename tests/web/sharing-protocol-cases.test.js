@@ -119,6 +119,23 @@ test("fixture shared HLS Start replies bind only B's VOD session and control tup
     assert.equal(accepts(()=>h.sharedPlaybackStartContext(base,mutated(start.public,row,B))),row.expected==="accepted",row.id);
 });
 
+test("fixture shared HLS Start replies bind a bounded view only for a bounded-range request",()=>{
+  const {h,base}=harness(),start=F.hls_start;
+  // The web player's own Start: it always advertises the bounded-range timeline.
+  const ranged={caps:{v:2,transports:["progressive","hls","hls-bounded-range-v1"]}};
+  const rows=start.mutations.filter(clientLayer);
+  for(const row of rows)
+    assert.equal(accepts(()=>h.sharedPlaybackStartContext(base,mutated(start.public,row,B),ranged)),
+      (row.bounded_range_expected??row.expected)==="accepted",row.id);
+  // The growing copy's view: no VOD, a signed origin, B's own lease.
+  const view={...structuredClone(start.public),vod:false,media_origin_ms:-83};
+  assert.equal(h.sharedPlaybackStartContext(base,view,ranged).session_id,B);
+  assert.equal(accepts(()=>h.sharedPlaybackStartContext(base,view)),false,"no request, no bounded view");
+  assert.equal(accepts(()=>h.sharedPlaybackStartContext(base,view,{caps:{v:2,transports:["hls","progressive"]}})),false,"unadvertised");
+  assert.equal(accepts(()=>h.sharedPlaybackStartContext(base,{...view,media_origin_ms:undefined},ranged)),false,"no signed origin");
+  assert.equal(accepts(()=>h.sharedPlaybackStartContext(base,{...view,control:{...view.control,lease_timeout_ms:60000}},ranged)),false,"B's lease only");
+});
+
 test("fixture direct Start replies, MIME set and URL binding",()=>{
   const {h,base}=harness(),direct=F.direct;
   assert.deepEqual([...h.mimes()],direct.mimes);

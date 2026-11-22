@@ -23,6 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MEMBERSHIP = ROOT / "crates/plurx-core/src/cluster/membership.rs"
 GATE = ROOT / "crates/plurxd/src/http/mod.rs"
+FACADE = ROOT / "crates/plurxd/src/cluster.rs"
+ACCESS = ROOT / "crates/plurx-core/src/cluster/membership/access.rs"
 
 # (function, slot field, guard type, committed value in the success path)
 REFRESHES = (
@@ -186,8 +188,8 @@ class RequestGatePublicationTest(unittest.TestCase):
                 "local_serving_role: AtomicU8::new(",
                 "LocalServingRolePublication::new(&inner.local_serving_role)",
                 "inner.local_serving_role.load(",
-                # the public accessor the request gate calls, which only reads
-                "pub async fn local_serving_role(",
+                # The LocalNode accessor delegates to this read-only method.
+                "pub(super) async fn local_serving_role(",
                 # Artifact eligibility calls the same read-only accessor.
                 # Keep the exact zero-argument awaited call, not a field prefix.
                 "self.local_serving_role().await",
@@ -197,8 +199,8 @@ class RequestGatePublicationTest(unittest.TestCase):
                 "local_maintenance: AtomicBool::new(",
                 "LocalMaintenancePublication::new(&inner.local_maintenance)",
                 "inner.local_maintenance.load(",
-                # the public accessor the request gate calls, which only reads
-                "pub fn local_maintenance_active(",
+                # The LocalNode accessor delegates to this read-only method.
+                "pub(super) fn local_maintenance_active(",
             ),
         }
         masked = strip_rust(self.source)
@@ -261,14 +263,32 @@ class RequestGatePublicationTest(unittest.TestCase):
     def test_the_route_gate_still_answers_503_for_a_closed_slot(self) -> None:
         gate = GATE.read_text(encoding="utf-8")
         body = function_body(gate, "async fn cluster_capacity_gate(")
-        self.assertIn("local_maintenance_active()", body)
-        # The decision is shared with HTTP authorization regressions; the
-        # production gate must retain its early maintenance return and consult
-        # the exact same fail-closed role decision after reading the slot.
-        self.assertLess(body.index("capacity_maintenance_refusal("),
-                        body.index("local_serving_role().await"))
-        self.assertIn("return refusal", body[:body.index("local_serving_role().await")])
+        role_read = "state.cluster.admission_role().await"
+        self.assertIn("state.cluster.maintenance_active()", body)
+        self.assertIn(f"let role = {role_read}.ok();", body)
+        # Preserve the request order and the exact read chain across both
+        # facade layers. The membership tests above still pin the atomic slots.
+        self.assertLess(body.index("capacity_maintenance_refusal("), body.index(role_read))
+        self.assertIn("return refusal", body[:body.index(role_read)])
         self.assertIn("capacity_role_refusal(role,", body)
+
+        facade = FACADE.read_text(encoding="utf-8")
+        access = ACCESS.read_text(encoding="utf-8")
+        for source, signature, call in (
+            (facade, "pub(crate) async fn admission_role(", "self.access.local().admission().await"),
+            (facade, "pub(crate) fn maintenance_active(", "self.access.local().maintenance_fence()"),
+            (access, "pub fn admission(", "self.manager.local_serving_role()"),
+            (access, "pub fn maintenance_fence(", "self.manager.local_maintenance_active()"),
+        ):
+            with self.subTest(accessor=signature):
+                body = " ".join(function_body(source, signature).split())
+                self.assertEqual(body, "{ " + call + " }")
+
+        role_accessor = function_body(self.source, "pub(super) async fn local_serving_role(")
+        maintenance_accessor = function_body(self.source, "pub(super) fn local_maintenance_active(")
+        self.assertIn("inner.local_serving_role.load(Ordering::Acquire)", role_accessor)
+        self.assertIn("inner.local_maintenance.load(Ordering::Acquire)", maintenance_accessor)
+
         decision = function_body(gate, "fn capacity_role_refusal(")
         self.assertIn("Some(LocalServingRole::Fenced) | None", decision)
         self.assertIn("StatusCode::SERVICE_UNAVAILABLE", decision)

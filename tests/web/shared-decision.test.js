@@ -82,22 +82,33 @@ test("synthetic complete B Start retains original caps resume and explicit null 
  assert.equal(r._sharedContext.session_id,sid);assert.equal(r._sharedContext.source_file_id,'9007199254740993');assert.equal(r._sharedContext.source_ref.item_id,ref.item_id);assert.ok(!Object.keys(r).includes('_sharedContext'));
  for(const field of ['previous_session_id','control_sequence','reopen_reason','intent']){const before=h.requests.length;await assert.rejects(h.start(c,{...b,[field]:field==='control_sequence'?0:'unsupported'}),e=>e.code==='sharing_start_unsupported');assert.equal(h.requests.length,before);}
 });
-test("synthetic B Start carries a burn and an HDR10 ask unchanged and refuses Dolby Vision before sending",async()=>{
+test("synthetic B Start carries a burn, an HDR10 ask and a Dolby Vision ask unchanged",async()=>{
  const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),c=(await h.details(ref)).files[0].context;
- for(const extra of [{subtitle_burn:0},{hdr10:true},{subtitle_burn:3,hdr10:false}]){
+ for(const extra of [{subtitle_burn:0},{hdr10:true},{subtitle_burn:3,hdr10:false},{copy:true,preserve_dolby_vision:true}]){
   const b={...startBody(h),force:"transcode",height:720,...extra},before=h.requests.length;await h.start(c,b);
   assert.equal(h.requests.length,before+1);assert.deepEqual(JSON.parse(h.requests.at(-1).options.body),JSON.parse(JSON.stringify(b)));
  }
  const before=h.requests.length;
- await assert.rejects(h.start(c,{...startBody(h),preserve_dolby_vision:true}),e=>e.code==='sharing_start_dolby_vision_unsupported');
  for(const bad of [{subtitle_burn:0,native_subtitles:true},{subtitle_burn:-1},{subtitle_burn:4096},{subtitle_burn:"0"},{hdr10:"yes"},{subtitle_burn:0,presentation:"direct"}])
   await assert.rejects(h.start(c,{...startBody(h),...bad}),e=>e.code==='sharing_start_unsupported');
  assert.equal(h.requests.length,before);
 });
 test("synthetic B Start rejects foreign session URLs malformed generation and late login",async()=>{
- for(const mutate of [r=>r.playlist_url='/api/v1/hls/'+ref.import_id+'/master.m3u8',r=>r.control.url='https://source/control',r=>r.control.generation='7',r=>r.control.control_epoch=0,r=>r.vod=false]){
+ for(const mutate of [r=>r.playlist_url='/api/v1/hls/'+ref.import_id+'/master.m3u8',r=>r.control.url='https://source/control',r=>r.control.generation='7',r=>r.control.control_epoch=0,r=>{r.vod=false;delete r.media_origin_ms;},r=>{r.vod=false;r.control.lease_timeout_ms=60000;}]){
   const reply=startReply();mutate(reply);const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),c=(await h.details(ref)).files[0].context;await assert.rejects(h.start(c,startBody(h)));assert.equal(c.session_id,null);
  }
+});
+// The Source's growing copy reaches the web player as B's bounded view: it
+// binds for this player's Start, which advertises the bounded-range timeline,
+// and not for a Start that does not.
+test("synthetic B Start binds a bounded view only for a bounded-range Start",async()=>{
+ const reply={...startReply(),vod:false,media_origin_ms:-83};
+ const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),c=(await h.details(ref)).files[0].context;
+ const body=startBody(h);assert.ok(body.caps.transports.includes("hls-bounded-range-v1"));
+ assert.equal((await h.start(c,body))._sharedContext.session_id,sid);
+ const plain=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),pc=(await plain.details(ref)).files[0].context;
+ const unadvertised=startBody(plain);unadvertised.caps={...unadvertised.caps,transports:["hls","progressive"]};
+ await assert.rejects(plain.start(pc,unadvertised));assert.equal(pc.session_id,null);
 });
 test("ordered Shared beats retry identical payload then resync409 without replaying old position",async()=>{
  let posts=0,gets=0;const h=harness((u,o)=>{

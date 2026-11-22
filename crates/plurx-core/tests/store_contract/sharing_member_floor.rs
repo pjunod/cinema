@@ -210,7 +210,7 @@ async fn three_voter_floor_and_atomic_admission_refuse_incomplete_member_proofs(
             "orphan membership transition refuses"
         );
         write(&client, "DELETE FROM cluster_node_join_staging").await;
-        write(&client, "DELETE FROM cluster_node_removals").await;
+        write(&client, "DELETE FROM cluster_node_removals WHERE 1 = 1").await;
         write(&client, "DELETE FROM cluster_node_removal_attempts").await;
         assert!(ready(&client).await);
     }
@@ -1115,4 +1115,289 @@ async fn actual_fourth_learner_raw_admission_and_promotion_freeze_capability_rac
         .membership()
         .get_node(&4)
         .is_none());
+}
+
+/// Live incident 2026-11-21: three fresh voters, and one registered learner
+/// whose host had stopped Cinema 3,037 s earlier. Its last heartbeat still
+/// carried the catalogue capability. The strict floor refused every Source
+/// catalogue and scope read with `sharing_member_floor_unavailable`. The
+/// serving-read floor must admit that roster. Every write keeps refusing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_registered_learner_does_not_refuse_the_serving_read_floor() {
+    use plurx_core::cluster::membership::{
+        sharing_member_floor_ready, sharing_member_guard_predicate,
+        sharing_member_serving_floor_ready, SharingMemberFloor,
+        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+    };
+    const FLOOR: SharingMemberFloor = SharingMemberFloor::CatalogueItemIdentity;
+    let mut cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("serving floor observer");
+
+    // A genuine fourth Raft member, admitted as a learner and then stopped.
+    let ports = contract_free_ports(2);
+    let learner_api = format!("127.0.0.1:{}", ports[0]);
+    let learner_raft = format!("127.0.0.1:{}", ports[1]);
+    let metrics = client.metrics_db().await.expect("bootstrap membership");
+    let mut specs = metrics
+        .membership_config
+        .nodes()
+        .map(|(id, node)| ContractNodeSpec {
+            id: *id,
+            api: node.addr_api.clone(),
+            raft: node.addr_raft.clone(),
+        })
+        .collect::<Vec<_>>();
+    specs.push(ContractNodeSpec {
+        id: 4,
+        api: learner_api,
+        raft: learner_raft,
+    });
+    let launch = ContractNodeLaunch {
+        node_id: 4,
+        learner_only: true,
+        root: cluster._root.path().to_path_buf(),
+        nodes: specs,
+    };
+    let mut child = Command::new(std::env::current_exe().expect("fixture executable"))
+        .arg("hiqlite_contract_node_process")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(
+            "PLURX_CONTRACT_NODE_LAUNCH",
+            serde_json::to_string(&launch).expect("node launch"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn real fourth learner");
+    let input = child.stdin.take().expect("learner stdin");
+    let output = child.stdout.take().expect("learner stdout");
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut reader = BufReader::new(output);
+        loop {
+            let mut line = String::new();
+            assert!(
+                reader.read_line(&mut line).expect("learner readiness line") > 0,
+                "learner exited before ready"
+            );
+            if line.trim() == "PLURX_CONTRACT_NODE_READY 4" {
+                return reader.into_inner();
+            }
+            assert!(
+                !line.starts_with("PLURX_CONTRACT_NODE_START_FAILED"),
+                "{line}"
+            );
+        }
+    });
+    let output = match tokio::time::timeout(Duration::from_secs(60), reader).await {
+        Ok(result) => result.expect("learner readiness task"),
+        Err(error) => {
+            drop(input);
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("fourth learner readiness: {error}");
+        }
+    };
+    cluster._nodes.push(ContractNodeProcess {
+        _child: child,
+        _input: Some(input),
+        _output: output,
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let metrics = client.metrics_db().await.expect("learner membership");
+        if metrics
+            .membership_config
+            .membership()
+            .get_node(&4)
+            .is_some()
+        {
+            assert_eq!(metrics.membership_config.voter_ids().count(), 3);
+            assert!(!metrics.membership_config.voter_ids().any(|id| id == 4));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fourth node joins as a committed learner"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let learner = cluster._nodes.last_mut().expect("learner process");
+    learner._child.kill().expect("stop the learner");
+    learner._child.wait().expect("reap the stopped learner");
+
+    for sql in [
+        "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT)",
+        "CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability))",
+        "CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY)",
+        "CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY)",
+        "CREATE TABLE cluster_node_removal_attempts (node_id TEXT NOT NULL, attempt_id TEXT)",
+        "CREATE TABLE allocator_admission_receipts (id INTEGER PRIMARY KEY)",
+    ] {
+        write(&client, sql).await;
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let stale = now - 3_037_000;
+    for id in 1_i64..=3 {
+        client
+            .execute(
+                "INSERT INTO cluster_nodes VALUES ($1,$2,$3,NULL,NULL)",
+                hiqlite::params!(format!("voter-{id}"), id, now),
+            )
+            .await
+            .expect("seed fresh voter");
+    }
+    client
+        .execute(
+            "INSERT INTO cluster_nodes VALUES ('learner-4',4,$1,NULL,'learner')",
+            hiqlite::params!(stale),
+        )
+        .await
+        .expect("seed the registered stale learner");
+    client
+        .execute(
+            "INSERT INTO cluster_node_capabilities SELECT node_id,$1,last_seen_at FROM cluster_nodes",
+            hiqlite::params!(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),
+        )
+        .await
+        .expect("every member's last heartbeat proved the capability");
+
+    let serving = |raft_id: u64| {
+        let client = client.clone();
+        async move {
+            sharing_member_serving_floor_ready(&client, raft_id, FLOOR)
+                .await
+                .expect("serving floor observation")
+        }
+    };
+    let strict = || {
+        let client = client.clone();
+        async move {
+            sharing_member_floor_ready(&client, 1, FLOOR)
+                .await
+                .expect("strict floor observation")
+        }
+    };
+
+    // The regression itself.
+    assert!(
+        serving(1).await,
+        "a stale non-voting learner does not refuse a healthy Source's reads"
+    );
+    // Writes and admissions keep the all-member rule, in the read and in SQL.
+    assert!(!strict().await, "the strict floor still sees the learner");
+    let guard = format!(
+        "INSERT INTO allocator_admission_receipts SELECT 1 WHERE {}",
+        sharing_member_guard_predicate(FLOOR, 1, 2, 3)
+    );
+    assert_eq!(
+        client
+            .execute(
+                guard,
+                hiqlite::params!("[1,2,3,4]", now - 120_000, now + 60_000)
+            )
+            .await
+            .expect("guarded admission write"),
+        0,
+        "a replicated write still refuses with a stale learner"
+    );
+    // The stale learner is not an eligible serving member, and an unknown
+    // identity is not either.
+    assert!(!serving(4).await, "a stale serving member refuses");
+    assert!(!serving(99).await, "an identity outside the roster refuses");
+
+    // A stale voter still refuses.
+    client
+        .execute(
+            "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id='voter-3'",
+            hiqlite::params!(stale),
+        )
+        .await
+        .expect("stale voter");
+    client
+        .execute(
+            "UPDATE cluster_node_capabilities SET last_seen_at=$1 WHERE node_id='voter-3'",
+            hiqlite::params!(stale),
+        )
+        .await
+        .expect("matching stale voter proof");
+    assert!(!serving(1).await, "a stale voter refuses the serving floor");
+    for table in ["cluster_nodes", "cluster_node_capabilities"] {
+        client
+            .execute(
+                format!("UPDATE {table} SET last_seen_at=$1 WHERE node_id='voter-3'"),
+                hiqlite::params!(now),
+            )
+            .await
+            .expect("restore voter heartbeat");
+    }
+    assert!(serving(1).await);
+
+    // The learner's capability proof is still required of every member.
+    write(
+        &client,
+        "DELETE FROM cluster_node_capabilities WHERE node_id='learner-4'",
+    )
+    .await;
+    assert!(
+        !serving(1).await,
+        "a learner without the capability refuses"
+    );
+    client
+        .execute(
+            "INSERT INTO cluster_node_capabilities VALUES ('learner-4',$1,$2)",
+            hiqlite::params!(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY, stale),
+        )
+        .await
+        .expect("restore learner proof");
+    // The committed roster still needs a SQL identity for the learner.
+    write(
+        &client,
+        "UPDATE cluster_nodes SET raft_id=44 WHERE node_id='learner-4'",
+    )
+    .await;
+    assert!(
+        !serving(1).await,
+        "a committed learner without SQL identity refuses"
+    );
+    write(
+        &client,
+        "UPDATE cluster_nodes SET raft_id=4 WHERE node_id='learner-4'",
+    )
+    .await;
+    // A join in flight still refuses.
+    write(
+        &client,
+        "INSERT INTO cluster_node_join_staging VALUES ('joiner')",
+    )
+    .await;
+    assert!(!serving(1).await, "a join in flight refuses");
+    write(&client, "DELETE FROM cluster_node_join_staging").await;
+    assert!(serving(1).await);
+
+    // Losing quorum fails closed.
+    for node in cluster._nodes.iter_mut().take(2) {
+        node._child.kill().expect("stop fixture voter");
+        node._child.wait().expect("reap stopped fixture voter");
+    }
+    let unavailable = tokio::time::timeout(
+        Duration::from_secs(5),
+        sharing_member_serving_floor_ready(&client, 1, FLOOR),
+    )
+    .await;
+    assert!(
+        !matches!(unavailable, Ok(Ok(true))),
+        "lost quorum cannot authorize a serving read"
+    );
 }

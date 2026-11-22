@@ -1405,7 +1405,8 @@ struct Shared {
     encoded_generation_scanner: Arc<StdMutex<EncodedGenerationScanner>>,
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
-    cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    cluster_calls: Option<crate::cluster::calls::PeerTransport>,
+    cluster_directory: Option<crate::cluster::Directory>,
     /// The cluster's catalogue identity (`instance.id`), read once: it never
     /// changes, and v3 copy-index source keys are derived from it per start.
     catalog_namespace: tokio::sync::OnceCell<String>,
@@ -1764,6 +1765,8 @@ use marker_dispatch::*;
 mod generation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use generation::m7_copy_landing_clock;
+#[cfg(test)]
+pub(crate) use generation::copy_video_pipeline;
 use generation::*;
 #[path = "vod/stream_format.rs"]
 mod stream_format;

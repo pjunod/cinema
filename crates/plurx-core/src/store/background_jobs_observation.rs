@@ -7,6 +7,9 @@ pub struct JobCount {
     pub kind: String,
     pub state: String,
     pub count: i64,
+    /// Rows in this state whose execution lease has elapsed at observation time.
+    #[serde(default)]
+    pub expired_leases: i64,
     pub oldest_age_ms: i64,
     /// Manual library work due for dispatch for at least five minutes.
     #[serde(default)]
@@ -127,6 +130,7 @@ FROM (
 
 pub(super) const COUNTS_SQL: &str = r#"
 SELECT json_object('kind', kind, 'state', state, 'count', COUNT(*),
+    'expired_leases', COUNT(CASE WHEN state IN ('running','cancelling') AND lease_expires_ms <= json_extract($1, '$.now_ms') THEN 1 END),
     'oldest_age_ms', MAX(0, json_extract($1, '$.now_ms') - MIN(created_at_ms)),
     'overdue_manual', COUNT(CASE WHEN state = 'queued' AND kind IN ('library_scan', 'metadata_refresh')
         AND not_before_ms <= json_extract($1, '$.manual_due_before_ms')

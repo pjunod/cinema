@@ -11,6 +11,20 @@ compiled or run. Every `file:line` below is **re-verify at build time**.
 Short paths: `mem.rs` = `crates/plurx-core/src/cluster/membership.rs`;
 `d/` = `crates/plurxd/src/`; `ltv.rs` = `d/http/live_tv.rs`.
 
+Shared DV/HDR integration adds `Purpose::Operations` for Activity's committed
+member roster, including learners and stale rows. Activity uses the shared
+directory and facade role/authority answers; member read/write authorization
+and response signing remain fresh proofs through the facade, never cached
+roster evidence. Its legacy transport construction remains counted until
+`call` lands. This extension lowers the census ceiling from 765 to 754;
+final qualification is pending.
+
+The metrics scrape also reads the process-local abandoned SQLite writer reply
+counters through `Cluster::writer_abandoned_replies`. The facade copies the
+vendor's fixed request labels and atomic counts into its own read-only rows;
+the Prometheus formatter and emitted series stay unchanged. This removes the
+HTTP handler's direct vendor counter and type reach-arounds.
+
 ## 1. Goal
 
 Feature code asks the cluster six questions through one type,
@@ -308,9 +322,9 @@ Size: about 1,400 changed lines without the baseline table.
 
 | Slice | After | Callers | Ceiling |
 |---|---|---|---|
-| 2 | #1629 | media-roster readers (`subtitle_source`, `subtitle_ranges`, `fragment_index_cluster`, `copy_index_v3`); `.serving` in `live_tv.rs`, `live_tv/**`, `http/internal_live_tv.rs`, `http/dvr.rs` | ~480 |
-| 3 | #1626 | role and admission: `http/mod.rs` gates, `remote`, `activity_starts`, `internal_activity`, `system`, `developer`, `diagnostics`; artwork (`Purpose::Artwork`, explicit active-voter confirm); hostnames | ~340 |
-| 4 | #1642, #1646 | operations: `http/cluster.rs`, `cluster_operations.rs`, `desktop_control.rs`, `main.rs` behind `cluster.operations()`; clock and revocation fresh rosters | ~170 |
+| 2 | #1629 | [Execution plan](CLUSTER-FACADE-SLICE-2-BUILD.md): media artifact rosters, Live TV HTTP authority and daemon subscriptions; local LiveTvAuthority state is retained | 744 (delivery in linked ledger) |
+| 3 | #1626 | [Execution plan](CLUSTER-FACADE-SLICE-3-BUILD.md): role and admission: `http/mod.rs` gates, `remote`, `activity_starts`, `internal_activity`, `system`, `developer`, `diagnostics`; artwork (`Purpose::Artwork`, explicit active-voter confirm); hostnames | 626 (qualification in linked ledger) |
+| 4 | #1642, #1646 | [Execution plan](CLUSTER-FACADE-SLICE-4-BUILD.md): operations: `http/cluster.rs`, `cluster_operations.rs`, `desktop_control.rs`, `main.rs` behind `cluster.operations()`; clock and revocation fresh rosters | exact reduction in linked ledger |
 | 5 | with A5/B5 | `PeerTransport::new` → `call`; delete F3's TTL memory and replace its regression record | ~120 |
 | 6 | #1614, #1619, #1622, #1597; with A6 | sharing and custody files | ~0 |
 | 7 | all | `AppState` fields private, manager roster and role methods `pub(super)`, census table empty | 0 |

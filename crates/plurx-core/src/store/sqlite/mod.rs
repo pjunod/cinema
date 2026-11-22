@@ -1372,7 +1372,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_refit_jobs::SCHEMA,
     // v135: person-curated tags, saved rows, Home layouts and curation grants.
     super::library_curation_schema::SCHEMA,
-    // v136: a source-keyed frozen M7 protocol and single-use candidate slots.
+    // v136: live title qualification takes precedence over manual library turns.
+    super::background_job_turns::LIVE_TITLE_MIGRATION,
+    // v137: a source-keyed frozen M7 protocol and single-use candidate slots.
     super::dv_m7_attempts::SCHEMA,
 ];
 
@@ -1850,6 +1852,9 @@ impl SqliteStore {
             if version == super::subtitle_managed_schema::PUBLISH_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
             }
+            if version == 136 {
+                super::background_job_turns::verify_catalog(&tx, false)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1939,6 +1944,7 @@ impl SqliteStore {
             tracing::info!(version, "applied schema migration");
         }
 
+        super::background_job_turns::verify_catalog(conn, true)?;
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;

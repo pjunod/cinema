@@ -16,6 +16,7 @@ const COPY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
 const COPY_WALL_LIMIT: Duration = Duration::from_secs(180);
 const HEAD_TARGET_HINT: &str = "native-fel-head-title";
 const HEAD_RETRY: Duration = Duration::from_secs(90);
+const PREWARM_DISPATCH_INTERVAL: Duration = Duration::from_secs(5);
 
 struct ObservedHead {
     dir: tempfile::TempDir,
@@ -540,9 +541,19 @@ impl TranscodeManager {
                 .await
         };
         if let Err(error) = hint.await {
-            tracing::debug!(target:"plurxd::dv", file_id=file.id, %error, "could not retain FEL preparation target hint");
+            tracing::debug!(
+                target: "plurxd::transcode",
+                file_id = file.id,
+                %error,
+                "could not retain FEL preparation target hint"
+            );
         }
-        tracing::info!(target: "plurxd::dv", file_id = file.id, staged, "admitted native FEL head is ready");
+        tracing::info!(
+            target: "plurxd::transcode",
+            file_id = file.id,
+            staged,
+            "admitted native FEL head is ready"
+        );
         Ok(())
     }
 
@@ -810,7 +821,12 @@ impl NativeFelHead {
             if let Err(reason) = result {
                 split.decline_prepared_head();
                 queue_rejected_native_fel_objects(&session, staged);
-                tracing::debug!(target:"plurxd::dv", file_id=session.file_id, %reason, "native FEL head kept ordinary startup");
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    file_id = session.file_id,
+                    %reason,
+                    "native FEL head kept ordinary startup"
+                );
             }
         });
     }
@@ -850,9 +866,26 @@ impl NativeFelHead {
 pub(super) struct FelHeadTarget {
     file_id: i64,
     retry_after: Instant,
+    dispatch_after: Instant,
 }
 
 impl FelHeadTarget {
+    fn new(file_id: i64, now: Instant) -> Self {
+        Self {
+            file_id,
+            retry_after: now,
+            dispatch_after: now,
+        }
+    }
+
+    fn take_due_dispatch(&mut self, now: Instant) -> Option<i64> {
+        if now < self.dispatch_after {
+            return None;
+        }
+        self.dispatch_after = now + PREWARM_DISPATCH_INTERVAL;
+        Some(self.file_id)
+    }
+
     pub(super) fn load(root: &Path) -> Option<Self> {
         // A local hint only locates work. The current snapshot still has to
         // authorize the exact source and prove its qualifying recipe.
@@ -866,10 +899,7 @@ impl FelHeadTarget {
         let mut hint = String::new();
         file.take(24).read_to_string(&mut hint).ok()?;
         let file_id = hint.parse::<i64>().ok()?;
-        (file_id > 0).then_some(Self {
-            file_id,
-            retry_after: Instant::now(),
-        })
+        (file_id > 0).then(|| Self::new(file_id, Instant::now()))
     }
 }
 
@@ -886,19 +916,30 @@ impl TranscodeManager {
             .as_ref()
             .is_none_or(|current| current.file_id != file.id)
         {
-            *target = Some(FelHeadTarget {
-                file_id: file.id,
-                retry_after: Instant::now(),
-            });
+            *target = Some(FelHeadTarget::new(file.id, Instant::now()));
         }
     }
 
     pub(super) fn native_fel_head_is_target(&self, file_id: i64) -> bool {
+        self.native_fel_head_target_file() == Some(file_id)
+    }
+
+    pub(crate) fn native_fel_head_target_file(&self) -> Option<i64> {
         self.native_fel_target
             .lock()
             .expect("native FEL head target")
             .as_ref()
-            .is_some_and(|target| target.file_id == file_id)
+            .map(|target| target.file_id)
+    }
+
+    /// Bound speculative discovery before it captures tools or takes an
+    /// ordinary title slot. A new target is eligible on the next pass.
+    pub(crate) fn take_due_native_fel_prewarm(&self) -> Option<i64> {
+        self.native_fel_target
+            .lock()
+            .expect("native FEL head target")
+            .as_mut()?
+            .take_due_dispatch(Instant::now())
     }
 
     pub(crate) async fn queue_missing_native_fel_head(
@@ -955,7 +996,7 @@ impl TranscodeManager {
         }
         let identity = self.fel_identity(&tools.backend_digest()).await?;
         let request = native_fel_request_from_probe(file, probe, identity)?;
-        if native_fel_verdict(file, probe, &request) != Some(true) {
+        if native_fel_verdict(file, probe, &request) == Some(false) {
             return Ok(());
         }
         self.store
@@ -964,6 +1005,7 @@ impl TranscodeManager {
                 node: node.to_owned(),
                 scanner_digest: scanner.to_owned(),
                 request,
+                measure_if_missing: true,
                 now_ms,
                 deadline_ms: now_ms.saturating_add(30 * 60 * 1000),
             })
@@ -994,4 +1036,19 @@ fn native_fel_verdict(
         VerdictState::Missing => None,
         VerdictState::Current(verdict) => Some(verdict.admitted),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn native_fel_prewarm_throttles_polling_and_rearms_on_a_new_title() {
+    let now = Instant::now();
+    let mut target = FelHeadTarget::new(7, now);
+    assert_eq!(target.take_due_dispatch(now), Some(7));
+    assert_eq!(target.take_due_dispatch(now), None);
+    assert_eq!(
+        target.take_due_dispatch(now + PREWARM_DISPATCH_INTERVAL),
+        Some(7)
+    );
+    let mut next = FelHeadTarget::new(8, now);
+    assert_eq!(next.take_due_dispatch(now), Some(8));
 }

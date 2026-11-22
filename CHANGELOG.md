@@ -44,6 +44,19 @@ bump may break compatibility and a **patch** bump never does.
 - Web and Apple playback information reports the attached conversion's F+
   mapping and held-out gain, or its identity reason. This metadata comes from
   the pinned rendition and adds no curve-store read to status polls.
+- plurx Player (Linux) draws the web player's quality pills beside the
+  title: resolution, dynamic range (source → what mpv renders, e.g.
+  "DV P7 → DV P8", "DV P7 → HDR10-E"), the active Dolby Vision enhancements
+  (FEL / EL / RPU / DYN) and the audio format. RPU and DYN light when mpv
+  renders Dolby Vision itself (no RPU claim on a Profile 7 → 8.1 delivery); EL
+  lights when the private build receives the dual-layer Profile 7 stream; FEL
+  is only ever the server's claim. A carried route's server pills hold only
+  while mpv renders Dolby Vision; a processed route's hold while its current
+  report does. Playback info adds the source grade, the Dolby Vision mapper
+  and one line per enhancement saying why it is or is not active. The
+  launcher now ignores VO warnings (an unmapped screenshot) and non-VO text
+  when reading the mapper line, and a failed control exchange keeps the
+  current processing report instead of clearing it.
 
 ### Changed
 
@@ -72,6 +85,60 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared titles play again in the web player. Every web shared Start runs
+  the Source's growing copy, which answered with a 60-second control lease that
+  the receiver refused, so the viewer saw "The sharing host could not confirm
+  playback preparation" and the copy expired a minute later without serving a
+  byte. The growing copy now keeps the 300-second lease every shared client is
+  promised, on its Start, its control replies and its own retirement, and
+  counts any resource fetch or authenticated control exchange the receiver
+  relays as viewer activity (the receiver's own status checks are not). The
+  web player also accepts the bounded view such a Start returns, as the Apple
+  and Android players already did. The Source and the receiver both need this
+  release: a receiver still refuses the 60-second lease an older Source sends.
+- A shared Start whose claim the Source refuses (sharing unavailable, at
+  capacity, or in conflict) no longer leaves a cleanup that can never finish.
+  The refusal wrote nothing for that Start, so the receiver's End now settles at once instead
+  of answering 503 on every retry, and the refused Start no longer holds one of
+  the Source's eight start slots until the node restarts. A Dolby Vision title
+  started through a Source node that forwards to another is no longer noted as
+  "receiver does not relay Dolby Vision" when the receiver said it does. Every
+  refusal on the Source's forwarding paths, a growing copy that fails to start,
+  a refused claim, and a receiver about to tell its viewer only "could not
+  confirm playback preparation" now log one line naming the step that refused.
+- A shared title's Start, and every other membership-guarded Source write, no
+  longer refuses as "sharing unavailable" when a member's routine heartbeat
+  commits while the write is in flight. The write's guard counted that
+  heartbeat as a future-dated clock because it was stamped after the write
+  sampled its own clock. A heartbeat is now accepted up to the five seconds a
+  write may use its membership observation. A clock further ahead is still
+  refused. A heartbeat still goes stale 120 seconds after the time it carries,
+  so a member whose clock runs up to five seconds ahead stays fresh for up to
+  125 seconds. A viewer saw "The sharing host could not confirm playback
+  preparation".
+- 4K Dolby Vision titles played as HDR10-E or with display mapping no
+  longer stall in the browser on Intel nodes. The node's Main10 GPU decode
+  probe copied its test picture to system memory, which crashed the shipped
+  FFmpeg in about one run in nine; each crash sent every Dolby Vision
+  window to software decode, which needs 2-3 s for each 2 s window. The probe
+  now keeps the picture on the GPU, as the renderer does.
+- A shared-library Source no longer refuses its catalogue, current-scope and
+  content reads with `sharing_member_floor_unavailable` when a registered
+  learner is offline. Serving reads require fresh heartbeats from the
+  committed voters and the serving member only. Capability proofs, the
+  committed roster, joins and removals in flight, and quorum remain required.
+  Every replicated write and transition still requires every member to be
+  fresh. Before this, a receiver showed `sharing source unavailable` under
+  Assign viewers and `sharing body authority unavailable` under Shared
+  Libraries, even though Check connection passed.
+- Source playback Start observes membership at its claim boundary after pure
+  preparation. Slow filesystem or planning work no longer consumes the
+  five-second authority proof before it is used; claim expiry, file and grant
+  checks, and overlapping playback ownership are preserved.
+- Keep the accepted copy recipe bound when a Dolby Vision FEL measurement completes
+  during playback. Give the most recent native FEL title's existing background job
+  priority to prepare its exact qualified startup segments before the complete-title scan.
+
 - Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
   Resume. Resume binds the renderer to the actual source pictures observed by
   the rolling copy, and the original AAC rendition continues across the switch.
@@ -87,6 +154,12 @@ bump may break compatibility and a **patch** bump never does.
 
 - Background Dolby Vision FEL measurement can qualify the current renderer
   while requests for an older renderer remain pending.
+
+- Revisit older Dolby Vision title scans after a busy source becomes available,
+  while continuing to discover work on other sources.
+- Recover expired Dolby Vision title attempts after physical source custody clears.
+  Activity distinguishes expired leases from live owners. Analysis requests report
+  the admission failure, and reconciliation preserves copy coordinator requests.
 
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses

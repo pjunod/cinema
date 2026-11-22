@@ -140,12 +140,11 @@ pub(super) async fn authority<
     // floor here is the shared advisory answer: a ready answer can admit for
     // up to five seconds after a heartbeat, capability or join change the
     // answer's key does not see; an error, a timeout or not-ready refuses.
-    if state.membership.is_replicated() {
+    if state.cluster.sharing().is_clustered() {
         let ready = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            state.membership.sharing_member_floor_advisory(
+            state.cluster.sharing().member_floor(
                 plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
-                state.serving.advisory_epoch(),
             ),
         )
         .await
@@ -658,13 +657,13 @@ async fn source_content_observation(
         if switch != SharingObservation::Current {
             return switch;
         }
-        if state.membership.is_replicated() {
+        if state.cluster.sharing().is_clustered() {
             let floor = SharingObservation::of_floor(
                 state
-                    .membership
-                    .sharing_member_floor_advisory(
+                    .cluster
+                    .sharing()
+                    .member_floor(
                         plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
-                        state.serving.advisory_epoch(),
                     )
                     .await,
             );
@@ -797,7 +796,7 @@ pub(super) async fn guard_source_response(
         // (A6 M3). Its drop ends the observation.
         // One outage budget for this body's whole life (see `UnknownSpan`).
         let mut span = crate::serving_fence::UnknownSpan::default();
-        let mut serving = state.serving.subscribe();
+        let mut serving = state.cluster.subscribe_authority();
         let mut looked = tokio::time::Instant::now();
         loop {
             let mut floor = true;

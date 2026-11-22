@@ -641,6 +641,7 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/server/node"
+        | crate::discovery::PATH
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
@@ -747,6 +748,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
+        | internal_activity::SOURCE_STOP_PATH
         | activity_starts::PEER_PATH
         | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
@@ -810,11 +812,11 @@ async fn http_store_attribution(
         .extensions()
         .get::<MatchedPath>()
         .map_or(8, |path| http_route_group(path.as_str()));
-    let raft = state.replication.metrics_handle().snapshot();
+    let raft = state.cluster.observations().raft();
     let role = http_node_role(
         raft.local_source,
         raft.watermark_source,
-        state.membership.local_serving_role().await.map_err(|_| ()),
+        state.cluster.admission_role().await.map_err(|_| ()),
     );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
     // The by-method split is folded when the last holder of these counts is
@@ -1687,6 +1689,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_library::viewer_router(state.clone()))
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
+        .route("/server/discovery", get(system::discovery_eligibility))
         .route("/server/node", get(system::server_node))
         .nest("/delegation", delegation::router())
         .route("/me", get(auth::me))
@@ -2499,6 +2502,10 @@ pub fn router(state: AppState) -> Router {
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
         .route(
+            internal_activity::SOURCE_STOP_PATH,
+            post(internal_activity::stop_source_processed).layer(DefaultBodyLimit::max(256)),
+        )
+        .route(
             activity_starts::PEER_PATH,
             post(activity_starts::peer).layer(DefaultBodyLimit::max(1_024)),
         )
@@ -2759,12 +2766,14 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/cluster/nodes"
+                | crate::discovery::PATH
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2773,6 +2782,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -2891,10 +2903,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/cluster/nodes"
+                | crate::discovery::PATH
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2905,6 +2919,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`
@@ -3062,6 +3079,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
 /// (`capacity_role_refusal`) and any sender choosing peers for an internal
 /// route use this one predicate, so they cannot drift apart.
 fn serving_role_admits(role: LocalServingRole, method: &Method, path: &str) -> bool {
+    if method == Method::GET && path == crate::discovery::PATH {
+        return true;
+    }
     match role {
         LocalServingRole::Unclustered | LocalServingRole::Voter => true,
         LocalServingRole::Learner => learner_route_eligible(method, path),
@@ -3074,6 +3094,11 @@ fn capacity_role_refusal(
     method: &Method,
     path: &str,
 ) -> Option<Response> {
+    // Discovery reports standing, never serving authority. Even a fenced or
+    // unreadable admission projection must be able to withdraw a LAN record.
+    if method == Method::GET && path == crate::discovery::PATH {
+        return None;
+    }
     match role {
         Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
         Some(role @ LocalServingRole::Learner) if serving_role_admits(role, method, path) => None,
@@ -3120,13 +3145,13 @@ async fn cluster_capacity_gate(
     next: Next,
 ) -> Response {
     if let Some(refusal) = capacity_maintenance_refusal(
-        state.membership.local_maintenance_active(),
+        state.cluster.maintenance_active(),
         request.method(),
         request.uri().path(),
     ) {
         return refusal;
     }
-    let role = state.membership.local_serving_role().await.ok();
+    let role = state.cluster.admission_role().await.ok();
     if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
         return refusal;
     }
@@ -3209,7 +3234,7 @@ pub(crate) struct ReadinessEvaluation {
 /// skewed node would take every node's `/readyz` down. The measurement stays
 /// visible in the Developer readiness rows and the clock metrics either way.
 fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
-    let guard = state.membership.clock_guard();
+    let guard = state.cluster.clock();
     (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
         ReadinessEvaluation {
             ready: false,
@@ -3223,7 +3248,7 @@ fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
 /// Replicated nodes use only the passive serving fence. A local SQLite node
 /// retains its existing bounded Store ping because it has no quorum proof.
 pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
-    if state.membership.local_maintenance_active() {
+    if state.cluster.maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::Maintenance),
@@ -3232,8 +3257,8 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // A fresh quorum watermark is already a recent replicated-store proof.
     // Do not turn readiness into another multi-second Store request exactly
     // when an isolated node needs to self-fence promptly.
-    if state.serving.is_quorum_managed() {
-        return if state.serving.is_ready() {
+    if state.cluster.quorum_managed() {
+        return if state.cluster.ready() {
             clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
@@ -3302,12 +3327,17 @@ async fn desktop_http_admission_gate(
         || path == internal_clock::PATH
         || matches!(
             path,
-            "/healthz" | "/readyz" | "/metrics" | "/api/v1/server" | "/api/v1/server/node"
+            "/healthz"
+                | "/readyz"
+                | "/metrics"
+                | "/api/v1/server"
+                | "/api/v1/server/node"
+                | crate::discovery::PATH
         );
     if control_plane {
         return next.run(request).await;
     }
-    let Some(admission) = state.serving.try_desktop_http_admission().await else {
+    let Some(admission) = state.cluster.desktop_admission().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [
@@ -3389,7 +3419,7 @@ async fn mutable_media_serving_gate(
         return serving_gate(&state, request, next).await;
     };
     let path = request.uri().path().to_owned();
-    hls::fence::observe_hls_session_response(&state.serving, route, &path, async {
+    hls::fence::observe_hls_session_response(state.cluster.authority(), route, &path, async {
         if route.existing_session_read {
             hls::fence::hold_for_outage_resolution(&state).await;
         }
@@ -3403,12 +3433,12 @@ async fn serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
+    let starts_media = crate::cluster::Cluster::starts_mutable_media(
         request.method().as_str(),
         request.uri().path(),
     );
     let restart_admission = if starts_media {
-        match state.serving.try_restart_admission().await {
+        match state.cluster.try_restart_admission().await {
             Some(admission) => Some(admission),
             None => {
                 let mut response = (
@@ -3429,7 +3459,7 @@ async fn serving_gate(
     } else {
         None
     };
-    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+    let Some(policy) = state.cluster.http_refusal(request.uri().path()) else {
         let response = next.run(request).await;
         return response
             .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, restart_admission)));

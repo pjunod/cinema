@@ -150,7 +150,10 @@ def _resolve_manual_binding_and_pull(
 
 def bind_manual_scope(environment, repository):
     binding, pull = _resolve_manual_binding_and_pull(environment, repository)
+    continuation = environment.get('PLURX_PREDECESSOR_RUN')
     if binding['schema'] != 2:
+        if continuation:
+            raise QualificationError('Only an enrolled ordinary PR may resume a prior source gate')
         return binding
 
     from validation import paperwork_continuation as paperwork
@@ -160,12 +163,20 @@ def bind_manual_scope(environment, repository):
     if paperwork.is_enrolled(pull.get('body')):
         try:
             enrollment = paperwork.enrollment(pull['body'])
-            verified, _ = paperwork.binding(
-                retention.runner_api(environment), enrollment, environment, repository, 'final')
+            api = retention.runner_api(environment)
+            if enrollment['version'] == 2:
+                from validation import source_gate_repair
+                _, _, verified, _ = source_gate_repair.runner_event(api, environment, repository)
+            else:
+                if continuation:
+                    raise QualificationError('An ordinary Python enrollment cannot resume a prior source gate')
+                verified, _ = paperwork.binding(api, enrollment, environment, repository, 'final')
         except (KeyError, ValueError, TypeError, ReceiptError) as error:
             raise QualificationError('Enrolled source gate requires its exact dispatched Python unit evidence') from error
         if verified != binding:
             raise QualificationError('Paperwork dispatch binding differs from live promotion scope')
+    elif continuation:
+        raise QualificationError('An ordinary PR must explicitly enroll to resume a prior source gate')
     return binding
 
 

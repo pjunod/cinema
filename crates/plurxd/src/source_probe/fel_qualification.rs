@@ -1039,7 +1039,14 @@ pub(crate) fn measure_title<'a>(
     Box::pin(measure(sample, q::WINDOWS))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum MaintenanceRecipe<'a> {
+    PendingOrNative,
+    Native(Option<&'a str>),
+}
+
 /// Measure and store the title's verdict when it is due on this node.
+#[cfg(test)]
 pub(super) async fn qualify_if_due(
     state: &crate::state::AppState,
     file: &plurx_core::domain::MediaFile,
@@ -1048,7 +1055,38 @@ pub(super) async fn qualify_if_due(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Qualification, String> {
-    qualify_due(state, file, document, tools, admission, cancel, None).await
+    qualify_maintenance_if_due(
+        state,
+        file,
+        document,
+        tools,
+        admission,
+        cancel,
+        MaintenanceRecipe::PendingOrNative,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn qualify_maintenance_if_due(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    tools: &crate::vodencode::dv_runtime::ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    maintenance: MaintenanceRecipe<'_>,
+) -> Result<Qualification, String> {
+    qualify_due(
+        state,
+        file,
+        document,
+        tools,
+        admission,
+        cancel,
+        (None, maintenance),
+    )
+    .await
 }
 
 /// A live successor may only measure an explicit, still-pending recipe.
@@ -1069,7 +1107,7 @@ pub(super) async fn qualify_requested_if_due(
         tools,
         admission,
         cancel,
-        Some(recipe_identity),
+        (Some(recipe_identity), MaintenanceRecipe::PendingOrNative),
     )
     .await
 }
@@ -1081,7 +1119,7 @@ async fn qualify_due(
     tools: &crate::vodencode::dv_runtime::ToolSet,
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
-    requested_recipe: Option<&str>,
+    (requested_recipe, maintenance): (Option<&str>, MaintenanceRecipe<'_>),
 ) -> Result<Qualification, String> {
     let live_recipes = if let Some(recipe) = requested_recipe {
         state
@@ -1120,7 +1158,10 @@ async fn qualify_due(
         admission,
         cancel,
         measure_title,
-        requested_recipe.map(|_| live_recipes.as_slice()),
+        (
+            requested_recipe.map(|_| live_recipes.as_slice()),
+            maintenance,
+        ),
     )
     .await
 }
@@ -1146,7 +1187,14 @@ pub(crate) async fn qualify_with(
     measurer: Measurer,
 ) -> Result<Qualification, String> {
     qualify_with_mode(
-        state, file, document, renderer, admission, cancel, measurer, None,
+        state,
+        file,
+        document,
+        renderer,
+        admission,
+        cancel,
+        measurer,
+        (None, MaintenanceRecipe::PendingOrNative),
     )
     .await
 }
@@ -1160,7 +1208,7 @@ async fn qualify_with_mode(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
     measurer: Measurer,
-    requested_recipes: Option<&[String]>,
+    (requested_recipes, maintenance): (Option<&[String]>, MaintenanceRecipe<'_>),
 ) -> Result<Qualification, String> {
     let dv = file.dolby_vision;
     if dv.profile != Some(7)
@@ -1209,10 +1257,25 @@ async fn qualify_with_mode(
     let pending = q::pending_recipes(&current_document, file.size, file.mtime);
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let mut clock = Clock::from_document(&document)?;
-    let request = if let Some(request) = pending.iter().find(|request| {
+    let pending_here = pending.iter().find(|request| {
         request.backend_identity == backend_identity
             && requested_recipes.is_none_or(|recipes| recipes.contains(&request.identity))
-    }) {
+    });
+    let request = if let MaintenanceRecipe::Native(expected) = maintenance {
+        let native = default_native_request(file, &document, clock, backend_identity)?;
+        if expected.is_some_and(|identity| identity != native.identity) {
+            return Err("the scheduled native FEL recipe changed".into());
+        }
+        match q::verdict_state(
+            Some(&current_document),
+            file.size,
+            file.mtime,
+            &native.identity,
+        ) {
+            q::VerdictState::Missing => native,
+            q::VerdictState::Current(_) => pending_here.cloned().unwrap_or(native),
+        }
+    } else if let Some(request) = pending_here {
         request.clone()
     } else if requested_recipes.is_some() {
         return Ok(Qualification::NotDue);
@@ -2429,7 +2492,7 @@ mod tests {
             &admission,
             &tokio_util::sync::CancellationToken::new(),
             slow_measurement,
-            Some(&[]),
+            (Some(&[]), MaintenanceRecipe::PendingOrNative),
         )
         .await
         .expect("no request is not due");
@@ -2517,7 +2580,7 @@ mod tests {
             &admission,
             &tokio_util::sync::CancellationToken::new(),
             current_measurement,
-            Some(&allowed),
+            (Some(&allowed), MaintenanceRecipe::PendingOrNative),
         )
         .await
         .expect("exact live measurement");
@@ -2730,6 +2793,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_prewarm_drains_other_local_recipes_after_its_receipt() {
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title(false)
+            .await
+            .expect("ordinary slot");
+        let path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let backend = state
+            .transcode
+            .fel_identity(&renderer.scanner)
+            .await
+            .expect("backend");
+        let parsed = serde_json::from_str(&document).expect("probe");
+        let native = default_native_request(
+            &file,
+            &parsed,
+            Clock::from_document(&parsed).expect("clock"),
+            backend.clone(),
+        )
+        .expect("native recipe");
+        let window = q::WindowScore {
+            start_ms: 1_000,
+            served_mean: 1.0,
+            served_p99: 2.0,
+            dropped_mean: 2.0,
+            dropped_p99: 2.0,
+            samples: 3,
+        };
+        let verdict = q::FelVerdict::from_windows(
+            native.identity.clone(),
+            file.size,
+            file.mtime,
+            1,
+            vec![window; q::WINDOWS],
+            &mut [1.0; 3],
+            &mut [2.0; 3],
+        )
+        .expect("native receipt");
+        assert!(verdict.admitted);
+        assert!(state
+            .store
+            .put_dv_fel_verdict(
+                file.id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(q::FelRecipeVerdict {
+                    request: native.clone(),
+                    verdict
+                })
+                .expect("receipt JSON"),
+            )
+            .await
+            .expect("store native receipt"));
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            20_000,
+            plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+            1920,
+            1080,
+            (24000, 1001),
+            true,
+            Default::default(),
+        )
+        .expect("other rendition envelope");
+        let other = q::FelRecipeRequest::new(
+            backend,
+            file.size,
+            file.mtime,
+            envelope,
+            q::FelRecipeOutput::new(0, (1920, 1080), (24000, 1001)),
+        );
+        assert!(state
+            .store
+            .request_dv_fel_variant(file.id, &other)
+            .await
+            .expect("other request"));
+        let outcome = qualify_with_mode(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &tokio_util::sync::CancellationToken::new(),
+            slow_measurement,
+            (
+                None,
+                MaintenanceRecipe::Native(Some(native.identity.as_str())),
+            ),
+        )
+        .await
+        .expect("ordinary turn with native receipt");
+        assert!(matches!(outcome, Qualification::Stored(_)));
+        let result = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("source");
+        assert!(q::pending_recipes(&result, file.size, file.mtime).is_empty());
+        assert!(matches!(
+            q::verdict_state(Some(&result), file.size, file.mtime, &other.identity),
+            q::VerdictState::Current(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn foreign_pending_recipe_does_not_block_current_background_qualification() {
         fn native_measurement<'a>(
             sample: &'a Sample<'a>,
@@ -2800,7 +2977,10 @@ mod tests {
             &admission,
             &cancel,
             slow_measurement,
-            Some(std::slice::from_ref(&request.identity)),
+            (
+                Some(std::slice::from_ref(&request.identity)),
+                MaintenanceRecipe::PendingOrNative,
+            ),
         )
         .await
         .expect("foreign live recipe is not due");

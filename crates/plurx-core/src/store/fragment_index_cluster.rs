@@ -164,7 +164,8 @@ pub(crate) fn analysis_source_capacity_terms(
                         AND viewer.job_id = held.request_id
                         AND viewer.state = 'pending' AND viewer.deadline_ms > {now}))
             + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
-              WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
+              WHERE (held.owner_kind IN ('lease','offline') OR (held.custody_id IS NOT NULL
+                AND held.expires_at_ms<={now})) AND held.active_occupancy=1{own_occupancy}
                 AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
                 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)"#
             ),
@@ -1586,6 +1587,9 @@ pub(super) fn reconciliation_parameters(
     new: &NewAnalysisRequest,
 ) -> Result<(String, String), StoreError> {
     if old.component != "fragment_index"
+        || old
+            .pipeline_version
+            .starts_with(super::analysis_coordination::PIPELINE_PREFIX)
         || old.requested_generation.starts_with("predict:")
         || new.component != old.component
         || new.file_id != old.file_id
@@ -2028,6 +2032,9 @@ impl LiveAnalysisEngines {
     #[must_use]
     pub fn is_stranded(&self, request: &AnalysisRequest) -> bool {
         request.component == "fragment_index"
+            && !request
+                .pipeline_version
+                .starts_with(super::analysis_coordination::PIPELINE_PREFIX)
             && request.state == "queued"
             && request.result_cache_key.is_empty()
             && !self
@@ -2061,13 +2068,67 @@ impl LiveAnalysisEngines {
 /// of [`LiveAnalysisEngines::digests`], or NULL when the inventory is
 /// unknown — then nothing is stranded, every row counts as before.
 pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
+    let coordinator = super::analysis_coordination::PIPELINE_PREFIX;
     format!(
         "({live} IS NOT NULL AND component = 'fragment_index' AND state = 'queued' \
+          AND pipeline_version NOT GLOB '{coordinator}*' \
           AND COALESCE(result_cache_key, '') = '' \
           AND (pipeline_version NOT IN (SELECT value FROM json_each({live})) \
             OR EXISTS (SELECT 1 FROM settings \
               WHERE key = '{REMOVED_TARGET_FENCE_PREFIX}' || target_node_id)))"
     )
+}
+
+/// Diagnose an insert refusal within the transaction that took the admission
+/// decision. Both stores return a matching generation before any refusal.
+/// A reused ID without a matching generation cannot succeed when capacity returns.
+pub(crate) fn analysis_admission_refusal_sql() -> String {
+    let stranded = analysis_request_stranded_sql("input.engines");
+    format!(
+        "WITH input AS (SELECT $1 AS req, $2 AS engines, $3 AS headroom, $4 AS inserted)
+         SELECT CASE WHEN inserted THEN 0
+           WHEN NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(req,'$.file_id')
+               AND size = json_extract(req,'$.source_size') AND mtime = json_extract(req,'$.source_mtime'))
+             THEN 1
+           WHEN json_extract(req,'$.requested_generation') LIKE 'predict:%' AND NOT EXISTS (
+             SELECT 1 FROM background_predictions WHERE request_id = json_extract(req,'$.request_id')
+               AND state = 'pending' AND expires_ms > json_extract(req,'$.created_at_ms')
+               AND file_id = json_extract(req,'$.file_id')
+               AND json_extract(request_json,'$.source_size') = json_extract(req,'$.source_size')
+               AND json_extract(request_json,'$.source_mtime') = json_extract(req,'$.source_mtime')
+               AND json_extract(request_json,'$.component') = json_extract(req,'$.component')
+               AND json_extract(request_json,'$.pipeline_version') = json_extract(req,'$.pipeline_version')
+               AND json_extract(request_json,'$.target_node_id') = json_extract(req,'$.target_node_id'))
+             THEN 2
+           WHEN EXISTS (SELECT 1 FROM analysis_requests WHERE request_id = json_extract(req,'$.request_id'))
+             THEN 5
+           WHEN (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted'))
+                  >= {MAX_ACTIVE_ANALYSIS_REQUESTS} * {ANALYSIS_BACKLOG_BOUND_FACTOR} + headroom THEN 3
+           WHEN (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')
+                  AND NOT {stranded}) >= {MAX_ACTIVE_ANALYSIS_REQUESTS} + headroom THEN 4
+           ELSE 5 END AS value FROM input"
+    )
+}
+
+pub(crate) fn analysis_headroom(request: &NewAnalysisRequest) -> i64 {
+    if request.priority == "foreground" && request.trigger == "playback" {
+        PLAYBACK_ANALYSIS_HEADROOM
+    } else {
+        0
+    }
+}
+
+pub(crate) fn analysis_admission_error(reason: usize) -> StoreError {
+    use crate::error::AnalysisAdmissionRefusal::*;
+    StoreError::AnalysisAdmission(match reason {
+        1 => SourceChanged,
+        2 => PredictionExpired,
+        3 => BacklogFull,
+        4 => QueueFull,
+        0 => StateChanged,
+        5 => GenerationConflict,
+        _ => return StoreError::Database(format!("unknown analysis admission result {reason}")),
+    })
 }
 
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
@@ -2187,6 +2248,22 @@ pub struct ClusterFragmentIndexLocation {
     pub bytes: i64,
     pub verified_at_ms: i64,
     pub last_seen_at_ms: i64,
+}
+
+/// Components that the current analysis worker can execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnalysisClaimMode {
+    All,
+    SkipMarkersOnly,
+}
+
+impl AnalysisClaimMode {
+    pub(crate) fn component_clause(self) -> &'static str {
+        match self {
+            Self::All => "component <> 'subtitle_source'",
+            Self::SkipMarkersOnly => "component = 'skip_markers'",
+        }
+    }
 }
 
 #[async_trait]
@@ -2367,6 +2444,34 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         targeted_only: bool,
         cross_node: bool,
         excluded_video_identities: &[String],
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_for_capacity_in_mode(
+            node_id,
+            pipeline_version,
+            now_ms,
+            lease_expires_ms,
+            viewer_only,
+            targeted_only,
+            cross_node,
+            excluded_video_identities,
+            AnalysisClaimMode::All,
+        )
+        .await
+    }
+
+    /// Apply the component restriction to claim selection, fencing and expiry.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_analysis_request_for_capacity_in_mode(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
+        viewer_only: bool,
+        targeted_only: bool,
+        cross_node: bool,
+        excluded_video_identities: &[String],
+        mode: AnalysisClaimMode,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at

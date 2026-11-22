@@ -248,6 +248,14 @@ impl SourceHeaders {
     pub(super) fn forwarded_ingress(&self) -> Option<&ForwardIngress> {
         self.forwarded.as_ref().map(|auth| &auth.ingress)
     }
+    /// Whether this operation reached its owner through a Source ingress: by
+    /// the retained forwarded envelope, or by the fresh preparation that
+    /// precedes it and starts the owned task. Either way the receiver's own
+    /// headers stopped at that ingress, which already applied them to the
+    /// recipe, so their absence here says nothing about the receiver.
+    pub(super) fn arrived_forwarded(&self) -> bool {
+        self.forwarded.is_some() || self.fresh.is_some()
+    }
 }
 pub(crate) trait AuthenticationHeaders {
     fn authenticated_receiver_presentation(&self) -> Option<bool> {
@@ -310,6 +318,69 @@ impl Operation {
     }
     fn media(self) -> bool {
         matches!(self, Self::Resources | Self::Direct)
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Status => "status",
+            Self::VodStatus => "vod_status",
+            Self::Control => "control",
+            Self::Resources => "resources",
+            Self::Direct => "direct",
+            Self::End => "end",
+        }
+    }
+}
+/// Where a forwarding handler stood when it refused. Every refusal these
+/// handlers return themselves is the same bare status on the wire (an
+/// unsigned 503 between members), so the stage is written down here, once,
+/// at the handler's single exit. A handler names each step before taking it.
+/// The receiver-facing route shape, logged instead of the caller's own path.
+const INGRESS_ROUTE: &str = "/sharing/v1/items/{item}/files/{file}/sessions";
+struct RefusalTrace {
+    stage: &'static str,
+    operation: Option<Operation>,
+    request_id: Option<Uuid>,
+}
+impl RefusalTrace {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            operation: None,
+            request_id: None,
+        }
+    }
+    fn at(&mut self, stage: &'static str) {
+        self.stage = stage;
+    }
+    fn refuse(self, path: &'static str, error: ApiError) -> Response {
+        // A typed retry (a full credit pool, a start still preparing on the
+        // viewer's clock) is an answer the caller acts on, not a refusal.
+        let answer = matches!(error, ApiError::TypedRetry { .. });
+        let response = error.into_response();
+        let error_class = match response.status() {
+            StatusCode::UNAUTHORIZED => "unauthorized",
+            StatusCode::BAD_REQUEST => "invalid",
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::TOO_MANY_REQUESTS => "busy",
+            StatusCode::SERVICE_UNAVAILABLE => "unavailable",
+            _ => "refused",
+        };
+        let operation = self.operation.map_or("unknown", Operation::name);
+        let request_id = self.request_id.map(|id| id.to_string()).unwrap_or_default();
+        // The public ingress refuses before any credential check; an
+        // unauthenticated caller must not be able to raise warn lines.
+        let pre_authentication = path == INGRESS_ROUTE
+            && matches!(
+                response.status(),
+                StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
+            );
+        if answer || pre_authentication {
+            tracing::debug!(target: "plurx::sharing", stage = self.stage, error_class, operation, request_id = %request_id, path, status = response.status().as_u16(), "Source forwarding answered a retry");
+        } else {
+            tracing::warn!(target: "plurx::sharing", stage = self.stage, error_class, operation, request_id = %request_id, path, status = response.status().as_u16(), "Source forwarding refused");
+        }
+        response
     }
 }
 fn operation(path: &str, body: &[u8]) -> Result<Operation, ApiError> {
@@ -1169,12 +1240,18 @@ pub(super) async fn route_to_owner(
     {
         return next.run(request).await;
     }
-    match route(state, request, next).await {
+    let mut trace = RefusalTrace::new("ingress.request");
+    match route(state, request, next, &mut trace).await {
         Ok(response) => response,
-        Err(error) => error.into_response(),
+        Err(error) => trace.refuse(INGRESS_ROUTE, error),
     }
 }
-async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Response, ApiError> {
+async fn route(
+    state: AppState,
+    request: Request<Body>,
+    next: Next,
+    trace: &mut RefusalTrace,
+) -> Result<Response, ApiError> {
     let began = Instant::now();
     let (parts, body) = request.into_parts();
     // Mint one absolute answer clock before body reads or discovery. Local
@@ -1187,20 +1264,26 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     let bytes = axum::body::to_bytes(body, MAX_PUBLIC_BODY)
         .await
         .map_err(|_| invalid())?;
+    trace.at("ingress.operation");
     let op = operation(&path, &bytes)?;
+    trace.operation = Some(op);
     let clocked = op == Operation::Start && clock.clocked();
+    trace.at("ingress.credit");
     let permit = credit(op)?;
     let deadline = began + op.budget();
     let headers = SourceHeaders::from(parts.headers.clone());
+    trace.at("ingress.connection");
     let connection = parts
         .extensions
         .get::<crate::SharingConnectionCancellation>()
         .cloned()
         .ok_or_else(unavailable)?;
+    trace.at("ingress.effective_recipe");
     let bytes = super::ingress::receiver_effective_body(&state, &headers, &path, &bytes).await?;
     // Retargeting retains this operation's original deadline and request body.
     // Only an affirmative pre-claim refusal may enter another iteration.
     loop {
+        trace.at("ingress.route_resolution");
         let route = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
             #[cfg(test)]
             state
@@ -1232,6 +1315,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         #[cfg(test)]
         eprintln!("Source forwarding route resolution succeeded");
         if matches!(route, ForwardRoute::Local) {
+            trace.at("ingress.local_retarget");
             // Every local attempt, including a retarget, carries the one
             // ingress clock minted above, never a fresh header allowance.
             let mut local = parts.clone();
@@ -1257,6 +1341,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         let canonical_body = String::from_utf8(bytes.to_vec()).map_err(|_| invalid())?;
         // Forwarded preparation keeps its own work deadline; all answer waits
         // below use the original ingress clock minted before discovery.
+        trace.at("ingress.remote_operation");
         if !remote_operation_allowed(&route, op) {
             return Err(unavailable());
         }
@@ -1280,15 +1365,19 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
                 if !matches!(op, Operation::Start | Operation::Status | Operation::End) {
                     return Err(unavailable());
                 }
+                trace.request_id = Some(fresh.request_id);
                 if fresh_choice {
+                    trace.at("ingress.candidate_pin");
                     state
                         .transcode
                         .source_http_starts
                         .forwarding
                         .pin(&mut fresh, &routing_recipe(&path, &bytes)?)?;
                 }
+                trace.at("ingress.prepare_driver");
                 let driver =
                     capture_driver(&state, &connection, &fresh.candidate_node_id, deadline).await?;
+                trace.at("ingress.prepare");
                 let prepare = FreshRequest {
                     path: path.clone(),
                     canonical_body: canonical_body.clone(),
@@ -1320,6 +1409,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
                     prepared.status,
                     prepared.body.len()
                 );
+                trace.at("ingress.prepare_reply");
                 if fresh_choice
                     && op == Operation::Start
                     && prepared.status == StatusCode::CONFLICT
@@ -1372,6 +1462,8 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             }
             ForwardRoute::Local => return Err(unavailable()),
         };
+        trace.request_id = Some(authority.request_id);
+        trace.at("ingress.assignment");
         if !authority.valid()
             || (authority.cleanup_only && !matches!(op, Operation::Status | Operation::End))
         {
@@ -1387,6 +1479,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         }
         #[cfg(test)]
         eprintln!("Source forwarding assignment validated; registering protected ingress");
+        trace.at("ingress.register");
         let ingress = if op == Operation::End || (op == Operation::Status && authority.cleanup_only)
         {
             // End never admits another media debt after seal. The actual driver
@@ -1403,6 +1496,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         };
         #[cfg(test)]
         eprintln!("Source forwarding ingress registered; dispatching owner operation");
+        trace.at("ingress.owner_dispatch");
         let wire = ForwardRequest {
             path: path.clone(),
             canonical_body,
@@ -1456,8 +1550,9 @@ async fn authenticate(
             tokio::time::timeout(
                 Duration::from_secs(9),
                 state
-                    .membership
-                    .authorize_internal_peer_request(&auth, "POST", path, body)
+                    .cluster
+                    .authentication()
+                    .authorize_exact_request(&auth, "POST", path, body)
             )
             .await,
             Ok(Ok(true))
@@ -1481,10 +1576,12 @@ async fn signed(
         return Err(unavailable());
     }
     let payload = crate::http::peer_transport::signed_response_payload(status.as_u16(), &body);
-    let signature =
-        state
-            .membership
-            .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload);
+    let signature = state.cluster.authentication().sign_exact_response(
+        &auth.node_id,
+        &auth.nonce,
+        path,
+        &payload,
+    );
     let signature = signature.map_err(|_| unavailable())?;
     remaining(deadline)?;
     Response::builder()
@@ -1534,15 +1631,20 @@ pub(crate) async fn receive(
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: Bytes,
 ) -> Response {
-    receive_at(
+    let mut trace = RefusalTrace::new("forward.authenticate");
+    match receive_at(
         state,
         headers,
         connection.map(|value| value.0),
         body,
         FORWARD_PATH,
+        &mut trace,
     )
     .await
-    .unwrap_or_else(|error| error.into_response())
+    {
+        Ok(response) => response,
+        Err(error) => trace.refuse(FORWARD_PATH, error),
+    }
 }
 pub(crate) async fn receive_control(
     State(state): State<AppState>,
@@ -1550,15 +1652,20 @@ pub(crate) async fn receive_control(
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: Bytes,
 ) -> Response {
-    receive_at(
+    let mut trace = RefusalTrace::new("forward.authenticate");
+    match receive_at(
         state,
         headers,
         connection.map(|value| value.0),
         body,
         CONTROL_PATH,
+        &mut trace,
     )
     .await
-    .unwrap_or_else(|error| error.into_response())
+    {
+        Ok(response) => response,
+        Err(error) => trace.refuse(CONTROL_PATH, error),
+    }
 }
 async fn trusted_receiver_range(
     state: &AppState,
@@ -1585,17 +1692,25 @@ async fn receive_at(
     connection: Option<crate::SharingConnectionCancellation>,
     body: Bytes,
     path: &'static str,
+    trace: &mut RefusalTrace,
 ) -> Result<Response, ApiError> {
     let began = Instant::now();
     let auth = authenticate(&state, &headers, path, &body).await?;
+    trace.at("forward.envelope");
     let wire: ForwardRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
+    trace.request_id = Some(wire.authority.request_id);
+    trace.operation = Some(wire.operation);
+    trace.at("forward.operation");
     let op = operation(&wire.path, wire.canonical_body.as_bytes())?;
+    trace.at("forward.transport_identity");
     if !wire.valid_transport(&state.node_id, &auth.node_id, path, op) {
         return Err(unavailable());
     }
+    trace.at("forward.deadline");
     let deadline = received_deadline(wire.remaining_ms, op.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    trace.at("forward.credit");
     let permit = match credit(op) {
         Ok(permit) => permit,
         // A full owner pool is load: a control reply carries its typed 429
@@ -1614,6 +1729,9 @@ async fn receive_at(
         }
         Err(error) => return Err(error),
     };
+    // The owner's retained entry and its assignment, held in this process:
+    // absent after a restart, and for a request this node never assigned.
+    trace.at("forward.retained_owner");
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::validate_retained_forward(
@@ -1627,6 +1745,7 @@ async fn receive_at(
     )
     .await
     .map_err(|_| unavailable())??;
+    trace.at("forward.receiver_range");
     let receiver_range = if wire.authority.cleanup_only || op == Operation::End {
         false
     } else {
@@ -1638,6 +1757,7 @@ async fn receive_at(
         )
         .await?
     };
+    trace.at("forward.owner_request");
     let mut request = Request::builder()
         .method("POST")
         .uri(&wire.path)
@@ -1651,8 +1771,10 @@ async fn receive_at(
     });
     // The parent separately captures/registers this actual internal writer.
     // Its closure cannot substitute for the outer accepted driver's closure.
+    trace.at("forward.connection");
     let connection = connection.ok_or_else(unavailable)?;
     request.extensions_mut().insert(connection);
+    trace.at("forward.owner_deadline");
     let response = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::peer_router(state.clone())
@@ -1662,6 +1784,7 @@ async fn receive_at(
     .await
     .map_err(|_| unavailable())?
     .unwrap_or_else(|never| match never {});
+    trace.at("forward.signed_reply");
     if op.media() {
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map(move |chunk| {
@@ -1686,18 +1809,25 @@ pub(crate) async fn prepare(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    prepare_inner(state, headers, body)
-        .await
-        .unwrap_or_else(|error| error.into_response())
+    let mut trace = RefusalTrace::new("prepare.authenticate");
+    match prepare_inner(state, headers, body, &mut trace).await {
+        Ok(response) => response,
+        Err(error) => trace.refuse(PREPARE_PATH, error),
+    }
 }
 async fn prepare_inner(
     state: AppState,
     headers: HeaderMap,
     body: Bytes,
+    trace: &mut RefusalTrace,
 ) -> Result<Response, ApiError> {
     let began = Instant::now();
     let auth = authenticate(&state, &headers, PREPARE_PATH, &body).await?;
+    trace.at("prepare.envelope");
     let wire: FreshRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
+    trace.request_id = Some(wire.authority.request_id);
+    trace.operation = Some(wire.operation);
+    trace.at("prepare.candidate_identity");
     if wire.hop != 1
         || wire.authority.candidate_node_id != state.node_id
         || !wire.authority.valid()
@@ -1712,9 +1842,11 @@ async fn prepare_inner(
     {
         return Err(unavailable());
     }
+    trace.at("prepare.deadline");
     let deadline = received_deadline(wire.remaining_ms, wire.operation.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    trace.at("prepare.credit_reply");
     // As at the control path: a full owner pool answers typed, signed.
     let _permit = match credit(wire.operation) {
         Ok(permit) => permit,
@@ -1731,6 +1863,8 @@ async fn prepare_inner(
         }
     };
     if wire.operation != Operation::Start {
+        // Status or End for a Start this node prepared but never assigned.
+        trace.at("prepare.unassigned_cleanup");
         let response = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             super::execute_forward_unassigned_cleanup(
@@ -1744,6 +1878,7 @@ async fn prepare_inner(
         )
         .await
         .map_err(|_| unavailable())??;
+        trace.at("prepare.cleanup_reply");
         return signed(
             &state,
             &auth,
@@ -1759,7 +1894,9 @@ async fn prepare_inner(
         wire.authority.principal.clone(),
         deadline,
     );
+    trace.at("prepare.current_reference");
     super::current_reference(&state, &fresh_headers, &wire.authority.reference).await?;
+    trace.at("prepare.receiver_range");
     let receiver_range = trusted_receiver_range(
         &state,
         &auth.node_id,
@@ -1767,6 +1904,7 @@ async fn prepare_inner(
         wire.canonical_body.as_bytes(),
     )
     .await?;
+    trace.at("prepare.start_deadline");
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::prepare_forward_start(
@@ -1781,6 +1919,7 @@ async fn prepare_inner(
     .map_err(|_| unavailable())?
     {
         Ok(assignment) => {
+            trace.at("prepare.assignment_reply");
             signed(
                 &state,
                 &auth,
@@ -1792,6 +1931,7 @@ async fn prepare_inner(
             .await
         }
         Err(error) => {
+            trace.at("prepare.refusal_reply");
             signed(
                 &state,
                 &auth,
@@ -1809,32 +1949,36 @@ pub(crate) async fn register_http(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    custody_inner(state, headers, body, REGISTER_PATH)
-        .await
-        .unwrap_or_else(|error| error.into_response())
+    let mut trace = RefusalTrace::new("custody.authenticate");
+    match custody_inner(state, headers, body, REGISTER_PATH, &mut trace).await {
+        Ok(response) => response,
+        Err(error) => trace.refuse(REGISTER_PATH, error),
+    }
 }
 pub(crate) async fn ack_http(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    custody_inner(state, headers, body, ACK_PATH)
-        .await
-        .unwrap_or_else(|error| {
-            #[cfg(test)]
-            eprintln!("Source ACK diagnostic stage=handler_refusal");
-            error.into_response()
-        })
+    let mut trace = RefusalTrace::new("custody.authenticate");
+    match custody_inner(state, headers, body, ACK_PATH, &mut trace).await {
+        Ok(response) => response,
+        Err(error) => trace.refuse(ACK_PATH, error),
+    }
 }
 async fn custody_inner(
     state: AppState,
     headers: HeaderMap,
     body: Bytes,
     path: &'static str,
+    trace: &mut RefusalTrace,
 ) -> Result<Response, ApiError> {
     let began = Instant::now();
     let auth = authenticate(&state, &headers, path, &body).await?;
+    trace.at("custody.envelope");
     let wire: CustodyRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
+    trace.request_id = Some(wire.authority.request_id);
+    trace.at("custody.wire_identity");
     if wire.hop != 1
         || !wire.authority.valid()
         || wire.authority.owner_node_id != state.node_id
@@ -1843,31 +1987,32 @@ async fn custody_inner(
         || wire.custody.ingress.node_id != auth.node_id
         || matches!(wire.custody.action, CustodyAction::Register) != (path == REGISTER_PATH)
     {
-        #[cfg(test)]
-        eprintln!("Source custody diagnostic stage=wire_identity");
         return Err(unavailable());
     }
+    trace.at("custody.receipt_identity");
     if let CustodyAction::Ack { receipt } = &wire.custody.action {
         if !receipt.matches(&wire.custody.ingress.driver) {
-            #[cfg(test)]
-            eprintln!("Source custody diagnostic stage=receipt_identity");
             return Err(unavailable());
         }
     }
+    trace.at("custody.credit");
     let _permit = credit(if matches!(wire.custody.action, CustodyAction::Register) {
         Operation::Control
     } else {
         Operation::End
     })?;
+    trace.at("custody.deadline");
     let deadline = received_deadline(wire.remaining_ms, Operation::Start.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    trace.at("custody.ledger_write");
     let result = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::apply_forward_custody(&state, &wire.authority, &wire.custody, deadline),
     )
     .await
     .map_err(|_| unavailable())??;
+    trace.at("custody.signed_reply");
     signed(
         &state,
         &auth,
@@ -1883,6 +2028,23 @@ async fn custody_inner(
 mod tests {
     use super::*;
     use axum::http::header;
+    /// The owner's task is started by the fresh preparation, before any
+    /// forwarded envelope exists. It must still know its Start came through
+    /// an ingress, or it reads the receiver's absent headers as a receiver
+    /// that affirmed nothing and marks every Dolby Vision title withheld.
+    #[test]
+    fn fresh_preparation_headers_say_the_start_arrived_forwarded() {
+        let principal =
+            PlaybackPrincipal::sharing(Uuid::new_v4(), &"b".repeat(64)).expect("sharing principal");
+        let fresh = SourceHeaders::verified_fresh(
+            "a".repeat(64),
+            principal,
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(fresh.forwarded_ingress().is_none());
+        assert!(fresh.arrived_forwarded());
+        assert!(!SourceHeaders::from(HeaderMap::new()).arrived_forwarded());
+    }
     #[test]
     fn public_headers_cannot_construct_forwarded_authority() {
         let mut raw = HeaderMap::new();
@@ -1895,6 +2057,7 @@ mod tests {
         assert!(headers.authenticated_hash().is_none());
         assert!(headers.authenticated_principal().is_none());
         assert!(headers.forwarded_ingress().is_none());
+        assert!(!headers.arrived_forwarded());
         assert!(!headers.cleanup_only());
     }
     #[test]
@@ -2353,8 +2516,8 @@ pub(super) async fn collect_fresh_location(
     let peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state
-            .membership
-            .media_peers_for_route(crate::http::learner_route_eligible(
+            .cluster
+            .media_targets_for_route(crate::http::learner_route_eligible(
                 &axum::http::Method::POST,
                 LOCATE_PATH,
             )),
