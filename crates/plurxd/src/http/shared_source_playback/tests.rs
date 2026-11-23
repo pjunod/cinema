@@ -5833,3 +5833,24 @@ async fn actual_source_unclocked_start() {
         .expect("server drained");
     fixture.shutdown().await;
 }
+
+/// Avatar 6751 (2026-11-23): the viewer was told `copy_sync_unverified` for a
+/// copy whose fragments outgrew the copy's input hold. The receiver relays a
+/// Source Start refusal's code as it is, so the code must be the cause.
+#[test]
+fn a_copy_input_limit_reaches_the_receiver_as_its_own_code() {
+    let answer =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::CopyInputLimit)
+            .response();
+    assert!(
+        matches!(
+            answer,
+            ApiError::Typed {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "copy_range_input_limit",
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
+}

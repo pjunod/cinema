@@ -320,6 +320,7 @@ enum SourceStartFailure {
     CopyInitContractChanged,
     CopyClockUnknown,
     CopySyncUnverified,
+    CopyInputLimit,
     Capacity,
     Conflict,
     Unresolved,
@@ -1260,6 +1261,7 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
             E::CopyInitContractChanged => Self::CopyInitContractChanged,
             E::CopyClockUnknown => Self::CopyClockUnknown,
             E::CopySyncUnverified => Self::CopySyncUnverified,
+            E::CopyInputLimit => Self::CopyInputLimit,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1277,6 +1279,7 @@ impl SourceStartFailure {
             Self::CopyInitContractChanged => (StatusCode::CONFLICT, "copy_init_contract_changed"),
             Self::CopyClockUnknown => (StatusCode::UNPROCESSABLE_ENTITY, "copy_clock_unknown"),
             Self::CopySyncUnverified => (StatusCode::UNPROCESSABLE_ENTITY, "copy_sync_unverified"),
+            Self::CopyInputLimit => (StatusCode::UNPROCESSABLE_ENTITY, "copy_range_input_limit"),
             Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (
