@@ -6,7 +6,11 @@ pub(super) fn split_family_shares_source<'a>(
     video: Option<&str>,
     soundtracks: impl IntoIterator<Item = &'a str>,
 ) -> bool {
-    video.is_some_and(|video| soundtracks.into_iter().all(|soundtrack| soundtrack == video))
+    video.is_some_and(|video| {
+        soundtracks
+            .into_iter()
+            .all(|soundtrack| soundtrack == video)
+    })
 }
 
 /// One verified child of a split copy presentation.

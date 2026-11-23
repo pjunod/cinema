@@ -4713,12 +4713,18 @@ fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() 
     let mut route = base.clone();
     route.recipe_json = serde_json::to_string(&split).expect("serialize split recipe");
     assert!(
-        matches!(classify_owner_loss(&route, EXPIRED_NOW_MS), OwnerLoss::Unrecoverable(_)),
+        matches!(
+            classify_owner_loss(&route, EXPIRED_NOW_MS),
+            OwnerLoss::Unrecoverable(_)
+        ),
         "a lost split owner answers media_owner_lost with its film position"
     );
     let held: RemoteStartRequest =
         serde_json::from_str(&route.recipe_json).expect("the held recipe parses");
-    assert!(held.request.split_audio, "the reopen on another node asks for the split again");
+    assert!(
+        held.request.split_audio,
+        "the reopen on another node asks for the split again"
+    );
     assert!(worker_session_request_is_valid(&held.request));
 
     let mut answer = valid_start_response();
@@ -4730,7 +4736,10 @@ fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() 
     };
     answer.target_height = 0;
     answer.playlist_url = format!("/api/v1/hls/{}/master.m3u8", answer.session_id);
-    assert!(answer.is_valid(), "a worker's split copy starts at its family master");
+    assert!(
+        answer.is_valid(),
+        "a worker's split copy starts at its family master"
+    );
     let mut transcode = answer.clone();
     transcode.kind = SessionKind::Transcode { height: 720 };
     transcode.target_height = 720;
