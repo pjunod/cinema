@@ -101,8 +101,10 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 
 # Reviewed recipes, not a source-commit or pull-request exception. Different
 # workflow, selector, feature, image or nextest contracts need a new review.
+# main-fast-lane.yml re-reviewed for #1811's preflight `runs-on` high-cpu
+# label (67af36308): scheduling only; the compile/test recipe is unchanged.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
- '.github/workflows/main-fast-lane.yml': '3ce991087d99bc508988d674d37ca48eb99cec34ce0d18af4fc36ec7c0878e22',
+ '.github/workflows/main-fast-lane.yml': 'd3df0a100e53693d93a565a4ecb95c6266324ccdb68acc20d378968657d657cf',
  '.github/workflows/rust-units.yml': 'e9ea37562c132dcf815336a46fa954fe7e0db841527dcff16f5e98d0b0ef93c2',
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
  'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
