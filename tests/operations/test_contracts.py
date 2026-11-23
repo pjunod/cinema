@@ -399,6 +399,24 @@ class OperationsContractCase(unittest.TestCase):
                 with self.assertRaises(harness["Fail"]):
                     wait(fixture, len(old))
 
+    def test_ui_baseline_hostname_wrap_fixture_overflows_its_cell_on_any_face(self):
+        # The nodes-table stress fixture asserts that an unbreakable hostname
+        # wraps inside its cell. That is only a test of the CSS when the token
+        # is wider than the cell on whatever face the runner resolves for
+        # `system-ui`; a token about as wide as the meridian 1280 stacked cell
+        # wrapped on wide faces and fitted on narrow ones (CI run 9084). Pin
+        # the premise: at 4px per character, below any real face at the
+        # hostname's 14px, the token still exceeds the card's maximum width.
+        script = read("scripts/ui-baseline")
+        body = script.split("def stress_cluster_strip_containment(", 1)[1]
+        body = body.split("\ndef ", 1)[0]
+        unit = re.search(r'const unit = "([^"]+)";', body).group(1)
+        repeat = int(re.search(r"const host = unit\.repeat\((\d+)\);", body).group(1))
+        card_max = int(re.search(r'card\.style\.maxWidth = "(\d+)px";', body).group(1))
+        self.assertRegex(unit, r"^[A-Za-z0-9]+$", "the token must offer no break opportunity")
+        self.assertGreater(len(unit) * repeat * 4, card_max)
+        self.assertIn("overflow-wrap:anywhere", read("crates/plurxd/src/web/app.css").split(".clhost{", 1)[1].split("}", 1)[0])
+
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 

@@ -1497,10 +1497,12 @@ def stress_cluster_strip_containment(page, name, layout_id):
       // meridian 1280 layout stacks the nodes table into a full-width Node cell
       // about as wide as one copy of this token: a single copy overflowed (and
       // so wrapped) on wide fallback faces and fitted on one line on narrow
-      // ones (CI run 9084). Three copies exceed the widest cell this test
-      // measures on any face, so the premise holds by construction.
+      // ones (CI run 9084). Four copies are 360 characters, wider than the
+      // 1100px card below even at 4px a character, which no face reaches at
+      // 14px, so the premise holds by construction
+      // (test_ui_baseline_hostname_wrap_fixture_overflows_its_cell_on_any_face).
       const unit = "ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-      const host = unit.repeat(3);
+      const host = unit.repeat(4);
       const fixture = document.createElement("div");
       fixture.className = "clcard clstrip";
       fixture.style.cssText = "grid-template-columns:repeat(3,minmax(0,1fr));max-width:700px";
