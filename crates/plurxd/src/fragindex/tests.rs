@@ -357,6 +357,14 @@ fn dvh1_completeness_revision_retries_only_affected_copy_indexes() {
         let video =
             transcode::CopyVideoOptions::new(true, preserve).with_parameter_set_retention(retain);
         let mut old_recipe = transcode::copy_video_args(&file, video);
+        // Every ordinary copy identity carries its landing-clock revision;
+        // only the dvh1 completeness component may differ here.
+        if video.dolby_vision_refit().is_none() {
+            old_recipe.push(format!(
+                "--plurx-copy-landing-clock={}",
+                plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+            ));
+        }
         old_recipe.push(format!(
             "--plurx-hdr10-index={}",
             fmp4::HDR10_INDEX_METADATA_REVISION
@@ -2260,8 +2268,8 @@ mod dv_title_companion {
             "argv carries no scan"
         );
         let spawn = source
-            .find("Some(ride) => ride.spawn(source, budget)")
-            .expect("spawn");
+            .find(".spawn(source, runtime_cache, budget)")
+            .expect("spawn with the runtime cache");
         let finish = source
             .find("let pending = ride.finish(file.id, task, lead_built, wait).await;")
             .expect("finish");
@@ -2312,7 +2320,7 @@ exec /bin/sleep 60
         let source = std::fs::File::open(source_path).expect("source descriptor");
         let (_store, _job, active) = crate::background_jobs::tests::active().await;
         let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
-            ride.spawn(&source, Duration::from_secs(60))
+            ride.spawn(&source, directory.path(), Duration::from_secs(60))
                 .expect("owned companion")
         })
         .await;

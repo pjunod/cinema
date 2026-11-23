@@ -8908,6 +8908,23 @@ source_anchor = '"transport": "mpv"'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
 
+
+[[fixes]]
+id = "android.prepared-seek-presented-quality"
+commits = ["b6f3fe3f86b346fb28e140a33c535cc3465ff746"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "planReplacement.presented(change.quality)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun preparedQualityOwnsSeeksOnlyAfterTheSuccessorsProvenFrame()"
+
+[[fixes]]
+id = "android.prepared-seek-build-counter-applicability"
+commits = ["d48ec8996565093cd97c64583ecdcda0c98a568e"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "versionCode ="
+test = "tests/validation/test_selected_pr_android_capture.py"
+test_anchor = "def test_counter_projection_preserves_actual_209_provenance_only_for_the_two_210_literals("
+
 [[fixes]]
 id = "apple.tvos-startup-decision-file-route"
 commits = ["39c3e9bb09649acd08f9f3bc59b9a6e47c34e9ec"]

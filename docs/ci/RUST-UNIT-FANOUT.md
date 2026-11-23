@@ -17,6 +17,140 @@ the code being merged; rebasing must not repeat tests that already passed on
 the same inputs; only what failed runs again; history that cannot be
 authenticated is simply not adopted.
 
+## Reviewed continuation across test-only source repairs
+
+An explicit manual `ci.yml` dispatch may resume an authenticated selected-PR
+Rust run after reviewed test-only repairs. Ordinary same-repository PRs require
+all three immutable promotion inputs, an open PR targeting current `main`, a
+checkout of its exact live branch tip, and ancestry proving that current main
+is included. Automatic branch routing and release qualification still accept
+only their established promotion branches. Ordinary manual dispatches produce
+`selected-pr-source-gate` evidence; that evidence does not establish a release,
+full-workspace unit success, doctest success, or an unaffected crate's result.
+
+The `workspace_rust_evidence` input remains an attachment descriptor with
+`sha256`, `attachment_id`, and `attachment_uuid`. Its enrolled document uses
+`version: workspace-nextest-shards-v1` and supplies `repository`, `pr`, `branch`,
+`base_sha`, `source_commit`, `prior`, `run`, `plan_artifact`, `crate_artifacts`,
+`shard_artifacts`, `changes`, and the closed compatibility identifier
+`linux-x64-nextest-0.9.151-isolated-two-8m-v1`. Artifact maps name every original
+selected crate and every original shard index. Each changed path has its exact
+`before`/`after` SHA256, `affected` nextest IDs (`<binary-id> <test-path>`), and
+reviewed `reason`. The authenticated writer attests that dependency
+classification. Cargo, compiler, feature, image and test-recipe changes are refused. The
+adapter admits only explicitly reviewed test/runtime inputs and audited
+protocol paths, with exact hashes and affected-body obligations. Runtime
+changes do not automatically invalidate or retain unrelated bodies.
+
+The provider independently authenticates the original repository, PR, run,
+source, complete plan, all shard jobs and raw status logs, uploaded JSON
+receipts, original exact crate keys, and inventory digests. Failures remain
+failures. Missing bodies, repeated identities, conflicting outcomes, unknown
+IDs, changed recipes, and incomplete shards refuse adoption. Source witnesses
+invalidate affected successes without changing the original records. This
+bridge does not change `rust_units.py` or its ordinary exact-key reuse rule.
+
+Current required crates are recomputed with that unchanged selector against
+the bound current main. The archive compiles the workspace with the original
+default feature unification, then lists every selected crate's current test
+binary. Historical bodies must remain present and runnable; new selected
+bodies are due. Only still-applicable passes are omitted. Ordinary tests use
+the original pinned nextest release, one fresh process per body, two concurrent
+bodies, and an 8 MiB stack; required ignored tests remain serial. Native
+Cargo's shared-process two-thread execution is not claimed equivalent.
+Container capacity differs, but compiler, profile, feature unification, image,
+FFmpeg recipe, assertion bodies and nextest isolation remain pinned. Resource
+availability itself is not a cross-run success guarantee; failures still
+require an actual current pass.
+
+The completion receipt names the selected crates, complete current census,
+original evidence enrollment, retained IDs, and actually executed IDs. No
+manual dispatch, publication, or source-gate completion is implied by preparing
+an attachment. Review new adoption code independently before executing it.
+
+### Explicit landing and environment eligibility
+
+`scripts/land --source-gate-run <actual-ci-run>` verifies actual manual CI
+provenance, every required CI surface, enrolled per-body Rust coverage and
+creator-bound completion artifacts; no status alias or untested acceptance is
+used. The fast-lane-only worker proof is retained only when its complete governed staged-source,
+library-binding, manifest and tool inputs are byte-identical to both current
+main and its authenticated origin. Gate-local paperwork binds the current PR
+body/title. Release publishers still reject schema2 source-gate receipts.
+
+Before any Rust body, a bounded owned-child capability probe logs the kernel,
+checks self/child `pidfd_open`, PIDfd STOP/CONT/TERM signals and nonblocking
+`waitid(P_PIDFD)` stop/continue/exit observations, then reaps the child and
+closes its descriptors. Unsupported environments refuse without fallback or
+skip. Placement uses an empirically eligible worker; pools are unchanged.
+
+The separately typed `main-python-journal-continuation-v1` provider uses the
+unchanged original main-unit start/final journal authenticator and source
+fingerprints, plus reviewed all-path imported-implementation impacts. It
+authenticates every inherited pass in its originating run’s own journal, requires
+all-path imported-input impact witnesses from each actual origin to the current
+candidate, preserves original source/run identities, and stops on unknown applicability
+instead of replaying valid passes. Main-lane records are never relabelled as
+native ci.yml discoveries.
+
+### Publication without duplicate automatic bodies
+
+Keep the PR draft while publishing the reviewed head. Dispatch its bound manual
+source gate and add exactly `Manual-Source-Gate: <actual-run-id>` to the PR body
+before gate-local paperwork executes; preserve all Regression-Test fields.
+Paperwork binds the semantic title with only the forge's WIP/[WIP] control
+prefix removed, so readying the PR preserves its exact subject/body identity.
+After the manual gate really completes, readying the PR triggers the ordinary
+scope job. That job independently authenticates the actual same-head/current-main
+manual gate, every required surface, enrollment and exact current census before
+omitting duplicate heavy work. Invalid claims fail scope; absent claims preserve
+default routing. Landing still prints real ci provenance and requires the explicit
+source-gate run; no status alias or untested exemption is created.
+
+Paperwork uses the same authenticated Python method plan. Enroll exactly one
+`Paperwork-Continuation:` JSON line containing `version: 1`, `pr`, `head`,
+`base`, and the `python_unit_evidence` attachment descriptor before publication.
+The draft paperwork job validates retained methods and reports the remaining
+methods as pending; it grants no qualification for those pending methods. All
+catalog, regression-field, release-counter and web syntax checks still run.
+For a local pre-push hook, explicitly set
+`PLURX_PAPERWORK_CONTINUATION=publication` and
+`PLURX_PAPERWORK_PUBLICATION_PR=<number>` with the existing API credentials and a
+compatible Python on `PATH`. That route requires a clean checkout on the PR's
+actual branch, current main, a draft PR, an authenticated writer enrollment and
+proof that the actual remote head is an ancestor of the exact local target.
+It preserves both head identities instead of pretending the target is published.
+
+The final manual paperwork step authenticates its own successful preflight job
+and the original named unittest results between source-bound execution markers.
+Retained methods plus direct current passes must cover every method in the
+complete current paperwork rule inventory. The schema2 paperwork receipt stores
+this method coverage, original preflight job/run and log digest; qualification
+and landing validate it again. Default paperwork still executes its full rule
+set, and readying an enrolled PR requires the completed authenticated manual
+source gate. A preliminary deferral never becomes a passed method.
+
+The cluster facade census and media wire compatibility checks read the exact
+comparison tree. Imported journals omit the resolved runtime `origin/main`,
+so these two methods run against the bound current main in the selected
+preflight. Other paperwork methods keep their authenticated source outcomes.
+
+A selected missing CVVDP RGB16 packing case requires its pinned NumPy 2.2.6
+wheel on CPython 3.12 on Linux x86_64. Preparation verifies the official wheel and
+complete package closure, stages it under `target/validation/python-deps`, and
+checks the actual import before any selected test body. Only the operations
+process receives that NumPy namespace; no global install, image change or model
+runtime is involved. The execution markers and qualification artifact retain
+the actual interpreter/package identity. An unavailable dependency fails
+preparation instead of crediting a skip. Default unenrolled execution is unchanged.
+
+The source-gate provider uses unchanged `rust_units.Keys` with one closed
+metadata projection: only the scope step's API-token env plumbing is removed.
+Original compile/test recipe bytes must match their reviewed digest. Actual
+workflow hashes and projected recipe hashes are both retained in the completion
+witness. Standard Rust selector/cache keys and ordinary branch behavior are
+unchanged; no projected key is published as a standard crate receipt.
+
 ## 1. What runs when
 
 | Trigger | What happens |

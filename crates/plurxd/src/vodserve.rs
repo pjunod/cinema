@@ -665,6 +665,25 @@ impl ChildMediaRequest {
 }
 
 impl ResponseOwner {
+    pub(crate) fn is_scalar_playlist(&self) -> bool {
+        self.scalar_playlist
+    }
+
+    pub(crate) fn prepared_frame_rate(&self) -> Option<f64> {
+        if !self.scalar_playlist || self.tombstone.is_some() {
+            return None;
+        }
+        let rendition = self.rendition.as_ref()?;
+        // A nominal encode grid does not prove the shortest quantized MP4
+        // sample. Keep this unknown until that output has measured cadence.
+        if rendition.recipe.encoding.is_some() {
+            return None;
+        }
+        let index = rendition.index.as_ref()?;
+        let cadence = index.verified_refit_cadence()?;
+        crate::transcode::prepared_frame_rate_bound(index.timescale, cadence.minimum_interval_ticks)
+    }
+
     pub(crate) fn retained_output_facts(&self) -> Option<crate::transcode::RetainedOutputFacts> {
         let artifact = self.retained_output.as_ref()?;
         Some(artifact.facts())

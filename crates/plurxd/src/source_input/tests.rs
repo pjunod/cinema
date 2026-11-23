@@ -97,6 +97,7 @@ async fn input_with_observer(
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         read_failed: std::sync::atomic::AtomicBool::new(false),
+        physical_read_failed: std::sync::atomic::AtomicBool::new(false),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
         read_gate,
     });
@@ -176,6 +177,7 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         read_failed: std::sync::atomic::AtomicBool::new(false),
+        physical_read_failed: std::sync::atomic::AtomicBool::new(false),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
         read_gate: Some(Arc::clone(&gate)),
     });

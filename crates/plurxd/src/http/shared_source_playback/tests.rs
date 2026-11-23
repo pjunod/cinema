@@ -1496,6 +1496,602 @@ async fn actual_range_init(
     }
 }
 
+/// A publication the ingress admission refused for now is answered as the
+/// typed retry; one it refused outright keeps its old plain answer.
+#[test]
+fn publication_refusals_answer_by_their_persistence() {
+    use crate::transcode::source_actor::RefusalPersistence;
+    match ApiError::from(super::ingress::PublicationRefusal(
+        RefusalPersistence::Transient,
+    )) {
+        ApiError::TypedRetry {
+            status,
+            code,
+            retry_after_seconds,
+            ..
+        } => {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(code, crate::sharing_client::SOURCE_LIVE_RETRY_CODE);
+            assert!(retry_after_seconds > 0);
+        }
+        other => panic!("a transient publication refusal retries: {other:?}"),
+    }
+    assert!(!matches!(
+        ApiError::from(super::ingress::PublicationRefusal(
+            RefusalPersistence::Terminal
+        )),
+        ApiError::TypedRetry { .. }
+    ));
+}
+/// Production 2026-11-22 (M6 file 6751): a live growing copy's Status was
+/// refused once and answered with the terminal-only projection, so the
+/// receiver retired a healthy session and Safari froze when its buffer ran
+/// out. A refusal that passes on its own (here, the actor's open-body limit)
+/// must be answered as a retry the receiver keeps the session through, on
+/// Status and on resources alike, and the next Status must succeed; a dead
+/// producer must still end the session, in the projection an older receiver
+/// already reads as the end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does() {
+    use crate::transcode::source_actor::GROWING_LEASE_TIMEOUT_MS;
+    use std::time::{Duration, Instant};
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let sessions = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str()
+    );
+    let response = actual_resource_request(
+        address,
+        true,
+        &sessions,
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "range Start");
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Start envelope");
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("strict Source envelope");
+    assert!(!decoded.response().vod, "a growing copy");
+    assert_eq!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .lease_timeout_ms,
+        GROWING_LEASE_TIMEOUT_MS
+    );
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"]
+        .as_str()
+        .expect("request")
+        .to_owned();
+    recipe["incarnation_id"] = json!(decoded.incarnation_id());
+    recipe["session_id"] = json!(decoded.response().session_id);
+    recipe["control_epoch"] = json!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .control_epoch
+    );
+    let operation = format!("{sessions}/{request}");
+    let status = || {
+        let body = serde_json::to_vec(&recipe).expect("status body");
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/status");
+        async move { actual_resource_request(address, true, &url, headers, body).await }
+    };
+    let mut playlist = recipe.clone();
+    playlist["resource"] = json!(decoded
+        .response()
+        .playlist_url
+        .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
+        .expect("session playlist"));
+    let resource = || {
+        let body = serde_json::to_vec(&playlist).expect("resource body");
+        let headers = fixture.headers.clone();
+        let url = format!("{operation}/resources");
+        async move { actual_resource_request(address, true, &url, headers, body).await }
+    };
+    assert_eq!(
+        status().await.status(),
+        StatusCode::OK,
+        "Status of the live copy"
+    );
+
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("registry")
+        .first()
+        .cloned()
+        .expect("actual entry");
+    let owned = entry
+        .wait(Instant::now() + Duration::from_secs(1))
+        .await
+        .expect("actual actor");
+    // Fill the actor's open bodies, as 64 transfers still in flight do.
+    let mut bodies = Vec::new();
+    while let Ok((_, guard)) = owned
+        .actor
+        .open_start_response(Instant::now() + Duration::from_secs(5))
+        .await
+    {
+        bodies.push(guard);
+        assert!(bodies.len() <= 64, "the open-body limit holds");
+    }
+    assert!(
+        !bodies.is_empty(),
+        "the copy served bodies before its limit"
+    );
+    for (what, answer) in [("Status", status().await), ("playlist", resource().await)] {
+        assert_eq!(
+            answer.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{what} retries"
+        );
+        let retry = answer
+            .headers()
+            .contains_key(axum::http::header::RETRY_AFTER);
+        assert!(retry, "{what} names when to ask again");
+        // What the receiver reads it as: the Source unavailable for now,
+        // which its Status owner and resource relay both keep a session
+        // through (`peer_failure` maps it to `PeerUnavailable`).
+        assert!(matches!(
+            crate::sharing_client::peer_status_refusal(answer.status(), retry),
+            crate::sharing_client::PeerError::Unavailable
+        ));
+        let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+            .await
+            .expect("retry body");
+        let body: Value = serde_json::from_slice(&body).expect("typed retry");
+        assert_eq!(body["code"], "sharing_source_retry", "{what}");
+    }
+    assert_eq!(
+        owned.actor.settlement_status(),
+        None,
+        "the session is not retired"
+    );
+    drop(bodies);
+    let answer = status().await;
+    assert_eq!(answer.status(), StatusCode::OK, "the next Status succeeds");
+    let body = axum::body::to_bytes(answer.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Status envelope");
+    super::super::decode_source_start_response(&body, &fixture.reference)
+        .expect("the live Start response again");
+
+    // The producer dies. That is the session's end: the first Status after
+    // it is terminal to the receiver, and the actor is retired, by that
+    // Status or by its own loop waking on the dead copy first (either may
+    // win); once the actor settles, Status answers the projection, which
+    // every receiver's own parse refuses and ends its session over.
+    owned
+        .actor
+        .growing_backing()
+        .expect("growing copy")
+        .retire();
+    let answer = status().await;
+    let code = answer.status();
+    let retry = answer
+        .headers()
+        .contains_key(axum::http::header::RETRY_AFTER);
+    assert!(!retry, "a dead copy is never answered as a retry: {code}");
+    assert!(
+        owned.actor.retirement_requested_for_test(),
+        "a dead copy's actor is retired"
+    );
+    tokio::time::timeout(Duration::from_secs(20), owned.actor.settled_for_test())
+        .await
+        .expect("a dead copy's actor settles promptly")
+        .expect("settled cleanly");
+    let answer = status().await;
+    assert_eq!(answer.status(), StatusCode::OK, "the terminal projection");
+    assert!(!answer
+        .headers()
+        .contains_key(axum::http::header::RETRY_AFTER));
+    let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+        .await
+        .expect("terminal body");
+    let projection: Value = serde_json::from_slice(&body).expect("terminal projection");
+    assert!(projection.get("response").is_none(), "{projection}");
+    for key in ["reference", "request_id", "incarnation_id", "state"] {
+        assert!(projection.get(key).is_some(), "{key} in {projection}");
+    }
+    let session =
+        crate::sharing_client::SourcePeerSession::new(fixture.reference.clone(), &fixture.request)
+            .expect("receiver peer session");
+    let known = crate::sharing_client::SourcePeerLineage::from_start(
+        decoded.incarnation_id(),
+        decoded.response(),
+    )
+    .expect("Source lineage");
+    let parsed =
+        crate::sharing_client::SourceStatusReceipt::parse_for_test(&body, &session, &known);
+    // No receiver reads the projection as a live response: its Status parse
+    // refuses the shape, and that refusal ends the receiver's session rather
+    // than keeping it (`peer_failure` maps it to `Unresolved`, never to
+    // `PeerUnavailable`).
+    let Err(error) = parsed else {
+        panic!("the receiver read the terminal projection as a live Status");
+    };
+    assert!(
+        matches!(error, crate::sharing_client::PeerError::InvalidResponse),
+        "{error:?}"
+    );
+    assert!(matches!(
+        crate::http::shared_receiver_playback::peer_failure(error),
+        crate::http::shared_receiver_playback::ReceiverStartError::Unresolved
+    ));
+    let _ = stop.send(());
+    let _ = server.await;
+    fixture.shutdown().await;
+}
+/// A live Source session as a receiver holds it: the peer router serving
+/// it, and the exact Status a receiver sends for it.
+struct LiveSourceSession {
+    direct: bool,
+    address: std::net::SocketAddr,
+    operation: String,
+    status_body: Vec<u8>,
+    stop: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
+}
+impl LiveSourceSession {
+    async fn start(fixture: &RealSourceStartFixture, direct: bool) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(crate::serve_http(
+            listener,
+            super::super::sharing::peer_router((*fixture.state).clone()),
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        let sessions = format!(
+            "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+            fixture.reference.item_id.as_str(),
+            fixture.reference.file_id.as_str()
+        );
+        let response = actual_resource_request(
+            address,
+            true,
+            &sessions,
+            fixture.headers.clone(),
+            fixture.request.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "Start");
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("Start envelope");
+        let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+        let request = recipe["session"]["request_id"]
+            .as_str()
+            .expect("request")
+            .to_owned();
+        if direct {
+            let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
+                &bytes,
+                &fixture.reference,
+            )
+            .expect("strict direct Start");
+            recipe["incarnation_id"] = json!(decoded.incarnation_id());
+            recipe["session_id"] = json!(decoded.direct().session_id);
+            recipe["control_epoch"] = json!(decoded.direct().control_epoch);
+        } else {
+            let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+                .expect("strict Source envelope");
+            recipe["incarnation_id"] = json!(decoded.incarnation_id());
+            recipe["session_id"] = json!(decoded.response().session_id);
+            recipe["control_epoch"] = json!(
+                decoded
+                    .response()
+                    .control
+                    .as_ref()
+                    .expect("control")
+                    .control_epoch
+            );
+        }
+        Self {
+            direct,
+            address,
+            operation: format!("{sessions}/{request}"),
+            status_body: serde_json::to_vec(&recipe).expect("status body"),
+            stop,
+            server,
+        }
+    }
+    async fn status(&self, fixture: &RealSourceStartFixture) -> axum::response::Response {
+        actual_resource_request(
+            self.address,
+            true,
+            &format!("{}/status", self.operation),
+            fixture.headers.clone(),
+            self.status_body.clone(),
+        )
+        .await
+    }
+    /// A Status answered with the live session, not the terminal projection
+    /// (which is a 200 as well).
+    async fn assert_live(&self, fixture: &RealSourceStartFixture, what: &str) {
+        let answer = self.status(fixture).await;
+        assert_eq!(answer.status(), StatusCode::OK, "{what}");
+        let body = axum::body::to_bytes(answer.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("Status envelope");
+        let live = if self.direct {
+            crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
+                &body,
+                &fixture.reference,
+            )
+            .is_ok()
+        } else {
+            super::super::decode_source_start_response(&body, &fixture.reference).is_ok()
+        };
+        assert!(live, "{what}: {}", String::from_utf8_lossy(&body));
+    }
+    /// Whether the answer is the typed retry a receiver keeps its session
+    /// through.
+    async fn is_retry(answer: axum::response::Response) -> bool {
+        let code = answer.status();
+        let retry = code == StatusCode::SERVICE_UNAVAILABLE
+            && answer
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER);
+        let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+            .await
+            .expect("answer body");
+        retry
+            && serde_json::from_slice::<Value>(&body)
+                .is_ok_and(|body| body["code"] == "sharing_source_retry")
+    }
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        let _ = self.server.await;
+    }
+}
+
+async fn live_source_owner(fixture: &RealSourceStartFixture) -> super::SourceStartOwned {
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("registry")
+        .first()
+        .cloned()
+        .expect("actual entry");
+    entry
+        .wait(std::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await
+        .expect("actual actor")
+}
+
+/// Make the Source ingress ledger one the Store cannot answer for, or
+/// restore it exactly: its row stays valid JSON (the table checks that) but
+/// no longer decodes as custody.
+async fn set_ledger_unreadable(fixture: &RealSourceStartFixture, unreadable: bool) {
+    let client = fixture
+        .selected
+        .local_client()
+        .expect("actual selected one-voter client");
+    let statement = if unreadable {
+        "UPDATE sharing_ingress_custody SET custody_json='['||custody_json||']' WHERE principal_kind='source'"
+    } else {
+        "UPDATE sharing_ingress_custody SET custody_json=substr(custody_json,2,length(custody_json)-2) WHERE principal_kind='source'"
+    };
+    client
+        .execute(statement, hiqlite::params![])
+        .await
+        .expect("ledger fixture");
+}
+
+/// A Store that cannot answer just now is not the session's end: Status
+/// answers it as a retry and the owner's renewal tick keeps the session.
+/// Nothing renews the lease meanwhile, so the lease the Store last confirmed
+/// bounds that: once it has passed, the same refusal is terminal and the
+/// tick itself retires the owner, though the Store still cannot say so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_unanswerable_store_passes_within_the_confirmed_lease_and_ends_past_it() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    set_ledger_unreadable(&fixture, true).await;
+    assert!(
+        LiveSourceSession::is_retry(session.status(&fixture).await).await,
+        "a Store that cannot answer is a retry"
+    );
+    // A renewal tick runs to its end while the Store cannot answer: the
+    // next one begins, and the owner is still not retiring.
+    tokio::time::timeout(Duration::from_secs(30), owned.actor.ticks_for_test(2))
+        .await
+        .expect("renewal ticks run");
+    assert!(
+        !owned.actor.retirement_requested_for_test(),
+        "the tick keeps the session while the lease holds"
+    );
+    assert_eq!(owned.actor.settlement_status(), None);
+    owned.actor.lapse_lease_for_test();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        owned.actor.retirement_requested_wait_for_test(),
+    )
+    .await
+    .expect("past the confirmed lease the tick retires the owner");
+    assert!(
+        !LiveSourceSession::is_retry(session.status(&fixture).await).await,
+        "past the confirmed lease nothing is answered as a retry"
+    );
+    set_ledger_unreadable(&fixture, false).await;
+    // The owner settles promptly. Its settlement may itself have met the
+    // Store that could not answer, and then says so rather than claiming a
+    // clean release.
+    let settled = tokio::time::timeout(Duration::from_secs(20), owned.actor.settled_for_test())
+        .await
+        .expect("the retired owner settles");
+    assert!(
+        matches!(
+            settled,
+            Ok(()) | Err(crate::transcode::source_actor::SourceWorkerError::Unresolved)
+        ),
+        "{settled:?}"
+    );
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
+/// The growing deadline judgement on a real owner: a wait over a producer
+/// that advanced passes and keeps the owner; a stuck one is terminal and
+/// retires it, with Revoke, and the owner settles. Judging the same stall
+/// again (the request's own deadline after its inner wait) changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_not() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let slow = owned.actor.deadline_refusal_for_test(false);
+    assert!(slow.is_transient());
+    assert!(!owned.actor.retirement_requested_for_test());
+    session
+        .assert_live(&fixture, "a slow producer keeps the session")
+        .await;
+    let stuck = owned.actor.deadline_refusal_for_test(true);
+    assert!(!stuck.is_transient());
+    assert!(owned.actor.retirement_requested_for_test());
+    assert!(!owned.actor.deadline_refusal_for_test(true).is_transient());
+    assert!(
+        !LiveSourceSession::is_retry(session.status(&fixture).await).await,
+        "a stuck producer's session is never answered as a retry"
+    );
+    tokio::time::timeout(Duration::from_secs(20), owned.actor.settled_for_test())
+        .await
+        .expect("the stuck owner settles")
+        .expect("settled cleanly");
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
+/// A direct owner answers Status like a growing one: a refusal that passes
+/// (its open bodies full, a ledger the Store cannot answer for) is a retry
+/// and keeps the owner; a refusal that does not (its file replaced) retires
+/// it, and the next Status is the terminal projection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_direct_status_retries_what_passes_and_retires_over_what_does_not() {
+    use std::time::{Duration, Instant};
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, true).await;
+    session
+        .assert_live(&fixture, "Status of the direct session")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    assert!(owned.actor.is_direct());
+
+    let mut bodies = Vec::new();
+    while let Ok((_, guard)) = owned
+        .actor
+        .open_direct_start(Instant::now() + Duration::from_secs(5))
+        .await
+    {
+        bodies.push(guard);
+        assert!(bodies.len() <= 64, "the open-body limit holds");
+    }
+    assert!(
+        LiveSourceSession::is_retry(session.status(&fixture).await).await,
+        "full open bodies are a retry"
+    );
+    assert!(!owned.actor.retirement_requested_for_test());
+    drop(bodies);
+    session
+        .assert_live(&fixture, "Status once bodies close")
+        .await;
+
+    set_ledger_unreadable(&fixture, true).await;
+    let unreadable = LiveSourceSession::is_retry(session.status(&fixture).await).await;
+    set_ledger_unreadable(&fixture, false).await;
+    assert!(
+        unreadable,
+        "a ledger the Store cannot answer for is a retry"
+    );
+    assert!(!owned.actor.retirement_requested_for_test());
+    session
+        .assert_live(&fixture, "Status once the ledger reads")
+        .await;
+
+    // A file replaced under the session: its identity no longer matches.
+    let path = owned.actor.source_path_for_test();
+    let modified = std::fs::metadata(&path)
+        .expect("source metadata")
+        .modified()
+        .expect("source mtime");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("source file")
+        .set_modified(modified + Duration::from_secs(60))
+        .expect("replaced source");
+    assert!(
+        !LiveSourceSession::is_retry(session.status(&fixture).await).await,
+        "a replaced file is never a retry"
+    );
+    assert!(
+        owned.actor.retirement_requested_for_test(),
+        "the terminal direct refusal retires the owner"
+    );
+    tokio::time::timeout(Duration::from_secs(20), owned.actor.settled_for_test())
+        .await
+        .expect("the retired direct owner settles")
+        .expect("settled cleanly");
+    let answer = session.status(&fixture).await;
+    assert_eq!(answer.status(), StatusCode::OK, "the terminal projection");
+    let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+        .await
+        .expect("terminal body");
+    let projection: Value = serde_json::from_slice(&body).expect("terminal projection");
+    assert!(projection.get("direct").is_none(), "{projection}");
+    assert!(projection.get("state").is_some(), "{projection}");
+    session.stop().await;
+    fixture.shutdown().await;
+}
 async fn actual_source_range_delivery(mode: SourceFixtureMode) {
     let mut fixture = real_source_start_fixture_with(mode, None).await;
     fixture.keep_fixture_membership_stable().await;

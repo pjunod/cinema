@@ -990,11 +990,225 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
     let failed = acquire_title(
         TitleAcquisitionMode::Maintenance,
         None,
-        async { Err("source changed".to_owned()) },
+        async { Err(TitleScanError::from("source changed")) },
         async { panic!("failed source acquisition cannot qualify") },
     )
     .await;
-    assert!(matches!(failed, Err(error) if error == "source changed"));
+    assert!(matches!(failed, Err(TitleScanError::Failed(error)) if error == "source changed"));
+    let interrupted = acquire_title(
+        TitleAcquisitionMode::Maintenance,
+        None,
+        async { Err(TitleScanError::SourceInterrupted("read".into())) },
+        async { panic!("an interrupted acquisition cannot qualify") },
+    )
+    .await;
+    assert!(matches!(
+        interrupted,
+        Err(TitleScanError::SourceInterrupted(_))
+    ));
+}
+
+#[test]
+fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
+    use super::super::dv_title::{scanner_verdict, SourceRead};
+    use std::os::unix::process::ExitStatusExt;
+    let output = |raw: i32, stdout: &[u8], stderr: &[u8]| {
+        Ok(plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        })
+    };
+    // Readable input: success returns the aggregate bytes.
+    assert_eq!(
+        scanner_verdict(output(0, b"{}", b""), SourceRead::Clean).expect("aggregate"),
+        b"{}".to_vec()
+    );
+    // A genuine refusal keeps its exit status and the end of stderr.
+    let long = format!("{}\nfatal: no RPU in frame 9\n", "noise ".repeat(400));
+    let Err(TitleScanError::Failed(reason)) =
+        scanner_verdict(output(256, b"", long.as_bytes()), SourceRead::Clean)
+    else {
+        panic!("a non-zero exit over readable input is a file verdict");
+    };
+    assert!(reason.contains("exit status: 1"), "{reason}");
+    assert!(reason.contains("fatal: no RPU in frame 9"), "{reason}");
+    assert!(!reason.contains('\n'));
+    assert!(reason.len() < 700, "stderr is bounded: {}", reason.len());
+    // The bridge's private capability URL never reaches a log line.
+    let Err(TitleScanError::Failed(reason)) = scanner_verdict(
+        output(
+            256,
+            b"",
+            b"http://127.0.0.1:41234/0123456789abcdef0123456789abcdef: I/O error",
+        ),
+        SourceRead::Clean,
+    ) else {
+        panic!("refusal");
+    };
+    assert!(
+        !reason.contains("0123456789abcdef0123456789abcdef"),
+        "{reason}"
+    );
+    // A failed served read outranks the scanner's own exit, including a
+    // success: an aggregate over truncated input must never be trusted.
+    // The storage class and the service class stay distinct.
+    for raw in [256, 0] {
+        assert!(matches!(
+            scanner_verdict(output(raw, b"{}", b"short read"), SourceRead::Interrupted),
+            Err(TitleScanError::SourceInterrupted(reason)) if reason.contains("short read")
+        ));
+        assert!(matches!(
+            scanner_verdict(output(raw, b"{}", b"short read"), SourceRead::StorageFailed),
+            Err(TitleScanError::SourceReadFailed(reason)) if reason.contains("short read")
+        ));
+    }
+    assert!(matches!(
+        scanner_verdict(
+            Err(std::io::Error::other("deadline")),
+            SourceRead::Interrupted
+        ),
+        Err(TitleScanError::SourceInterrupted(_))
+    ));
+    assert!(matches!(
+        scanner_verdict(Err(std::io::Error::other("deadline")), SourceRead::Clean),
+        Err(TitleScanError::Failed(reason)) if reason.contains("deadline")
+    ));
+}
+
+#[tokio::test]
+async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_charge() {
+    use plurx_core::store::background_jobs::{JobState, SettleJob};
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let start = now_ms();
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::FragmentIndexBuild {
+                file_id: 1,
+                source_generation: "source:1".to_owned(),
+                source_size: 100,
+                source_mtime: 1,
+                source_sha256: "d".repeat(64),
+                cache_key: "c".repeat(64),
+                pipeline_digest: "a".repeat(64),
+            },
+            dedupe_key: "fragment:1".to_owned(),
+            priority: 1,
+            not_before_ms: start,
+            now_ms: start,
+            request: JobRequest {
+                scope: "user:1".to_owned(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "b".repeat(64),
+                consumer_kind: "analysis".to_owned(),
+                consumer_ref: "analysis:1".to_owned(),
+                target_node_id: None,
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("enqueue");
+    let claim = |revision: i64, at: i64| ClaimJob {
+        job_id: id.clone(),
+        expected_revision: revision,
+        node_id: "node-a".to_owned(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::FragmentIndexBuild,
+        payload_version: 1,
+        now_ms: at,
+        dispatched_at_ms: at,
+    };
+    let claimed = |outcome| match outcome {
+        ClaimOutcome::Claimed { job } => *job,
+        outcome => panic!("expected claim, got {outcome:?}"),
+    };
+    let settle = |token, settlement, at| SettleJob {
+        token,
+        settlement,
+        now_ms: at,
+    };
+
+    let first = claimed(store.claim_job(claim(0, start)).await.expect("claim"));
+    let interrupted = scan_failure_settlement(
+        &TitleScanError::SourceInterrupted("source read failed".into()),
+        &id,
+        first.failed_attempts,
+    );
+    assert!(matches!(interrupted, JobSettlement::Yield { .. }));
+    let JobSettlement::Yield { not_before_ms, .. } = &interrupted else {
+        unreachable!()
+    };
+    assert!(*not_before_ms > start, "a whole-title reread is backed off");
+    assert!(store
+        .settle_job(settle(first.token.expect("token"), interrupted, start))
+        .await
+        .expect("yield"));
+    let yielded = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(yielded.state, JobState::Queued);
+    assert_eq!(yielded.failed_attempts, 0, "interruption is not a verdict");
+    assert_eq!(
+        yielded.last_error_code.as_deref(),
+        Some("title_source_interrupted")
+    );
+
+    // Reclaim once the yield's backoff has elapsed. The refusal below computes
+    // the same uncharged-attempt delay from a later clock, so its retry time is
+    // never earlier than this settlement time.
+    let later = yielded.not_before_ms;
+    let second = claimed(
+        store
+            .claim_job(claim(yielded.revision, later))
+            .await
+            .expect("reclaim"),
+    );
+    let refused = scan_failure_settlement(
+        &TitleScanError::Failed("complete-title DV scan failed (exit status: 1)".into()),
+        &id,
+        second.failed_attempts,
+    );
+    assert!(store
+        .settle_job(settle(second.token.expect("token"), refused, later))
+        .await
+        .expect("retry"));
+    let charged = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(
+        charged.failed_attempts, 1,
+        "a file refusal is still charged"
+    );
+    assert_eq!(
+        charged.last_error_code.as_deref(),
+        Some("title_scan_failed")
+    );
+
+    // A storage read failure (a bad sector) must stay bounded by the attempt
+    // limit, so it is charged too, under its own code.
+    let third_at = charged.not_before_ms;
+    let third = claimed(
+        store
+            .claim_job(claim(charged.revision, third_at))
+            .await
+            .expect("third claim"),
+    );
+    let storage = scan_failure_settlement(
+        &TitleScanError::SourceReadFailed("source storage read failed".into()),
+        &id,
+        third.failed_attempts,
+    );
+    assert!(matches!(storage, JobSettlement::Retry { .. }));
+    assert!(store
+        .settle_job(settle(third.token.expect("token"), storage, third_at))
+        .await
+        .expect("storage retry"));
+    let bounded = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(bounded.failed_attempts, 2, "a storage failure is charged");
+    assert_eq!(
+        bounded.last_error_code.as_deref(),
+        Some("title_source_read_failed")
+    );
 }
 
 #[tokio::test]

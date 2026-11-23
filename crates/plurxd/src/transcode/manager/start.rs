@@ -2048,6 +2048,30 @@ impl TranscodeManager {
                 .and_then(Result::ok)
         });
         let native_split = split_reservation.is_some();
+        if options.convert_dolby_vision && !native_split {
+            let reason = if !allow_native_split {
+                "not_allowed_for_request"
+            } else if !can_split_at_requested_offset {
+                "offset_without_video_index"
+            } else if audio_offset_ms != 0 {
+                "audio_offset"
+            } else if takeover.is_some() {
+                "takeover"
+            } else if !segmenting {
+                "not_segmenting"
+            } else if split_startup_budget <= 0 {
+                "no_split_startup_budget"
+            } else {
+                "split_scratch_reservation_refused"
+            };
+            tracing::info!(
+                target: "plurxd::transcode",
+                file_id,
+                start_seconds,
+                reason,
+                "native HLS split not reserved; the copy keeps the ordinary mux"
+            );
+        }
         // Only a split with a grant needs a fresh inventory. Keep ordinary
         // retained output eligible when its extra scratch reservation fails.
         let retained_budget = if native_split {

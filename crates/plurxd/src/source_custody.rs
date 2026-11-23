@@ -89,8 +89,8 @@ pub(crate) async fn configure_access_roots(
     config: &plurx_core::config::Config,
     dirs: &crate::state::Dirs,
 ) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    let validated = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let validated = match crate::dv_tools::ToolSet::capture().await {
         Ok(Some(tools)) => tools.executable_directories(),
         Ok(None) => Vec::new(),
         Err(error) => {
@@ -98,7 +98,7 @@ pub(crate) async fn configure_access_roots(
             Vec::new()
         }
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let validated = Vec::new();
     let (owned, tools) = access_root_paths(config, dirs, &validated);
     plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools).map_err(|error| {

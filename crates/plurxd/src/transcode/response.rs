@@ -32,6 +32,22 @@ pub(crate) struct VodResponsePublication<T> {
 }
 
 impl MediaResponseOwner {
+    /// Structural identity of the exact attached presentation, not a request hint.
+    pub(crate) fn is_scalar_vod(&self) -> bool {
+        match &self.0 {
+            MediaResponseOwnerKind::Vod(owner) => owner.is_scalar_playlist(),
+            MediaResponseOwnerKind::Rolling { .. } => false,
+        }
+    }
+
+    /// Conservative timing from this attachment's immutable media evidence.
+    pub(crate) fn prepared_frame_rate(&self) -> Option<f64> {
+        match &self.0 {
+            MediaResponseOwnerKind::Vod(owner) => owner.prepared_frame_rate(),
+            MediaResponseOwnerKind::Rolling { .. } => None,
+        }
+    }
+
     /// Which kind of owner this is, and the exact producer attempt a rolling
     /// owner is bound to, for correlating a failed response in the log.
     pub(crate) fn log_identity(&self) -> (&'static str, Option<u64>) {
@@ -1022,4 +1038,52 @@ pub(super) fn first_media_settlement_slots() -> &'static Arc<tokio::sync::Semaph
             MAX_FIRST_MEDIA_SETTLEMENT_OWNERS,
         ))
     })
+}
+
+/// HLS FRAME-RATE is an upper bound. Round toward a shorter interval, including
+/// the Android parser's Float conversion; never widen a decoded-frame proof.
+pub(crate) fn prepared_frame_rate_bound(timescale: u32, interval_ticks: u64) -> Option<f64> {
+    if timescale == 0 || interval_ticks == 0 || interval_ticks > u64::from(timescale) {
+        return None;
+    }
+    let required = f64::from(timescale) / interval_ticks as f64;
+    let mut milli = (u64::from(timescale) * 1_000).div_ceil(interval_ticks);
+    let parsed = (milli as f64 / 1_000.0) as f32;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return None;
+    }
+    if f64::from(parsed) < required {
+        // A three-decimal value can round down at a Float boundary. Move to
+        // the next representable Float before formatting the decimal again.
+        milli =
+            (f64::from(f32::from_bits(parsed.to_bits().checked_add(1)?)) * 1_000.0).ceil() as u64;
+    }
+    let rate = milli as f64 / 1_000.0;
+    let reparsed: f32 = format!("{rate:.3}").parse().ok()?;
+    (reparsed.is_finite() && f64::from(reparsed) >= required).then_some(rate)
+}
+
+#[cfg(test)]
+mod prepared_timing_tests {
+    use super::prepared_frame_rate_bound;
+
+    #[test]
+    fn playlist_float_roundtrip_never_widens_the_verified_interval() {
+        for (scale, ticks) in [
+            (1_000, 41),
+            (24_000, 1_001),
+            (90_000, 3_003),
+            (u32::MAX, 1),
+            (u32::MAX, 16_777_217),
+            (1, 1),
+        ] {
+            let rate = prepared_frame_rate_bound(scale, ticks).expect("bounded rate");
+            let parsed: f32 = format!("{rate:.3}").parse().expect("Media3 Float");
+            assert!(1.0 / f64::from(parsed) <= ticks as f64 / f64::from(scale));
+        }
+        assert_eq!(prepared_frame_rate_bound(1_000, 41), Some(24.391));
+        assert!(prepared_frame_rate_bound(0, 1).is_none());
+        assert!(prepared_frame_rate_bound(1_000, 0).is_none());
+        assert!(prepared_frame_rate_bound(1_000, 1_001).is_none());
+    }
 }

@@ -4,8 +4,9 @@
 //   segment_decode_render --refit-stats SOURCE VIDEO_INDEX [--threads N]
 //                         [--frames FIRST LAST | --resume FIRST FIRST_PTS]
 //   segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
+//   segment_decode_render --export-composed-topleft SOURCE VIDEO_INDEX FIRST LAST NEW_OUTPUT.yuv
 //
-// Either takes a trailing diagnostic [--area LEFT RIGHT TOP BOTTOM], which
+// The first two modes take a trailing diagnostic [--area LEFT RIGHT TOP BOTTOM], which
 // replaces every frame's L5 active area with these offsets, to reproduce an
 // offline region of interest. Production callers do not pass it.
 //
@@ -15,6 +16,12 @@
 // pixels from each frame's own RPU (refit_compose.h). No GPU, Vulkan device
 // or VA-API device is opened. FIRST and LAST are inclusive presentation-order
 // frame ordinals from the start of the title.
+//
+// --export-composed-topleft uses the same admitted CPU composition and
+// requires exactly 48 frames. It writes an exclusive full-raster raw
+// yuv420p10le file and a stdout JSONL sidecar with the versioned color tags,
+// source clocks, RPU and frame hashes. The final export_complete record
+// follows a successful close of the complete raw file.
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
@@ -57,6 +64,7 @@
 // a random-access point (exit 1 otherwise).
 
 #include "refit_compose.h"
+#include "refit_topleft.h"
 
 // About 11.5 hours at 24 frames per second.
 #define REFIT_MAX_TITLE_FRAMES 1000000
@@ -66,7 +74,8 @@
 
 #define REFIT_EXIT_CONTENT 3
 
-static bool refit_dump, refit_area_override;
+static bool refit_dump, refit_area_override, refit_topleft;
+static FILE *refit_topleft_output;
 // --resume: the resume point, and the preroll decoded before it.
 static int64_t refit_resume_frame = -1, refit_resume_pts, refit_preroll;
 static bool refit_resume_started, refit_preroll_seen;
@@ -221,6 +230,61 @@ static bool refit_scene_refresh(const uint8_t *nalu, size_t size, const AVDOVIMe
   return refresh;
 }
 
+static void refit_sample(const AVFrame *bl, const AVFrame *el, int x, int y,
+                         uint16_t base[3], uint16_t enhancement[3]) {
+  struct refit_sites sites = refit_pair(x, y, bl->width, bl->height);
+  base[0] = refit_code(bl, 0, x, y);
+  base[1] = refit_code(bl, 1, sites.bl_chroma[0], sites.bl_chroma[1]);
+  base[2] = refit_code(bl, 2, sites.bl_chroma[0], sites.bl_chroma[1]);
+  enhancement[0] = refit_code(el, 0, sites.el_luma[0], sites.el_luma[1]);
+  enhancement[1] = refit_code(el, 1, sites.el_chroma[0], sites.el_chroma[1]);
+  enhancement[2] = refit_code(el, 2, sites.el_chroma[0], sites.el_chroma[1]);
+}
+
+static void refit_topleft_frame(const AVFrame *bl, const AVFrame *el,
+                              const AVDOVIMetadata *data,
+                              const struct refit_mapping *mapping, int64_t ordinal,
+                              const uint8_t *nalu, size_t nalu_size) {
+  const AVDOVIColorMetadata *color = av_dovi_get_color(data);
+  refit_content(refit_topleft_mapping(data), "TopLeft v1 requires identity mapping and calibrated linear NLQ");
+  refit_content(refit_topleft_color(color), "TopLeft v1 requires the calibrated Q13/Q28 full-range color matrix");
+  size_t pixels = (size_t)bl->width * bl->height;
+  size_t bytes = 3 * pixels;
+  if (!refit_records) {
+    refit_records = malloc(bytes);
+    need(refit_records != NULL, "one-frame TopLeft export buffer");
+    refit_records_capacity = bytes;
+  }
+  need(bytes == refit_records_capacity, "stable TopLeft raster");
+  uint8_t *cb = refit_records + 2 * pixels;
+  uint8_t *cr = cb + pixels / 2;
+  for (int y = 0; y < bl->height; y++) {
+    for (int x = 0; x < bl->width; x++) {
+      uint16_t base[3], enhancement[3], composed[3], rgb[3];
+      refit_sample(bl, el, x, y, base, enhancement);
+      refit_compose(mapping, base, enhancement, composed);
+      refit_topleft_rgb(color, composed, rgb);
+      int64_t luma;
+      uint16_t code = refit_topleft_luma(rgb, &luma);
+      refit_topleft_store(refit_records, (size_t)y * bl->width + x, code);
+      if (!(x % 2) && !(y % 2)) {
+        size_t chroma = (size_t)(y / 2) * (bl->width / 2) + x / 2;
+        refit_topleft_store(cb, chroma, refit_topleft_chroma(rgb[2], luma, 18814));
+        refit_topleft_store(cr, chroma, refit_topleft_chroma(rgb[0], luma, 14746));
+      }
+    }
+  }
+  char rpu_sha[65], frame_sha[65];
+  hash_bytes(nalu, nalu_size, rpu_sha);
+  hash_bytes(refit_records, bytes, frame_sha);
+  need(fwrite(refit_records, 1, bytes, refit_topleft_output) == bytes &&
+           printf("{\"kind\":\"export_frame\",\"ordinal\":%lld,\"pts_ticks\":%lld,"
+                  "\"duration_ticks\":%lld,\"bytes\":%zu,\"source_rpu_sha256\":\"%s\","
+                  "\"frame_sha256\":\"%s\"}\n", (long long)ordinal, (long long)bl->pts,
+                  (long long)bl->duration, bytes, rpu_sha, frame_sha) > 0,
+       "TopLeft frame and receipt write");
+}
+
 static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
   need(bl->pts <= INT64_MAX - bl->duration, "frame end overflow");
   AVFrameSideData *raw = av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_RPU_BUFFER);
@@ -249,6 +313,11 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
            bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w &&
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
        "software-decoded planar ten-bit layers");
+  if (refit_topleft) {
+    refit_topleft_frame(bl, el, data, &mapping, ordinal, nalu, raw->size + 2);
+    refit_composed++;
+    return;
+  }
   int area[4] = {0, 0, 0, 0}; // left, right, top, bottom
   const AVDOVIDmData *l5 = av_dovi_find_level(data, 5);
   if (refit_area_override) {
@@ -284,15 +353,8 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
     int64_t taken = 0;
     for (int y = y0 + phases[k]; y < y1; y += REFIT_STRIDE) {
       for (int x = x0 + phases[k]; x < x1; x += REFIT_STRIDE) {
-        struct refit_sites s = refit_pair(x, y, w, h);
-        const uint16_t base[3] = {
-            refit_code(bl, 0, x, y), refit_code(bl, 1, s.bl_chroma[0], s.bl_chroma[1]),
-            refit_code(bl, 2, s.bl_chroma[0], s.bl_chroma[1])};
-        const uint16_t enhancement[3] = {
-            refit_code(el, 0, s.el_luma[0], s.el_luma[1]),
-            refit_code(el, 1, s.el_chroma[0], s.el_chroma[1]),
-            refit_code(el, 2, s.el_chroma[0], s.el_chroma[1])};
-        uint16_t composed[3];
+        uint16_t base[3], enhancement[3], composed[3];
+        refit_sample(bl, el, x, y, base, enhancement);
         refit_compose(&mapping, base, enhancement, composed);
         taken++;
         if (refit_dump) {
@@ -433,13 +495,17 @@ static void refit_drain(void) {
 
 static int refit_main(int argc, char **argv) {
   refit_dump = !strcmp(argv[1], "--dump-composed");
+  refit_topleft = !strcmp(argv[1], "--export-composed-topleft");
   refit_area_override = argc >= 5 && !strcmp(argv[argc - 5], "--area");
   if (refit_area_override) {
     for (int i = 0; i < 4; i++)
       refit_area[i] = number(argv[argc - 4 + i], 0, 4095);
     argc -= 5;
   }
-  if (refit_dump)
+  if (refit_topleft)
+    need(argc == 7 && !refit_area_override,
+         "usage: segment_decode_render --export-composed-topleft SOURCE VIDEO_INDEX FIRST LAST NEW_OUTPUT.yuv");
+  else if (refit_dump)
     need(argc == 6, "usage: segment_decode_render --dump-composed SOURCE VIDEO_INDEX "
                     "FIRST LAST [--area LEFT RIGHT TOP BOTTOM]");
   else
@@ -450,10 +516,15 @@ static int refit_main(int argc, char **argv) {
   // Refusals leave without exit-time teardown while decoder threads run.
   dv_threads_live = true;
   int stream_index = number(argv[3], 0, 255);
-  if (refit_dump) {
+  if (refit_dump || refit_topleft) {
     refit_first = number(argv[4], 0, REFIT_MAX_TITLE_FRAMES - 1);
     refit_last = number(argv[5], 0, REFIT_MAX_TITLE_FRAMES - 1);
     need(refit_first <= refit_last, "ordered frame range");
+    if (refit_topleft) {
+      need(refit_last - refit_first + 1 == REFIT_TOPLEFT_FRAMES,
+           "TopLeft export requires exactly 48 frames");
+      refit_threads = 1;
+    }
   } else {
     bool ranged = false, resumed = false;
     for (int i = 4; i < argc;) {
@@ -550,6 +621,26 @@ static int refit_main(int argc, char **argv) {
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before the resume point");
 
+  if (refit_topleft) {
+    const AVCodecParameters *codec = stream->codecpar;
+    refit_content(codec->color_primaries == AVCOL_PRI_BT2020 && codec->color_trc == AVCOL_TRC_SMPTE2084 &&
+                      codec->color_space == AVCOL_SPC_BT2020_NCL && codec->color_range == AVCOL_RANGE_MPEG &&
+                      codec->chroma_location == AVCHROMA_LOC_TOPLEFT,
+                  "TopLeft v1 requires declared BT.2020 PQ video range and TopLeft chroma");
+    int fd = open(argv[6], O_WRONLY | O_CREAT | O_EXCL, 0600);
+    need(fd >= 0, "new exclusive TopLeft output");
+    refit_topleft_output = fdopen(fd, "wb");
+    need(refit_topleft_output != NULL, "TopLeft output stream");
+    need(printf("{\"kind\":\"composed_topleft_export\",\"format\":\"%s\","
+                "\"time_base\":\"%d/%d\",\"first\":%lld,\"last\":%lld,"
+                "\"video_index\":%d,\"width\":%d,\"height\":%d,\"pix_fmt\":\"yuv420p10le\","
+                "\"color_primaries\":\"bt2020\",\"color_trc\":\"smpte2084\","
+                "\"colorspace\":\"bt2020nc\",\"color_range\":\"tv\","
+                "\"chroma_location\":\"topleft\"}\n",
+                REFIT_TOPLEFT_FORMAT, source_time_base.num, source_time_base.den,
+                (long long)refit_first, (long long)refit_last, stream_index, expected_w[0], expected_h[0]) > 0,
+         "TopLeft export header");
+  }
   refit_raw = calloc(1, sizeof(*refit_raw));
   refit_pooled = calloc(1, sizeof(*refit_pooled));
   refit_frame_stats[0] = calloc(1, sizeof(*refit_frame_stats[0]));
@@ -591,7 +682,12 @@ static int refit_main(int argc, char **argv) {
     need(refit_paired > refit_last, "requested frame range extends past the title");
   need(refit_composed > 0, "nonempty frame range");
 
-  if (refit_dump) {
+  if (refit_topleft) {
+    need(refit_composed == REFIT_TOPLEFT_FRAMES && fclose(refit_topleft_output) == 0,
+         "complete 48-frame TopLeft output");
+    need(printf("{\"kind\":\"export_complete\",\"format\":\"%s\",\"frames\":%lld}\n",
+                REFIT_TOPLEFT_FORMAT, (long long)refit_composed) > 0, "TopLeft export trailer");
+  } else if (refit_dump) {
     need(printf("{\"kind\":\"dump_complete\",\"frames\":%lld}\n", (long long)refit_composed) > 0,
          "composed dump trailer");
   } else {

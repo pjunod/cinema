@@ -2092,6 +2092,7 @@ impl TranscodeManager {
             session = %session_log_id(session_id),
             file_id = session.file_id,
             layout = if chosen.is_some() { "split" } else { "muxed" },
+            reason = split.decline_reason().unwrap_or("-"),
             first_segment = range.map(|(first, _)| first),
             last_segment = range.map(|(_, last)| last),
             "selected native HLS layout"

@@ -100,7 +100,7 @@ pub(super) struct Rendition {
     /// index counts from, measured once by the first landing probe that needs
     /// it ([`super::generation::LandingProbe`]). The held source cannot change
     /// under the rendition, so neither can this.
-    pub(super) landing_origin: tokio::sync::OnceCell<f64>,
+    pub(super) landing_origin: tokio::sync::OnceCell<super::generation::LandingPacket>,
     /// The capacity hold this rendition is under, if any, retained across the
     /// producer that was terminated for it.
     ///
