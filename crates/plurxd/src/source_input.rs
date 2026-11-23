@@ -283,6 +283,8 @@ struct ByteBudget {
     operation_used: u64,
     grant: Option<SourceServiceGrant>,
     used: u64,
+    /// Bytes issued from the observer's startup burst; never refunded.
+    startup_used: u64,
     window: ReadWindow,
 }
 #[derive(Default)]
@@ -952,10 +954,12 @@ async fn read_source(
     offset: u64,
     remaining: u64,
 ) -> std::io::Result<Vec<u8>> {
+    let requested_at = std::time::Instant::now();
     let mut budget = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         budget=state.budget.lock()=>budget,
     };
+    let budget_locked_at = std::time::Instant::now();
     if state
         .observer
         .as_ref()
@@ -1025,6 +1029,21 @@ async fn read_source(
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
     }
+    let mut paced_to_grant_expiry = false;
+    // A new transfer input reads its startup burst at source speed before the
+    // epoch grant paces it, the same burst-then-hold shape as rolling input.
+    // An unverified seek landing keeps its small control windows: a burst
+    // window is discarded by the seek and would spend the bounded bootstrap
+    // allowance before the landing is proven.
+    let startup_burst_left = observer
+        .filter(|_| seek_ceiling == u64::MAX)
+        .filter(|observer| !observer.rolling_policy())
+        .map_or(0, |observer| {
+            observer
+                .startup_burst_bytes()
+                .saturating_sub(budget.startup_used)
+        });
+    let allowance_started_at = std::time::Instant::now();
     let allowance = if let Some(allocator) = state.purpose_budget.as_ref() {
         tokio::select! {biased;
             ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
@@ -1039,10 +1058,11 @@ async fn read_source(
                     .map_err(std::io::Error::other)?,
             );
         }
-        if !observer.rolling_policy() {
+        if !observer.rolling_policy() && startup_burst_left == 0 {
             if let Some(grant) = &budget.grant {
                 let now = crate::fragment_index_cluster::unix_ms();
                 if budget.used >= grant.foreground_bytes && now < grant.expires_at_ms {
+                    paced_to_grant_expiry = true;
                     observer.idle().await.map_err(std::io::Error::other)?;
                     tokio::select! {biased;
                         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
@@ -1067,6 +1087,8 @@ async fn read_source(
         }
         if observer.rolling_policy() {
             wanted
+        } else if startup_burst_left > 0 {
+            startup_burst_left
         } else {
             budget
                 .grant
@@ -1085,6 +1107,7 @@ async fn read_source(
             allowance=allocator.allowance(wanted as usize)=>allowance? as u64,
         }
     };
+    let allowance_ready_at = std::time::Instant::now();
     let size = wanted.min(allowance) as usize;
     if size == 0 {
         return Err(std::io::Error::other(
@@ -1094,7 +1117,11 @@ async fn read_source(
     // Reserve the entire issued window before handing it to a blocking
     // worker. Cancelled/short reads receive no refund and cannot reset an
     // epoch by abandoning their HTTP waiter.
-    budget.used = budget.used.saturating_add(size as u64);
+    if startup_burst_left > 0 {
+        budget.startup_used = budget.startup_used.saturating_add(size as u64);
+    } else {
+        budget.used = budget.used.saturating_add(size as u64);
+    }
     budget.operation_used = budget
         .operation_used
         .checked_add(size as u64)
@@ -1105,10 +1132,12 @@ async fn read_source(
             allowed=observer.reads_allowed()=>allowed.map_err(std::io::Error::other)?,
         }
     }
+    let slot_requested_at = std::time::Instant::now();
     let read_permit = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         permit=Arc::clone(&state.read_slot).acquire_owned()=>permit.map_err(std::io::Error::other)?,
     };
+    let slot_acquired_at = std::time::Instant::now();
     // Recheck closure after acquiring the actual read slot. No new work may
     // start after close_and_wait has joined and closed the held descriptor.
     if state.close.is_cancelled() {
@@ -1123,11 +1152,13 @@ async fn read_source(
             allowed=observer.reads_allowed()=>allowed.map_err(std::io::Error::other)?,
         }
     }
+    let pause_requested_at = std::time::Instant::now();
     let pause_guard = match &state.pause {
         Some(pause) => Some(pause.enlist(&state.close).await?),
         None => None,
     };
     let read_state = Arc::clone(state);
+    let pause_enlisted_at = std::time::Instant::now();
     let activity = if let Some(observer) = observer {
         loop {
             if let Some(activity) = observer.try_active_read() {
@@ -1141,6 +1172,7 @@ async fn read_source(
     } else {
         None
     };
+    let admitted_at = std::time::Instant::now();
     let job = tokio::task::spawn_blocking(move || {
         let activity = activity;
         let _pause_guard = pause_guard;
@@ -1166,6 +1198,7 @@ async fn read_source(
             return Err(std::io::Error::other("source input changed"));
         }
         window.resize(size, 0);
+        let read_started_at = std::time::Instant::now();
         let mut count = 0;
         while count < size {
             #[cfg(unix)]
@@ -1189,6 +1222,7 @@ async fn read_source(
             }
             count += read;
         }
+        let read_elapsed = read_started_at.elapsed();
         read_state
             .source_bytes
             .fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
@@ -1201,9 +1235,9 @@ async fn read_source(
             }
         }
         window.truncate(count);
-        Ok::<_, std::io::Error>((window, read_permit))
+        Ok::<_, std::io::Error>((window, read_permit, read_elapsed))
     });
-    let (bytes, _read_permit) = tokio::select! {biased;
+    let (bytes, _read_permit, read_elapsed) = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         result=job=>result.map_err(std::io::Error::other)??,
     };
@@ -1214,6 +1248,26 @@ async fn read_source(
             "source input truncated",
         ));
     }
+    // One event per issued source window separates the source's own read
+    // time from the budget, grant and admission waits ahead of it.
+    tracing::debug!(
+        target: "plurxd::source_input",
+        offset,
+        bytes = bytes.len(),
+        budget_lock_ms = budget_locked_at.duration_since(requested_at).as_millis() as u64,
+        allowance_ms = allowance_ready_at.duration_since(allowance_started_at).as_millis() as u64,
+        paced_to_grant_expiry,
+        startup_burst = startup_burst_left > 0,
+        admission_ms = admitted_at.duration_since(allowance_ready_at).as_millis() as u64,
+        allowed_ms = slot_requested_at.duration_since(allowance_ready_at).as_millis() as u64,
+        read_slot_ms = slot_acquired_at.duration_since(slot_requested_at).as_millis() as u64,
+        reallowed_ms = pause_requested_at.duration_since(slot_acquired_at).as_millis() as u64,
+        pause_ms = pause_enlisted_at.duration_since(pause_requested_at).as_millis() as u64,
+        active_ms = admitted_at.duration_since(pause_enlisted_at).as_millis() as u64,
+        read_ms = read_elapsed.as_millis() as u64,
+        total_ms = requested_at.elapsed().as_millis() as u64,
+        "source window read"
+    );
     if let Some(observer) = observer {
         if !observer.rolling_policy() && budget.grant.is_none() {
             budget.grant = Some(

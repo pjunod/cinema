@@ -1,3 +1,4 @@
+use super::shared::AttachmentPurpose;
 use super::*;
 
 /// One request's resolved native recipe, before any rendition is attached.
@@ -441,6 +442,32 @@ impl VodServe {
         ),
         String,
     > {
+        self.resolve_rendition_for_purpose(
+            prepared,
+            file,
+            settings,
+            viewer,
+            private_preparation,
+            AttachmentPurpose::Playback,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_rendition_for_purpose(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+        private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        purpose: AttachmentPurpose,
+    ) -> Result<
+        (
+            RenditionAttachment,
+            Option<retained_manifest::LogicalOutput>,
+        ),
+        String,
+    > {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let PreparedVodRecipe {
             identity,
@@ -449,7 +476,7 @@ impl VodServe {
             duration_ms,
             incoming_logical,
         } = self
-            .prepare_recipe(prepared, file, settings, viewer)
+            .prepare_recipe(prepared, file, settings, viewer, purpose)
             .await?;
         let canonical_key = rendition_key(&recipe, &identity);
         if let Some(reuse) = prepared
@@ -531,6 +558,7 @@ impl VodServe {
                             .and_then(|admission| admission.instance_allowance.clone()),
                     )
                 }),
+                purpose,
             )
             .await?
             .ok_or_else(|| {
@@ -612,9 +640,15 @@ impl VodServe {
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_recipe(&mut prepared, file, settings, viewer)
-            .await
-            .map(|prepared| prepared.recipe.encoding)
+        self.prepare_recipe(
+            &mut prepared,
+            file,
+            settings,
+            viewer,
+            AttachmentPurpose::Playback,
+        )
+        .await
+        .map(|prepared| prepared.recipe.encoding)
     }
 
     async fn prepare_recipe(
@@ -623,6 +657,7 @@ impl VodServe {
         file: &MediaFile,
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
     ) -> Result<PreparedVodRecipe, String> {
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
@@ -669,7 +704,18 @@ impl VodServe {
             "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
-        let probe_json = if prepared.encoding.is_none() {
+        let probe_json = if purpose == AttachmentPurpose::SelectedDetail {
+            let probe = self
+                .shared
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading the file probe: {error}"))?;
+            if plurx_core::transcode::hevc_census::needs_census(file, probe.as_deref()) {
+                return Err("selected copy needs an HEVC census".into());
+            }
+            Ok(probe)
+        } else if prepared.encoding.is_none() {
             crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
         } else {
             self.shared.store.get_file_probe_json(file.id).await
@@ -702,7 +748,7 @@ impl VodServe {
         // A published v3 copy index is preferred over the v2 cluster artifact
         // and the node-local index; without one the order below is unchanged.
         let (copy_index, own_source) = match prepared.encoding {
-            None => match self.try_copy_index_v3(file, video).await {
+            None => match self.try_copy_index_v3(file, video, purpose).await? {
                 Some(found) => (found.index, Some(found.own)),
                 None => (None, None),
             },
@@ -734,7 +780,8 @@ impl VodServe {
         } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, viewer).await
+            self.try_cluster_fragment_index(file, video, viewer, purpose)
+                .await
         } else {
             Ok(None)
         };
@@ -761,6 +808,7 @@ impl VodServe {
                 None,
                 None,
             ),
+            Err(reason) if purpose == AttachmentPurpose::SelectedDetail => return Err(reason),
             Err(reason) => {
                 // The first rollout phase is write/shadow plus prefer-v2.
                 // Per-key fallback preserves an already healthy v1 title
@@ -777,6 +825,9 @@ impl VodServe {
                 )
             }
         };
+        if purpose == AttachmentPurpose::SelectedDetail && index.is_none() {
+            return Err("selected copy needs an existing fragment index".into());
+        }
         // HEVC safety is established on original headers, before filters can
         // hide updates. Bind the proof to this node's current source object;
         // a peer's filesystem identity is not a local attestation.
@@ -813,7 +864,10 @@ impl VodServe {
                 } else {
                     "HEVC copy needs preparation; shared preparation is disabled".to_owned()
                 };
-                if reason.is_none() && cluster_cache_enabled {
+                if reason.is_none()
+                    && cluster_cache_enabled
+                    && purpose == AttachmentPurpose::Playback
+                {
                     if let Some(node) = self.shared.cluster_node_id.as_deref() {
                         preparation =
                             match crate::state::enqueue_copy_preparation_for_object_with_viewer(
@@ -2892,8 +2946,8 @@ impl VodServe {
         // The origin's published v3 copy index serves a Source rendition too:
         // reading it queues nothing and joins no local viewer interest.
         let copy_index = if prepared.encoding.is_none() {
-            self.try_copy_index_v3(file, video)
-                .await
+            self.try_copy_index_v3(file, video, AttachmentPurpose::Playback)
+                .await?
                 .and_then(|found| found.index)
         } else {
             None
@@ -2910,8 +2964,13 @@ impl VodServe {
         } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
-                .await
+            self.try_cluster_fragment_index(
+                file,
+                video,
+                fences.viewer.as_ref(),
+                AttachmentPurpose::Playback,
+            )
+            .await
         } else {
             Ok(None)
         };
@@ -3237,6 +3296,7 @@ impl VodServe {
                             .and_then(|root| root.instance_allowance.clone()),
                     )
                 }),
+                AttachmentPurpose::Playback,
             )
             .await?
             .ok_or_else(|| {
@@ -3421,6 +3481,7 @@ mod principal_demand_tests {
             live_recovery: true,
             output_preparation: OutputPreparation::Off,
             output_budget_bytes: 50 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         };
         let viewer = crate::state::PlaybackViewerDemand {
             principal: PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64))
@@ -3447,7 +3508,12 @@ mod principal_demand_tests {
             "sharing playback demand requires typed source authority"
         );
         let index_refusal = serve
-            .try_cluster_fragment_index(&file, CopyVideoOptions::new(true, false), Some(&viewer))
+            .try_cluster_fragment_index(
+                &file,
+                CopyVideoOptions::new(true, false),
+                Some(&viewer),
+                AttachmentPurpose::Playback,
+            )
             .await
             .expect_err("Shared index needs source admission");
         assert_eq!(index_refusal, refusal);

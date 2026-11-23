@@ -6561,6 +6561,45 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(PlaybackWaitPresentation.detail(for: stagedOpen, live: live))
     }
 
+    #if os(tvOS)
+    @MainActor
+    func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws {
+        var negotiation = Decision(fileId: 42, method: "remux", playUrl: "/files/42/hls/sessions")
+        negotiation.displayAwareAutoProtocol = "route-v1"
+        var caps = Caps.capsDocument(hevc: true, av1: false, displayHDR: true, dolbyVision: true)
+        caps.display.presentationTarget = PresentationTarget(widthPx: 3840, heightPx: 2160, revision: 1)
+        let request = try XCTUnwrap(PlayerController.startupPreparationRequest(
+            decision: negotiation, caps: caps, selection: .none, quality: .auto,
+            startMs: 1_424_363, deviceSubtitlesOff: false, subtitleReadiness: .onDemand,
+            routeV1: true, playbackId: UUID().uuidString
+        ))
+
+        XCTAssertEqual(request.intent?.selection.quality, .auto)
+        XCTAssertEqual(request.copy, true)
+        XCTAssertEqual(request.start, 1_424.363)
+    }
+    #endif
+
+    func testStartupPreparationIsAClosedLocalFileResource() throws {
+        let local = try PlaybackFileContext.local(42)
+        XCTAssertEqual(try local.apiPath("hls/prepare-startup"), "files/42/hls/prepare-startup")
+        XCTAssertThrowsError(try local.path("hls/prepare-startup", query: [URLQueryItem(name: "file", value: "7")]))
+        XCTAssertThrowsError(try local.path("hls/prepare-startup/extra"))
+        XCTAssertEqual(try local.apiPath("hls/startup-decision"), "files/42/hls/startup-decision")
+        XCTAssertThrowsError(try local.path("hls/startup-decision/extra"))
+        let session = try local.withSession("00000000-0000-4000-8000-000000000001")
+        XCTAssertThrowsError(try session.path("hls/prepare-startup"))
+        XCTAssertThrowsError(try session.path("hls/startup-decision"))
+    }
+
+    func testNativeStartupSeekRequiresTheRequestedItemClock() {
+        XCTAssertTrue(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 6_174, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 5_172, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(false), positionMs: 6_200, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.timedOut, positionMs: 6_200, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.cancelled, positionMs: 6_200, targetMs: 6_200))
+    }
+
     func testLiveCopyRecoverySeeksPastThePrecedingKeyframe() {
         XCTAssertEqual(
             PlayerController.sessionAttachSeekMs(

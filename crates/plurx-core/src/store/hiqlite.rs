@@ -2393,6 +2393,7 @@ impl HiqliteAuthStore {
         store.install_dispatch_turns(None).await?;
         store.install_scan_request_v2_schema(None).await?;
         store.install_custody_retention_schema(None).await?;
+        store.install_fragment_publication_schema(None).await?;
         store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
         store.install_dv_refit_schema(None).await?;
@@ -2608,6 +2609,7 @@ impl HiqliteAuthStore {
                     self.install_dispatch_turns(admission).await?;
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
+                    self.install_fragment_publication_schema(admission).await?;
                     self.install_offloaded_schema(admission).await?;
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
@@ -5183,6 +5185,47 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "custody retention schema install did not settle".into(),
+        ))
+    }
+
+    async fn fragment_publication_installed(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed trigger shape fences fragment publication before node startup is admitted.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "fragment_publication_installed",
+                super::fragment_publication::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] => super::fragment_publication::installed(&row.sql),
+            _ => Err(StoreError::Migration(
+                "fragment publication trigger missing".into(),
+            )),
+        }
+    }
+
+    async fn install_fragment_publication_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.fragment_publication_installed().await? {
+            return Ok(());
+        }
+        let statements = super::fragment_publication::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.fragment_publication_installed().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "fragment publication trigger replacement did not settle".into(),
         ))
     }
 

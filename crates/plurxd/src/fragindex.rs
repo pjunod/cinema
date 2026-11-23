@@ -122,6 +122,24 @@ impl IndexFailure {
     }
 }
 
+fn index_process_exit_failure(status: std::process::ExitStatus, rows: usize) -> IndexFailure {
+    #[cfg(unix)]
+    let interrupted = {
+        use std::os::unix::process::ExitStatusExt;
+        // Our deadline and cancellation are settled before this path. An
+        // external kill (for example an OOM) does not diagnose the media.
+        status.signal() == Some(libc::SIGKILL)
+    };
+    #[cfg(not(unix))]
+    let interrupted = false;
+    IndexFailure::new(
+        IndexFailureCode::IndexProcessFailed,
+        format!("index pipe exited with {status}"),
+        rows,
+    )
+    .transient(interrupted)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CompletionExpectationError {
     Unsupported(String),
@@ -3771,11 +3789,8 @@ async fn build_with_args_owned(
                     .filter(|(outcome, early)| !is_refusal(outcome, **early))
                     .map(|(outcome, _)| outcome)
                 {
-                    *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
-                        IndexFailureCode::IndexProcessFailed,
-                        format!("index pipe exited with {status}"),
-                        rows,
-                    )));
+                    *outcome =
+                        IndexOutcome::Failed(Box::new(index_process_exit_failure(status, rows)));
                 }
             }
             Some(format!("{status}"))

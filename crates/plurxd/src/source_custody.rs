@@ -863,6 +863,9 @@ pub(crate) struct SourceRequest {
     store: Arc<dyn Store>,
     owner: ForegroundSourceOwner,
     file: MediaFile,
+    /// Seconds of media a new transfer input may read before epoch pacing
+    /// engages. Zero keeps the input paced from its first byte.
+    startup_burst_secs: f64,
 }
 /// Permission for a strict child that must keep its original descriptor in a
 /// network-isolated sandbox. The existing child owner retains this value until
@@ -955,6 +958,7 @@ impl SourceIdentity {
         SourceRequest {
             file: file.clone(),
             store,
+            startup_burst_secs: 0.0,
             owner: ForegroundSourceOwner {
                 owner_id: uuid::Uuid::new_v4().to_string(),
                 lifetime_id: lifetime.to_owned(),
@@ -982,6 +986,7 @@ pub(crate) struct SourceObserver {
     commands: mpsc::UnboundedSender<Command>,
     reads: Arc<ReadActivity>,
     foreground_bytes: u64,
+    startup_burst_bytes: u64,
 }
 /// A controlled command owner for deterministic lifecycle regressions. It
 /// never opens a source, grants capacity, or substitutes for store qualification.
@@ -1013,6 +1018,17 @@ impl SourceObserverPolicyTestOwner {
             Some(Command::CleanupPending)
         ));
     }
+    /// Accept every projection (transfer epochs and refills) until the
+    /// observer's input closes, so a read never waits on wall-clock epochs.
+    pub(crate) fn accept_projections(mut self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(command) = self.0.recv().await {
+                if let Command::Project(_, reply) = command {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        })
+    }
 }
 #[cfg(test)]
 impl SourceObserver {
@@ -1023,9 +1039,17 @@ impl SourceObserver {
                 commands,
                 reads: Arc::new(ReadActivity::default()),
                 foreground_bytes: 1024,
+                startup_burst_bytes: 0,
             },
             SourceObserverPolicyTestOwner(receiver),
         )
+    }
+    pub(crate) fn transfer_fixture(
+        startup_burst_bytes: u64,
+    ) -> (Self, SourceObserverPolicyTestOwner) {
+        let (mut observer, owner) = Self::policy_fixture();
+        observer.startup_burst_bytes = startup_burst_bytes;
+        (observer, owner)
     }
 }
 
@@ -1089,12 +1113,9 @@ impl SourceRequest {
             pause: plurx_core::process::bounded::source_pause_controller(),
         }))
     }
-    fn foreground_epoch_bytes(&self) -> u64 {
-        // The quantum is a reserved minimum, not a low throughput ceiling.
-        // Size a bounded five-second class for three times container average;
-        // unknown-rate media gets a bounded 64 MiB class, explicitly unqualified.
-        let bps = self
-            .file
+    /// Container average bits per second, from the scan or size and duration.
+    fn average_bps(&self) -> Option<u128> {
+        self.file
             .bitrate
             .filter(|rate| *rate > 0)
             .map(|rate| rate as u128)
@@ -1105,13 +1126,45 @@ impl SourceRequest {
                     .map(|duration| {
                         (self.file.size.max(0) as u128).saturating_mul(8_000) / (duration as u128)
                     })
-            });
-        let foreground =
-            bps.map_or(64_u128 * 1024 * 1024, |bps| {
+            })
+    }
+    fn foreground_epoch_bytes(&self) -> u64 {
+        // The quantum is a reserved minimum, not a low throughput ceiling.
+        // Size a bounded five-second class for three times container average;
+        // unknown-rate media gets a bounded 64 MiB class, explicitly unqualified.
+        let foreground = self
+            .average_bps()
+            .map_or(64_u128 * 1024 * 1024, |bps| {
                 bps.saturating_mul(5_000).saturating_mul(3) / 8_000
             })
-            .clamp(u128::from(BACKGROUND_QUANTUM * 2), 512_u128 * 1024 * 1024) as u64;
+            .clamp(u128::from(BACKGROUND_QUANTUM * 2), 512_u128 * 1024 * 1024)
+            as u64;
         foreground.div_ceil(2) * 2
+    }
+    /// The same burst-then-hold shape as rolling input pacing
+    /// ([`plurx_core::transcode::Pacing`]): a start reads this many seconds of
+    /// media at source speed, so the player can build a buffer, and only then
+    /// settles to the per-epoch rate. Unknown-rate media bursts one epoch
+    /// class per five seconds requested. Bounded like the epoch class.
+    pub(crate) fn with_startup_burst(mut self, seconds: f64) -> Self {
+        self.startup_burst_secs = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
+        self
+    }
+    fn startup_burst_bytes(&self) -> u64 {
+        if self.startup_burst_secs <= 0.0 {
+            return 0;
+        }
+        let millis = (self.startup_burst_secs * 1_000.0) as u128;
+        self.average_bps()
+            .map_or_else(
+                || u128::from(self.foreground_epoch_bytes()).saturating_mul(millis) / 5_000,
+                |bps| bps.saturating_mul(millis) / 8_000,
+            )
+            .min(512_u128 * 1024 * 1024) as u64
     }
     pub(crate) fn file(&self) -> &MediaFile {
         &self.file
@@ -1193,6 +1246,7 @@ impl SourceRequest {
                 commands,
                 reads,
                 foreground_bytes: self.foreground_epoch_bytes(),
+                startup_burst_bytes: self.startup_burst_bytes(),
             },
             settled: false,
         })
@@ -1414,6 +1468,10 @@ impl SourceObserver {
     }
     pub(crate) fn rolling_policy(&self) -> bool {
         self.reads.rolling.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Transfer bytes this input may read before its epoch grant paces it.
+    pub(crate) fn startup_burst_bytes(&self) -> u64 {
+        self.startup_burst_bytes
     }
     pub(crate) async fn transfer_epoch(&self) -> Result<SourceServiceGrant, String> {
         let now = crate::fragment_index_cluster::unix_ms();

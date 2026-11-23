@@ -348,7 +348,7 @@ impl PutSink {
         &self,
     ) -> Option<plurx_core::output_measurement::CompleteOutputRates> {
         self.observed_complete_inventory()
-            .map(|(rates, _, _)| rates)
+            .map(|(rates, _, _, _)| rates)
     }
 
     pub(crate) fn bind_retained(

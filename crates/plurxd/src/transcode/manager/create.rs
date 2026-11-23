@@ -1209,7 +1209,11 @@ impl TranscodeManager {
                             // not include streams nobody ever received.
                             let session =
                                 self.sessions.lock().await.get(&started.session_id).cloned();
-                            if let Some(session) = session {
+                            // A retained reader consumes no source I/O. The
+                            // temporary suspension is restored by its owner.
+                            if let Some(session) =
+                                session.filter(|session| session.rolling_artifact.is_none())
+                            {
                                 fallback_interest.transfer(&session);
                             }
                             record_live_recovery(reason);
@@ -5339,6 +5343,43 @@ impl TranscodeManager {
     /// Read the VOD serving settings. Absence means enabled; an explicit `0`
     /// is a maintenance kill switch that refuses playback rather than routing
     /// it through the removed live presentation.
+    pub(crate) async fn prepare_selected_copy(
+        &self,
+        request: &SessionRequest,
+        mut file: plurx_core::domain::MediaFile,
+        user_id: i64,
+        position_ms: i64,
+        shutdown: tokio_util::sync::CancellationToken,
+        slot: crate::subtitle_translation::ReadPreparationSlot,
+    ) {
+        if !matches!(request.kind, SessionKind::Copy { .. })
+            || request.subtitle_burn.is_some()
+            || request.continuous_media.is_some()
+            || request.passive_vod
+        {
+            return;
+        }
+        let Ok(Some(settings)) = self.vod_settings(request).await else {
+            return;
+        };
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            request.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        self.vod
+            .prepare_selected_copy(
+                request.into(),
+                &file,
+                &settings,
+                user_id,
+                position_ms,
+                shutdown,
+                slot,
+            )
+            .await;
+    }
+
     pub(super) async fn vod_settings(
         &self,
         req: &SessionRequest,
@@ -5492,6 +5533,11 @@ impl TranscodeManager {
                 read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
             )
             .unwrap_or(0),
+            // The same burst seconds rolling input pacing reads.
+            source_burst_secs: read(plurx_core::store::keys::HLS_BURST_SECS)
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                .unwrap_or(crate::transcode::HLS_BURST_SECS_DEFAULT),
         })
     }
 
@@ -5619,6 +5665,14 @@ impl TranscodeManager {
                 result: publication.result,
                 owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
             })
+    }
+
+    pub(crate) fn vod_startup_seek_ready_ms(
+        &self,
+        session_id: &str,
+        requested_ms: i64,
+    ) -> Option<i64> {
+        self.vod.startup_seek_ready_ms(session_id, requested_ms)
     }
 
     /// True for an attached VOD capability or one still in the slow

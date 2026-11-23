@@ -1064,7 +1064,7 @@ fn seam_census_of_the_workspace() {
         .collect();
     let expected_catalog_record = Site {
         file: "crates/plurxd/src/transcode/manager/candidates.rs".to_owned(),
-        owner: "TranscodeManager::quality_catalog_from_snapshot_progress".to_owned(),
+        owner: "TranscodeManager::quality_catalog_from_snapshot_with_probe_policy".to_owned(),
         seam: Seam::Record,
     };
     let expected_record = Site {

@@ -14,6 +14,8 @@ pub(crate) type CompleteRollingInventory = (
     CompleteOutputRates,
     Vec<(String, CommittedObject, Option<WireDuration>)>,
     uuid::Uuid,
+    // Count of consecutive initial segments with known video coverage.
+    usize,
 );
 
 #[derive(Clone, Debug)]
@@ -27,6 +29,7 @@ pub(crate) struct CommittedObject {
 pub(crate) struct RollingOutputMeasurement {
     nonce: uuid::Uuid,
     objects: BTreeMap<String, CommittedObject>,
+    video_prefix_segments: usize,
     refused: bool,
 }
 
@@ -35,6 +38,7 @@ impl Default for RollingOutputMeasurement {
         Self {
             nonce: uuid::Uuid::new_v4(),
             objects: BTreeMap::new(),
+            video_prefix_segments: 0,
             refused: false,
         }
     }
@@ -57,11 +61,20 @@ impl RollingOutputMeasurement {
         self.objects.insert(name.to_owned(), object);
     }
 
+    /// Called by the copy cutter after committing a video-timed segment.
+    /// Once a segment lacks that proof, later objects cannot extend the prefix.
+    pub(crate) fn extend_video_prefix(&mut self, index: u64) {
+        if usize::try_from(index) == Ok(self.video_prefix_segments) {
+            self.video_prefix_segments += 1;
+        }
+    }
+
     /// Only after the owner proves normal completion and final publication.
     /// Caller must separately retain/revalidate the complete artifact before
     /// these observed numbers can become any frozen wire/candidate fact.
     pub(crate) fn complete(&self, playlist: &[u8]) -> Option<CompleteOutputRates> {
-        self.complete_inventory(playlist).map(|(rates, _, _)| rates)
+        self.complete_inventory(playlist)
+            .map(|(rates, _, _, _)| rates)
     }
 
     /// Preserve exact ordered names and committed hashes for a separately
@@ -181,7 +194,7 @@ impl RollingOutputMeasurement {
                     (name.to_owned(), object.clone(), Some(duration))
                 }),
         );
-        Some((rates, members, self.nonce))
+        Some((rates, members, self.nonce, self.video_prefix_segments))
     }
 }
 
@@ -210,7 +223,10 @@ mod tests {
         ] {
             observed.committed(name, CommittedObject { bytes, digest });
         }
-        let (rates, members, nonce) = observed.complete_inventory(playlist).expect("full mux");
+        observed.extend_video_prefix(0);
+        let (rates, members, nonce, video_prefix) =
+            observed.complete_inventory(playlist).expect("full mux");
+        assert_eq!(video_prefix, 1, "the unverified tail is not video coverage");
         assert_eq!(nonce, observed.nonce);
         assert_eq!(rates.wire_bytes, 600, "init is not media-rate numerator");
         assert_eq!(members.len(), 3);
@@ -233,7 +249,8 @@ mod tests {
                 digest: [4; 32],
             },
         );
-        let (_, members, _) = ts.complete_inventory(b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000000,\nseg00000.ts\n#EXT-X-ENDLIST\n").expect("TS without fabricated init");
+        let (_, members, _, video_prefix) = ts.complete_inventory(b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000000,\nseg00000.ts\n#EXT-X-ENDLIST\n").expect("TS without fabricated init");
+        assert_eq!(video_prefix, 0);
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].0, "seg00000.ts");
         assert!(members[0].2.is_some());

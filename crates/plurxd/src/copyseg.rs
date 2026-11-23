@@ -1404,7 +1404,7 @@ impl SessionDir {
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
         let committed = self.publish_file("init.mp4", &init.bytes).await?;
-        self.observe_object("init.mp4", committed);
+        self.observe_object("init.mp4", committed, None);
         if self.split_inventory.is_some() {
             match NativeSplitAuthor::new(init.clone()) {
                 Ok(author) => {
@@ -1533,7 +1533,12 @@ impl SessionDir {
         }
         let name = published.name();
         let committed = self.publish_file(&name, &published.segment.bytes).await?;
-        self.observe_object(&name, committed);
+        // Ordinary cuts are timed by video. At EOF the mux may continue
+        // after video ends, so the last cuts cannot qualify a retained seek.
+        let video_index = (published.segment.video_ticks > 0
+            && published.reason != fmp4::CutReason::EndOfStream)
+            .then_some(published.index);
+        self.observe_object(&name, committed, video_index);
         self.write_split_segment(published).await?;
         if self.published_secs == 0.0 {
             tracing::info!(
@@ -1593,12 +1598,16 @@ impl SessionDir {
         &self,
         name: &str,
         committed: Option<crate::rolling_output::CommittedObject>,
+        video_index: Option<u64>,
     ) {
         let (Some(measurement), Some(committed)) = (&self.measurement, committed) else {
             return;
         };
         if let Ok(mut measurement) = measurement.lock() {
             measurement.committed(name, committed);
+            if let Some(index) = video_index {
+                measurement.extend_video_prefix(index);
+            }
         }
     }
 }

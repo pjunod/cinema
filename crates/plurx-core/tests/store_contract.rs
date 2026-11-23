@@ -593,6 +593,7 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_chapters",
     "merge_file_probe_chapters_if_missing",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
@@ -21836,7 +21837,11 @@ fn contract_inventory_matches_every_store_method() {
     // title's maintenance demand without moving the title worker's cursor.
     // Named in BACKGROUND_JOB_METHODS and exercised on both backends by
     // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
-    assert_eq!(declared.len(), 635, "review the Store method count");
+    // 635 -> 636 for the Apple TV startup fix: `MediaStore`'s
+    // `merge_file_probe_hevc_scan` grafts a probed HEVC scan verdict onto the
+    // measured probe revision, exercised on both backends by
+    // media_contract_runs_through_dyn_store. Named in `MEDIA_METHODS`.
+    assert_eq!(declared.len(), 636, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -29357,6 +29362,36 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .submit_fragment_index_analysis(&forced_claim, &forced_job, 21)
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit forced generation: {error}")));
+        let coordination = plurx_core::store::analysis_coordination::AnalysisCoordinationSource {
+            file_id,
+            source_size: forced_request.source_size,
+            source_mtime: forced_request.source_mtime,
+            origin_node_id: forced_request.target_node_id.clone(),
+            object_version: "fixture-object".to_owned(),
+            video_identity: "a".repeat(64),
+            contract_version: 3,
+            requested_generation: "fixture-coordination".to_owned(),
+        };
+        let newer = NewAnalysisRequest {
+            request_id: "repair-newer-coordination".to_owned(),
+            pipeline_version: coordination.pipeline_marker(),
+            video_identity: coordination.video_marker(),
+            requested_generation: coordination.requested_generation,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            not_before_ms: 22,
+            created_at_ms: 22,
+            ..forced_request.clone()
+        };
+        assert_eq!(
+            store
+                .enqueue_analysis_request(&newer)
+                .await
+                .expect("newer coordination")
+                .request_id,
+            newer.request_id
+        );
         let forced_worker = store
             .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 30)
             .await
@@ -29460,7 +29495,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .unwrap_or_else(|| panic!("{backend}: forced head artifact"))
                 .cache_key,
             generation_key,
-            "backend {backend}"
+            "backend {backend}: newer v3 coordination does not supersede the legacy head"
         );
         // C-05: item detail's batched lookup resolves the same head, through
         // this node's attestation of the exact observed object version.
@@ -33757,6 +33792,34 @@ async fn media_contract_runs_through_dyn_store() {
             .merge_file_probe_hevc_parameter_sets(empty_file, 2_000, 20, census)
             .await
             .expect("unprobed census"));
+        // A probed HEVC scan verdict is grafted the same way: fenced to the
+        // measured revision, keyed so stored facts can read it back.
+        let scan = r#"{"stream_index":0,"progressive_frame_only":true}"#;
+        assert!(!store
+            .merge_file_probe_hevc_scan(movie_file, measured.size + 1, measured.mtime, scan)
+            .await
+            .expect("fenced scan verdict"));
+        assert!(store
+            .merge_file_probe_hevc_scan(movie_file, measured.size, measured.mtime, scan)
+            .await
+            .expect("scan verdict"));
+        let scanned: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(movie_file)
+                .await
+                .expect("probe JSON")
+                .expect("probe JSON"),
+        )
+        .expect("probe JSON parses");
+        assert_eq!(
+            scanned[plurx_core::transcode::HEVC_SCAN_PROBE_KEY]["progressive_frame_only"],
+            true
+        );
+        assert_eq!(scanned["plurx_hevc_parameter_sets"]["verdict"], "varying");
+        assert!(!store
+            .merge_file_probe_hevc_scan(empty_file, 2_000, 20, scan)
+            .await
+            .expect("unprobed scan verdict"));
         assert!(store
             .get_file_probe_json(movie_file)
             .await

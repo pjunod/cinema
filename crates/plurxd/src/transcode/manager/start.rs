@@ -2080,10 +2080,12 @@ impl TranscodeManager {
             Self::rolling_retained_budget_from(&settings)
         };
         let pacing = Self::pacing_from_settings(&settings, true).await;
+        // Completed retained output is always produced at zero. Reconstruct
+        // that recipe for lookup even when the new viewer will seek into it.
         let canonical_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
                 &file,
-                start_seconds,
+                0.0,
                 audio_index,
                 options.transcode_audio,
                 pacing,
@@ -2093,7 +2095,7 @@ impl TranscodeManager {
         } else {
             transcode::hls_copy_args_with_audio_delivery(
                 &file,
-                start_seconds,
+                0.0,
                 audio_index,
                 options.transcode_audio,
                 pacing,
@@ -2126,30 +2128,43 @@ impl TranscodeManager {
             logical["copyseg_dvh1_guard"] = serde_json::json!(1);
         }
         let logical = serde_json::to_vec(&logical).ok();
-        let rolling_provenance =
-            if start_seconds == 0.0 && takeover.is_none() && retained_budget.is_some() {
-                match logical {
-                    Some(logical) => {
-                        crate::rolling_provenance::RollingProduction::capture(
-                            &file,
-                            &logical,
-                            file.audio_offset_ms != 0
-                                && !file.audio_streams.is_empty()
-                                && audio_delivery
-                                    .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
-                            &if segmenting {
-                                ffmpeg_bin()
-                            } else {
-                                producer_ffmpeg_bin()
-                            },
-                        )
-                        .await
-                    }
-                    None => None,
+        let retained_resume = start_seconds > 0.0
+            && file
+                .duration_ms
+                .is_some_and(|duration| start_seconds * 1_000.0 < duration as f64)
+            && replacement_deadline.is_none()
+            && self.vod.has_rolling_output_for_file(file_id);
+        let retained_provenance = if (start_seconds == 0.0 || retained_resume)
+            && takeover.is_none()
+            && retained_budget.is_some()
+        {
+            match logical {
+                Some(logical) => {
+                    crate::rolling_provenance::RollingProduction::capture(
+                        &file,
+                        &logical,
+                        file.audio_offset_ms != 0
+                            && !file.audio_streams.is_empty()
+                            && audio_delivery
+                                .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
+                        &if segmenting {
+                            ffmpeg_bin()
+                        } else {
+                            producer_ffmpeg_bin()
+                        },
+                    )
+                    .await
                 }
-            } else {
-                None
-            };
+                None => None,
+            }
+        } else {
+            None
+        };
+        // A cold resume cannot collect a complete zero-origin artifact.
+        let rolling_provenance = retained_provenance
+            .as_ref()
+            .filter(|_| start_seconds == 0.0)
+            .cloned();
         let mut execution_file = file.clone();
         if let Some(provenance) = &rolling_provenance {
             execution_file.path = provenance.input_path();
@@ -2188,11 +2203,6 @@ impl TranscodeManager {
         // actor for the one frozen legacy retry; the reader never performs the
         // replacement itself.
 
-        // Freeze the achieved media origin before actor admission. The actor,
-        // retry recipe, and response contract must describe one immutable
-        // presentation even if the start future is later cancelled.
-        let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
-
         // `served`, not `options`, from here on: the playlist must advertise
         // the HDR10 base this path serves and the session record must not
         // claim a conversion that did not happen.
@@ -2205,30 +2215,25 @@ impl TranscodeManager {
             convert_dolby_vision: served.convert_dolby_vision,
             dual_layer_as_copied: served.dual_layer_as_copied,
         };
-        let frozen_presentation = FrozenHlsPresentation::new(
-            file.clone(),
-            HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::audio(
-                    audio_delivery,
-                    !file.audio_streams.is_empty(),
-                    served.transcode_audio,
-                )),
-                bandwidth: None,
-                file_id,
-                start_seconds,
-                media_origin_seconds,
-                codecs: hls_codecs.clone(),
-                supplemental_codecs: hls_supplemental_codecs.clone(),
-                frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
-            },
-            &copy_kind,
-        );
-        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
-        if let Some(production) = &rolling_provenance {
+        let mut context = HlsContext {
+            codec_facts: Some(FrozenHlsCodecFacts::audio(
+                audio_delivery,
+                !file.audio_streams.is_empty(),
+                served.transcode_audio,
+            )),
+            bandwidth: None,
+            file_id,
+            start_seconds,
+            media_origin_seconds: 0.0,
+            codecs: hls_codecs.clone(),
+            supplemental_codecs: hls_supplemental_codecs.clone(),
+            frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
+        };
+        if let Some(production) = &retained_provenance {
             if let Some(attached) = self
                 .attach_rolling_retained(
                     production,
-                    frozen_presentation.clone(),
+                    FrozenHlsPresentation::new(file.clone(), context.clone(), &copy_kind),
                     copy_kind,
                     None,
                     audio_delivery.cloned(),
@@ -2245,6 +2250,14 @@ impl TranscodeManager {
                 return Ok(attached);
             }
         }
+        drop(retained_provenance);
+        // Freeze the achieved media origin before actor admission. The actor,
+        // retry recipe, and response contract must describe one immutable
+        // presentation even if the start future is later cancelled.
+        let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
+        context.media_origin_seconds = media_origin_seconds;
+        let frozen_presentation = FrozenHlsPresentation::new(file.clone(), context, &copy_kind);
+        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
         let scratch_reservation = match split_reservation {
             Some(reservation) => reservation,
             None => self.reserve_rolling_scratch_with(ordinary_sizing, limits)?,
