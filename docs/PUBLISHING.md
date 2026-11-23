@@ -22,17 +22,14 @@ knowing what it bought.
 
 [mobile-channels.yml](../.github/workflows/mobile-channels.yml) runs after a
 push to `main` on Forgejo. It compares the complete push range using the same
-release-input paths as [the build-counter validator](../validation/mobile_versions.py).
+release-input paths as [the mobile-version validator](../validation/mobile_versions.py).
 Apple source, resources or project metadata select iOS and tvOS TestFlight;
 Android release source or build metadata select Google Play **internal testing**.
 Docs, native test changes and server changes alone do not allocate a signing
-runner. Contributors still bump the affected build counter in their pull
-request; this job preserves those numbers rather than committing a new bump.
-
-A platform publishes only if no client path changed after the `main`
-commit that landed its counter (first-parent, so an early bump in a merged PR
-counts). Otherwise the log says `skipping Cinema <platform>` and the next bump
-publishes it. The controller guard must use the same first-parent rule.
+runner. Build numbers are derived (`scripts/build-number`), so a tree with that
+script selects platforms by changed paths alone; an older tree skips a
+platform whose client paths changed after its last counter commit. The
+controller guard applies the same rules.
 
 The job calls `media/mobile-channels.yml` in the private Ansible repository,
 selecting `cinema` only. This channel playbook is separate from the physical
@@ -402,11 +399,10 @@ Two numbers, and they are not the same number:
 | Key | Where | Rule |
 |---|---|---|
 | `MARKETING_VERSION` | `project.yml` | The version humans see — `0.1.0`. Tracks the server's number ([RELEASING.md](RELEASING.md)) so a bug report naming one identifies the other |
-| `CURRENT_PROJECT_VERSION` | `project.yml` | The build number. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete |
+| `CFBundleVersion` | built `Info.plist` | The build number. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete. A build phase stamps it from `scripts/build-number` (`--release` in Release); `CURRENT_PROJECT_VERSION` is a fixed placeholder `1` |
 
 App Store Connect rejects a duplicate build number at upload time, after the
-whole archive has finished — so bump it before you archive, not after you wait
-twenty minutes to be told.
+whole archive has finished; archive from a full clone of `main`.
 
 ### 2.3 Archive and upload
 
@@ -652,7 +648,8 @@ channels, and keeping both is deliberate.
 
 Upload the `.aab` in Play Console → Testing → Closed testing, run the 14-day
 gate, then promote to production. `versionCode` must increase on every upload,
-same rule as Apple's build number.
+same rule as Apple's build number and from the same script
+(`-PplurxVersionCode=N` overrides it).
 
 ### 5.3 The Play paperwork
 

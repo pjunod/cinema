@@ -4,7 +4,6 @@
 ports were deleted in Apple 209 / Android 146 (2026-10-04 close-out). No
 native playback enablement or device acceptance ever happened.
 
-Build: 209
 Issue: #634
 
 The Apple and Android clients now contain pure ports of the current browser

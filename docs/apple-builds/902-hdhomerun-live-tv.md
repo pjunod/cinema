@@ -1,6 +1,5 @@
 # HDHomeRun Live TV on iPhone, iPad and Apple TV
 
-Build: 116
 Issue: #902
 
 Live TV is always visible in navigation. A dedicated live player supports

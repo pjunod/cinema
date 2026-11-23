@@ -14,9 +14,12 @@ version = "0.3.0"
 ```
 
 Every crate inherits it with `version.workspace = true`. The native apps keep
-their store-facing marketing versions aligned with the workspace separately;
-their monotonically increasing build counters advance whenever their release
-paths change, and CI enforces that contract.
+their store-facing marketing versions aligned with the workspace separately,
+and CI enforces that. Their store build number is not stored at all: both apps
+take one number derived at build time by
+[`scripts/build-number`](../scripts/build-number) — the first-parent commit
+count of the `main` commit a build is based on — so it rises with every
+commit that lands on `main` and no pull request ever raises a counter.
 
 plurx follows [semantic versioning](https://semver.org/) under the 0.x rules,
 which are worth stating plainly because they are not what 1.x users expect:
@@ -69,22 +72,25 @@ CI passes the tag name automatically when it publishes an image.
 1. **Decide the number** using the table above.
 
 2. **Run `scripts/release-cut`** (`--part minor` for a minor bump, or
-   `--version X.Y.Z`). It refuses an empty `Unreleased` section, an existing
-   tag and an existing changelog section before it writes anything; then it
-   moves `CHANGELOG.md`'s `Unreleased` section under a dated
-   `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
+   `--version X.Y.Z`). It collects the `Changelog:` entries every landing
+   commit carried since the previous cut's `changelog-through` marker
+   (`validation/changelog_field.py`; `scripts/release-cut --preview` shows
+   them), refuses a release with no entries, an existing tag and an existing
+   changelog section before it writes anything, names any landing that came
+   in without the field, then writes the entries under a dated
+   `## [X.Y.Z] — YYYY-MM-DD` heading with a new marker, folds every fragment
+   folder (`scripts/fold --all`), rewrites the two link definitions at the
    bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
-   marketing versions to it and advances both native build counters (the
-   mobile-version contract requires all of that of a version bump), rewrites
-   the status lines that quote the version or a build counter
+   marketing versions to it (the mobile-version contract requires that),
+   rewrites the status lines that quote the version
    (`clients/apple/README.md`, `clients/android/README.md`,
-   `docs/clients/APPLE-CLIENT-PARITY.md`, `docs/STATUS.html`, the Apple ones
-   through `validation/apple_build.py`'s generator) so the tree it leaves
-   passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
-   `spikes/hiqlite-m0/Cargo.lock`. It never tags.
+   `docs/clients/APPLE-CLIENT-PARITY.md`) so the tree it leaves passes
+   `make operations-check`, and lets Cargo relock `Cargo.lock` and
+   `spikes/hiqlite-m0/Cargo.lock`. It never tags, and it touches no build
+   number: those are derived at build time by `scripts/build-number`.
 
    Review the exact-file fingerprints before pushing. Apple project version
-   and build changes need a reviewed refresh of `BUILD_SPECS` in
+   changes need a reviewed refresh of `BUILD_SPECS` in
    `validation/native_receipts.py`. Cargo manifest and lockfile changes also
    need reviewed fingerprints in the durable-jobs and operation-progress
    formal mappings, even when only workspace versions changed. The release
@@ -93,6 +99,12 @@ CI passes the tag name automatically when it publishes an image.
    `python3 -m unittest tests.validation.test_native_receipts` and
    `python3 scripts/check-formal check-mapping --package <package>` for
    `durable-jobs`, `operation-progress`, and `worker-refinement` before pushing.
+
+   The release pull request's description says `Changelog: none`: its
+   entries are already in the dated section, and repeating them as fields
+   would list them again in the next release. A pull request that lands
+   while the release pull request is open is listed under the next
+   release, since the cut read only what had landed when it ran.
 
 3. **Read the changelog it dated.** Entries are for people running the server,
    not for people reading the diff; edit them in the release pull request.
@@ -346,8 +358,9 @@ curl -s localhost:32400/api/v1/server | jq '{version, build}'
 
 From a node's `build` to the changelog entries it runs: a `build` of
 `v0.3.1` is exactly the `## [0.3.1]` section of `CHANGELOG.md`; a `build` of
-`v0.3.1-12-gabc1234` is that section **plus** whatever of `[Unreleased]` was
-merged by commit `abc1234` (`git log v0.3.1..abc1234`). Across the fleet the
+`v0.3.1-12-gabc1234` is that section **plus** the `Changelog:` entries of
+the landing commits up to `abc1234` (`git log --first-parent v0.3.1..abc1234`;
+`scripts/release-cut --preview` on that commit prints them). Across the fleet the
 same pair is the `plurx_build_info{version,build}` metric, and
 [OPERATIONS.md](OPERATIONS.md) "The fleet registry" says which image a node
 runs.

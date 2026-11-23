@@ -1,6 +1,5 @@
 # A terminal verdict rules out one reconnect, not the ladder
 
-Build: 101
 Issue: #708
 
 Supersedes the behaviour described in
