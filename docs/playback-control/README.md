@@ -14,6 +14,7 @@ list.
 | File | Answers | |
 |---|---|---|
 | [STATUS-HISTORY.md](STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
+| [ROLLING-PRODUCER-OWNERS-HISTORY.md](ROLLING-PRODUCER-OWNERS-HISTORY.md) | Rolling-producer owners history: the narrative comment block that led `tests/playback/rolling-producer-owners.toml`, moved verbatim on 2026-11-23 and frozen; new reasons for a count change go in pull request descriptions. | done |
 | [REPLACEMENT-GATE-SUPERSESSION-RCA.md](REPLACEMENT-GATE-SUPERSESSION-RCA.md) | Why an abandoned replacement held its player key forever, the lab6 evidence, and the supersedable gate that fixes it. | built |
 | [CALLBACK-ROOT-CAUSE-AND-FIX.md](CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
 | [MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md](MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md) | Seven retained Mac HDR follow-ups, completed bounded physical/current-owner evidence, reviewed repairs and task gates; final frozen-tree promotion remains pending and broader device/optical limits stay explicit. | open |
