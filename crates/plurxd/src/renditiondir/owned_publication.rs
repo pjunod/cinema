@@ -153,17 +153,33 @@ fn start_reserved_publication(
 }
 
 impl RenditionDir {
+    #[cfg(test)]
     pub(super) async fn publish_owned(&self, name: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.publish_owned_with(name, bytes, true).await
+    }
+
+    /// `allow_init_eviction` false lets speculative init writes use existing
+    /// headroom without evicting media. Finite custody owns its own output
+    /// budget and takes no global-cache grant, so the choice does not apply.
+    pub(super) async fn publish_owned_with(
+        &self,
+        name: &str,
+        bytes: Vec<u8>,
+        allow_init_eviction: bool,
+    ) -> io::Result<()> {
         #[cfg(unix)]
         if let Some(finite) = &self.writes.finite {
             return finite.publish(name, bytes).await;
         }
         // Segment callers already reserve before their manifest lock. Init
         // publication takes its existing global-cache grant before our lock.
-        let reservation = if name == INIT_NAME {
-            crate::playback_cache::reserve(self.path(), bytes.len() as u64).await?
-        } else {
-            None
+        let len = bytes.len() as u64;
+        let reservation = match (name == INIT_NAME, allow_init_eviction) {
+            (true, true) => crate::playback_cache::reserve(self.path(), len).await?,
+            (true, false) => {
+                crate::playback_cache::reserve_without_eviction(self.path(), len).await?
+            }
+            (false, _) => None,
         };
         self.publish_reserved_owned(name, bytes, reservation).await
     }

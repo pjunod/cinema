@@ -1368,13 +1368,13 @@ async fn source_actual_copy_attachment(
         assignment,
     ))
     .await;
-    let gate = Arc::new(SourceProducerAuthority {
-        store: Arc::clone(store),
-        source_members: state.cluster.source_members(),
-        master: Arc::clone(master),
-        registry_boot_id: state.sharing.accepted_drivers.boot_id(),
-        ingress: ingress_fixture.permission().await,
-    });
+    let gate = Arc::new(SourceProducerAuthority::new(
+        Arc::clone(store),
+        state.cluster.source_members(),
+        Arc::clone(master),
+        state.sharing.accepted_drivers.boot_id(),
+        ingress_fixture.permission().await,
+    ));
     authority
         .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
         .expect("original postcommit clock");
@@ -1450,6 +1450,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
@@ -1616,13 +1617,13 @@ async fn source_actual_actor(
     .await;
     let ingress_permission = ingress_fixture.permission().await;
     if mode == 52 {
-        let gate = SourceProducerAuthority {
-            store: Arc::clone(&state.store),
-            source_members: state.cluster.source_members(),
-            master: Arc::clone(&state.sharing.key),
-            registry_boot_id: state.sharing.accepted_drivers.boot_id(),
-            ingress: ingress_permission.clone(),
-        };
+        let gate = SourceProducerAuthority::new(
+            Arc::clone(&state.store),
+            state.cluster.source_members(),
+            Arc::clone(&state.sharing.key),
+            state.sharing.accepted_drivers.boot_id(),
+            ingress_permission.clone(),
+        );
         assert!(gate.current_preparation(&assignment).await.is_ok());
         ingress_fixture.close().await;
         assert!(gate.current_preparation(&assignment).await.is_err());
@@ -2378,7 +2379,13 @@ async fn source_actual_actor(
             )
             .await;
         assert!(
-            matches!(busy, Err(SourceWorkerError::Capacity)),
+            matches!(
+                busy,
+                Err(crate::transcode::source_actor::LiveRefusal {
+                    error: SourceWorkerError::Capacity,
+                    ..
+                })
+            ),
             "caption capacity remains typed"
         );
         assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
@@ -2631,7 +2638,10 @@ async fn source_actual_actor(
                     actor
                         .open_resource(&caption, Instant::now() + Duration::from_secs(5))
                         .await,
-                    Err(SourceWorkerError::Capacity)
+                    Err(crate::transcode::source_actor::LiveRefusal {
+                        error: SourceWorkerError::Capacity,
+                        ..
+                    })
                 ),
                 "managed zero cache ceiling is caption capacity"
             );
@@ -2668,7 +2678,10 @@ async fn source_actual_actor(
                 actor
                     .open_resource(&resource, Instant::now() + Duration::from_secs(5))
                     .await,
-                Err(SourceWorkerError::Capacity)
+                Err(crate::transcode::source_actor::LiveRefusal {
+                    error: SourceWorkerError::Capacity,
+                    ..
+                })
             ));
             drop(eviction);
         }
@@ -2755,7 +2768,10 @@ async fn source_actual_actor(
                     actor
                         .open_resource(&resource, Instant::now() + Duration::from_secs(5))
                         .await,
-                    Err(SourceWorkerError::Unsupported)
+                    Err(crate::transcode::source_actor::LiveRefusal {
+                        error: SourceWorkerError::Unsupported,
+                        ..
+                    })
                 ),
                 "caption data bounds are not transient capacity"
             );
@@ -2963,7 +2979,13 @@ async fn source_actual_actor(
         assert_descriptor(pause, true, "parked job owns its descriptor");
         if mode == 44 {
             let called = call.await.expect("actual timed resource waiter");
-            assert!(matches!(called, Err(SourceWorkerError::Deadline)));
+            assert!(matches!(
+                called,
+                Err(crate::transcode::source_actor::LiveRefusal {
+                    error: SourceWorkerError::Deadline,
+                    ..
+                })
+            ));
             assert!(
                 actor.0.state.lock().expect("actual Source state").bodies > 0,
                 "timed waiter cannot release actual unfinished filesystem job"
@@ -3523,7 +3545,10 @@ async fn source_actual_actor(
                     Instant::now() + Duration::from_secs(5)
                 )
                 .await,
-            Err(SourceWorkerError::Unsupported)
+            Err(crate::transcode::source_actor::LiveRefusal {
+                error: SourceWorkerError::Unsupported,
+                ..
+            })
         ));
         let legacy = actor
             .open_resource(
@@ -3573,7 +3598,10 @@ async fn source_actual_actor(
                     Instant::now() + Duration::from_secs(5)
                 )
                 .await,
-            Err(SourceWorkerError::Unsupported)
+            Err(crate::transcode::source_actor::LiveRefusal {
+                error: SourceWorkerError::Unsupported,
+                ..
+            })
         ));
         let opened = actor
             .open_resource(
@@ -3739,7 +3767,7 @@ async fn source_actual_actor(
         actor.0.gate.current_owned(&assignment).await.is_ok(),
         "stored authority can lag the physical object"
     );
-    assert!(matches!(actor.open_resource(&SharingHlsResource::parse("index.m3u8").expect("typed actual cached playlist"), Instant::now() + Duration::from_secs(5)).await, Err(SourceWorkerError::Unavailable)), "Source physical boundary must refuse a changed or linked path despite stored authorization");
+    assert!(matches!(actor.open_resource(&SharingHlsResource::parse("index.m3u8").expect("typed actual cached playlist"), Instant::now() + Duration::from_secs(5)).await, Err(crate::transcode::source_actor::LiveRefusal { error: SourceWorkerError::Unavailable, .. })), "Source physical boundary must refuse a changed or linked path despite stored authorization");
     tokio::time::timeout(Duration::from_secs(1), init_guard.cancelled())
         .await
         .expect("actual retained Body fence refuses physical Source drift");
@@ -3766,7 +3794,10 @@ async fn source_actual_actor(
                 Instant::now() + Duration::from_secs(1)
             )
             .await,
-        Err(SourceWorkerError::Unavailable)
+        Err(crate::transcode::source_actor::LiveRefusal {
+            error: SourceWorkerError::Unavailable,
+            ..
+        })
     ));
     drop(bytes);
     drop(body_guard);
@@ -4863,6 +4894,7 @@ async fn source_sparse_input_reserves_before_write_and_releases_only_after_close
 
 fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> SessionRequest {
     SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,

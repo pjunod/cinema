@@ -295,17 +295,31 @@ pub const AUTH_PROTOCOL_VERSION: i64 = AUTH_PROTOCOL_MIN;
 /// learner admission" and must not.
 pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 
-const STORE_TIMEOUT: Duration = Duration::from_secs(3);
-const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize = 2;
-const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(800);
-const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 = 100;
-const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
-const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
-const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
+const STORE_TIMEOUT: Duration = crate::cluster::timing::store::STORE_TIMEOUT;
+const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_READ_TIMEOUT_RETRY_DELAY;
+const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize =
+    crate::cluster::timing::store::AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS;
+const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_INITIAL_DELAY;
+const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_MAX_BACKOFF;
+const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS;
+const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_MAX_DELAY;
+const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RECOVERY_BUDGET;
+const IDEMPOTENT_WRITE_RETRY_DELAY: Duration =
+    crate::cluster::timing::store::IDEMPOTENT_WRITE_RETRY_DELAY;
+const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize =
+    crate::cluster::timing::store::IDEMPOTENT_WRITE_MAX_ATTEMPTS;
 pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+const AUTH_TOKEN_POLICY_WRITE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
+     SELECT $1, $2, $3 WHERE EXISTS (\
+       SELECT 1 FROM cluster_cache_admin_revocation_leases WHERE claim_id = $4) \
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
+
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
@@ -1617,6 +1631,18 @@ impl TimedClient {
             .map_err(database_error)
     }
 
+    fn token_image_source(&self) -> Option<crate::store::TokenProofSource> {
+        match &self.inner {
+            TimedClientInner::Connected(client) => {
+                let mark = client.local_db_applied_mark().ok()?;
+                let local = client.local_db_raft_metrics().ok()?;
+                Some(crate::store::TokenProofSource::local(mark, local))
+            }
+            #[cfg(test)]
+            TimedClientInner::Disconnected | TimedClientInner::InjectedConsistentRead(_) => None,
+        }
+    }
+
     fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
         #[cfg(test)]
         if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
@@ -2500,6 +2526,7 @@ impl HiqliteAuthStore {
         store.install_dispatch_turns(None).await?;
         store.install_scan_request_v2_schema(None).await?;
         store.install_custody_retention_schema(None).await?;
+        store.install_fragment_publication_schema(None).await?;
         store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
         store.install_adaptive_source_scope(None).await?;
@@ -2718,6 +2745,7 @@ impl HiqliteAuthStore {
                     self.install_dispatch_turns(admission).await?;
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
+                    self.install_fragment_publication_schema(admission).await?;
                     self.install_offloaded_schema(admission).await?;
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
@@ -5297,6 +5325,47 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn fragment_publication_installed(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed trigger shape fences fragment publication before node startup is admitted.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "fragment_publication_installed",
+                super::fragment_publication::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] => super::fragment_publication::installed(&row.sql),
+            _ => Err(StoreError::Migration(
+                "fragment publication trigger missing".into(),
+            )),
+        }
+    }
+
+    async fn install_fragment_publication_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.fragment_publication_installed().await? {
+            return Ok(());
+        }
+        let statements = super::fragment_publication::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.fragment_publication_installed().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "fragment publication trigger replacement did not settle".into(),
+        ))
+    }
+
     /// `items.offloaded_at` and the triggers that clear it when a file
     /// attaches. A column cannot be `IF NOT EXISTS`, so presence is read
     /// first; a racing node's duplicate `ADD COLUMN` fails and is settled by
@@ -6579,10 +6648,16 @@ impl HiqliteAuthStore {
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
             ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
-            ("DELETE FROM offline_source_probes".to_owned(), params!()),
+            (
+                "DELETE FROM offline_source_probes WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM offline_lease_guards".to_owned(), params!()),
             ("DELETE FROM offline_package_leases".to_owned(), params!()),
-            ("DELETE FROM offline_packages".to_owned(), params!()),
+            (
+                "DELETE FROM offline_packages WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM cache_consumer_pins".to_owned(), params!()),
             ("DELETE FROM cache_storage_members".to_owned(), params!()),
             (
@@ -7735,6 +7810,46 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(())
     }
 
+    async fn put_auth_token_policy(
+        &self,
+        values: &[(&str, &str)],
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        if values.iter().any(|(key, _)| {
+            !matches!(
+                *key,
+                keys::AUTH_TOKEN_EXPIRY_ENABLED
+                    | keys::AUTH_TOKEN_IDLE_DAYS
+                    | keys::AUTH_TOKEN_EXPIRY_SINCE
+            )
+        }) {
+            return Err(StoreError::Database("invalid token policy key".to_owned()));
+        }
+        if values.is_empty() {
+            return Ok(true);
+        }
+        let Some(claim) = claim else {
+            // Before membership activation the raw Store has no lease table.
+            // After activation the persisted policy guards reject this legacy
+            // path; only the claim-checked transaction below can then write.
+            self.put_settings(values).await?;
+            return Ok(true);
+        };
+        let now = self.now()?;
+        let claim_id = claim.as_str();
+        let sql = AUTH_TOKEN_POLICY_WRITE_SQL;
+        let changed = self
+            .credential_mutation(
+                "put_auth_token_policy",
+                values
+                    .iter()
+                    .map(|(key, value)| (sql, params!(*key, *value, now, claim_id)))
+                    .collect(),
+            )
+            .await?;
+        Ok(changed.iter().all(|count| *count == 1))
+    }
+
     async fn put_settings_if_generation(
         &self,
         generation_key: &str,
@@ -8159,18 +8274,30 @@ impl UserStore for HiqliteAuthStore {
         token_hash: &str,
         audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        Ok(self
+            .authenticate_token_proof_for(token_hash, audience)
+            .await?
+            .authentication)
+    }
+
+    async fn authenticate_token_proof_for(
+        &self,
+        token_hash: &str,
+        audience: super::TokenAudience,
+    ) -> Result<crate::store::TokenAuthenticationProof, StoreError> {
         // A handoff token is never a row in `tokens`; its own table answers.
         if audience == super::TokenAudience::PlaybackHandoff {
-            return Ok(
-                match self
-                    .authenticate_playback_handoff("authenticate_token_for", token_hash)
-                    .await?
-                {
-                    Some(user) => TokenAuthentication::Authenticated(user),
-                    None => TokenAuthentication::Unknown,
-                },
-            );
+            return Ok(crate::store::TokenAuthenticationProof::uncached(match self
+                .authenticate_playback_handoff("authenticate_token_for", token_hash)
+                .await?
+            {
+                Some(user) => TokenAuthentication::Authenticated(user),
+                None => TokenAuthentication::Unknown,
+            }));
         }
+        // Capture before the authoritative read: an in-process snapshot may
+        // replace the SQLite image without replacing this Store's Arc.
+        let source_image = self.client().token_image_source();
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
         // against the committed policy rather than a node-local cache.
@@ -8203,7 +8330,9 @@ impl UserStore for HiqliteAuthStore {
             )
             .await?;
         let Some(row) = rows.pop() else {
-            return Ok(TokenAuthentication::Unknown);
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Unknown,
+            ));
         };
         let now = self.now()?;
         if let Some(policy) = row
@@ -8211,13 +8340,31 @@ impl UserStore for HiqliteAuthStore {
             .filter(|policy| policy.is_expired(row.last_seen_at, now))
         {
             // No activity refresh: touching an expired token would revive it.
-            return Ok(TokenAuthentication::Expired {
-                idle_days: policy.idle_days,
-            });
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Expired {
+                    idle_days: policy.idle_days,
+                },
+            ));
         }
         self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
             .await?;
-        Ok(TokenAuthentication::Authenticated(row.user.into()))
+        let mut proof = crate::store::TokenAuthenticationProof::authenticated(
+            row.user.into(),
+            now,
+            row.last_seen_at,
+            row.expiry,
+        );
+        if source_image
+            .as_ref()
+            .is_none_or(|source| !source.still_valid())
+        {
+            // None does not distinguish an immutable remote client from an
+            // unknown local source. Preserve authentication, decline reuse.
+            proof.lease = None;
+        } else if let Some(lease) = proof.lease.as_mut() {
+            lease.source_image = source_image;
+        }
+        Ok(proof)
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {

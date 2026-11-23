@@ -140,6 +140,7 @@ impl GenerationOutput {
         rendition: &Arc<Rendition>,
         epoch: u64,
         at: u32,
+        resume_work: Option<&Arc<super::super::resume_preparation::ResumePreparation>>,
     ) {
         let mut state = self.state.lock().await;
         let Some(terminal) = state.terminal.as_mut() else {
@@ -159,7 +160,14 @@ impl GenerationOutput {
         if !diagnostic.actionable.is_empty() {
             tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
         }
-        if let Some(outcome) = terminal.outcome.take() {
+        let outcome = terminal.outcome.take();
+        if let Some(work) = resume_work {
+            // A speculative resume settles its own preparation; it never
+            // reports a foreground generation end. Retirement is joined.
+            work.cancel();
+            rendition.settle_resume_preparation(work);
+            rendition.kick();
+        } else if let Some(outcome) = outcome {
             on_generation_end(shared, rendition, outcome, epoch, at).await;
         }
         state.terminal.take();

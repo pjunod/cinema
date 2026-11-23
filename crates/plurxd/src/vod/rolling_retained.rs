@@ -1,6 +1,7 @@
 //! Process-private rolling output in the existing retained namespace/budget.
 //! No restart alias or received descriptor can create acquisition authority.
 use super::*;
+use plurx_core::output_measurement::WireDuration;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -40,6 +41,44 @@ pub(crate) struct RollingArtifact {
 struct RollingComplete {
     rates: plurx_core::output_measurement::CompleteOutputRates,
     manifest: plurx_core::transcode::manifest::GenerationManifest,
+    segment_windows: SegmentWindows,
+}
+
+struct SegmentWindows {
+    micros: Vec<(u64, u64)>,
+    video_end_micros: u64,
+}
+
+impl SegmentWindows {
+    fn from_durations(
+        durations: impl Iterator<Item = WireDuration>,
+        video_prefix: usize,
+    ) -> Option<Self> {
+        let mut cursor = 0u64;
+        let mut micros = Vec::new();
+        for duration in durations {
+            let end = cursor.checked_add(duration.as_micros())?;
+            micros.push((cursor, end));
+            cursor = end;
+        }
+        let video_end_micros = match video_prefix.checked_sub(1) {
+            Some(last) => micros.get(last)?.1,
+            None => 0,
+        };
+        Some(Self {
+            micros,
+            video_end_micros,
+        })
+    }
+
+    fn covers_resume(&self, seconds: f64) -> bool {
+        (0.0..self.video_end_micros as f64 / 1_000_000.0).contains(&seconds)
+    }
+
+    fn window_seconds(&self, sequence: i64) -> Option<(f64, f64)> {
+        let &(start, end) = self.micros.get(usize::try_from(sequence).ok()?)?;
+        Some((start as f64 / 1_000_000.0, end as f64 / 1_000_000.0))
+    }
 }
 
 /// Reserving the existing allowance precedes every optional hardlink. Drop
@@ -297,7 +336,14 @@ impl RollingCollection {
             self.refuse();
             return None;
         }
-        let (rates, members, writing_nonce) = inventory;
+        let (rates, members, writing_nonce, video_prefix) = inventory;
+        let Some(segment_windows) = SegmentWindows::from_durations(
+            members.iter().filter_map(|(_, _, duration)| *duration),
+            video_prefix,
+        ) else {
+            self.refuse();
+            return None;
+        };
         {
             let objects = self
                 .artifact
@@ -383,7 +429,11 @@ impl RollingCollection {
         }
         self.artifact
             .complete
-            .set(RollingComplete { rates, manifest })
+            .set(RollingComplete {
+                rates,
+                manifest,
+                segment_windows,
+            })
             .ok()?;
         let cap = state.preparations.get(&self.artifact.nonce).copied()?;
         if cap != self.cap
@@ -442,6 +492,19 @@ impl Drop for RollingCollection {
 impl RollingArtifact {
     pub(crate) fn acquirable(&self) -> bool {
         !self.refused.load(Acquire)
+    }
+
+    pub(crate) fn covers_resume(&self, start_seconds: f64) -> bool {
+        self.complete
+            .get()
+            .is_some_and(|output| output.segment_windows.covers_resume(start_seconds))
+    }
+
+    pub(crate) fn segment_window_seconds(&self, sequence: i64) -> Option<(f64, f64)> {
+        self.complete
+            .get()?
+            .segment_windows
+            .window_seconds(sequence)
     }
 
     /// Sessions reading this artifact, given one reference the caller knows
@@ -827,6 +890,18 @@ impl VodServe {
         }
     }
 
+    /// Cheap hint before reconstructing a complete output's source/recipe key.
+    pub(crate) fn has_rolling_output_for_file(&self, file_id: i64) -> bool {
+        self.shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock")
+            .rolling
+            .values()
+            .any(|entry| entry.artifact.file_id == file_id && entry.artifact.acquirable())
+    }
+
     pub(crate) fn acquire_rolling_output(
         &self,
         production: &crate::rolling_provenance::RollingProduction,
@@ -1000,6 +1075,31 @@ impl RetainedArtifactRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_windows_use_cumulative_wire_time_and_exclude_the_video_end() {
+        use super::*;
+
+        for (duration, boundary_micros) in
+            [("2.666667", 2_666_667_000u64), ("2.333333", 2_333_333_000)]
+        {
+            let duration = WireDuration::parse(duration).expect("wire duration");
+            let tail = WireDuration::parse("1.000000").expect("audio-only tail");
+            let windows = SegmentWindows::from_durations(
+                std::iter::repeat_n(duration, 1_000).chain(std::iter::once(tail)),
+                1_000,
+            )
+            .expect("verified playlist windows");
+            let end = boundary_micros as f64 / 1_000_000.0;
+
+            assert_eq!(windows.video_end_micros, boundary_micros);
+            assert_eq!(windows.window_seconds(999).expect("last video").1, end);
+            assert_eq!(windows.window_seconds(1_000), Some((end, end + 1.0)));
+            assert!(windows.covers_resume(end - 0.000001));
+            assert!(!windows.covers_resume(end));
+            assert!(!windows.covers_resume(end + 0.000001));
+        }
+    }
+
     #[tokio::test]
     async fn rolling_attachment_refusal_is_observed_after_source_await() {
         use super::*;

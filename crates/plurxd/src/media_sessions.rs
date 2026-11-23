@@ -17,10 +17,12 @@ use plurx_core::cluster::clock::{
 };
 #[cfg(test)]
 use plurx_core::cluster::membership::MembershipManager;
+#[cfg(test)]
+use plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::{AppliedView, FactInstant, StampCheck, Store, ViewSource, ViewStamp};
@@ -111,15 +113,18 @@ pub(crate) const PREPARED_SUCCESSOR_PLAN_NOTE: &str = "prepared_quality_handoff"
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
 #[cfg(target_os = "linux")]
 pub(crate) const ADAPTIVE_PREVIEW_BYTES: usize = 32 * 1024;
-pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
-pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
-pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
-const ABORT_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const START_DEADLINE: Duration = plurx_core::cluster::timing::media::START_DEADLINE;
+pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::OWNER_ASSIGNMENT_DEADLINE;
+pub(crate) const ACTIVATION_STORE_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::ACTIVATION_STORE_DEADLINE;
+const ABORT_DEADLINE: Duration = plurx_core::cluster::timing::media::ABORT_DEADLINE;
 /// Post-header streaming is deliberately disjoint from the request's
 /// preparation budget. A media lookup may spend almost its whole request
 /// deadline before headers exist; every admitted local or relayed body then
 /// gets this one bounded lifetime.
-pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_secs(300);
+pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::MAX_ADMITTED_MEDIA_BODY_LIFETIME;
 /// Bytes requested from storage per read while streaming a media body.
 ///
 /// Tokio's file reader performs one blocking-pool hop per read and caps an
@@ -154,15 +159,14 @@ pub(crate) const MEDIA_BODY_ACK_GRANULARITY: usize = 4 * 1024;
 /// Longest authenticated public/relay resource envelope before response
 /// headers, including accepted inter-node clock disagreement. This is the
 /// playlist ceiling; segment and short-control envelopes are smaller.
-pub(crate) const MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME: Duration = Duration::from_secs(
-    RELAY_PLAYLIST_MAX_LIFETIME.as_secs() + RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE.as_secs(),
-);
+pub(crate) const MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME;
 /// Once authoritative Store state is terminal, this outlives both the full
 /// pre-header envelope and body lifetime of every response admitted under the
 /// predecessor generation. Exact control projection normally settles
 /// immediately; this is the crash/partition proof boundary.
 pub(crate) const TERMINAL_PROJECTION_SAFETY_WINDOW: Duration =
-    Duration::from_millis(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS as u64);
+    plurx_core::cluster::timing::media::TERMINAL_PROJECTION_SAFETY_WINDOW;
 const _: () = assert!(
     TERMINAL_PROJECTION_SAFETY_WINDOW.as_secs()
         == MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME.as_secs()
@@ -172,28 +176,26 @@ const _: () = assert!(
 /// Once the downstream is actively polling, a local reader or remote owner
 /// that produces no next body item for this long is failed. This is an
 /// upstream no-progress bound, not a refresh of the total body lifetime.
-pub(crate) const MEDIA_BODY_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const MEDIA_BODY_NO_PROGRESS_TIMEOUT: Duration =
+    plurx_core::cluster::timing::media::MEDIA_BODY_NO_PROGRESS_TIMEOUT;
 /// A relay pump may read only this many chunks ahead of its downstream. The
 /// independently driven task owns the peer response and both body timers;
 /// dropping the HTTP body drops the receiver and cancels that sole owner.
 const RELAY_BODY_CHANNEL_CAPACITY: usize = 2;
-const LEASE_INTERVAL: Duration = Duration::from_secs(3);
-pub(crate) const LEASE_TTL_MS: i64 = 12_000;
+const LEASE_INTERVAL: Duration = plurx_core::cluster::timing::media::LEASE_INTERVAL;
+pub(crate) const LEASE_TTL_MS: i64 = plurx_core::cluster::timing::media::LEASE_TTL_MS;
 /// A takeover claim must survive provisional publication plus the worst-case
 /// first ordinary renewal path. After that first renewal it returns to the
 /// normal 12-second lease. The longer one-shot claim is an ownership fence,
 /// not an inactivity or playback-progress watchdog.
-const TAKEOVER_CLAIM_LEASE_TTL_MS: i64 = 24_000;
+const TAKEOVER_CLAIM_LEASE_TTL_MS: i64 =
+    plurx_core::cluster::timing::media::TAKEOVER_CLAIM_LEASE_TTL_MS;
 /// Begins on the worker before the start response leaves it, so it must
 /// strictly outlive ingress placement, owner assignment, the fixed activation
 /// lease, and a scheduling margin. There is no independent reconciliation or
 /// confirmation watchdog: the activation transaction owns one lease deadline.
-pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(
-    START_DEADLINE.as_secs()
-        + OWNER_ASSIGNMENT_DEADLINE.as_secs()
-        + (LEASE_TTL_MS as u64 / 1_000)
-        + 10,
-);
+pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration =
+    plurx_core::cluster::timing::media::REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 /// How long the route cache holds a fact it observed directly (a row this
 /// process committed, or a quorum read) while this replica is not proven to
@@ -209,33 +211,42 @@ const CONTROL_RATE_GLOBAL: u32 = 512;
 /// Maximum authenticated clock disagreement accepted on a relayed resource
 /// deadline. This is deliberately small: it is only tolerance for wall-clock
 /// conversion between workers, never extra request work minted at the owner.
-const RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(2);
+const RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE: Duration =
+    plurx_core::cluster::timing::media::RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE;
 /// The public playlist path reserves 55 seconds for rolling startup and five
 /// seconds for publication. Keep this wire-envelope ceiling synchronized with
 /// that externally visible request lifetime rather than trusting a peer to
 /// choose an arbitrary absolute deadline.
-const RELAY_PLAYLIST_MAX_LIFETIME: Duration = Duration::from_secs(60);
+const RELAY_PLAYLIST_MAX_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::RELAY_PLAYLIST_MAX_LIFETIME;
 /// Public status, subtitle-segment, and release requests only perform bounded
 /// response publication/control work.
-const RELAY_SHORT_MAX_LIFETIME: Duration = Duration::from_secs(5);
+const RELAY_SHORT_MAX_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::RELAY_SHORT_MAX_LIFETIME;
 /// A media segment can spend 30 seconds in a VOD blocked GET plus the five
 /// second publication fence.
-const RELAY_SEGMENT_MAX_LIFETIME: Duration = Duration::from_secs(35);
+const RELAY_SEGMENT_MAX_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::RELAY_SEGMENT_MAX_LIFETIME;
 const ROUTE_QUERY_SHARDS: usize = 32;
 const ROUTE_GENERATION_SHARDS: usize = 4_096;
-const ROUTE_QUERY_DEADLINE: Duration = Duration::from_secs(3);
+const ROUTE_QUERY_DEADLINE: Duration = plurx_core::cluster::timing::media::ROUTE_QUERY_DEADLINE;
 const LEASE_RENEWAL_BATCH: usize = 256;
 const LEASE_RENEWAL_FANOUT: usize = 16;
-const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
-const LEASE_RENEWAL_MIN_REMAINING_MS: i64 = 4_000;
+const LEASE_RENEWAL_DEADLINE: Duration = plurx_core::cluster::timing::media::LEASE_RENEWAL_DEADLINE;
+const LEASE_RENEWAL_MIN_REMAINING_MS: i64 =
+    plurx_core::cluster::timing::media::LEASE_RENEWAL_MIN_REMAINING_MS;
 const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
-const STALE_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(4);
+const STALE_SETTLEMENT_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_DEADLINE;
 /// A candidate must still own the complete exact-read window. Routes closer
 /// to expiry are left active so a survivor can claim them instead of a stale
 /// local cleanup racing that handoff.
-const STALE_SETTLEMENT_MIN_RUNWAY_MS: i64 = 4_000;
-const STALE_SETTLEMENT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
-const STALE_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const STALE_SETTLEMENT_MIN_RUNWAY_MS: i64 =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_MIN_RUNWAY_MS;
+const STALE_SETTLEMENT_RETRY_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_RETRY_BACKOFF;
+const STALE_SETTLEMENT_MAX_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_MAX_BACKOFF;
 /// Public DELETE admits at most this many distinct commit-unknown capabilities
 /// at once. Reconciliation itself uses a much smaller fan-out below, so a
 /// failed Store cannot turn the fail-closed registry into request-amplified
@@ -243,31 +254,32 @@ const STALE_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const MAX_PENDING_RELEASE_RECONCILIATIONS: usize = 128;
 const RELEASE_RECONCILIATION_SHARDS: usize = 32;
 const RELEASE_RECONCILIATION_FANOUT: usize = 4;
-const RELEASE_RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_secs(1);
-const RELEASE_RECONCILIATION_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const RELEASE_RECONCILIATION_RETRY_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::RELEASE_RECONCILIATION_RETRY_BACKOFF;
+const RELEASE_RECONCILIATION_MAX_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::RELEASE_RECONCILIATION_MAX_BACKOFF;
 const RELEASE_CLEANUP_CAPACITY: usize = 128;
-const TAKEOVER_INTERVAL: Duration = Duration::from_secs(2);
-const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
+const TAKEOVER_INTERVAL: Duration = plurx_core::cluster::timing::media::TAKEOVER_INTERVAL;
+const TAKEOVER_DEADLINE: Duration = plurx_core::cluster::timing::media::TAKEOVER_DEADLINE;
 const TAKEOVER_BATCH: usize = 16;
 const TAKEOVER_FANOUT: usize = 4;
-const TAKEOVER_OVERLAP_MARGIN_MS: i64 = 2_000;
-const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
+const TAKEOVER_OVERLAP_MARGIN_MS: i64 =
+    plurx_core::cluster::timing::media::TAKEOVER_OVERLAP_MARGIN_MS;
+const TAKEOVER_CLEANUP_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_CLEANUP_DEADLINE;
 /// Commit-unknown takeover settlement owns only the fixed lease proposed by
 /// the CAS. Store attempts are kept short enough to make several exact reads
 /// inside that lease; immediate failures back off so an unavailable Store
 /// cannot become a busy loop.
-const TAKEOVER_RECONCILIATION_STORE_DEADLINE: Duration = Duration::from_secs(1);
-const TAKEOVER_RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const TAKEOVER_RECONCILIATION_STORE_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_RECONCILIATION_STORE_DEADLINE;
+const TAKEOVER_RECONCILIATION_RETRY_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_RECONCILIATION_RETRY_BACKOFF;
 /// Enough authority to finish one bounded publication mutation and still
 /// reach the next ordinary lease tick, complete its owner inventory, and
 /// enter the renewal Store with the full fail-closed admission window.
-const TAKEOVER_PUBLICATION_MIN_RUNWAY: Duration = Duration::from_secs(
-    TAKEOVER_RECONCILIATION_STORE_DEADLINE.as_secs()
-        + LEASE_INTERVAL.as_secs()
-        + LEASE_RENEWAL_DEADLINE.as_secs()
-        + (LEASE_RENEWAL_MIN_REMAINING_MS as u64 / 1_000)
-        + 1,
-);
+const TAKEOVER_PUBLICATION_MIN_RUNWAY: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_PUBLICATION_MIN_RUNWAY;
 
 fn try_admit_takeover_settlement() -> Option<tokio::sync::OwnedSemaphorePermit> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
@@ -3202,7 +3214,12 @@ impl RemoteStartResponse {
                 .audio_delivery
                 .as_ref()
                 .is_none_or(|audio| audio.valid_snapshot())
-            && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
+            && (self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
+                // A split copy enters through its family master.
+                || self.vod
+                    && matches!(self.kind, SessionKind::Copy { .. })
+                    && self.playlist_url
+                        == format!("/api/v1/hls/{}/master.m3u8", self.session_id))
             && self
                 .duration_ms
                 .is_none_or(|duration| (0..=MAX_MEDIA_MILLIS).contains(&duration))
@@ -3280,6 +3297,9 @@ impl RemoteAbortRequest {
 fn is_zero_i64(value: &i64) -> bool {
     *value == 0
 }
+
+/// Select the prepared scalar VOD envelope on the existing playlist path.
+pub(crate) const PREPARED_VOD_NATIVE_MODE: u8 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
@@ -3417,7 +3437,7 @@ impl RelayResource {
             Self::Playlist {
                 native, subtitle, ..
             } => {
-                native.is_none_or(|value| value <= 1)
+                native.is_none_or(|value| value <= PREPARED_VOD_NATIVE_MODE)
                     && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
             }
             Self::Master {
@@ -6277,6 +6297,7 @@ fn durable_terminal_or_replaced(route: &MediaSessionRoute) -> crate::vodserve::T
 async fn fence_and_reap_sessions(
     state: &AppState,
     sessions: Vec<(String, String, i64, bool, &'static str)>,
+    deadline: tokio::time::Instant,
 ) {
     if sessions.is_empty() {
         return;
@@ -6301,8 +6322,11 @@ async fn fence_and_reap_sessions(
                     .transcode
                     .begin_session_publication_fence(&session_id)
                     .await;
-                match tokio::time::timeout(
-                    LEASE_RENEWAL_DEADLINE,
+                if tokio::time::Instant::now() >= deadline {
+                    return;
+                }
+                match tokio::time::timeout_at(
+                    deadline,
                     state
                         .store
                         .media_session_route_by_incarnation(&incarnation_id),
@@ -6477,105 +6501,151 @@ async fn cleanup_reconciled_release(
 /// Reconcile only exact locally owned generations. This is part of the
 /// existing owner lease lifecycle, so crash recovery and takeover naturally
 /// resume a blocked handoff without a second watchdog registry.
-async fn reconcile_owned_publication_fences(
-    state: &AppState,
-    leases: &[OwnedMediaSessionLease],
-    live: &HashSet<String>,
-) {
-    let candidates = leases
-        .iter()
-        .filter(|lease| live.contains(&lease.session_id))
-        .cloned()
-        .collect::<Vec<_>>();
+/// Drive optional publication work against one deadline shared by every
+/// candidate. A saturated first fanout cannot start another timed batch after
+/// that budget. Construction and Store dispatch both remain lazy.
+async fn run_publication_reconciliation_phase<F, Fut>(
+    candidates: Vec<OwnedMediaSessionLease>,
+    deadline: tokio::time::Instant,
+    mut reconcile: F,
+) where
+    F: FnMut(OwnedMediaSessionLease) -> Fut,
+    Fut: Future<Output = ()>,
+{
     stream::iter(candidates)
         .for_each_concurrent(LEASE_RENEWAL_FANOUT, |lease| {
-            let state = state.clone();
+            let incarnation_id = lease.incarnation_id.clone();
+            let operation = (tokio::time::Instant::now() < deadline).then(|| reconcile(lease));
             async move {
-                let deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
-                let route = match tokio::time::timeout_at(
-                    deadline,
-                    state
-                        .store
-                        .media_session_route_by_incarnation(&lease.incarnation_id),
-                )
-                .await
-                {
-                    Ok(Ok(Some(route)))
-                        if route.incarnation_id == lease.incarnation_id
-                            && route.session_id == lease.session_id
-                            && route.owner_node_id == state.node_id
-                            && route.owner_epoch == lease.owner_epoch
-                            && route.state == "active" =>
-                    {
-                        route
-                    }
-                    Ok(Ok(_)) => return,
-                    Ok(Err(error)) => {
+                if let Some(operation) = operation {
+                    if tokio::time::timeout_at(deadline, operation).await.is_err() {
                         tracing::debug!(
-                            %error,
-                            incarnation = %lease.incarnation_id,
-                            "owned publication-fence route read remains unavailable"
+                            incarnation = %incarnation_id,
+                            "owned media-session publication-fence phase exhausted its cycle budget"
                         );
-                        return;
                     }
-                    Err(_) => return,
-                };
-                if route.publication_ready_at_ms == 0 {
-                    return;
-                }
-                let now_ms = unix_ms();
-                let outcome = if route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
-                {
-                    let not_before_ms = now_ms.saturating_add(
-                        i64::try_from(TERMINAL_PROJECTION_SAFETY_WINDOW.as_millis())
-                            .unwrap_or(i64::MAX),
-                    );
-                    tokio::time::timeout_at(
-                        deadline,
-                        state.store.arm_media_session_handoff(
-                            &route.incarnation_id,
-                            &route.owner_node_id,
-                            route.owner_epoch,
-                            not_before_ms,
-                            now_ms,
-                        ),
-                    )
-                    .await
-                } else if route.publication_ready_at_ms <= now_ms {
-                    tokio::time::timeout_at(
-                        deadline,
-                        state.store.complete_media_session_handoff(
-                            &route.incarnation_id,
-                            &route.owner_node_id,
-                            route.owner_epoch,
-                            MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
-                                expected_not_before_ms: route.publication_ready_at_ms,
-                            },
-                            now_ms,
-                        ),
-                    )
-                    .await
-                } else {
-                    return;
-                };
-                match outcome {
-                    Ok(Ok(Some(reconciled))) => {
-                        state.media_sessions.cache_route(reconciled).await;
-                    }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => tracing::debug!(
-                        %error,
-                        incarnation = %route.incarnation_id,
-                        "owned media-session publication fence remains pending"
-                    ),
-                    Err(_) => tracing::debug!(
-                        incarnation = %route.incarnation_id,
-                        "owned media-session publication-fence reconciliation timed out"
-                    ),
                 }
             }
         })
         .await;
+}
+
+fn publication_reconciliation_candidates(
+    leases: &[OwnedMediaSessionLease],
+    live: &HashSet<String>,
+    newly_fenced: &[(String, String, i64, bool, &'static str)],
+) -> Vec<OwnedMediaSessionLease> {
+    let fenced = newly_fenced
+        .iter()
+        .map(|(incarnation, session, epoch, _, _)| (incarnation.as_str(), session.as_str(), *epoch))
+        .collect::<HashSet<_>>();
+    leases
+        .iter()
+        .filter(|lease| live.contains(&lease.session_id))
+        .filter(|lease| {
+            !fenced.contains(&(
+                lease.incarnation_id.as_str(),
+                lease.session_id.as_str(),
+                lease.owner_epoch,
+            ))
+        })
+        .cloned()
+        .collect()
+}
+
+async fn reconcile_owned_publication_fences(
+    state: &AppState,
+    candidates: Vec<OwnedMediaSessionLease>,
+    deadline: tokio::time::Instant,
+) {
+    run_publication_reconciliation_phase(candidates, deadline, |lease| {
+        let state = state.clone();
+        async move {
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            let route = match state
+                .store
+                .media_session_route_by_incarnation(&lease.incarnation_id)
+                .await
+            {
+                Ok(Some(route))
+                    if route.incarnation_id == lease.incarnation_id
+                        && route.session_id == lease.session_id
+                        && route.owner_node_id == state.node_id
+                        && route.owner_epoch == lease.owner_epoch
+                        && route.state == "active"
+                        && route.lease_expires_at_ms > unix_ms() =>
+                {
+                    route
+                }
+                Ok(_) => return,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        incarnation = %lease.incarnation_id,
+                        "owned publication-fence route read remains unavailable"
+                    );
+                    return;
+                }
+            };
+            if route.publication_ready_at_ms == 0 || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            let now_ms = unix_ms();
+            let outcome = if route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED {
+                let not_before_ms = now_ms.saturating_add(
+                    i64::try_from(TERMINAL_PROJECTION_SAFETY_WINDOW.as_millis())
+                        .unwrap_or(i64::MAX),
+                );
+                state
+                    .store
+                    .arm_media_session_handoff(
+                        &route.incarnation_id,
+                        &route.owner_node_id,
+                        route.owner_epoch,
+                        not_before_ms,
+                        now_ms,
+                    )
+                    .await
+            } else if route.publication_ready_at_ms <= now_ms {
+                state
+                    .store
+                    .complete_media_session_handoff(
+                        &route.incarnation_id,
+                        &route.owner_node_id,
+                        route.owner_epoch,
+                        MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                            expected_not_before_ms: route.publication_ready_at_ms,
+                        },
+                        now_ms,
+                    )
+                    .await
+            } else {
+                return;
+            };
+            match outcome {
+                Ok(Some(reconciled))
+                    if reconciled.incarnation_id == lease.incarnation_id
+                        && reconciled.session_id == lease.session_id
+                        && reconciled.owner_node_id == state.node_id
+                        && reconciled.owner_epoch == lease.owner_epoch
+                        && reconciled.state == "active"
+                        && reconciled.lease_expires_at_ms > unix_ms()
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    state.media_sessions.cache_route(reconciled).await;
+                }
+                Ok(_) => {}
+                Err(error) => tracing::debug!(
+                    %error,
+                    incarnation = %route.incarnation_id,
+                    "owned media-session publication fence remains pending"
+                ),
+            }
+        }
+    })
+    .await;
 }
 
 /// The tick's owner inventory, or `None` when it could not be read.
@@ -6595,14 +6665,25 @@ async fn lease_tick_inventory(
     state: &AppState,
     idle_process: bool,
     now_ms: i64,
+    idle_watch: Option<&plurx_core::store::TableWatch>,
+    deadline: tokio::time::Instant,
 ) -> Option<Vec<OwnedMediaSessionLease>> {
-    // One deadline for the hint and the inventory together: an idle tick
-    // that times out on its local read cannot then spend a second one.
-    let deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+    // Hint and inventory spend the cycle's existing deadline, leaving only
+    // its remainder for renewal and optional publication work.
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
     if idle_process
         && lease_tick_live(state.transcode.renewable_session_ids().await).is_empty()
         && !state.media_sessions.has_lease_seeds().await
-        && matches!(
+    {
+        if idle_watch.is_some_and(plurx_core::store::TableWatch::unchanged) {
+            return Some(Vec::new());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        if matches!(
             tokio::time::timeout_at(
                 deadline,
                 state
@@ -6611,9 +6692,12 @@ async fn lease_tick_inventory(
             )
             .await,
             Ok(Ok(false))
-        )
-    {
-        return Some(Vec::new());
+        ) {
+            return Some(Vec::new());
+        }
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return None;
     }
     match tokio::time::timeout_at(
         deadline,
@@ -6640,6 +6724,7 @@ pub(crate) async fn lease_loop(state: AppState) {
     let mut interval = tokio::time::interval(LEASE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut known = HashMap::<String, (String, i64, i64, bool)>::new();
+    let mut idle_watch = None;
     let mut settling = HashSet::<String>::new();
     let mut settlement_backoff = HashMap::<String, StaleSettlementBackoff>::new();
     let (settled_tx, mut settled_rx) =
@@ -6648,6 +6733,7 @@ pub(crate) async fn lease_loop(state: AppState) {
         tokio::sync::mpsc::channel::<PendingReleaseResult>(RELEASE_RECONCILIATION_FANOUT);
     loop {
         interval.tick().await;
+        let cycle_deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
         while let Ok(result) = release_rx.try_recv() {
             match result.outcome {
                 Ok(Some(route)) => {
@@ -6913,12 +6999,21 @@ pub(crate) async fn lease_loop(state: AppState) {
                 .into_iter()
                 .collect::<HashSet<_>>(),
         );
+        // Subscribe before inventory: a row committed during its read must
+        // invalidate the empty answer on the next safety tick.
+        let next_idle_watch = state.cluster.watch(&["media_sessions"]);
         let routes = lease_tick_inventory(
             &state,
             known.is_empty() && vod_capabilities.is_empty(),
             now_ms,
+            idle_watch.as_ref(),
+            cycle_deadline,
         )
         .await;
+        idle_watch = routes
+            .as_ref()
+            .filter(|rows| rows.is_empty())
+            .map(|_| next_idle_watch);
         // Sample process-local liveness *after* the owner inventory. A
         // takeover that commits while the Store read is in flight is then
         // observed either through its settlement guard or through the adopted
@@ -6972,10 +7067,9 @@ pub(crate) async fn lease_loop(state: AppState) {
             for (incarnation_id, _, _, _) in expired {
                 known.remove(&incarnation_id);
             }
-            fence_and_reap_sessions(&state, cleanup).await;
+            fence_and_reap_sessions(&state, cleanup, cycle_deadline).await;
             continue;
         };
-        reconcile_owned_publication_fences(&state, &routes, &live).await;
         let routed_session_ids = routes
             .iter()
             .map(|route| route.session_id.as_str())
@@ -7037,7 +7131,7 @@ pub(crate) async fn lease_loop(state: AppState) {
             .map(|route| route.session_id.clone())
             .collect::<Vec<_>>();
         let frontiers = Arc::new(state.transcode.session_frontiers(&active_session_ids).await);
-        let renewal_deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+        let renewal_deadline = cycle_deadline;
         let renewal_batches = renewal_chunks(&active)
             .map(|chunk| {
                 chunk
@@ -7059,14 +7153,17 @@ pub(crate) async fn lease_loop(state: AppState) {
                 let renewal_now_ms = unix_ms();
                 let renewals = chunk
                     .iter()
-                    // The replicated store has a three-second hard boundary
-                    // inside this four-second caller deadline. Refuse to send
-                    // work without the complete window remaining, so even a
-                    // commit-unknown reply cannot revive an already-expired
-                    // lease. Omitted routes fail closed in the outcome pass.
+                    // The Store attempt is capped at three seconds and also
+                    // consumes only this cycle's remaining caller budget.
+                    // Retain the complete four-second old-lease runway, so a
+                    // commit-unknown reply cannot revive an expired worker.
+                    // Omitted routes fail closed in the outcome pass.
                     .filter(|route| {
-                        route.lease_expires_at_ms
-                            > renewal_now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
+                        renewal_has_full_runway(
+                            route.lease_expires_at_ms,
+                            renewal_now_ms,
+                            renewal_deadline,
+                        )
                     })
                     .filter_map(|route| {
                         frontiers
@@ -7080,17 +7177,27 @@ pub(crate) async fn lease_loop(state: AppState) {
                             })
                     })
                     .collect::<Vec<_>>();
-                let outcome = tokio::time::timeout_at(
-                    renewal_deadline,
-                    store.renew_media_sessions(
-                        &owner_node_id,
-                        &renewals,
-                        renewal_now_ms,
-                        renewal_now_ms.saturating_add(LEASE_TTL_MS),
-                    ),
-                )
-                .await;
-                (chunk, renewal_now_ms, outcome, vod_capabilities)
+                // A chunk the spent budget never dispatches issued no Store
+                // write, so nothing can commit late on its behalf. The
+                // outcome pass treats it like a failed inventory rather than
+                // a commit-unknown renewal.
+                let dispatched = tokio::time::Instant::now() < renewal_deadline;
+                let outcome = if !dispatched {
+                    None
+                } else {
+                    tokio::time::timeout_at(
+                        renewal_deadline,
+                        store.renew_media_sessions(
+                            &owner_node_id,
+                            &renewals,
+                            renewal_now_ms,
+                            renewal_now_ms.saturating_add(LEASE_TTL_MS),
+                        ),
+                    )
+                    .await
+                    .ok()
+                };
+                (chunk, renewal_now_ms, dispatched, outcome, vod_capabilities)
             }
         }))
         .buffer_unordered(LEASE_RENEWAL_FANOUT)
@@ -7121,11 +7228,16 @@ pub(crate) async fn lease_loop(state: AppState) {
                 .map(|end| {
                     let store = Arc::clone(&state.store);
                     async move {
-                        tokio::time::timeout_at(
-                            renewal_deadline,
-                            store.end_media_session_if_owner(&end),
-                        )
-                        .await
+                        if tokio::time::Instant::now() >= renewal_deadline {
+                            None
+                        } else {
+                            tokio::time::timeout_at(
+                                renewal_deadline,
+                                store.end_media_session_if_owner(&end),
+                            )
+                            .await
+                            .ok()
+                        }
                     }
                 }),
         )
@@ -7141,16 +7253,16 @@ pub(crate) async fn lease_loop(state: AppState) {
             // cross-node sweep would become the bound for a drain on a
             // perfectly healthy node. Leaving it alone costs one more tick.
             //
-            // `Ok(Ok(None))` is finished too: the CAS found no matching row,
+            // `Some(Ok(None))` is finished too: the CAS found no matching row,
             // which means something already ended it or ownership moved. The
             // reap below reads whatever it actually finds.
             let ended = match outcome {
-                Ok(Ok(_)) => true,
-                Ok(Err(error)) => {
+                Some(Ok(_)) => true,
+                Some(Err(error)) => {
                     tracing::debug!(%error, "draining media session could not be ended");
                     false
                 }
-                Err(_) => {
+                None => {
                     tracing::debug!("draining media session end timed out");
                     false
                 }
@@ -7177,12 +7289,42 @@ pub(crate) async fn lease_loop(state: AppState) {
             ));
             known.remove(&lease.incarnation_id);
         }
-        for (chunk, renewal_now_ms, outcome, vod_capabilities) in renewal_outcomes {
+        for (chunk, renewal_now_ms, dispatched, outcome, vod_capabilities) in renewal_outcomes {
+            if !dispatched {
+                // No Store write was issued, so nothing can commit late. Keep
+                // exactly the routes this chunk would have sent: they still
+                // have the full renewal runway and a frontier, and `known`
+                // already holds their durable expiry from this tick's
+                // inventory. A later tick (which fires at once when late)
+                // renews them. Fail the rest closed as the dispatched path
+                // does for routes it leaves out.
+                let undispatched_now_ms = unix_ms();
+                for route in &chunk {
+                    if undispatched_renewal_keeps_lease(
+                        route.lease_expires_at_ms,
+                        undispatched_now_ms,
+                    ) && frontiers.contains_key(&route.session_id)
+                    {
+                        continue;
+                    }
+                    cleanup.push((
+                        route.incarnation_id.clone(),
+                        route.session_id.clone(),
+                        route.owner_epoch,
+                        vod_capabilities.contains(&route.session_id),
+                        "cluster lease lost",
+                    ));
+                    known.remove(&route.incarnation_id);
+                }
+                continue;
+            }
             match outcome {
-                Ok(Ok(renewed)) => {
+                Some(Ok(renewed)) => {
                     let renewed = renewed.into_iter().collect::<HashSet<_>>();
                     for route in &chunk {
-                        if renewed.contains(&route.incarnation_id) {
+                        if renewed.contains(&route.incarnation_id)
+                            && renewal_receipt_is_live(renewal_now_ms, unix_ms())
+                        {
                             known.insert(
                                 route.incarnation_id.clone(),
                                 (
@@ -7204,7 +7346,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                         }
                     }
                 }
-                Ok(Err(error)) => {
+                Some(Err(error)) => {
                     tracing::debug!(%error, "media-session lease renewal chunk unavailable");
                     for route in &chunk {
                         // Store timeouts and transport errors are commit-
@@ -7223,7 +7365,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                         known.remove(&route.incarnation_id);
                     }
                 }
-                Err(_) => {
+                None => {
                     tracing::debug!("media-session lease renewal fan-out exceeded its deadline");
                     for route in &chunk {
                         cleanup.push((
@@ -7250,7 +7392,13 @@ pub(crate) async fn lease_loop(state: AppState) {
         }
         cleanup.sort_unstable_by(|left, right| left.1.cmp(&right.1));
         cleanup.dedup_by(|left, right| left.1 == right.1);
-        fence_and_reap_sessions(&state, cleanup).await;
+        let publication_candidates =
+            publication_reconciliation_candidates(&routes, &live, &cleanup);
+        fence_and_reap_sessions(&state, cleanup, cycle_deadline).await;
+        // Store inventory and renewal independently exclude unconfirmed work.
+        // Only optional publication work moves: it cannot spend a fresh phase
+        // after renewal, and an ambiguous/lost owner has already been fenced.
+        reconcile_owned_publication_fences(&state, publication_candidates, cycle_deadline).await;
         let settlement_now = tokio::time::Instant::now();
         let settlement_now_ms = unix_ms();
         let unsettled = take_stale_settlement_candidates(
@@ -8936,6 +9084,29 @@ fn known_generation_missing_from_inventory(
     live_session_ids.contains(session_id)
         && !inventory_incarnations.contains(incarnation_id)
         && !fresh_seed_incarnations.contains(incarnation_id)
+}
+
+fn renewal_has_full_runway(
+    lease_expires_at_ms: i64,
+    now_ms: i64,
+    cycle_deadline: tokio::time::Instant,
+) -> bool {
+    tokio::time::Instant::now() < cycle_deadline
+        && lease_expires_at_ms > now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
+}
+
+/// A renewal the cycle never dispatched wrote nothing and cannot commit late.
+/// It keeps its lease for the next tick exactly when it would still have been
+/// sent now: the lease clause of [`renewal_has_full_runway`], without the
+/// spent cycle deadline.
+fn undispatched_renewal_keeps_lease(lease_expires_at_ms: i64, now_ms: i64) -> bool {
+    lease_expires_at_ms > now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
+}
+
+/// An acknowledgement can be polled late without moving the expiry that
+/// was proposed at dispatch. A receipt past that fixed boundary fences now.
+fn renewal_receipt_is_live(dispatched_at_ms: i64, received_at_ms: i64) -> bool {
+    dispatched_at_ms.saturating_add(LEASE_TTL_MS) > received_at_ms
 }
 
 fn renewal_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {

@@ -2031,6 +2031,25 @@ fn sdr_master_never_declares_codecs_and_hdr_keeps_them() {
 }
 
 #[test]
+fn prepared_single_variant_uses_only_the_attachment_frame_rate() {
+    let file = hls_file(vec![]);
+    let mut context = hls_context("hvc1.2.4.H153.90,ec-3", Some("dvh1.08.10/db1p"));
+    context.bandwidth = Some(plurx_core::transcode::OutputBandwidth {
+        peak_bps: 9_500_000,
+        average_bps: 6_000_000,
+    });
+    assert_eq!(
+        prepared_single_variant_master(&file, &context, Some(24.013)),
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=9500000,\
+         FRAME-RATE=24.013\nindex.m3u8\n",
+    );
+    assert_eq!(
+        prepared_single_variant_master(&file, &context, None),
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=9500000\nindex.m3u8\n",
+    );
+}
+
+#[test]
 fn source_probe_preserves_fractional_video_frame_rate() {
     let probe = r#"{
             "streams": [
@@ -2058,6 +2077,7 @@ fn sub(codec: &str, language: &str, title: &str, default: bool, forced: bool) ->
 #[test]
 fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
     let request = CreateSession {
+        split_audio: None,
             processed_upgrade: None,
         source_telemetry: None,
         intent: None,
@@ -2094,6 +2114,7 @@ fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
 #[test]
 fn bitmap_fallback_still_carries_an_explicit_burn_request() {
     let request = CreateSession {
+        split_audio: None,
             processed_upgrade: None,
         source_telemetry: None,
         intent: None,
@@ -4429,6 +4450,7 @@ async fn a_settlement_delayed_past_its_retry_budget_expires_uncommitted() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -7927,4 +7949,199 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
             ));
         }
     }
+}
+
+
+#[tokio::test]
+async fn qualified_auto_copy_rebinds_the_incumbent_with_muxed_hls() {
+    use super::preparation;
+    use crate::playback_control::{
+        ClientSelection, CodecPolicy, DynamicRangePolicy, EffectiveSelection, QualitySelection,
+        SubtitleMode, SubtitleSelection,
+    };
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::playback::candidate::CandidateRoute;
+
+    prepare_catalog_test_encoder().await;
+    let state = resolver_state();
+    let dir = crate::test_tempdir().expect("source dir");
+    let path = dir.path().join("ordinary.mkv");
+    std::fs::write(&path, [0_u8; 4096]).expect("candidate source");
+    let mtime = std::fs::metadata(&path)
+        .expect("metadata")
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs() as i64;
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Qualified copy".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Qualified copy".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let id = state
+        .store
+        .upsert_file(
+            item,
+            path.to_str().expect("source path"),
+            4096,
+            mtime,
+            &ProbeResult {
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(3840),
+                height: Some(2160),
+                bit_depth: Some(8),
+                raw_json: Some(
+                    serde_json::json!({"streams":[{
+                        "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                        "width":3840,"height":2160,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1",
+                        "avg_frame_rate":"24/1","r_frame_rate":"24/1"
+                    }]})
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let source = state
+        .store
+        .get_file(id)
+        .await
+        .expect("read")
+        .expect("source");
+    let caps = caps_v2(
+        r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls"]}"#,
+    );
+    let create = CreateSession {
+        playback_id: "qualified-auto-copy".into(),
+        quality_auto: Some(true),
+        copy: Some(true),
+        height: Some(2160),
+        caps: Some(caps.clone()),
+        presentation: Some("vod".into()),
+        transport: Some("native".into()),
+        ..bare_create()
+    };
+    let query = create.selection_catalog_request(&source, &caps, create.reviewed_copy_scope(None));
+    let catalog = state
+        .media_pool
+        .quality_catalog(&state, query.clone())
+        .await;
+    let row = catalog
+        .candidates
+        .iter()
+        .find(|row| {
+            row.node_id == state.node_id
+                && row.candidate.route == CandidateRoute::Remux
+                && row.candidate.target_height == 2160
+                && row.candidate.playable()
+        })
+        .expect("ordinary copy row");
+    let candidate = &row.candidate;
+    let mut route = crate::media_sessions::takeover_eligible_route(
+        "qualified-muxed",
+        "00000000-0000-4000-8000-0000000000a1",
+    );
+    route.owner_node_id = state.node_id.clone();
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.source_mtime = mtime;
+    predecessor.request = create.into_request(id, 2160);
+    reconcile_request_audio(Some(&source), &mut predecessor.request);
+    predecessor.candidate_id = Some(candidate.id);
+    predecessor.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
+        catalog_query: Some(query),
+        candidate: candidate.clone(),
+        caps: caps.clone(),
+        binding: row.binding.clone().expect("authoritative copy binding"),
+    });
+    predecessor.decoder_caps = Some(
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+            .expect("retained playback decoder"),
+    );
+    route.recipe_json = serde_json::to_string(&predecessor).expect("durable worker recipe");
+    route.response_json = serde_json::json!({"planning_caps":caps}).to_string();
+    let predecessor: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("parse durable route");
+    assert!(predecessor.request.candidate_context.is_none());
+    let delivered = EffectiveSelection::from_recipe(&predecessor, 2160, None);
+    let mut selection = ClientSelection {
+        quality: QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        },
+        codec: CodecPolicy::Auto,
+        dynamic_range: DynamicRangePolicy::Auto,
+        audio_track: None,
+        subtitle: SubtitleSelection {
+            mode: SubtitleMode::Off,
+            track: None,
+        },
+        audio_offset_ms: 0,
+    };
+    let fresh = preparation::replan_qualified_upgrade(
+        &state,
+        &route,
+        &predecessor,
+        &selection,
+        &delivered,
+        None,
+        &source,
+        2160,
+    )
+    .await
+    .unwrap_or_else(|error| match error {
+        preparation::QualifiedUpgradeReplanError::Retry => panic!("candidate unavailable"),
+        preparation::QualifiedUpgradeReplanError::Terminal(reason) => panic!("{reason}"),
+    });
+    let bound = fresh
+        .candidate_context
+        .expect("fresh copy binding after qualification");
+    assert_eq!(bound.candidate_id, candidate.id);
+    assert_eq!(bound.recipe_digest, candidate.recipe_digest);
+    assert_eq!(
+        fresh.kind.copy_contract(),
+        predecessor.request.kind.copy_contract()
+    );
+    assert_eq!(fresh.transport, predecessor.request.transport);
+    selection.quality = QualitySelection::Auto {
+        height: Some(2160),
+        candidate_id: Some(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([17; 32]),
+        ),
+    };
+    assert!(matches!(
+        preparation::replan_qualified_upgrade(
+            &state,
+            &route,
+            &predecessor,
+            &selection,
+            &delivered,
+            None,
+            &source,
+            2160,
+        )
+        .await,
+        Err(preparation::QualifiedUpgradeReplanError::Terminal(_))
+    ));
 }

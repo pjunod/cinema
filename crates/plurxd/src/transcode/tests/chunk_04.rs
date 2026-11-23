@@ -1211,6 +1211,7 @@ fn reopen_request(
     previous_session_id: &str,
 ) -> SessionRequest {
     SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,

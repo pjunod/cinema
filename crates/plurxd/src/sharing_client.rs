@@ -1634,6 +1634,10 @@ mod driver_lifetime_tests {
 /// then are retryable answers decoded (a 429 as `Busy`, a typed 503
 /// `startup_timeout` as `StartNotYet`, each with the bounded `Retry-After`
 /// every peer wait uses), so every other Start keeps today's mapping.
+/// The code a Source answers a passing live refusal with (a 503 with
+/// `Retry-After`); see `shared_source_playback::live_refusal_retry`.
+pub(crate) const SOURCE_LIVE_RETRY_CODE: &str = "sharing_source_retry";
+
 fn source_start_refusal(
     status: StatusCode,
     bytes: &[u8],
@@ -1658,6 +1662,13 @@ fn source_start_refusal(
                     }
                     if refusal.code == StartRetryCode::SourceNotPrepared.as_str() {
                         return PeerError::StartNotPrepared { retry_after_secs };
+                    }
+                    // The Source's own answer for a refusal that passes on
+                    // its own (a store renewal, a lost lease race, its body
+                    // limit): the attempt lives on, and the same request id
+                    // rejoins it, as a startup timeout does.
+                    if refusal.code == SOURCE_LIVE_RETRY_CODE {
+                        return PeerError::StartNotYet { retry_after_secs };
                     }
                 }
             }
@@ -1691,12 +1702,19 @@ fn source_start_refusal(
 
 /// A Source that cannot read its own authority answers 503 with
 /// `Retry-After`: unavailable for now, never a refusal that retires the
-/// receiver's session. Every other non-success answer is a refusal.
-pub(crate) fn peer_status_refusal(status: StatusCode, retry_after: bool) -> PeerError {
-    if status == StatusCode::SERVICE_UNAVAILABLE && retry_after {
-        PeerError::Unavailable
-    } else {
-        PeerError::Rejected(status)
+/// receiver's session. A full ingress credit pool answers 429 with
+/// `Retry-After` (load, not an outage): busy, retried after its wait. Every
+/// other non-success answer is a refusal.
+pub(crate) fn peer_status_refusal(
+    status: StatusCode,
+    retry_after: Option<&HeaderValue>,
+) -> PeerError {
+    match (status, retry_after) {
+        (StatusCode::SERVICE_UNAVAILABLE, Some(_)) => PeerError::Unavailable,
+        (StatusCode::TOO_MANY_REQUESTS, Some(value)) => PeerError::Busy {
+            retry_after_secs: peer_retry_after_secs(Some(value)),
+        },
+        _ => PeerError::Rejected(status),
     }
 }
 
@@ -1705,17 +1723,47 @@ mod peer_status_refusal_tests {
     use super::*;
     #[test]
     fn a_source_outage_is_unavailable_and_a_plain_refusal_is_not() {
+        let wait = HeaderValue::from_static("1");
         assert!(matches!(
-            peer_status_refusal(StatusCode::SERVICE_UNAVAILABLE, true),
+            peer_status_refusal(StatusCode::SERVICE_UNAVAILABLE, Some(&wait)),
             PeerError::Unavailable
         ));
         assert!(matches!(
-            peer_status_refusal(StatusCode::SERVICE_UNAVAILABLE, false),
+            peer_status_refusal(StatusCode::SERVICE_UNAVAILABLE, None),
             PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
         ));
         assert!(matches!(
-            peer_status_refusal(StatusCode::GONE, true),
+            peer_status_refusal(StatusCode::GONE, Some(&wait)),
             PeerError::Rejected(StatusCode::GONE)
+        ));
+    }
+
+    /// Regression (M4 Air, 2026-11-22 22:15:30Z, 'Avatar' attempt 3): the
+    /// ingress's full credit pool answered a status renewal with its typed
+    /// 429 and `Retry-After`. The receiver read it as a refusal, retired a
+    /// session that had just published ten segments, and its viewer sat at
+    /// "preparing" on a dead session. It is busy: retried inside the lease.
+    #[test]
+    fn a_typed_busy_answer_is_retried_not_a_refusal() {
+        let wait = HeaderValue::from_static("3");
+        assert!(matches!(
+            peer_status_refusal(StatusCode::TOO_MANY_REQUESTS, Some(&wait)),
+            PeerError::Busy {
+                retry_after_secs: 3
+            }
+        ));
+        // The renewal loop defers exactly what this maps to.
+        assert!(matches!(
+            crate::http::shared_receiver_playback::peer_failure(peer_status_refusal(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(&wait)
+            )),
+            crate::http::shared_receiver_playback::ReceiverStartError::PeerUnavailable
+        ));
+        // An untyped 429 is still a refusal.
+        assert!(matches!(
+            peer_status_refusal(StatusCode::TOO_MANY_REQUESTS, None),
+            PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
         ));
     }
 }
@@ -1723,6 +1771,23 @@ mod peer_status_refusal_tests {
 #[cfg(test)]
 mod source_start_refusal_tests {
     use super::*;
+    /// A Source's typed live retry is a Start that lives on: the receiver
+    /// rejoins it with the same request id. Unbudgeted, it stays a refusal.
+    #[test]
+    fn a_source_live_retry_rejoins_the_start() {
+        let body = br#"{"code":"sharing_source_retry","message":"Shared playback is briefly unavailable"}"#;
+        let wait = HeaderValue::from_static("1");
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, Some(Some(&wait))),
+            PeerError::StartNotYet {
+                retry_after_secs: 1
+            }
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, None),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+    }
     #[test]
     fn source_not_prepared_is_a_bounded_retry_only_for_budgeted_start() {
         let body = br#"{"code":"sharing_source_not_prepared","message":"Source has not prepared"}"#;

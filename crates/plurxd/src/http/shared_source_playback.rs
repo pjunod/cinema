@@ -1192,7 +1192,9 @@ async fn status(
         .store
         .source_ingress_custody(&owned.assignment)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", "Source status refused"); unavailable() })?
+        // A Store that cannot answer passes only for an owner still live: an
+        // ending one cannot be kept by a retry, whatever the Store says later.
+        .map_err(|_| { let retiring = owned.actor.is_retiring(); tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", retiring, "Source status refused"); if retiring { unavailable() } else { live_refusal_retry() } })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "absent", "Source status refused"); unavailable() })?;
     let cleanup_only = headers.cleanup_only()
         || current.is_err()
@@ -1212,7 +1214,7 @@ async fn status(
     if let (Ok((_, current_grant)), true) =
         (current.as_ref(), owned.actor.is_direct() && !cleanup_only)
     {
-        if let Ok(response) = direct::published_reply(
+        match direct::published_reply(
             &state,
             &headers,
             &entry,
@@ -1221,18 +1223,40 @@ async fn status(
             *current_grant,
             deadline,
         )
-        .await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", error_class = "operation_refused", "Source status refused"); })
+        .await
         {
-            return Ok(super::shared_library::guard_source_response(
-                state,
-                connection.map(|c| c.0),
-                response,
-            )
-            .await);
+            Ok(response) => {
+                return Ok(super::shared_library::guard_source_response(
+                    state,
+                    connection.map(|c| c.0),
+                    response,
+                )
+                .await)
+            }
+            // A direct owner has no HLS Start response to open: a refusal
+            // that passes is answered as a retry. Any other has already
+            // retired the owner and is answered with the terminal
+            // projection below.
+            Err(refusal) => {
+                tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", transient = refusal.transient, "Source status refused");
+                if refusal.transient {
+                    return Err(refusal.answer);
+                }
+            }
         }
     }
-    if current.is_ok() && !cleanup_only {
-        if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?error, "Source status refused"); }) {
+    if current.is_ok() && !cleanup_only && !owned.actor.is_direct() {
+        let opened = owned.actor.open_start_response(deadline).await;
+        if let Err(refusal) = &opened {
+            tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?refusal.error, transient = refusal.is_transient(), "Source status refused");
+            // A refusal that passes on its own is answered as one: a typed
+            // retry the receiver keeps its live session through. Only a
+            // terminal one falls through to the terminal projection below.
+            if refusal.is_transient() {
+                return Err(live_refusal_retry());
+            }
+        }
+        if let Ok((response, guard)) = opened {
             ingress::publication_allowed(&state, &owned.assignment).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.publication_allowed", error_class = "operation_refused", "Source status refused"); })?;
             entry
                 .observe_published(&owned, &response)
@@ -1852,8 +1876,9 @@ async fn resources(
     if current_grant != grant {
         return Err(unavailable());
     }
-    let opened = opened.map_err(|error| {
+    let opened = opened.map_err(|refusal| {
         use crate::transcode::source_actor::SourceWorkerError;
+        let error = refusal.error;
         let native_caption = input.resource.cached_subtitle_revision().is_none()
             && matches!(
                 input.resource.kind(),
@@ -1869,6 +1894,9 @@ async fn resources(
                 message: "The shared playback resource is still preparing".into(),
                 retry_after_seconds: 1,
             }
+        } else if refusal.is_transient() {
+            // The receiver relays this as unavailable and keeps the session.
+            live_refusal_retry()
         } else {
             SourceStartFailure::from(error).response()
         }
@@ -2033,7 +2061,8 @@ async fn start(
         .map_err(SourceStartFailure::response)?;
     if owned.actor.is_direct() {
         return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
-            .await;
+            .await
+            .map_err(|refusal| refusal.answer);
     }
     // Wait for the first publication on the viewer's clock alone, then open
     // the response under the owner's: opening reserves a body and is not
@@ -2041,12 +2070,22 @@ async fn start(
     clock
         .answer(owned.actor.wait_ready(deadline))
         .await?
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+        .map_err(|e| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.wait_ready", error_class = ?e, "Source start refused");
+            SourceStartFailure::from(e).response()
+        })?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
         .await
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+        .map_err(|refusal| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.open_response", error_class = ?refusal.error, transient = refusal.is_transient(), "Source start refused");
+            if refusal.is_transient() {
+                live_refusal_retry()
+            } else {
+                SourceStartFailure::from(refusal.error).response()
+            }
+        })?;
     let (_, current_grant) = current_reference(&state, &headers, &target).await?;
     if current_grant != grant {
         return Err(unavailable());
@@ -2423,6 +2462,8 @@ async fn own_start(
         Err(receipt) => {
             let reason = receipt.reason();
             entry.retain_stage(SourceStartTaskStage::FactoryRefused(receipt));
+            #[cfg(test)]
+            eprintln!("Source Start diagnostic stage=owner_factory reason={reason:?}");
             return Err(SourceStartFailure::from(reason));
         }
     };
@@ -2479,6 +2520,21 @@ async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
     }
     Ok((hash, grant))
 }
+/// A live session's refusal that passes on its own ([`LiveRefusal`]). The
+/// receiver reads a 503 with `Retry-After` as the Source being unavailable
+/// for now (`PeerError::Unavailable`), so it keeps the session and asks again;
+/// a plain 503 would read as the Source refusing it for good.
+///
+/// [`LiveRefusal`]: crate::transcode::source_actor::LiveRefusal
+fn live_refusal_retry() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: crate::sharing_client::SOURCE_LIVE_RETRY_CODE,
+        message: "Shared playback is briefly unavailable".to_owned(),
+        retry_after_seconds: 1,
+    }
+}
+
 fn unavailable() -> ApiError {
     ApiError::typed(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -2880,6 +2936,15 @@ pub(crate) enum SourceFixtureMode {
     /// [`Self::DolbyVisionConverted`] and a TrueHD 5.1 track, converted to
     /// Profile 8.1 by the growing copy owner.
     RangeDolbyVisionConverted,
+    /// [`Self::RangeDolbyVisionConverted`] whose scan records a 3840x2160
+    /// remux, as M6 file 6751's does. For preparation only: the generated
+    /// source itself stays small, so no copy of it is started.
+    RangeDolbyVisionScanned4k,
+    /// File 3122's shape through the web player: Matroska H.264 SDR with an
+    /// E-AC-3 5.1 track and two SubRip tracks (the first "English (SDH)"),
+    /// started by Chrome's caps document and audio sinks with `aac` asked and
+    /// native subtitles on the first track.
+    RangeWebNativeAudioCopy,
 }
 
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
@@ -3083,6 +3148,12 @@ async fn build_real_source_start_fixture(
     advertised_http: Option<tokio::net::TcpListener>,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
+    // Every refusal names its step in a warning; a fixture test that fails
+    // must show them, or a refusal under load is a code with no cause.
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("warn,hiqlite=error")
+        .try_init();
     use plurx_core::{
         config::Config,
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
@@ -3230,6 +3301,7 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::NativeEncoded
             | SourceFixtureMode::NativeHdr10Copy
             | SourceFixtureMode::RangeNativeCopy
+            | SourceFixtureMode::RangeWebNativeAudioCopy
     );
     // The modes a range-affirming receiver starts: a growing H.264 copy.
     let range_copy = matches!(
@@ -3238,12 +3310,17 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::RangeNativeCopy
             | SourceFixtureMode::RangeAudioCopy
             | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeDolbyVisionScanned4k
+            | SourceFixtureMode::RangeWebNativeAudioCopy
     );
     // The scanned remux modes' audio: the codec FFmpeg encodes, its scanned
     // name and channel count.
     let audio = match mode {
-        SourceFixtureMode::RangeAudioCopy => Some(("eac3", 6)),
-        SourceFixtureMode::RangeDolbyVisionConverted => Some(("truehd", 6)),
+        SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeWebNativeAudioCopy => {
+            Some(("eac3", 6))
+        }
+        SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => Some(("truehd", 6)),
         _ => None,
     };
     let burn = matches!(
@@ -3255,9 +3332,9 @@ async fn build_real_source_start_fixture(
         | SourceFixtureMode::DolbyVisionCompatibleEncoded
         | SourceFixtureMode::DolbyVisionUnaffirmed
         | SourceFixtureMode::DolbyVisionStripped => Some((8u8, 1u8)),
-        SourceFixtureMode::DolbyVisionConverted | SourceFixtureMode::RangeDolbyVisionConverted => {
-            Some((7, 6))
-        }
+        SourceFixtureMode::DolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => Some((7, 6)),
         SourceFixtureMode::DolbyVisionProfile5Encoded => Some((5, 0)),
         _ => None,
     };
@@ -3269,6 +3346,7 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::DolbyVisionUnaffirmed
             | SourceFixtureMode::DolbyVisionStripped
             | SourceFixtureMode::RangeDolbyVisionConverted
+            | SourceFixtureMode::RangeDolbyVisionScanned4k
     );
     let hdr = matches!(
         mode,
@@ -3424,7 +3502,7 @@ async fn build_real_source_start_fixture(
     }
     if let Some((codec, channels)) = audio {
         // A remux's audio beside the video built above, in Matroska.
-        let muxed = directory.path().join("source.mkv");
+        let muxed = directory.path().join("remux.mkv");
         let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
             .args(["-v", "error", "-i"])
             .arg(&file)
@@ -3481,10 +3559,42 @@ async fn build_real_source_start_fixture(
             .arg(&caption)
             .arg("-i")
             .arg(&alternative)
-            .args([
-                "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
-                "subrip", "-y",
-            ])
+            .args(
+                if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+                    // File 3122's shape: its audio beside two English SubRip
+                    // tracks, the first titled "English (SDH)".
+                    &[
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a",
+                        "-map",
+                        "1:s:0",
+                        "-map",
+                        "2:s:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "copy",
+                        "-c:s",
+                        "subrip",
+                        "-metadata:s:s:0",
+                        "language=eng",
+                        "-metadata:s:s:0",
+                        "title=English (SDH)",
+                        "-metadata:s:s:1",
+                        "language=eng",
+                        "-y",
+                    ][..]
+                } else {
+                    // The other native modes keep their original video-only,
+                    // untagged two-track shape.
+                    &[
+                        "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
+                        "subrip", "-y",
+                    ][..]
+                },
+            )
             .arg(&muxed)
             .output()
             .await
@@ -3645,10 +3755,15 @@ async fn build_real_source_start_fixture(
             7 => "Dolby Vision · Profile 7 (HDR10-compatible)",
             _ => "Dolby Vision · Profile 5",
         };
-        let (scanned_width, scanned_height) = (
-            video["width"].as_i64().expect("width"),
-            video["height"].as_i64().expect("height"),
-        );
+        let (scanned_width, scanned_height) =
+            if matches!(mode, SourceFixtureMode::RangeDolbyVisionScanned4k) {
+                (3840, 2160)
+            } else {
+                (
+                    video["width"].as_i64().expect("width"),
+                    video["height"].as_i64().expect("height"),
+                )
+            };
         client
             .execute(
                 "UPDATE files SET hdr='dolby_vision',hdr_format=$1,dv_profile=$2,dv_level=$3,dv_bl_compat_id=$4,dv_el_present=0,dv_rpu_present=1,width=$5,height=$6 WHERE id=1",
@@ -3879,7 +3994,8 @@ async fn build_real_source_start_fixture(
         SourceFixtureMode::DolbyVisionPreserved
         | SourceFixtureMode::DolbyVisionConverted
         | SourceFixtureMode::DolbyVisionUnaffirmed
-        | SourceFixtureMode::RangeDolbyVisionConverted => {
+        | SourceFixtureMode::RangeDolbyVisionConverted
+        | SourceFixtureMode::RangeDolbyVisionScanned4k => {
             // The ask only clamps: a player that does not ask for Dolby
             // Vision is given the compatible base whatever its caps say.
             recipe["session"]["preserve_dolby_vision"] = serde_json::json!(true);
@@ -3909,6 +4025,12 @@ async fn build_real_source_start_fixture(
             headers.insert(name, value.parse().expect("receiver affirmation"));
         }
     }
+    if matches!(mode, SourceFixtureMode::RangeDolbyVisionConverted) {
+        // A rung below the source, as production's 4K Profile 7 plan resolved
+        // under the node's Dolby Vision transcode ceiling: the copy still
+        // carries, and reports, the source's own geometry.
+        recipe["session"]["height"] = serde_json::json!(144);
+    }
     if audio.is_some() {
         // Selected by index and with no `aac` ask, as a client whose caps name
         // no audio sinks sends it. E-AC-3 is in its decoder list and passes
@@ -3917,6 +4039,25 @@ async fn build_real_source_start_fixture(
         recipe["session"]["audio"] = serde_json::json!(0);
         if matches!(mode, SourceFixtureMode::RangeAudioCopy) {
             recipe["session"]["caps"]["audio"] = serde_json::json!(["aac", "eac3"]);
+        }
+        if matches!(mode, SourceFixtureMode::RangeWebNativeAudioCopy) {
+            // Chrome on macOS as decode-tiers.js builds it: no AC-3/E-AC-3
+            // decoder, stereo output, a sink for each decodable codec, and the
+            // `aac` ask copyAudioNeedsTranscode makes for E-AC-3.
+            recipe["session"]["caps"] = serde_json::json!({"v":2,
+                "client":{"kind":"web","build":"fixture","ua":"Mozilla/5.0 (Macintosh) Chrome"},
+                "video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr"],"dv_profiles":[]}],
+                "audio":["aac","mp3","opus","flac"],
+                "containers":["mp4","webm","mov","m4a","m4b","mp3","aac","flac","ogg","opus","wav"],
+                "transports":["progressive","hls","hls-bounded-range-v1"],
+                "hls_hevc_sample_entries":["hvc1"],"progressive_hevc_sample_entries":[],
+                "display":{"hdr":false,"dolby_vision":false},
+                "audio_sinks":[
+                    {"codec":"aac","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                    {"codec":"mp3","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                    {"codec":"flac","max_channels":2,"passthrough":false,"sample_rates_hz":[44100,48000]}],
+                "learned_limits":[]});
+            recipe["session"]["aac"] = serde_json::json!(true);
         }
     }
     if matches!(mode, SourceFixtureMode::Direct) {

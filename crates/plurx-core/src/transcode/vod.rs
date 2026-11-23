@@ -872,6 +872,307 @@ impl VodPresentationFamily {
     }
 }
 
+/// A video-only rendition copied from the source and cut on its own keyframe
+/// grid. Unlike `VodVideoRung` it has no encoded constant frame grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodCopyVideoRendition {
+    rendition_id: String,
+    init_id: String,
+    source_object_version: String,
+    facts: crate::fmp4::AvcSampleEntryFacts,
+    frame_rate: Option<(u32, u32)>,
+}
+
+impl VodCopyVideoRendition {
+    pub fn from_verified_init(
+        init: &crate::fmp4::Init,
+        rendition_id: &str,
+        source_object_version: &str,
+        frame_rate: Option<(u32, u32)>,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        use sha2::{Digest, Sha256};
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "copy rendition is not a verified single-track AVC init".into(),
+            )
+        };
+        if rendition_id.len() != 64
+            || !rendition_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || source_object_version.is_empty()
+            || source_object_version.len() > 512
+            || source_object_version
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || init.tracks.len() != 1
+        {
+            return Err(refuse());
+        }
+        let facts = crate::fmp4::avc_copy_sample_entry_facts(init)?.ok_or_else(refuse)?;
+        Ok(Self {
+            rendition_id: rendition_id.to_owned(),
+            init_id: hex::encode(Sha256::digest(&init.bytes)),
+            source_object_version: source_object_version.to_owned(),
+            facts,
+            frame_rate: frame_rate.filter(|(num, den)| *num != 0 && *den != 0),
+        })
+    }
+    pub fn rendition_id(&self) -> &str {
+        &self.rendition_id
+    }
+    pub fn init_id(&self) -> &str {
+        &self.init_id
+    }
+    pub fn source_object_version(&self) -> &str {
+        &self.source_object_version
+    }
+    pub fn facts(&self) -> &crate::fmp4::AvcSampleEntryFacts {
+        &self.facts
+    }
+    pub fn frame_rate(&self) -> Option<(u32, u32)> {
+        self.frame_rate
+    }
+    /// The child media playlist over the copy's own immutable keyframe plan,
+    /// addressed like every family child: `init/<id>.mp4`, `segment/<n>.m4s`.
+    /// Refuses a plan that names anything but video.
+    pub fn media_playlist(&self, plan: &SegmentPlan) -> Result<String, crate::fmp4::Fmp4Error> {
+        use std::fmt::Write;
+        if plan.entries.is_empty()
+            || plan.timescale == 0
+            || plan
+                .entries
+                .iter()
+                .enumerate()
+                .any(|(at, entry)| entry.index as usize != at || entry.kind != PlanEntryKind::Video)
+        {
+            return Err(crate::fmp4::Fmp4Error::Unsupported(
+                "split copy video plan is empty, unordered or not video-only".into(),
+            ));
+        }
+        let mut out = String::with_capacity(256 + plan.entries.len() * 48);
+        out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
+        let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", plan.target_duration.max(1));
+        out.push_str("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n");
+        let _ = writeln!(out, "#EXT-X-MAP:URI=\"init/{}.mp4\"", self.init_id);
+        for entry in &plan.entries {
+            let _ = writeln!(
+                out,
+                "#EXTINF:{:.6},\nsegment/{}.m4s",
+                entry.seconds(plan.timescale),
+                entry.index
+            );
+        }
+        out.push_str("#EXT-X-ENDLIST\n");
+        Ok(out)
+    }
+}
+
+/// One shared AAC soundtrack for one source audio stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodSplitSoundtrack {
+    pub audio: VodSharedAudioRendition,
+    pub source_index: i64,
+    pub language: Option<String>,
+    pub name: String,
+}
+
+/// One copied video rendition plus a soundtrack per source language. The
+/// identity excludes the default selection so viewers with different
+/// defaults share one family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodSplitCopyFamily {
+    id: String,
+    video: VodCopyVideoRendition,
+    soundtracks: Vec<VodSplitSoundtrack>,
+    default_source_index: i64,
+}
+
+/// HLS quoted strings cannot hold quotes or line breaks.
+fn hls_quoted(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            '"' => '\'',
+            '\r' | '\n' => ' ',
+            c => c,
+        })
+        .collect()
+}
+
+impl VodSplitCopyFamily {
+    pub fn new(
+        video: VodCopyVideoRendition,
+        mut soundtracks: Vec<VodSplitSoundtrack>,
+        default_source_index: i64,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        use sha2::{Digest, Sha256};
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "split copy family soundtracks do not name one source and distinct renditions"
+                    .into(),
+            )
+        };
+        soundtracks.sort_by_key(|track| track.source_index);
+        let mut renditions = std::collections::BTreeSet::new();
+        let mut inits = std::collections::BTreeSet::new();
+        if soundtracks.is_empty()
+            || soundtracks
+                .windows(2)
+                .any(|pair| pair[0].source_index == pair[1].source_index)
+            || soundtracks.iter().any(|track| {
+                track.audio.source_object_version != video.source_object_version
+                    || track.audio.rendition_id == video.rendition_id
+                    || track.audio.init_id == video.init_id
+                    || !renditions.insert(track.audio.rendition_id.as_str())
+                    || !inits.insert(track.audio.init_id.as_str())
+            })
+            || !soundtracks
+                .iter()
+                .any(|track| track.source_index == default_source_index)
+        {
+            return Err(refuse());
+        }
+        let mut identity = Sha256::new();
+        identity.update(b"plurx-vod-split-copy-family-v1\0");
+        identity.update(video.rendition_id.as_bytes());
+        identity.update(video.init_id.as_bytes());
+        identity.update((soundtracks.len() as u64).to_le_bytes());
+        for track in &soundtracks {
+            identity.update(track.source_index.to_le_bytes());
+            identity.update(track.audio.rendition_id.as_bytes());
+            identity.update(track.audio.init_id.as_bytes());
+            identity.update(track.audio.recipe_id.as_bytes());
+        }
+        Ok(Self {
+            id: hex::encode(identity.finalize()),
+            video,
+            soundtracks,
+            default_source_index,
+        })
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn video(&self) -> &VodCopyVideoRendition {
+        &self.video
+    }
+    pub fn soundtracks(&self) -> &[VodSplitSoundtrack] {
+        &self.soundtracks
+    }
+    pub fn default_source_index(&self) -> i64 {
+        self.default_source_index
+    }
+    pub fn soundtrack(&self, rendition_id: &str) -> Option<&VodSplitSoundtrack> {
+        self.soundtracks
+            .iter()
+            .find(|track| track.audio.rendition_id == rendition_id)
+    }
+
+    /// Alternate-audio master: one video variant, one `EXT-X-MEDIA` per
+    /// language. Budgets must cover exactly the advertised renditions.
+    pub fn master_playlist(
+        &self,
+        video_budget: &VodRenditionBandwidth,
+        audio_budgets: &[VodRenditionBandwidth],
+        default_source_index: i64,
+    ) -> Result<String, crate::fmp4::Fmp4Error> {
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "split copy master has incomplete or conflicting rendition budgets".into(),
+            )
+        };
+        let budgets: std::collections::BTreeMap<_, _> = audio_budgets
+            .iter()
+            .map(|budget| (budget.rendition_id.as_str(), budget))
+            .collect();
+        if !video_budget.valid()
+            || video_budget.rendition_id != self.video.rendition_id
+            || budgets.len() != audio_budgets.len()
+            || audio_budgets.len() != self.soundtracks.len()
+            || audio_budgets.iter().any(|budget| !budget.valid())
+            || self
+                .soundtracks
+                .iter()
+                .any(|track| !budgets.contains_key(track.audio.rendition_id.as_str()))
+            || !self
+                .soundtracks
+                .iter()
+                .any(|track| track.source_index == default_source_index)
+        {
+            return Err(refuse());
+        }
+        let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n");
+        let mut audio_codecs: Vec<&str> = Vec::new();
+        let mut max_audio_peak = 0u64;
+        let mut max_audio_average = Some(0u64);
+        for track in &self.soundtracks {
+            let budget = budgets[track.audio.rendition_id.as_str()];
+            max_audio_peak = max_audio_peak.max(budget.peak_bps);
+            max_audio_average = match (max_audio_average, budget.average_bps) {
+                (Some(max), Some(average)) => Some(max.max(average)),
+                _ => None,
+            };
+            if !audio_codecs.contains(&track.audio.facts.codec) {
+                audio_codecs.push(track.audio.facts.codec);
+            }
+            let language = track
+                .language
+                .as_deref()
+                .map(|lang| {
+                    lang.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect::<String>()
+                })
+                .filter(|lang| !lang.is_empty());
+            out.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{}\"",
+                hls_quoted(&track.name),
+            ));
+            if let Some(language) = language {
+                out.push_str(&format!(",LANGUAGE=\"{language}\""));
+            }
+            out.push_str(&format!(
+                ",DEFAULT={},AUTOSELECT=YES,CHANNELS=\"{}\",STABLE-RENDITION-ID=\"a{}\",URI=\"audio/{}/index.m3u8\"\n",
+                if track.source_index == default_source_index {
+                    "YES"
+                } else {
+                    "NO"
+                },
+                track.audio.facts.channels,
+                track.source_index,
+                track.audio.rendition_id,
+            ));
+        }
+        let peak = video_budget
+            .peak_bps
+            .checked_add(max_audio_peak)
+            .ok_or_else(refuse)?;
+        out.push_str(&format!("#EXT-X-STREAM-INF:BANDWIDTH={peak}"));
+        if let (Some(video), Some(audio)) = (video_budget.average_bps, max_audio_average) {
+            let average = video.checked_add(audio).ok_or_else(refuse)?;
+            out.push_str(&format!(",AVERAGE-BANDWIDTH={average}"));
+        }
+        out.push_str(&format!(
+            ",RESOLUTION={}x{}",
+            self.video.facts.width, self.video.facts.height
+        ));
+        if let Some((num, den)) = self.video.frame_rate {
+            out.push_str(&format!(
+                ",FRAME-RATE={:.3}",
+                f64::from(num) / f64::from(den)
+            ));
+        }
+        out.push_str(&format!(
+            ",CODECS=\"{},{}\",AUDIO=\"audio\"\nvideo/{}/index.m3u8\n",
+            self.video.facts.codec,
+            audio_codecs.join(","),
+            self.video.rendition_id,
+        ));
+        Ok(out)
+    }
+}
+
 /// AAC correction shared by muxed VOD and the single family soundtrack.
 /// Seek and trim on the global sample lattice rather than restarting its phase.
 struct AudioClock {
@@ -3205,5 +3506,241 @@ mod tests {
             VodFrameGrid::new(60_000, 2_002),
             VodFrameGrid::new(30_000, 1_001)
         );
+    }
+
+    fn split_video() -> VodCopyVideoRendition {
+        VodCopyVideoRendition {
+            rendition_id: "a".repeat(64),
+            init_id: "b".repeat(64),
+            source_object_version: "source-one".into(),
+            facts: crate::fmp4::AvcSampleEntryFacts {
+                codec: "avc1.640028".into(),
+                width: 1920,
+                height: 1080,
+                color_primaries: 1,
+                color_transfer: 1,
+                color_matrix: 1,
+                full_range: false,
+            },
+            frame_rate: Some((24_000, 1_001)),
+        }
+    }
+
+    fn split_audio(id: char, init: char, channels: u16) -> VodSharedAudioRendition {
+        VodSharedAudioRendition {
+            rendition_id: id.to_string().repeat(64),
+            init_id: init.to_string().repeat(64),
+            recipe_id: "c".repeat(64),
+            source_object_version: "source-one".into(),
+            facts: crate::fmp4::AacSampleEntryFacts {
+                codec: "mp4a.40.2",
+                channels,
+                sample_rate: 48_000,
+                samples_per_frame: 1_024,
+            },
+            bitrate_kbps: 160,
+        }
+    }
+
+    fn split_track(
+        id: char,
+        init: char,
+        index: i64,
+        lang: Option<&str>,
+        name: &str,
+    ) -> VodSplitSoundtrack {
+        VodSplitSoundtrack {
+            audio: split_audio(id, init, 2),
+            source_index: index,
+            language: lang.map(str::to_owned),
+            name: name.into(),
+        }
+    }
+
+    fn budget(id: &str, peak: u64, average: Option<u64>) -> VodRenditionBandwidth {
+        VodRenditionBandwidth {
+            rendition_id: id.into(),
+            peak_bps: peak,
+            average_bps: average,
+            sustained_bps: None,
+        }
+    }
+
+    fn split_family() -> VodSplitCopyFamily {
+        VodSplitCopyFamily::new(
+            split_video(),
+            vec![
+                split_track('f', 'e', 2, Some("fre"), "Francais"),
+                split_track('d', '1', 1, Some("eng"), "English"),
+            ],
+            1,
+        )
+        .expect("family")
+    }
+
+    fn split_budgets() -> (VodRenditionBandwidth, Vec<VodRenditionBandwidth>) {
+        (
+            budget(&"a".repeat(64), 8_000_000, Some(6_000_000)),
+            vec![
+                budget(&"d".repeat(64), 200_000, Some(160_000)),
+                budget(&"f".repeat(64), 250_000, Some(150_000)),
+            ],
+        )
+    }
+
+    #[test]
+    fn split_copy_master_lists_every_language_with_one_default() {
+        let family = split_family();
+        let (video, audio) = split_budgets();
+        let master = family.master_playlist(&video, &audio, 1).expect("master");
+        let expected = format!(
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"eng\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a1\",URI=\"audio/{d}/index.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Francais\",LANGUAGE=\"fre\",DEFAULT=NO,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a2\",URI=\"audio/{f}/index.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=8250000,AVERAGE-BANDWIDTH=6160000,RESOLUTION=1920x1080,FRAME-RATE=23.976,CODECS=\"avc1.640028,mp4a.40.2\",AUDIO=\"audio\"\n\
+video/{a}/index.m3u8\n",
+            d = "d".repeat(64),
+            f = "f".repeat(64),
+            a = "a".repeat(64),
+        );
+        assert_eq!(master, expected);
+        assert_eq!(
+            family
+                .soundtrack(&"f".repeat(64))
+                .expect("fre")
+                .source_index,
+            2
+        );
+        assert!(family.soundtrack(&"0".repeat(64)).is_none());
+    }
+
+    #[test]
+    fn split_copy_default_changes_flags_but_not_identity() {
+        let family = split_family();
+        let (video, audio) = split_budgets();
+        let eng = family.master_playlist(&video, &audio, 1).expect("eng");
+        let fre = family.master_playlist(&video, &audio, 2).expect("fre");
+        assert_ne!(eng, fre);
+        let strip = |text: &str| {
+            text.replace("DEFAULT=YES", "DEFAULT=_")
+                .replace("DEFAULT=NO", "DEFAULT=_")
+        };
+        assert_eq!(strip(&eng), strip(&fre));
+        assert!(eng.contains("NAME=\"English\",LANGUAGE=\"eng\",DEFAULT=YES"));
+        assert!(fre.contains("NAME=\"Francais\",LANGUAGE=\"fre\",DEFAULT=YES"));
+        let other = VodSplitCopyFamily::new(
+            split_video(),
+            family.soundtracks().iter().rev().cloned().collect(),
+            2,
+        )
+        .expect("other default");
+        assert_eq!(family.id(), other.id());
+        assert_eq!(other.default_source_index(), 2);
+        let mut changed = family.soundtracks().to_vec();
+        changed[0].audio.init_id = "9".repeat(64);
+        assert_ne!(
+            family.id(),
+            VodSplitCopyFamily::new(split_video(), changed, 1)
+                .expect("changed")
+                .id()
+        );
+    }
+
+    #[test]
+    fn split_copy_family_refuses_inconsistent_soundtracks() {
+        let tracks = || {
+            vec![
+                split_track('d', '1', 1, Some("eng"), "English"),
+                split_track('f', 'e', 2, Some("fre"), "Francais"),
+            ]
+        };
+        assert!(VodSplitCopyFamily::new(split_video(), vec![], 1).is_err());
+        let mut dup_index = tracks();
+        dup_index[1].source_index = 1;
+        assert!(VodSplitCopyFamily::new(split_video(), dup_index, 1).is_err());
+        let mut other_source = tracks();
+        other_source[1].audio.source_object_version = "source-two".into();
+        assert!(VodSplitCopyFamily::new(split_video(), other_source, 1).is_err());
+        assert!(VodSplitCopyFamily::new(split_video(), tracks(), 9).is_err());
+        let mut dup_rendition = tracks();
+        dup_rendition[1].audio.rendition_id = dup_rendition[0].audio.rendition_id.clone();
+        assert!(VodSplitCopyFamily::new(split_video(), dup_rendition, 1).is_err());
+        let mut dup_init = tracks();
+        dup_init[1].audio.init_id = dup_init[0].audio.init_id.clone();
+        assert!(VodSplitCopyFamily::new(split_video(), dup_init, 1).is_err());
+        let mut video_rendition = tracks();
+        video_rendition[0].audio.rendition_id = "a".repeat(64);
+        assert!(VodSplitCopyFamily::new(split_video(), video_rendition, 1).is_err());
+        let mut video_init = tracks();
+        video_init[0].audio.init_id = "b".repeat(64);
+        assert!(VodSplitCopyFamily::new(split_video(), video_init, 1).is_err());
+    }
+
+    #[test]
+    fn split_copy_master_refuses_incomplete_or_wrong_budgets() {
+        let family = split_family();
+        let (video, audio) = split_budgets();
+        assert!(family.master_playlist(&video, &audio[..1], 1).is_err());
+        let mut extra = audio.clone();
+        extra.push(budget(&"0".repeat(64), 100_000, None));
+        assert!(family.master_playlist(&video, &extra, 1).is_err());
+        let mut duplicate = audio.clone();
+        duplicate[1] = duplicate[0].clone();
+        assert!(family.master_playlist(&video, &duplicate, 1).is_err());
+        let wrong_video = budget(&"0".repeat(64), 8_000_000, None);
+        assert!(family.master_playlist(&wrong_video, &audio, 1).is_err());
+        assert!(family.master_playlist(&video, &audio, 7).is_err());
+        let invalid = budget(&"a".repeat(64), 0, None);
+        assert!(family.master_playlist(&invalid, &audio, 1).is_err());
+        let overflow = budget(&"a".repeat(64), u64::MAX, None);
+        assert!(family.master_playlist(&overflow, &audio, 1).is_err());
+    }
+
+    #[test]
+    fn split_copy_master_sanitizes_names_and_languages() {
+        let family = VodSplitCopyFamily::new(
+            split_video(),
+            vec![
+                split_track('d', '1', 1, Some("e\"n g\r\n-US"), "Say \"hi\"\r\nnow"),
+                split_track('f', 'e', 2, Some("  "), "Plain"),
+            ],
+            1,
+        )
+        .expect("family");
+        let (video, audio) = split_budgets();
+        let master = family.master_playlist(&video, &audio, 1).expect("master");
+        assert!(master.contains("NAME=\"Say 'hi'  now\",LANGUAGE=\"eng-US\",DEFAULT=YES"));
+        assert!(master.contains("NAME=\"Plain\",DEFAULT=NO"));
+        assert!(!master.contains("LANGUAGE=\"\""));
+        assert_eq!(master.lines().count(), 7);
+    }
+
+    #[test]
+    fn split_copy_master_omits_average_when_any_budget_lacks_one() {
+        let family = split_family();
+        let (video, mut audio) = split_budgets();
+        audio[1].average_bps = None;
+        let master = family.master_playlist(&video, &audio, 1).expect("master");
+        assert!(master.contains("BANDWIDTH=8250000,RESOLUTION"));
+        assert!(!master.contains("AVERAGE-BANDWIDTH"));
+        let (mut video, audio) = split_budgets();
+        video.average_bps = None;
+        let master = family.master_playlist(&video, &audio, 1).expect("master");
+        assert!(!master.contains("AVERAGE-BANDWIDTH"));
+    }
+
+    #[test]
+    fn split_copy_master_omits_unknown_frame_rate_and_language() {
+        let mut video = split_video();
+        video.frame_rate = None;
+        let family =
+            VodSplitCopyFamily::new(video, vec![split_track('d', '1', 1, None, "Audio")], 1)
+                .expect("family");
+        let (video_budget, audio) = split_budgets();
+        let master = family
+            .master_playlist(&video_budget, &audio[..1], 1)
+            .expect("master");
+        assert!(!master.contains("FRAME-RATE"));
+        assert!(!master.contains("LANGUAGE"));
     }
 }

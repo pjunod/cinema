@@ -2503,6 +2503,7 @@ async fn staging_route_with_incumbent_on(
         .expect("staging user");
     let incarnation_id = uuid::Uuid::new_v4().to_string();
     let predecessor_request = crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2573,6 +2574,7 @@ async fn staging_route_with_incumbent_on(
         height: 2160,
         encoder: "test".to_owned(),
         vod: false,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: Some("sdr".to_owned()),

@@ -169,14 +169,7 @@ pub type LandingClock = Box<
         > + Send,
 >;
 
-/// A [`LandingClock`]'s answer: the landing keyframe's time counted from the
-/// film's first video keyframe — the index's own zero — and one frame's
-/// duration, the most the two clocks may disagree by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LandingTime {
-    pub ticks: u64,
-    pub frame_ticks: u64,
-}
+pub use crate::segplan::LandingTime;
 
 /// Why the landing time did not place an ambiguous landing.
 #[derive(Debug, Clone)]
@@ -1006,9 +999,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                     let presentation = i128::from(index.rows[row].dts)
                         + i128::from(proofs[row].first_cto())
                         - first_presentation;
-                    let off = presentation.abs_diff(i128::from(time.ticks));
-                    off < u128::from(time.frame_ticks.max(1))
-                        && off * 2 < u128::from(index.rows[row].duration.max(1))
+                    time.admits(time.offset_from(presentation), index.rows[row].duration)
                 }
                 None => row == 0,
             })
@@ -1113,14 +1104,8 @@ impl<S: Sink> GenerationRun<'_, S> {
                     {
                         let clock = self.landing_clock.take().expect("checked by the guard");
                         let placed = match clock().await {
-                            Ok(time) => match_landing_at(
-                                index,
-                                &self.observed,
-                                target,
-                                time.ticks,
-                                time.frame_ticks,
-                            )
-                            .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
+                            Ok(time) => match_landing_at(index, &self.observed, target, time)
+                                .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
                             Err(why) => Err(TimeRefusal::Unmeasured(why)),
                         };
                         match placed {

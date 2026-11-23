@@ -51,6 +51,8 @@ pub struct ObservedRangeAssembler {
     init: Option<Init>,
     fragment: Option<Fragment>,
     next_sequence: u64,
+    /// The strict-muxer decode time the previous fragment ended on.
+    muxed_dts: Option<i64>,
     origin: SourceTimestamp,
     canonical_start: u64,
     max_packets: usize,
@@ -84,6 +86,7 @@ impl ObservedRangeAssembler {
             init: None,
             fragment: None,
             next_sequence: 0,
+            muxed_dts: None,
             origin,
             canonical_start: canonical_title_start,
             max_packets: max_pending_packets,
@@ -299,12 +302,14 @@ impl ObservedRangeAssembler {
             init,
             &packets[..count],
             self.next_sequence,
+            self.muxed_dts,
             self.origin,
             self.canonical_start,
         )
         .map_err(|_| ObservationError::Clock)?;
         drop(self.packets.drain(..count));
         self.next_sequence = clock.next_packet_sequence;
+        self.muxed_dts = Some(clock.last_muxed_dts);
         let fragment = self.fragment.take().ok_or(ObservationError::Media)?;
         Ok(Some(ObservedUnit::Fragment { fragment, clock }))
     }

@@ -178,6 +178,8 @@ mod subtitle_text;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/subtitle_translation_upgrade.rs"]
 mod subtitle_translation_upgrade;
+#[path = "store_contract/token_proofs.rs"]
+mod token_proofs;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -397,6 +399,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting_if_absent_if_artwork_repair_current",
     "prune_unreferenced_book_cover_origins",
     "put_settings",
+    "put_auth_token_policy",
     // The generation-fenced settings write. It belongs beside `put_settings`
     // rather than in a Live TV group: nothing about it is Live TV specific,
     // and any caller that needs a settings batch to land only against an
@@ -450,6 +453,7 @@ const USER_METHODS: &[&str] = &[
     "create_token_if_password_matches",
     "authenticate_token",
     "authenticate_token_for",
+    "authenticate_token_proof_for",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -600,6 +604,7 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_chapters",
     "merge_file_probe_chapters_if_missing",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
@@ -743,6 +748,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_title_readiness",
     "dv_title_demands",
     "dv_title_demands_through",
+    "dv_title_demand_for_file",
     "bind_dv_title_demand",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
@@ -21838,7 +21844,20 @@ fn contract_inventory_matches_every_store_method() {
     // published with chapter evidence (`timeline_annotation_set` is now a
     // provided method over it). Named in `MEDIA_METHODS` and
     // `TIMELINE_ANNOTATION_METHODS`; no new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 634, "review the Store method count");
+    // 634 -> 635: `dv_title_demand_for_file` reads one recent native FEL
+    // title's maintenance demand without moving the title worker's cursor.
+    // Named in BACKGROUND_JOB_METHODS and exercised on both backends by
+    // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
+    // 635 -> 636 for the Apple TV startup fix: `MediaStore`'s
+    // `merge_file_probe_hevc_scan` grafts a probed HEVC scan verdict onto the
+    // measured probe revision, exercised on both backends by
+    // media_contract_runs_through_dyn_store. Named in `MEDIA_METHODS`.
+    // 636 -> 638: source-bound token proofs (2c2557edf) add
+    // `put_auth_token_policy` to SETTINGS_METHODS and
+    // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
+    // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
+    // No existing method, trait or supertrait is removed.
+    assert_eq!(declared.len(), 638, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -29359,6 +29378,36 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .submit_fragment_index_analysis(&forced_claim, &forced_job, 21)
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit forced generation: {error}")));
+        let coordination = plurx_core::store::analysis_coordination::AnalysisCoordinationSource {
+            file_id,
+            source_size: forced_request.source_size,
+            source_mtime: forced_request.source_mtime,
+            origin_node_id: forced_request.target_node_id.clone(),
+            object_version: "fixture-object".to_owned(),
+            video_identity: "a".repeat(64),
+            contract_version: 3,
+            requested_generation: "fixture-coordination".to_owned(),
+        };
+        let newer = NewAnalysisRequest {
+            request_id: "repair-newer-coordination".to_owned(),
+            pipeline_version: coordination.pipeline_marker(),
+            video_identity: coordination.video_marker(),
+            requested_generation: coordination.requested_generation,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            not_before_ms: 22,
+            created_at_ms: 22,
+            ..forced_request.clone()
+        };
+        assert_eq!(
+            store
+                .enqueue_analysis_request(&newer)
+                .await
+                .expect("newer coordination")
+                .request_id,
+            newer.request_id
+        );
         let forced_worker = store
             .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 30)
             .await
@@ -29462,7 +29511,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .unwrap_or_else(|| panic!("{backend}: forced head artifact"))
                 .cache_key,
             generation_key,
-            "backend {backend}"
+            "backend {backend}: newer v3 coordination does not supersede the legacy head"
         );
         // C-05: item detail's batched lookup resolves the same head, through
         // this node's attestation of the exact observed object version.
@@ -30420,6 +30469,7 @@ async fn fragment_index_contract_runs_through_dyn_store() {
             vec![
                 IndexRow {
                     dts: 0,
+                    first_cto: None,
                     duration: 28_016,
                     bytes: 104_452,
                     video_bytes: 103_836,
@@ -30427,6 +30477,7 @@ async fn fragment_index_contract_runs_through_dyn_store() {
                 },
                 IndexRow {
                     dts: 28_016,
+                    first_cto: None,
                     duration: 28_032,
                     bytes: 110_038,
                     video_bytes: 109_422,
@@ -30650,6 +30701,7 @@ async fn fragment_index_outcome_contract_runs_through_dyn_store() {
             16_000,
             vec![IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 28_016,
                 bytes: 104_452,
                 video_bytes: 103_836,
@@ -33756,6 +33808,34 @@ async fn media_contract_runs_through_dyn_store() {
             .merge_file_probe_hevc_parameter_sets(empty_file, 2_000, 20, census)
             .await
             .expect("unprobed census"));
+        // A probed HEVC scan verdict is grafted the same way: fenced to the
+        // measured revision, keyed so stored facts can read it back.
+        let scan = r#"{"stream_index":0,"progressive_frame_only":true}"#;
+        assert!(!store
+            .merge_file_probe_hevc_scan(movie_file, measured.size + 1, measured.mtime, scan)
+            .await
+            .expect("fenced scan verdict"));
+        assert!(store
+            .merge_file_probe_hevc_scan(movie_file, measured.size, measured.mtime, scan)
+            .await
+            .expect("scan verdict"));
+        let scanned: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(movie_file)
+                .await
+                .expect("probe JSON")
+                .expect("probe JSON"),
+        )
+        .expect("probe JSON parses");
+        assert_eq!(
+            scanned[plurx_core::transcode::HEVC_SCAN_PROBE_KEY]["progressive_frame_only"],
+            true
+        );
+        assert_eq!(scanned["plurx_hevc_parameter_sets"]["verdict"], "varying");
+        assert!(!store
+            .merge_file_probe_hevc_scan(empty_file, 2_000, 20, scan)
+            .await
+            .expect("unprobed scan verdict"));
         assert!(store
             .get_file_probe_json(movie_file)
             .await

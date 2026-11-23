@@ -382,6 +382,7 @@ async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            requested_audio_index: None,
             adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
@@ -441,6 +442,7 @@ async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            requested_audio_index: None,
             adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
@@ -3017,6 +3019,7 @@ async fn rendition_shipped_shape() {
             "shipped-shape",
             None,
             Recipe {
+                audio_excluded: false,
                 dv_refit_gain: None,
                 source_telemetry: false,
                 retained_logical: None,
@@ -5189,6 +5192,7 @@ async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            requested_audio_index: None,
             adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
@@ -5394,14 +5398,9 @@ async fn make_room_never_evicts_inside_a_live_readers_window() {
     );
 }
 
-/// Fix 1's derivation, as a unit: `video_ms` from the fragment index,
-/// `audio_ms` from the container — the split that makes the audio tail
-/// plannable at all. A container-for-both derivation makes the tail
-/// identically zero on every file.
-#[test]
-fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
-    let index = synthetic_index(24);
-    let recipe = Recipe {
+fn copy_plan_test_recipe() -> Recipe {
+    Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         retained_logical: None,
@@ -5415,7 +5414,19 @@ fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         cluster_cache_key: None,
         copy_index_init_contract: None,
         encoding: None,
-    };
+    }
+}
+
+/// Keep the audio tail plannable when the copy recipe maps real audio.
+#[test]
+fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
+    let index = synthetic_index(24);
+    let mut recipe = copy_plan_test_recipe();
+    recipe.file.audio_streams.push(plurx_core::domain::AudioStream {
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
     let video_ms = index_video_ms(&index);
     assert!(video_ms > 0);
 
@@ -5443,6 +5454,51 @@ fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
             .iter()
             .all(|entry| entry.kind == PlanEntryKind::Video),
         "no overrun, no tail"
+    );
+}
+
+#[test]
+fn silent_copy_plan_ends_at_indexed_video_despite_later_container_end() {
+    let index = synthetic_index(15);
+    let mut recipe = copy_plan_test_recipe();
+    let video_ms = index_video_ms(&index);
+    let container_ms = video_ms + 125;
+    let policy = shipped_policy(index.timescale);
+
+    let silent_key = rendition_key(&recipe, &index.source);
+    let tracks = track_durations(&index, &recipe, container_ms);
+    let plan = plurx_core::segplan::plan_copy(&index, &policy, &tracks);
+    assert_eq!(plan.duration_ticks(), index.ticks());
+    assert!(plan
+        .entries
+        .iter()
+        .all(|entry| entry.kind == PlanEntryKind::Video));
+
+    recipe.file.audio_streams.push(plurx_core::domain::AudioStream {
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
+    assert_ne!(rendition_key(&recipe, &index.source), silent_key);
+    assert_eq!(
+        track_durations(&index, &recipe, container_ms).audio_ms,
+        container_ms
+    );
+    recipe.audio_index = Some(1);
+    assert_eq!(
+        track_durations(&index, &recipe, container_ms).audio_ms,
+        video_ms
+    );
+
+    recipe.audio_index = Some(0);
+    recipe.audio_delivery = Some(plurx_core::playback::audio::AudioDelivery {
+        action: plurx_core::playback::audio::AudioAction::None,
+        downmix: None,
+        reason: "silent copy fixture".into(),
+    });
+    assert_eq!(
+        track_durations(&index, &recipe, container_ms).audio_ms,
+        video_ms
     );
 }
 
@@ -5489,7 +5545,13 @@ async fn a_seek_into_the_audio_tail_spawns_at_the_last_video_entry_and_serves_th
     // container duration, which is what the probe reports and what the
     // audio tail is derived from.
     let (store, _) = store_with_index(&media_file_at(source.clone(), 9_000)).await;
-    let file = media_file_at(source, 12_000);
+    let mut file = media_file_at(source, 12_000);
+    file.audio_streams.push(plurx_core::domain::AudioStream {
+        codec: "aac".into(),
+        channels: Some(2),
+        sample_rate: Some(48_000),
+        ..Default::default()
+    });
     let serve = local_serve(temp.path().join("renditions"), store);
 
     // Seek into the tail (video ends ~9 s).
@@ -7363,8 +7425,11 @@ fn a_landing_probe_keeps_the_producers_seek_and_input() {
 fn a_landing_probe_reads_the_first_packets_pts_and_duration() {
     let framecrc = "#extradata 0:       39, 0xffe00c7b\n#tb 0: 1/1000\n\
                         #media_type 0: video\n0,      29625,      29708,       41,      244, 0x1e5180d4\n";
-    let (pts, duration) = first_packet_time(framecrc).expect("one packet");
-    assert!((pts - 29.708).abs() < 1e-9 && (duration - 0.041).abs() < 1e-9);
+    let packet = first_packet_time(framecrc).expect("one packet");
+    assert_eq!(
+        (packet.pts, packet.duration, packet.time_base),
+        (29_708, 41, (1, 1_000))
+    );
     assert!(first_packet_time("#tb 0: 1/1000\n").is_err());
     assert!(first_packet_time("0, 0, 0, 41, 244, 0x0\n").is_err());
     assert!(first_packet_time("#tb 0: 1/1000\n0, 1, x, 41, 244, 0x0\n").is_err());
@@ -7419,13 +7484,7 @@ async fn the_landing_time_counts_from_the_first_video_keyframe_like_the_index() 
         .await
         .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(
-            plurx_core::segplan::match_landing_at(
-                &index,
-                &observed,
-                target,
-                time.ticks,
-                time.frame_ticks
-            ),
+            plurx_core::segplan::match_landing_at(&index, &observed, target, time),
             Ok(truth),
             "{name}: the time {time:?} must name the row its bytes landed on"
         );

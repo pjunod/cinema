@@ -25,6 +25,7 @@ async fn a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_front
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -368,6 +369,7 @@ fn preparation_row(
         height: 1080,
         encoder: "staged".to_owned(),
         vod: true,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: Some("sdr".to_owned()),
@@ -524,6 +526,7 @@ async fn activate_superseding_route(
         height: 1080,
         encoder: "test".to_owned(),
         vod: true,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: Some("sdr".to_owned()),
@@ -856,6 +859,7 @@ async fn delivery_preparation_says_offered_with_the_prepare_action() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -937,6 +941,7 @@ async fn delivery_preparation_says_none_when_the_slot_is_empty() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1197,6 +1202,7 @@ async fn a_second_ask_supersedes_a_preparation_in_the_registration_window() {
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1388,6 +1394,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1619,6 +1626,7 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
         &processed,
         Some(source),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1845,6 +1853,7 @@ async fn a_supersession_in_the_registration_window_still_frees_the_preparation()
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1947,6 +1956,7 @@ async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration()
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -2420,6 +2430,7 @@ fn staged_source_file() -> plurx_core::domain::MediaFile {
 
 fn staged_candidate_request() -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2798,6 +2809,7 @@ async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
                 height: 720,
                 encoder: "software".to_owned(),
                 vod: false,
+                startup_seek_ready_ms: None,
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
@@ -3424,4 +3436,39 @@ async fn continuous_family_quality_does_not_stage_a_legacy_successor() {
         &recipe,
         &request.selection
     ));
+}
+
+/// A planned successor of a split copy keeps the negotiated soundtrack
+/// alternates, so a language change never re-plans into a muxed recipe that
+/// would cross the audio axis and stage a replacement session.
+#[test]
+fn a_split_copy_successor_keeps_its_soundtrack_alternates() {
+    let mut source = staged_source_file();
+    source.audio_streams = (0..2)
+        .map(|index| plurx_core::domain::AudioStream {
+            index,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        })
+        .collect();
+    let copy = crate::transcode::SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    let mut predecessor = staged_candidate_request();
+    predecessor.kind = copy;
+    predecessor.audio_index = Some(0);
+    predecessor.split_audio = true;
+    let mut candidate = predecessor.clone();
+    candidate.split_audio = false; // a re-planned successor has no negotiation of its own
+    candidate.audio_index = Some(1);
+    let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
+    assert!(candidate.split_audio);
+    candidate.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+    let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
+    assert!(!candidate.split_audio, "an encoded successor is not a split copy");
 }

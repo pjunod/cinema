@@ -1099,7 +1099,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
-	PLURX_EXPECT_TEST_COUNT=13 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	PLURX_EXPECT_TEST_COUNT=17 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1594,6 +1594,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
+	@node --test tests/playback/audio-alternation.test.js
 	@node --test tests/playback/prepared-successor-chase.test.js
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js

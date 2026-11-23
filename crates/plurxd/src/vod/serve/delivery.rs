@@ -949,6 +949,11 @@ impl VodServe {
         session_id: &str,
         deadline: Instant,
     ) -> Option<VodPublication<Option<Vec<u8>>>> {
+        // A split copy is the other role-split family: one shared copy video
+        // and every soundtrack, served through the same master and children.
+        if let Some(split) = self.split_copy_master_before(session_id, deadline).await {
+            return Some(split);
+        }
         let publication = self
             .verified_continuous_family_before(session_id, deadline)
             .await?;
@@ -1364,6 +1369,12 @@ impl VodServe {
             let Some(found) = publication.result? else {
                 return Ok(None);
             };
+            if role == "video"
+                && found.rendition.recipe.audio_excluded
+                && found.rendition.recipe.encoding.is_none()
+            {
+                return self.split_copy_child_playlist(&found).await;
+            }
             let Some(encoding) = found.rendition.recipe.encoding.as_ref() else {
                 return Ok(None);
             };
@@ -1741,21 +1752,25 @@ impl VodServe {
                 })
             }
         };
-        let compatible_role = found
-            .rendition
-            .recipe
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| {
-                if request.role == "audio" {
-                    encoding.shared_audio.is_some()
-                } else {
-                    encoding.shared_audio.is_none()
-                        && !encoding.plan.options().input_has_audio
-                        && encoding.plan.options().video_sample_envelope
-                            == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
-                }
-            });
+        let split_video = request.role == "video"
+            && found.rendition.recipe.audio_excluded
+            && found.rendition.recipe.encoding.is_none();
+        let compatible_role = split_video
+            || found
+                .rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .is_some_and(|encoding| {
+                    if request.role == "audio" {
+                        encoding.shared_audio.is_some()
+                    } else {
+                        encoding.shared_audio.is_none()
+                            && !encoding.plan.options().input_has_audio
+                            && encoding.plan.options().video_sample_envelope
+                                == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                    }
+                });
         if !compatible_role {
             return Some(VodPublication {
                 result: Ok(None),
@@ -1998,7 +2013,7 @@ async fn quality_inspection<T: Send + 'static>(
 }
 
 /// Validate the opened init, retaining the same descriptor for HTTP streaming.
-async fn read_child_init(
+pub(super) async fn read_child_init(
     ready: &mut SegmentReady,
     expected: &str,
     deadline: Instant,

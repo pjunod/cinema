@@ -583,6 +583,55 @@ impl SourceReadBudget {
     }
 }
 
+/// This runs inside the pre-existing read owner, never in Drop or a new actor.
+/// Close-before-resolve fences delayed registration/renewal acknowledgements.
+pub(crate) async fn settle_read_lease(
+    store: &Arc<dyn plurx_core::store::Store>,
+    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+    physical_joined: bool,
+) {
+    loop {
+        match store
+            .close_read_attestation_source_lease(owner.clone(), crate::state::clock_ms())
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => {
+                tracing::warn!(%error,"source read lease settlement pending");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    loop {
+        if let Some(held) = receipt.take() {
+            if physical_joined {
+                crate::background_jobs::settle_joined_source_custody(store, held).await;
+            } else {
+                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
+            }
+            return;
+        } else {
+            use plurx_core::store::background_jobs_resources::BackgroundSourceRegistration;
+            match store
+                .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+                .await
+            {
+                Ok(BackgroundSourceRegistration::Registered(held)) => {
+                    receipt = Some(held);
+                    continue;
+                }
+                Ok(
+                    BackgroundSourceRegistration::LostOwnership
+                    | BackgroundSourceRegistration::NotRequired,
+                ) => return,
+                Err(error) => tracing::warn!(%error,"resolving source read lease receipt"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 tokio::task_local! { static SOURCE_BUDGET:Arc<SourceReadBudget>; }
 pub(crate) async fn budgeted<T>(
     budget: Arc<SourceReadBudget>,

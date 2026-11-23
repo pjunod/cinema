@@ -100,6 +100,7 @@ async fn a_prepared_transition_stages_a_successor_and_leaves_the_pointer_alone()
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -153,6 +154,7 @@ async fn a_prepared_successor_publishes_the_vod_engine_identity() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -208,6 +210,7 @@ async fn a_staged_successor_is_announced_without_moving_the_pointer_and_replays_
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -361,6 +364,7 @@ async fn a_local_prepare_rejects_an_unsafe_durable_playlist_url() {
         height: 1080,
         encoder: "staged".to_owned(),
         vod: true,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: Some("sdr".to_owned()),
@@ -460,6 +464,7 @@ async fn a_transient_staged_read_failure_does_not_advance_or_rotate_the_action()
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -557,6 +562,7 @@ async fn a_client_without_prepare_vocabulary_skips_the_staged_store_read() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -619,13 +625,134 @@ async fn a_client_without_prepare_vocabulary_skips_the_staged_store_read() {
     ));
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn accepted_apple_quality_handoff_pins_fitted_copy_without_reopen_fields() {
+    use crate::playback_control::{
+        ClientPlatform, ClientSelection, CodecPolicy, DynamicCapabilities,
+        DynamicRangePolicy, EffectiveSelection, QualitySelection, SubtitleMode,
+        SubtitleSelection,
+    };
+
+    for enabled in [true, false] {
+        let dir = crate::test_tempdir().expect("prepared refit fixture");
+        let playback_id = unique_playback_id("prepared-refit");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        let source = staging_source(&fixture).await;
+        let fitted_digest =
+            crate::source_probe::seed_preparation_refit(&fixture.store, &source).await;
+        fixture
+            .store
+            .put_setting(
+                plurx_core::store::keys::DV_REFIT_APPLE,
+                if enabled { "true" } else { "false" },
+            )
+            .await
+            .expect("Apple refit setting");
+
+        let mut recipe = staged_predecessor_recipe(&route);
+        recipe.request.file_id = source.id;
+        recipe.request.playback_id = playback_id.clone();
+        recipe.request.kind = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+            dual_layer_as_copied: false,
+        };
+        recipe.request.automatic = true;
+        let delivered = EffectiveSelection::from_request(&recipe.request, 2160, None);
+        let selection = ClientSelection {
+            quality: QualitySelection::Original,
+            audio_track: None,
+            subtitle: SubtitleSelection {
+                mode: SubtitleMode::Off,
+                track: None,
+            },
+            // Copy to copy is not a rung (the same source bytes), so the
+            // accepted handoff is an audio-offset change on the fitted copy.
+            audio_offset_ms: 250,
+            codec: CodecPolicy::Auto,
+            dynamic_range: DynamicRangePolicy::Auto,
+        };
+        process_preparation_candidate(
+            fixture.state.clone(),
+            PendingCandidateGuard::begin(&playback_id, &selection.desired().digest()),
+            PreparationCandidateInputs {
+                accepted_observation: None,
+                session_id,
+                route: route.clone(),
+                recipe,
+                planning_caps: None,
+                planning_overrides: None,
+                selection,
+                observed_download_bps: Some(100_000_000),
+                delivered,
+                delivered_bps: Some(10_000_000),
+                capabilities: Some(DynamicCapabilities {
+                    presentation_target: None,
+                    decoder_caps: None,
+                    platform: ClientPlatform::Apple,
+                    max_height: 2160,
+                    codecs: vec![CodecPolicy::Hevc],
+                    dynamic_ranges: vec![DynamicRangePolicy::DolbyVision],
+                    dual_player_preparation: true,
+                }),
+                platform: ClientPlatform::Apple,
+                purpose: PreparationPurpose::SelectionChange,
+                accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+            },
+        )
+        .await;
+
+        let staged = fixture
+            .store
+            .staged_media_session_for_playback(&route.principal, &playback_id)
+            .await
+            .expect("ledger read")
+            .expect("Apple quality handoff staged");
+        let staged_route = fixture
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route read")
+            .expect("the ledger names a successor route");
+        let response: serde_json::Value =
+            serde_json::from_str(&staged_route.response_json).expect("Apple response");
+        assert!(response.get(PREPARED_PLAYLIST_SHAPE_FIELD).is_none());
+        assert_eq!(
+            response["playlist_url"],
+            format!("/api/v1/hls/{}/index.m3u8", staged_route.session_id),
+        );
+        let staged: RemoteStartRequest =
+            serde_json::from_str(&staged_route.recipe_json).expect("durable successor recipe");
+        let request = staged.request;
+        assert!(matches!(
+            request.kind,
+            crate::transcode::SessionKind::Copy {
+                convert_dolby_vision: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            request.dv_refit_digest.as_deref(),
+            enabled.then_some(fitted_digest.as_str())
+        );
+        assert!(request.previous_session_id.is_none());
+        assert!(request.reopen_reason.is_none());
+        assert!(request.control_sequence.is_none());
+    }
+}
+
 /// The detached decision boundary stages an admitted candidate and leaves
 /// the predecessor pointer alone. The production control-to-boundary
 /// wiring is covered separately below.
 #[tokio::test]
 async fn an_admitted_preparation_candidate_reaches_the_ledger() {
     let dir = crate::test_tempdir().expect("state dir");
-    let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+    let playback_id = unique_playback_id("android-prepared");
+    let (fixture, session_id, route) =
+        staging_fixture_for_playback(dir.path(), &playback_id).await;
     // The seam reads the source, and staging refuses without a snapshot.
     // Its 2160 height is also load-bearing: it is what makes the viewer's
     // 1080 ask cross the delivery method as well as the resolution.
@@ -636,6 +763,7 @@ async fn an_admitted_preparation_candidate_reaches_the_ledger() {
     // together — the one pair with a hardware receipt.
     let mut recipe = staged_candidate_request();
     recipe.file_id = source.id;
+    recipe.playback_id.clone_from(&playback_id);
     recipe.kind = crate::transcode::SessionKind::Copy {
         aac: false,
         preserve_dolby_vision: false,
@@ -702,14 +830,14 @@ async fn an_admitted_preparation_candidate_reaches_the_ledger() {
             capabilities: Some(crate::playback_control::DynamicCapabilities {
                 presentation_target: None,
                 decoder_caps: None,
-                platform: crate::playback_control::ClientPlatform::Apple,
+                platform: crate::playback_control::ClientPlatform::Android,
                 max_height: 2160,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
                 dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
                 // The retained field, read rather than re-derived.
                 dual_player_preparation: true,
             }),
-            platform: crate::playback_control::ClientPlatform::Apple,
+            platform: crate::playback_control::ClientPlatform::Android,
             purpose: PreparationPurpose::SelectionChange,
             accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
         },
@@ -739,6 +867,100 @@ async fn an_admitted_preparation_candidate_reaches_the_ledger() {
         route.incarnation_id,
         "and the viewer's own generation is still the current one",
     );
+
+    let successor = fixture
+        .store
+        .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+        .await
+        .expect("read Android successor")
+        .expect("Android successor route");
+    let response: serde_json::Value =
+        serde_json::from_str(&successor.response_json).expect("Android response");
+    assert_eq!(
+        response[PREPARED_PLAYLIST_SHAPE_FIELD],
+        PREPARED_SINGLE_VARIANT_SHAPE,
+    );
+    let start = control_start_response(&successor).expect("prepared start");
+    assert_eq!(
+        start.playlist_url,
+        format!("/api/v1/hls/{}/index.m3u8?native=2", successor.session_id),
+    );
+    assert_eq!(start.media_origin_ms, Some(0));
+
+    install_vod_http_session(&fixture, dir.path(), &successor.session_id).await;
+    let query = || PlaylistQuery {
+        native: Some(2),
+        subtitle: Some(0),
+        ..Default::default()
+    };
+    assert!(matches!(
+        playlist(
+            State(fixture.state.clone()),
+            AxPath(session_id),
+            Query(query()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(ApiError::NotFound("prepared playlist"))
+    ));
+    let master = playlist(
+        State(fixture.state.clone()),
+        AxPath(successor.session_id.clone()),
+        Query(query()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("serve the staged Android master from its durable shape");
+    let master = axum::body::to_bytes(master.into_body(), 4_096)
+        .await
+        .expect("master body");
+    let bandwidth = source.bitrate.unwrap_or(25_000_000).max(128_000);
+    let expected =
+        format!("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}\nindex.m3u8\n");
+    assert_eq!(
+        master.as_ref(),
+        expected.as_bytes(),
+        "cadence is unavailable"
+    );
+
+    let relay = RelayRequest {
+        session_id: successor.session_id.clone(),
+        resource: RelayResource::Playlist {
+            native: Some(2),
+            subtitle: None,
+            acquisition_start_ms: None,
+        },
+        deadline_unix_ms: unix_ms().saturating_add(30_000),
+        headers: RelayHeaders::default(),
+    };
+    assert!(relay.is_valid());
+    let relayed = relay_local(&fixture.state, relay).await;
+    assert_eq!(relayed.status(), StatusCode::OK);
+    let relayed = axum::body::to_bytes(relayed.into_body(), 4_096)
+        .await
+        .expect("relayed master body");
+    assert_eq!(relayed, master);
+
+    let attached_playlist = fixture
+        .state
+        .transcode
+        .vod_playlist(&successor.session_id)
+        .await
+        .expect("attached VOD playlist")
+        .result
+        .expect("static media playlist");
+    let child = playlist(
+        State(fixture.state.clone()),
+        AxPath(successor.session_id),
+        Query(PlaylistQuery::default()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("serve the staged Android media playlist");
+    let child = axum::body::to_bytes(child.into_body(), 1_048_576)
+        .await
+        .expect("media playlist body");
+    assert_eq!(child.as_ref(), attached_playlist.as_slice());
 }
 
 /// The complete production seam: an accepted selection change schedules
@@ -949,6 +1171,7 @@ async fn a_second_prepared_transition_is_refused_by_the_one_successor_slot() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -975,6 +1198,7 @@ async fn a_second_prepared_transition_is_refused_by_the_one_successor_slot() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1014,6 +1238,7 @@ async fn a_playback_with_no_live_worker_stages_nothing() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1050,6 +1275,7 @@ async fn acknowledge_rolling_preparation(
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1149,6 +1375,7 @@ async fn prepared_successor_status_serves_staged_and_committed_but_not_ended_med
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1409,6 +1636,7 @@ async fn concurrent_exact_acknowledgements_join_one_canonical_settlement() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1507,6 +1735,7 @@ async fn a_late_exact_acknowledgement_joins_the_completed_canonical_settlement()
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1647,6 +1876,7 @@ async fn a_detached_abort_settles_after_the_status_snapshot_disappears() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1742,6 +1972,7 @@ async fn a_fresh_takeover_engine_discards_the_departed_owners_preparation() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1834,6 +2065,7 @@ async fn a_fresh_takeover_engine_discards_the_departed_owners_preparation() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1893,6 +2125,7 @@ async fn preparation_capacity_and_serving_loss_refuse_before_acknowledgement_acc
                 &staged_candidate_request(),
                 Some(&staged_source_file()),
                 AcceptedAsk {
+                    platform: None,
                     prepared_proof: None,
                     planning_registration: None,
                     quality_intent: None,
@@ -2032,6 +2265,7 @@ async fn admitted_preparation_settlement_holds_serving_fence_through_commit_and_
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -2188,6 +2422,7 @@ async fn a_staged_successor_commits_into_a_usable_route() {
         &candidate,
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -2348,6 +2583,7 @@ async fn a_timed_out_settlement_finishes_detached_and_replays_durably() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -2503,6 +2739,7 @@ async fn failed_preparation_acknowledgement_frees_slot(cleaned_up: bool) {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -2625,6 +2862,7 @@ async fn failed_preparation_acknowledgement_frees_slot(cleaned_up: bool) {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -2860,6 +3098,7 @@ async fn canonical_preparation_answer_keeps_context_through_rewritten_body_alias
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,

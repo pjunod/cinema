@@ -16,6 +16,7 @@ async fn a_repeated_create_returns_the_same_session() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -203,6 +204,7 @@ async fn concurrent_creates_with_one_request_id_share_one_session() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -289,6 +291,7 @@ async fn a_failed_create_does_not_poison_its_request_id() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -362,6 +365,7 @@ async fn transport_replay_of_a_stall_reopen_returns_one_session_and_one_target()
         Pipeline::Cpu,
     );
     let original = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2930,6 +2934,7 @@ async fn plan_under(
 #[test]
 fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,

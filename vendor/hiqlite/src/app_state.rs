@@ -57,6 +57,8 @@ pub(crate) struct AppState {
     #[cfg(feature = "backup")]
     pub backups_dir: String,
     pub id: NodeId,
+    #[cfg(feature = "sqlite")]
+    pub append_timing_epoch: u64,
     #[cfg(feature = "cache")]
     pub nodes: Vec<crate::Node>,
     pub addr_api: String,
@@ -171,9 +173,7 @@ impl StateRaftDB {
                 .raft
                 .wait(None)
                 .metrics(
-                    |metrics| {
-                        learner_caught_up(metrics, id, &membership_log_id, lag_threshold)
-                    },
+                    |metrics| learner_caught_up(metrics, id, &membership_log_id, lag_threshold),
                     "wait new learner to become line-rate",
                 )
                 .await;

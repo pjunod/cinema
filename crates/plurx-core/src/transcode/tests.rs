@@ -2600,3 +2600,109 @@ fn a_copy_session_begins_at_the_keyframe_before_the_requested_start() {
         requested - origin
     );
 }
+
+/// A scan verdict persisted after one decode probe must give later stored
+/// planning the exact facts the probe produced: the same progressive scan type
+/// and the same facts digest. A verdict for another stream proves nothing.
+#[test]
+fn stored_hevc_scan_verdict_matches_the_probed_refinement() {
+    let probe = serde_json::json!({"streams":[{
+        "index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10",
+        "pix_fmt":"yuv420p10le","width":3840,"height":2160,
+        "avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001"
+    }]});
+    let unscanned = DecodeFacts::from_ffprobe_json(
+        &probe,
+        DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+    )
+    .expect("bound decode facts");
+    assert_eq!(unscanned.scan_type(), crate::domain::ScanType::Unknown);
+    let refinement: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/hevc-progressive-configuration.json"
+    ))
+    .expect("captured HEVC document");
+    let probed = unscanned.clone().with_hevc_scan_metadata(&refinement);
+    assert_eq!(probed.scan_type(), crate::domain::ScanType::Progressive);
+    let evidence = probed
+        .hevc_scan_evidence()
+        .expect("progressive verdict to persist");
+
+    let mut stored_probe = probe.clone();
+    stored_probe[HEVC_SCAN_PROBE_KEY] = evidence;
+    let stored = unscanned.clone().with_stored_hevc_scan(&stored_probe);
+    assert_eq!(stored.scan_type(), crate::domain::ScanType::Progressive);
+    assert_eq!(stored.facts_digest(), probed.facts_digest());
+    assert!(unscanned.hevc_scan_evidence().is_none());
+
+    let mut other_stream = probe;
+    other_stream[HEVC_SCAN_PROBE_KEY] =
+        serde_json::json!({"stream_index": 1, "progressive_frame_only": true});
+    let ignored = unscanned.clone().with_stored_hevc_scan(&other_stream);
+    assert_eq!(ignored.scan_type(), crate::domain::ScanType::Unknown);
+    assert_eq!(ignored.facts_digest(), unscanned.facts_digest());
+}
+
+#[test]
+fn split_copy_video_is_the_muxed_copy_video_without_any_audio_input() {
+    let mut media = file(None);
+    media.audio_offset_ms = 250;
+    media.audio_streams = vec![
+        crate::domain::AudioStream {
+            codec: "aac".into(),
+            channels: Some(2),
+            index: 1,
+            ..Default::default()
+        },
+        crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            index: 2,
+            ..Default::default()
+        },
+    ];
+    let video = CopyVideoOptions::new(false, false);
+    let split = copy_video_only_pipe_args(&media, 12.5, Pacing::unpaced(), video);
+    let muxed = copy_pipe_args_with_audio_delivery(
+        &media,
+        12.5,
+        Some(2),
+        true,
+        Pacing::unpaced(),
+        video,
+        None,
+    );
+    // One input: an audio offset never adds the legacy second read.
+    assert_eq!(split.iter().filter(|arg| *arg == "-i").count(), 1);
+    assert!(split.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
+    assert!(split.iter().any(|arg| arg == "-an"));
+    assert!(!split
+        .iter()
+        .any(|arg| arg.contains(":a") || arg == "-c:a" || arg == "-af" || arg == "-itsoffset"));
+    // Seek, video bitstream handling and fMP4 output are the muxed copy's own.
+    let video_only = |args: &[String]| {
+        args.iter()
+            .filter(|arg| !arg.contains(":a") && !["-an", "-sn"].contains(&arg.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(split.last(), muxed.last());
+    for needle in ["-ss", "-c:v", "-movflags"] {
+        let at = |args: &[String]| {
+            args.iter()
+                .position(|arg| arg == needle)
+                .map(|i| args[i + 1].clone())
+        };
+        assert_eq!(at(&split), at(&muxed), "{needle}");
+    }
+    // Language, offset and audio delivery are not inputs of the shared video.
+    media.audio_offset_ms = 0;
+    assert_eq!(
+        video_only(&split),
+        video_only(&copy_video_only_pipe_args(
+            &media,
+            12.5,
+            Pacing::unpaced(),
+            video
+        ))
+    );
+}

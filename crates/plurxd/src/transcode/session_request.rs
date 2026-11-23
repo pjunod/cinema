@@ -804,6 +804,12 @@ pub struct SessionRequest {
     pub subtitle_burn: Option<i64>,
     /// Manual A/V correction for this playback only (positive delays audio).
     pub audio_offset_ms: i64,
+    /// The client attaches copy video and selects a soundtrack itself: serve
+    /// one video-only copy rendition with every soundtrack as an alternate
+    /// audio rendition, so a language change never opens a session. Admitted
+    /// only for indexed copy; any other route keeps the muxed presentation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_audio: bool,
     /// The client asked for the HDR10 re-encode grade rather than the SDR
     /// ladder: it decodes and presents HEVC Main10 PQ (`hdr10t=1` at
     /// `/decision`, `CreateSession::hdr10` here).

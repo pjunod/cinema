@@ -2355,7 +2355,7 @@ impl FoldedSelection<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn claim_new_request(
+async fn try_insert_request_claim(
     store: &HiqliteAuthStore,
     user_id: i64,
     request_id: &str,
@@ -2365,7 +2365,8 @@ async fn claim_new_request(
     now_ms: i64,
     claim_expires_at_ms: i64,
     selection: Option<&FoldedSelection<'_>>,
-) -> Result<MediaSessionRequestClaim, StoreError> {
+    require_new_playback: bool,
+) -> Result<bool, StoreError> {
     let ownership = LocalSessionSql::load(store).await?;
     let owner = ownership.equals(1);
     let owner_column = ownership.column();
@@ -2391,6 +2392,11 @@ async fn claim_new_request(
                       WHERE {owner}) < $10
                 AND (SELECT COUNT(*) FROM media_sessions
                       WHERE {owner}) < $11
+                AND ($12 = 0 OR (
+                    NOT EXISTS (SELECT 1 FROM media_playback_pointers
+                                WHERE {owner} AND playback_id = $4)
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations
+                                    WHERE {owner} AND playback_id = $4)))
              {existing_user}
              ON CONFLICT({owner_column}, request_id) DO NOTHING"
     );
@@ -2405,7 +2411,8 @@ async fn claim_new_request(
         MAX_IN_FLIGHT_PER_USER,
         MAX_CURRENT_PER_USER,
         MAX_REQUEST_ROWS_PER_USER,
-        MAX_SESSION_ROWS_PER_USER
+        MAX_SESSION_ROWS_PER_USER,
+        i64::from(require_new_playback)
     );
     let inserted = if let Some(selection) = selection {
         // One replicated transaction: the claim, then the ask under a
@@ -2433,7 +2440,35 @@ async fn claim_new_request(
             .execute("claim_media_session_request", insert_sql, insert_params)
             .await?
     };
-    if inserted == 1 {
+    Ok(inserted == 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claim_new_request(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    request_id: &str,
+    fingerprint: &str,
+    playback_id: &str,
+    incarnation_id: &str,
+    now_ms: i64,
+    claim_expires_at_ms: i64,
+    selection: Option<&FoldedSelection<'_>>,
+) -> Result<MediaSessionRequestClaim, StoreError> {
+    if try_insert_request_claim(
+        store,
+        user_id,
+        request_id,
+        fingerprint,
+        playback_id,
+        incarnation_id,
+        now_ms,
+        claim_expires_at_ms,
+        selection,
+        false,
+    )
+    .await?
+    {
         return Ok(MediaSessionRequestClaim::Acquired {
             incarnation_id: incarnation_id.to_owned(),
         });
@@ -3346,37 +3381,65 @@ impl MediaSessionStore for HiqliteAuthStore {
             now_ms,
         });
         let fingerprint = request_fingerprint.to_ascii_lowercase();
-        self.maintain_media_sessions(now_ms).await?;
-        let claim = if let Some(row) =
-            request_row("claim_media_session_request", self, user_id, request_id).await?
+        let method = "claim_media_session_request";
+        let already_recorded = request_row(method, self, user_id, request_id)
+            .await?
+            .is_some();
+        // The guarded insert enforces both live and retained quotas and
+        // commits the selection under the new claim. Unrelated retention
+        // and repair can wait for the existing maintenance loop.
+        let claim = if !already_recorded
+            && try_insert_request_claim(
+                self,
+                user_id,
+                request_id,
+                &fingerprint,
+                playback_id,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+                selection.as_ref(),
+                true,
+            )
+            .await?
         {
-            claim_existing_or_reacquire(
-                "claim_media_session_request",
-                self,
-                row,
-                user_id,
-                request_id,
-                &fingerprint,
-                playback_id,
-                incarnation_id,
-                now_ms,
-                claim_expires_at_ms,
-                selection.as_ref(),
-            )
-            .await?
+            MediaSessionRequestClaim::Acquired {
+                incarnation_id: incarnation_id.to_owned(),
+            }
         } else {
-            claim_new_request(
-                self,
-                user_id,
-                request_id,
-                &fingerprint,
-                playback_id,
-                incarnation_id,
-                now_ms,
-                claim_expires_at_ms,
-                selection.as_ref(),
-            )
-            .await?
+            // A retained row or a refused insert may need the old cleanup
+            // before replay, reacquisition, or a capacity retry. Re-read
+            // after cleanup because a concurrent claim can also win.
+            self.maintain_media_sessions(now_ms).await?;
+            if let Some(row) = request_row(method, self, user_id, request_id).await? {
+                claim_existing_or_reacquire(
+                    method,
+                    self,
+                    row,
+                    user_id,
+                    request_id,
+                    &fingerprint,
+                    playback_id,
+                    incarnation_id,
+                    now_ms,
+                    claim_expires_at_ms,
+                    selection.as_ref(),
+                )
+                .await?
+            } else {
+                claim_new_request(
+                    self,
+                    user_id,
+                    request_id,
+                    &fingerprint,
+                    playback_id,
+                    incarnation_id,
+                    now_ms,
+                    claim_expires_at_ms,
+                    selection.as_ref(),
+                )
+                .await?
+            }
         };
         // The ask is read back only for a claim this call acquired; the
         // statement wrote it under the claim's own predicate.

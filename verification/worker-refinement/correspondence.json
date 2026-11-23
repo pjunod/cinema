@@ -1662,19 +1662,19 @@
     },
     {
       "file": "crates/plurxd/src/job_lease.rs",
-      "anchor": "const RELEASE_ATTEMPTS: usize = 5;",
+      "anchor": "const RELEASE_ATTEMPTS:",
       "used_by": "release",
       "scope": "item",
       "item": "const RELEASE_ATTEMPTS",
-      "item_sha256": "d7cf45294cf9eecd604fe0a20029191b07e71fa1aee41a193744f3012ae18c61"
+      "item_sha256": "eff1bca28264a1f4a4b929b62407c57e47fd4605b56ddcd6b296e5bcbefa0e61"
     },
     {
       "file": "crates/plurxd/src/job_lease.rs",
-      "anchor": "const RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);",
+      "anchor": "const RELEASE_RETRY_DELAY:",
       "used_by": "release",
       "scope": "item",
       "item": "const RELEASE_RETRY_DELAY",
-      "item_sha256": "daa1f040a2f92ea7aecbc3fd8dba673f86bad857943b853002ee0b0a44a927c6"
+      "item_sha256": "8d61b37871c826eefbe643261bd345a75ae6ed882d722fe26ed97a9735826713"
     },
     {
       "file": "crates/plurxd/src/job_lease.rs",
@@ -1867,6 +1867,14 @@
       "scope": "item",
       "item": "impl OriginalUnitTask > fn wait",
       "item_sha256": "6179880661e7ff4c73a1188bc4937446e0e38a8d54a8208733ea4406503856cd"
+    },
+    {
+      "file": "crates/plurx-core/src/cluster/timing.rs",
+      "anchor": "pub mod jobs {",
+      "used_by": "release",
+      "scope": "item",
+      "item": "mod jobs",
+      "item_sha256": "780d13bfee00546bd7f9340a72225f37267de5b0d2040f6374ffa86a345a3774"
     }
   ]
 }

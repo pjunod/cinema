@@ -609,10 +609,7 @@ mod tests {
         let mut generation = generation(&film, start_entry);
         generation.convert_dolby_vision = true;
         generation.dv_refit = Some(table);
-        generation.landing_clock = clock(Ok(LandingTime {
-            ticks: near_second,
-            frame_ticks: step * 2,
-        }));
+        generation.landing_clock = clock(Ok(LandingTime::from_ticks(near_second, step * 2)));
         let sink = MemSink::default();
         let outcome = run(&film.feed[..], generation, &sink, "fitted-candidates").await;
         assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
@@ -1604,10 +1601,7 @@ mod tests {
     /// A time between two fragment starts: it names no row.
     fn off_index(film: &Film) -> LandingTime {
         let row = &film.index.rows[1];
-        LandingTime {
-            ticks: row.dts + row.duration / 2,
-            frame_ticks: 1,
-        }
+        LandingTime::from_ticks(row.dts + row.duration / 2, 1)
     }
 
     /// Review of F1: the first ambiguity went straight to the landing time,

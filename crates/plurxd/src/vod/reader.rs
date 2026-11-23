@@ -11,6 +11,10 @@ pub(super) struct Recipe {
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
     pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    /// The shared video of a split copy presentation: no audio track at all.
+    /// The audio fields above then describe nothing this rendition carries,
+    /// and `rendition_key` omits them so every soundtrack shares one video.
+    pub(super) audio_excluded: bool,
     pub(super) video: CopyVideoOptions,
     /// Read with the exact pinned curve table when this recipe was resolved.
     /// Status only: `rendition_key` and every media identity omit it.
@@ -59,6 +63,8 @@ pub(super) struct Reader {
     /// Move-only credit of this exact reader. Removal or replacement drops
     /// it even if the driver never polls.
     pub(super) initial_hardware: Option<(u32, super::session::InitialHardwarePermit)>,
+    /// Keeps a replaced attachment distinct even if it uses the same reader ID.
+    pub(super) attachment: Arc<()>,
     /// Exact controlled companion attachment. The source-purpose bridge must
     /// survive quality selection, supersession and later producer generations.
     pub(super) companion_bootstrap: bool,
@@ -112,6 +118,7 @@ impl Reader {
     ) -> Self {
         Self {
             initial_hardware: None,
+            attachment: Arc::new(()),
             companion_bootstrap: false,
             control_required: false,
             quality_required: false,

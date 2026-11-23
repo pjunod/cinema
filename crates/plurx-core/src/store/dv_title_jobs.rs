@@ -36,6 +36,8 @@ pub struct TitleDemand {
     pub scanner_digest: Option<String>,
     #[serde(default)]
     pub fel_head_target: Option<String>,
+    #[serde(default)]
+    pub fel_head_recipe: Option<String>,
 }
 /// Node-local maintenance discovery. A source may become admissible after
 /// this worker has passed it, while new revisions keep the forward walk busy.
@@ -103,13 +105,14 @@ pub struct TitleViewerRequest {
     pub now_ms: i64,
 }
 
-/// Rebuild already admitted output on a worker with a missing local head.
+/// Prepare native output on the target worker using the exact recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FelHeadRequest {
     pub file_id: i64,
     pub node: String,
     pub scanner_digest: String,
     pub request: crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    pub measure_if_missing: bool,
     pub now_ms: i64,
     pub deadline_ms: i64,
 }
@@ -159,6 +162,18 @@ pub struct PublishTitleJob {
 const DEMAND_ROWS: &str = r#"
 WITH candidates AS (
  SELECT d.revision,d.terminal,d.scanner_digest,file.id,file.size,file.mtime,file.probe_json,
+ (SELECT json_object('node',w.target_node_id,'recipe',w.request_digest)
+  FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
+  WHERE w.consumer_kind='native_fel_head' AND w.deadline_ms>json_extract($1,'$.now')
+    AND w.state IN ('pending','awaiting_hydration')
+    AND j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
+    AND json_extract(j.payload_json,'$.file_id')=file.id
+    AND json_extract(j.payload_json,'$.source_size')=file.size
+    AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+    AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+    AND json_extract(j.payload_json,'$.scanner_digest')=d.scanner_digest
+  ORDER BY w.created_at_ms,w.request_id LIMIT 1) AS fel_head,
+
  (SELECT json_group_array(DISTINCT w.consumer_ref)
   FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
   JOIN json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
@@ -179,14 +194,8 @@ SELECT json_object('file_id',file.id,'probe_revision',file.revision,
  'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
  'scanner_digest',file.scanner_digest,'playback_recipes',json(file.playback_recipes),
  'playback_requested',json(CASE WHEN json_array_length(file.playback_recipes)>0 THEN 'true' ELSE 'false' END),
- 'fel_head_target',(SELECT w.target_node_id FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
-  WHERE w.consumer_kind='native_fel_head' AND w.deadline_ms>json_extract($1,'$.now')
-    AND w.state IN ('pending','awaiting_hydration')
-    AND j.kind='dv_title_scan' AND j.state IN ('queued','running')
-    AND json_extract(j.payload_json,'$.file_id')=file.id
-    AND json_extract(j.payload_json,'$.probe_revision')=file.revision
-    AND json_extract(j.payload_json,'$.scanner_digest')=file.scanner_digest
-  ORDER BY w.created_at_ms,w.request_id LIMIT 1),
+ 'fel_head_target',json_extract(file.fel_head,'$.node'),
+ 'fel_head_recipe',json_extract(file.fel_head,'$.recipe'),
  'active_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
   AND json_extract(j.payload_json,'$.file_id')=file.id AND json_extract(j.payload_json,'$.probe_revision')=file.revision
   AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
@@ -205,6 +214,7 @@ fn maintenance_demands_sql() -> String {
         "{DEMAND_ROWS} {}",
         r#"
 WHERE file.revision>json_extract($1,'$.after') AND file.revision<=json_extract($1,'$.through')
+ AND (json_extract($1,'$.file_id') IS NULL OR file.id=json_extract($1,'$.file_id'))
  AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
  AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
@@ -220,14 +230,20 @@ pub(super) async fn demands<T: QueueSql>(
     after: i64,
     through: i64,
     now_ms: i64,
+    file_id: Option<i64>,
 ) -> Result<Vec<TitleDemand>, StoreError> {
-    if !digest(scanner) || after < 0 || through < after || now_ms < 0 {
+    if !digest(scanner)
+        || after < 0
+        || through < after
+        || now_ms < 0
+        || file_id.is_some_and(|id| id <= 0)
+    {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
     let rows = store
         .queue_sql(
             maintenance_demands_sql(),
-            encode(&serde_json::json!({"scanner":scanner,"after":after,"through":through,"now":now_ms}))?,
+            encode(&serde_json::json!({"scanner":scanner,"after":after,"through":through,"now":now_ms,"file_id":file_id}))?,
             false,
             true,
         )
@@ -674,9 +690,9 @@ WHERE d.file_id=json_extract($1,'$.file_id')
     Ok(bind(store, revision, binding).await?.is_some())
 }
 
-/// Reopen the same generation only when a complete title scan and its
-/// current admitting verdict already exist. A fresh ordinary episode works
-/// after a previously succeeded generation's request receipt is retained.
+/// Reopen the same complete title generation to build an admitted head
+/// or, for the current prewarm target, measure the exact missing recipe first.
+/// The existing aggregate and active title attempts retain their authority.
 pub(super) async fn request_fel_head<T: QueueSql>(
     store: &T,
     input: FelHeadRequest,
@@ -747,6 +763,9 @@ WHERE file_id=json_extract($1,'$.file_id')
     enqueue.validate()?;
     let mut body = enqueue_body(store, &enqueue).await?;
     body["native_fel_head_reopen"] = 1.into();
+    if input.measure_if_missing {
+        body["native_fel_head_measure_missing"] = 1.into();
+    }
     let body = encode(&body)?;
     // Enqueue may admit this exact settled title within the transaction. Only
     // the resulting job and waiter authorize reopening it. A refusal leaves

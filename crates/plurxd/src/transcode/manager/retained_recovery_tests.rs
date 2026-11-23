@@ -482,6 +482,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         sustainable: true,
     };
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -545,6 +546,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
             live_recovery: true,
             output_preparation: crate::vodserve::OutputPreparation::CopyAndEncoded,
             output_budget_bytes: 4 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         },
         encoding: None,
         session_id: session_id.into(),

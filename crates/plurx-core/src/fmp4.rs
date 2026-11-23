@@ -154,6 +154,68 @@ pub fn avc_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>
     }))
 }
 
+/// Facts of a copied source's one AVC sample entry. A copy carries whatever
+/// the source signalled: `avc1` or `avc3`, and a colour record only when the
+/// source had one. Absent colour is reported as ITU-T H.273 "unspecified"
+/// (2), never invented; the encoder's stricter contract stays above.
+pub fn avc_copy_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>, Fmp4Error> {
+    let Some(codec) = avc_rfc6381_codec(init)? else {
+        return Ok(None);
+    };
+    let video = init.video().expect("AVC codec requires video");
+    let (count, entries) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    if count != 1 || entries.len() != 1 || !matches!(&entries[0].sample_entry, b"avc1" | b"avc3") {
+        return Err(Fmp4Error::Unsupported(
+            "copied AVC requires one avc1 or avc3 sample entry".into(),
+        ));
+    }
+    let entry = &entries[0];
+    let header = peek_box(&init.bytes, entry.entry.start)?
+        .ok_or_else(|| Fmp4Error::Malformed("missing AVC sample entry".into()))?;
+    let body = entry.entry.start + entry.entry.header_len;
+    let end = entry.entry.start + header.size;
+    if end < body + 78 {
+        return malformed("copied AVC sample entry is truncated");
+    }
+    let width = u16::from_be_bytes([init.bytes[body + 24], init.bytes[body + 25]]);
+    let height = u16::from_be_bytes([init.bytes[body + 26], init.bytes[body + 27]]);
+    if width == 0 || height == 0 {
+        return malformed("copied AVC has an empty raster");
+    }
+    let unspecified = (2, 2, 2, false);
+    let colors = find_children(&init.bytes, body + 78..end, b"colr")?;
+    let (primaries, transfer, matrix, full_range) = match colors.as_slice() {
+        [(at, color)] => {
+            let data = &init.bytes[at.start + color.header_len..at.start + color.size];
+            if data.len() == 11 && &data[..4] == b"nclx" {
+                (
+                    u16::from_be_bytes([data[4], data[5]]),
+                    u16::from_be_bytes([data[6], data[7]]),
+                    u16::from_be_bytes([data[8], data[9]]),
+                    data[10] & 0x80 != 0,
+                )
+            } else {
+                unspecified
+            }
+        }
+        [] => unspecified,
+        _ => {
+            return Err(Fmp4Error::Unsupported(
+                "copied AVC has ambiguous colour records".into(),
+            ))
+        }
+    };
+    Ok(Some(AvcSampleEntryFacts {
+        codec,
+        width,
+        height,
+        color_primaries: primaries,
+        color_transfer: transfer,
+        color_matrix: matrix,
+        full_range,
+    }))
+}
+
 /// Actual configuration of the initial shared soundtrack family. This parser
 /// accepts the production AAC-LC/48 kHz/1024-sample shape, not an arbitrary
 /// audio entry whose filename happens to end in MP4.
@@ -3146,8 +3208,8 @@ pub struct CopyVideoSampleEntryFacts {
 }
 
 /// Read actual container declarations, not catalog tags or encoder arguments.
-/// High-profile AVC needs its explicit avcC depth/chroma extension; this API
-/// does not infer missing extension fields from an unparsed SPS. In-band
+/// High-profile AVC reads its avcC depth/chroma extension, or the SPS's own
+/// depth and chroma fields when an avcC omits that optional extension. In-band
 /// parameter-set changes require an independent bitstream inspection.
 pub fn copy_video_sample_entry_facts(init: &Init) -> Result<CopyVideoSampleEntryFacts, Fmp4Error> {
     let video = init
@@ -3365,11 +3427,13 @@ fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8
     if sps_count == 0 {
         return Err(Fmp4Error::Unsupported("avcC has no SPS declaration".into()));
     }
+    let mut first_sps = None;
     for _ in 0..sps_count {
         let nal = copy_avcc_nal(record, &mut pos, 7)?;
         if nal.len() < 4 || nal[1..4] != record[1..4] {
             return malformed("avcC SPS profile disagrees with header");
         }
+        first_sps.get_or_insert(nal);
     }
     let count = *record
         .get(pos)
@@ -3392,24 +3456,35 @@ fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8
                 "unknown AVC profile depth/chroma semantics".into(),
             ));
         }
-        let ext = record
-            .get(pos..pos + 4)
-            .ok_or_else(|| Fmp4Error::Unsupported("AVC depth/chroma extension absent".into()))?;
-        if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
-            return malformed("invalid AVC depth/chroma extension");
+        // The High-profile extension is optional in practice: an avcC copied
+        // from a Matroska CodecPrivate often ends after its PPS. Then the SPS
+        // itself is the declaration, read with the same depth rules.
+        if pos == record.len() {
+            let sps = first_sps
+                .ok_or_else(|| Fmp4Error::Unsupported("avcC has no SPS declaration".into()))?;
+            video_splice_format::avc_sps_depth_chroma(sps).ok_or_else(|| {
+                Fmp4Error::Unsupported("unequal or unsupported AVC bit depths".into())
+            })?
+        } else {
+            let ext = record.get(pos..pos + 4).ok_or_else(|| {
+                Fmp4Error::Malformed("truncated AVC depth/chroma extension".into())
+            })?;
+            if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
+                return malformed("invalid AVC depth/chroma extension");
+            }
+            if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
+                return Err(Fmp4Error::Unsupported(
+                    "unequal or unsupported AVC bit depths".into(),
+                ));
+            }
+            let facts = (8 + (ext[1] & 7), ext[0] & 3);
+            let count = ext[3];
+            pos += 4;
+            for _ in 0..count {
+                copy_avcc_nal(record, &mut pos, 13)?;
+            }
+            facts
         }
-        if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
-            return Err(Fmp4Error::Unsupported(
-                "unequal or unsupported AVC bit depths".into(),
-            ));
-        }
-        let facts = (8 + (ext[1] & 7), ext[0] & 3);
-        let count = ext[3];
-        pos += 4;
-        for _ in 0..count {
-            copy_avcc_nal(record, &mut pos, 13)?;
-        }
-        facts
     };
     if pos != record.len() {
         return malformed("trailing copy avcC bytes");

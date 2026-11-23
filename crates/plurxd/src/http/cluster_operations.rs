@@ -44,16 +44,21 @@ use crate::serving_fence::{
 use crate::state::AppState;
 
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
-const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
+const AGGREGATE_TIMEOUT: Duration = plurx_core::cluster::timing::operations::AGGREGATE_TIMEOUT;
+const PEER_STATUS_TIMEOUT: Duration = plurx_core::cluster::timing::operations::PEER_STATUS_TIMEOUT;
+const PEER_DIRECTORY_TIMEOUT: Duration =
+    plurx_core::cluster::timing::operations::PEER_DIRECTORY_TIMEOUT;
+const PEER_STATUS_CACHE_TTL: Duration =
+    plurx_core::cluster::timing::operations::PEER_STATUS_CACHE_TTL;
+const PEER_STATUS_REFRESH_INTERVAL: Duration =
+    plurx_core::cluster::timing::operations::PEER_STATUS_REFRESH_INTERVAL;
+const TRANSPORT_FALLBACK_STALL_MS: u64 =
+    plurx_core::cluster::timing::operations::TRANSPORT_FALLBACK_STALL_MS;
+const TRANSPORT_OBSERVATION_TTL_MS: u64 =
+    plurx_core::cluster::timing::operations::TRANSPORT_OBSERVATION_TTL_MS;
 const ADAPTIVE_OUTAGE_INVENTORY_TIMEOUT: Duration = Duration::from_secs(2);
-const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
-const PEER_DIRECTORY_TIMEOUT: Duration = Duration::from_millis(500);
-const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
-const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
-const TRANSPORT_FALLBACK_STALL_MS: u64 = 30 * 1_000;
-const TRANSPORT_OBSERVATION_TTL_MS: u64 = 5 * 60 * 1_000;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-const MAX_FRESH_AGE_MS: u64 = 5_000;
+const MAX_FRESH_AGE_MS: u64 = plurx_core::cluster::timing::operations::MAX_FRESH_AGE_MS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ClusterNodeOperationsStatus {
@@ -572,8 +577,10 @@ impl Drop for PlannedOutageLeaseGuard {
     }
 }
 
-const PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
-const PLANNED_OUTAGE_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
+const PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL: Duration =
+    plurx_core::cluster::timing::operations::PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL;
+const PLANNED_OUTAGE_CLEANUP_RETRY_MAX: Duration =
+    plurx_core::cluster::timing::operations::PLANNED_OUTAGE_CLEANUP_RETRY_MAX;
 
 fn next_planned_outage_cleanup_delay(current: Duration) -> Duration {
     current
@@ -2175,6 +2182,8 @@ async fn fetch_peer_status(
         Err(PeerTransportError::TimedOut) => (ObservationState::TimedOut, None),
         Err(PeerTransportError::InvalidResponse) => (ObservationState::InvalidResponse, None),
         Err(PeerTransportError::Unreachable) => (ObservationState::Unreachable, None),
+        Err(PeerTransportError::LocalUnavailable) => (ObservationState::Unavailable, None),
+        Err(PeerTransportError::AuthenticationRefused(_)) => (ObservationState::Refused, None),
     };
     PeerStatusOutcome {
         node_id: expected_node_id.to_owned(),

@@ -5,6 +5,7 @@ fn preroll_index() -> FragmentIndex {
         (0..4)
             .map(|at| plurx_core::segplan::IndexRow {
                 dts: at * 100,
+                first_cto: None,
                 duration: 100,
                 bytes: 1,
                 video_bytes: 1,

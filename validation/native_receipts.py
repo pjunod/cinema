@@ -86,7 +86,13 @@ BUILD_SPECS = {
     # native build recipe changed.
     # PR #1666 adds only `node --test tests/playback/prepared-successor-chase.test.js`
     # to the web-unit-check recipe (a Node web test); no native recipe changes.
-    'Makefile': 'a7b767c0bc813c46c2fedd64fe465cc44748fb660f088c78a13e30d9a528440b',
+    # P49 adds only `node --test tests/playback/audio-alternation.test.js` to
+    # the web-unit-check recipe (a Node playback-lab observer test); no native
+    # recipe changes.
+    # #1866 changes only cluster-wal-check's exact `snapshot_metrics` hiqlite
+    # test count from 13 to 17 (four landed snapshot recovery contracts); no
+    # native recipe changes.
+    'Makefile': '9088e3ed9a502671d5d78b2d41a0db169ff30158e00827c915c8b613a95147cd',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag
@@ -334,7 +340,8 @@ def verify_desktop(data):
 
 def origin(api, artifact, scope, current, current_run, *, tv_cases=False):
     rid = positive(artifact['run_id'])
-    require(rid < current_run and artifact.get('expired') is False, 'Expired/current/future origin')
+    require((current_run is None or rid < current_run) and artifact.get('expired') is False,
+            'Expired/current/future origin')
     run = api.get(f'/actions/runs/{rid}')
     require(run['id'] == rid and run['repository']['id'] == scope['repository'], 'Foreign origin run')
     event = bounded_json(run['event_payload'].encode())

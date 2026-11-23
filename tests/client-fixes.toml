@@ -8908,6 +8908,106 @@ source_anchor = '"transport": "mpv"'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
 
+# PR #1821: the presented rule-options panel takes native focus before Delete.
+[[fixes]]
+id = "apple.tvos-dvr-rule-options-native-focus"
+commits = ["ae9c167bd8ee00cbc8e122d9818d941d8795d9d2"]
+source = "clients/apple/Sources/DvrRecordings.swift"
+source_anchor = ".focusScope(ruleOptionsFocus)"
+test = "clients/apple/UITests/TVDvrNavigationTests.swift"
+test_anchor = "func testRecordingDetailsRuleConfirmationAndManualChannelReturn() throws"
+
+[[fixes]]
+id = "android.prepared-seek-presented-quality"
+commits = ["b6f3fe3f86b346fb28e140a33c535cc3465ff746"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "planReplacement.presented(change.quality)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun preparedQualityOwnsSeeksOnlyAfterTheSuccessorsProvenFrame()"
+
+[[fixes]]
+id = "android.prepared-seek-build-counter-applicability"
+commits = ["d48ec8996565093cd97c64583ecdcda0c98a568e"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "versionCode ="
+test = "tests/validation/test_selected_pr_android_capture.py"
+test_anchor = "def test_counter_projection_preserves_actual_209_provenance_only_for_the_two_210_literals("
+
+[[fixes]]
+id = "apple.tvos-startup-decision-file-route"
+commits = ["39c3e9bb09649acd08f9f3bc59b9a6e47c34e9ec"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = 'resource == "hls/startup-decision"'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testStartupPreparationIsAClosedLocalFileResource() throws"
+
+[[fixes]]
+id = "apple.tvos-initial-seek-requires-preparation-receipt"
+commits = ["ec5cd852dd40f79ae9a8ded27f922c5dd5224f3a"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "func isStartupSeekReady(at positionMs: Int) -> Bool"
+test = "clients/apple/Tests/AppleItemReadinessTests.swift"
+test_anchor = "func testStartupSeekRequiresExactPositivePreparationReceipt() throws"
+
+[[fixes]]
+id = "apple.tvos-local-startup-preparation-file-route"
+commits = ["69719053e97bcafe2800adab8a3b2bc0b8e60a8e"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = 'resource == "hls/prepare-startup" && query.isEmpty'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testStartupPreparationIsAClosedLocalFileResource() throws"
+
+[[fixes]]
+id = "apple.tvos-unnamed-auto-copy-preparation"
+commits = ["526ce70730ffd1c114e9e0b002c207c39ebdac74"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "intentQuality = autoControlQualitySelection(desired: candidate,"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws"
+
+# The request-builder test covers the preparation path through the shared planner.
+[[fixes]]
+id = "apple.tvos-shared-native-startup-selection"
+commits = ["8d103febcca3bf013f9d14f0fa73609a872d9880"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private static func nativeSessionRequest("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws"
+
+[[fixes]]
+id = "apple.tvos-initial-vod-position"
+commits = ["1133a70e2538c08b1ba635326dbbd3add80f5427"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func initialItemSeekLanded("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testNativeStartupSeekRequiresTheRequestedItemClock()"
+
+# The request-builder test checks the copy request and the selected resume time.
+[[fixes]]
+id = "apple.tvos-selected-detail-startup-preparation"
+commits = ["edfd331effcc55e176a30cfb00a27850570338f7"]
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "private func tvStartupPreparation("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws"
+
+# The Theater feature resumes Continue Watching without title detail.
+[[fixes]]
+id = "apple.tvos-home-feature-startup-preparation"
+commits = ["19adc2cf3e2ad790197d47c0ad47aa5a919701dc"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = "private func prepareFeature(_ feature: TvTheaterFeature) async"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "func testTheaterContinueWatchingOffersPreparationForItsResumeWindow() throws"
+
+[[fixes]]
+id = "apple.tvos-home-feature-preparation-cancelled-on-play"
+commits = ["f8a0f137586f1fc5baf53978a8f826942671f990"]
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "var startsPlayback: Bool"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "func testTheaterPlayStartCancelsTheFeaturePreparation() throws"
+
 [[fixes]]
 id = "apple.cinema-refused-subtitle-keeps-generated-captions"
 commits = ["5ce3268f688f74a586013c3252ea13a89694e094"]
@@ -8948,3 +9048,21 @@ source = "clients/linux-player/plurx_player/badges.py"
 source_anchor = "def current_report(session):"
 test = "clients/linux-player/tests/test_badges.py"
 test_anchor = "def test_failed_control_exchange_keeps_the_current_report(self):"
+
+# A dotless changelog mail host stopped every package verification at lintian.
+[[fixes]]
+id = "linux-player.changelog-mail-host-lintian"
+commits = ["ea87b71612be8b23abe5d44d194e5995e3755083"]
+source = "clients/linux-player/debian/changelog"
+source_anchor = "<codex-agent@plurx.invalid>"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_changelog_trailer_names_a_mail_host_lintian_accepts(self):"
+
+# A future-dated changelog entry made every package build differ.
+[[fixes]]
+id = "linux-player.changelog-date-reproducible-build"
+commits = ["8a49785fd268c80af8b40375fe67813015a10392"]
+source = "clients/linux-player/debian/changelog"
+source_anchor = "Sat, 21 Nov 2026 22:41:14 -0500"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_no_changelog_entry_is_dated_in_the_future(self):"

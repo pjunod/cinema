@@ -1842,6 +1842,12 @@ async fn owner_snapshot_within(
 fn peer_error(error: PeerTransportError) -> LiveTvError {
     let message = match error {
         PeerTransportError::Unreachable => "the session server is unreachable",
+        PeerTransportError::LocalUnavailable => {
+            "this server could not construct an authenticated peer request"
+        }
+        PeerTransportError::AuthenticationRefused(_) => {
+            "the session server refused peer authentication"
+        }
         PeerTransportError::TimedOut => "the session server timed out",
         PeerTransportError::InvalidResponse => "the session server returned an invalid response",
     };

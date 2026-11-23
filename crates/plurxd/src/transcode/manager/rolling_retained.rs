@@ -65,9 +65,18 @@ impl TranscodeManager {
         item_title: &str,
         automatic: bool,
     ) -> Option<StartInfo> {
-        let artifact = self.vod.acquire_rolling_output(production)?;
-        let manifest = artifact.manifest()?;
         let mut context = frozen.context;
+        // Retention qualifies output from the beginning. A fresh resume keeps
+        // its requested cursor, with media time still anchored at zero.
+        let start_seconds = context.start_seconds;
+        let artifact = self.vod.acquire_rolling_output(production)?;
+        // The producer completion check allows some catalog duration drift.
+        // A resume must still lie inside the complete media we actually serve.
+        if start_seconds > 0.0 && !artifact.covers_resume(start_seconds) {
+            return None;
+        }
+        let manifest = artifact.manifest()?;
+        context.media_origin_seconds = 0.0;
         context.bandwidth = Some(artifact.bandwidth()?);
         let frozen = FrozenHlsPresentation::from_rolling_artifact(
             frozen.file,
@@ -158,7 +167,7 @@ impl TranscodeManager {
             kind,
             audio_delivery: audio.clone(),
             method,
-            start_seconds: 0.0,
+            start_seconds,
             media_origin_seconds: 0.0,
             grade,
             target_height: height,
@@ -216,7 +225,7 @@ impl TranscodeManager {
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: file.duration_ms,
-            start_seconds: 0.0,
+            start_seconds,
             media_origin_seconds: 0.0,
             target_height: height,
             kind,

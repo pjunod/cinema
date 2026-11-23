@@ -2106,17 +2106,17 @@ async fn dolby_vision_refit(
     let on =
         |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
     let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
-    #[cfg(target_os = "linux")]
-    let helper = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let helper = match crate::dv_tools::ToolSet::capture().await {
         Ok(Some(tools)) => Ok(Some(format!(
             "refit mode {}, decoder {}",
-            crate::vodencode::dv_runtime::REFIT_MODE_VERSION,
+            crate::dv_tools::REFIT_MODE_VERSION,
             tools.decoder_abi()
         ))),
         Ok(None) => Ok(None),
         Err(error) => Err(error),
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let helper: Result<Option<String>, String> = Ok(None);
     let progress = state
         .store

@@ -1096,6 +1096,22 @@ impl TranscodeManager {
         Err(rejection)
     }
 
+    pub(crate) fn remember_resume_candidate(&self, user_id: i64, file_id: i64, session_id: &str) {
+        self.vod
+            .remember_resume_candidate(user_id, file_id, session_id);
+    }
+
+    pub(crate) fn offer_predicted_resume(
+        &self,
+        user_id: i64,
+        progress: &[plurx_core::domain::InProgressItem],
+        shutdown: &tokio_util::sync::CancellationToken,
+        slot: crate::subtitle_translation::ReadPreparationSlot,
+    ) {
+        self.vod
+            .offer_predicted_resume(user_id, progress, shutdown, slot);
+    }
+
     /// End one session now. True if it existed.
     ///
     /// `reason` distinguishes the two callers in the log, because they mean

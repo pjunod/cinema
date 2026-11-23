@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use plurx_core::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
-const SERVING_FENCE_POLL: Duration = Duration::from_millis(25);
+const SERVING_FENCE_POLL: Duration = plurx_core::cluster::timing::serving::SERVING_FENCE_POLL;
 
 pub(crate) const SERVING_FENCED_MESSAGE: &str = "this node has lost quorum serving authority";
 pub(crate) const SERVING_FENCED_JSON: &str =
@@ -557,7 +557,8 @@ impl ServingState {
 /// generation exactly as before.
 // Real-media qualification exercises the same 2468 ms outage and five-second
 // boundary as production; an accelerated test-only budget would retire it.
-pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration =
+    plurx_core::cluster::timing::serving::SERVING_FENCE_SESSION_GRACE;
 
 /// How one loss of serving authority ended for an owner of running work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -808,8 +809,34 @@ pub(crate) struct ServingHttpPolicy {
     pub(crate) code: Option<&'static str>,
 }
 
+/// Passive lateness of the existing serving monitor's sleep wake.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MonitorWakeObservation {
+    pub instance: u64,
+    pub samples: u64,
+    pub total: std::time::Duration,
+    pub maximum: std::time::Duration,
+    pub last: std::time::Duration,
+}
+impl MonitorWakeObservation {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            instance: NEXT.fetch_add(1, Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+    fn record(&mut self, late: std::time::Duration) {
+        self.samples = self.samples.saturating_add(1);
+        self.total = self.total.saturating_add(late);
+        self.maximum = self.maximum.max(late);
+        self.last = late;
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ServingFence {
+    monitor_wake: Arc<StdMutex<MonitorWakeObservation>>,
     metrics: PassiveRaftMetrics,
     quorum_managed: Arc<AtomicBool>,
     word: AuthorityWord,
@@ -846,6 +873,7 @@ impl ServingFence {
             state,
             restart_drain: Arc::new(RestartDrain::default()),
             retained_proof: Arc::new(StdMutex::new(None)),
+            monitor_wake: Arc::new(StdMutex::new(MonitorWakeObservation::new())),
         }
     }
 
@@ -1618,12 +1646,25 @@ impl ServingFence {
         self.publish(ready).await;
     }
 
+    pub(crate) fn monitor_wake_observation(&self) -> MonitorWakeObservation {
+        self.monitor_wake
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) async fn monitor_loop(self, shutdown: tokio_util::sync::CancellationToken) {
         loop {
             self.refresh().await;
+            let sleep = tokio::time::sleep(SERVING_FENCE_POLL);
+            let deadline = sleep.deadline();
+            tokio::pin!(sleep);
             tokio::select! {
                 () = shutdown.cancelled() => break,
-                () = tokio::time::sleep(SERVING_FENCE_POLL) => {}
+                () = &mut sleep => {
+                    let late = tokio::time::Instant::now().saturating_duration_since(deadline);
+                    if let Ok(mut observation) = self.monitor_wake.lock() { observation.record(late); }
+                }
             }
         }
     }
@@ -1943,6 +1984,28 @@ mod tests {
     }
 
     use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+    #[tokio::test(start_paused = true)]
+    async fn monitor_wake_lateness_is_observed_without_changing_standalone_authority() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fresh = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        assert_ne!(
+            fence.monitor_wake_observation().instance,
+            fresh.monitor_wake_observation().instance
+        );
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(fence.clone().monitor_loop(stop.clone()));
+        tokio::task::yield_now().await;
+        tokio::time::advance(SERVING_FENCE_POLL + Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        let observation = fence.monitor_wake_observation();
+        assert!(observation.samples >= 1);
+        assert!(observation.maximum >= Duration::from_millis(100));
+        assert!(fence.is_ready());
+        assert_eq!(fresh.monitor_wake_observation().samples, 0);
+        stop.cancel();
+        task.await.expect("stopped monitor");
+    }
 
     fn span_fence() -> (
         tokio::sync::watch::Sender<ServingState>,

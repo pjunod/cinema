@@ -1,3 +1,4 @@
+use super::shared::AttachmentPurpose;
 use super::*;
 
 impl VodServe {
@@ -199,6 +200,7 @@ impl VodServe {
             let duration = if index % 2 == 0 { 28_016 } else { 28_032 };
             rows.push(IndexRow {
                 dts,
+                first_cto: None,
                 duration,
                 bytes: 100_000,
                 video_bytes: 99_400,
@@ -232,6 +234,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                audio_excluded: false,
                 dv_refit_gain: None,
                 source_telemetry: false,
                 retained_logical: None,
@@ -257,10 +260,12 @@ impl VodServe {
             working_set_budget: 8 << 30,
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
             manifest: Mutex::new(Manifest::new(plan.clone())),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage: None,
             copy_preparation: StdMutex::new(None),
+            resume_preparation: StdMutex::new(None),
             preparation_epoch: AtomicU64::new(0),
             retained_offer: StdMutex::new(None),
             cancelled_preparation_epoch: AtomicU64::new(0),
@@ -329,6 +334,7 @@ impl VodServe {
             session_id.to_owned(),
             Session {
                 adopted_reader: None,
+                requested_audio_index: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -494,6 +500,7 @@ impl VodServe {
                 #[cfg(target_os = "linux")]
                 ordinary_collector_draining: AtomicBool::new(false),
                 local_index_demand: StdMutex::new(VecDeque::new()),
+                resume_predictions: Default::default(),
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,
                 )),
@@ -633,16 +640,24 @@ impl VodServe {
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
-    ) -> Option<crate::copy_index_v3::Resolution> {
-        let node_id = self.shared.cluster_node_id.as_deref()?;
+        purpose: AttachmentPurpose,
+    ) -> Result<Option<crate::copy_index_v3::Resolution>, String> {
+        use crate::copy_index_v3::ResolveMode;
+        let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
+            return Ok(None);
+        };
         // A recipe planned from a shared index is fenced on the engine at
         // every generation, exactly as a v2 one is. With a changed engine it
         // could not produce, so the node-local index keeps the title playing.
         // Nothing is returned, so no index is asked for either: a changed
         // engine could not build one.
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
-            return None;
+            return Ok(None);
         }
+        let mode = match purpose {
+            AttachmentPurpose::Playback => ResolveMode::Foreground,
+            AttachmentPurpose::SelectedDetail => ResolveMode::LocalOnly,
+        };
         let resolved =
             async {
                 let namespace =
@@ -664,15 +679,17 @@ impl VodServe {
                     file,
                     video,
                     self.shared.copy_analysis.get().map(Arc::as_ref),
+                    mode,
                 )
                 .await
             }
             .await;
         match resolved {
-            Ok(resolved) => Some(resolved),
+            Ok(resolved) => Ok(Some(resolved)),
+            Err(reason) if purpose == AttachmentPurpose::SelectedDetail => Err(reason),
             Err(reason) => {
                 tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v3 copy index unavailable");
-                None
+                Ok(None)
             }
         }
     }
@@ -719,6 +736,7 @@ impl VodServe {
         file: &MediaFile,
         video: CopyVideoOptions,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if let Some(viewer) = viewer {
             viewer.require_local_authority().map_err(str::to_owned)?;
@@ -782,6 +800,9 @@ impl VodServe {
                     && artifact.pipeline_sha256 == pipeline
             });
         let Some(artifact) = artifact else {
+            if purpose == AttachmentPurpose::SelectedDetail {
+                return Ok(None);
+            }
             let queued = self
                 .shared
                 .store
@@ -810,15 +831,26 @@ impl VodServe {
                 "the exact v2 artifact is awaiting queue admission".to_owned()
             });
         };
-        let index = crate::fragment_index_cluster::hydrate(
-            self.shared.store.as_ref(),
-            self.shared.cluster_calls.as_ref(),
-            self.shared.cluster_directory.as_ref(),
-            node_id,
-            root,
-            &artifact,
-        )
-        .await?;
+        let index = if purpose == AttachmentPurpose::SelectedDetail {
+            let blob = crate::fragment_index_cluster::read_local_blob(root, &artifact)
+                .await?
+                .ok_or_else(|| {
+                    "the exact v2 copy index requires foreground hydration".to_owned()
+                })?;
+            Some(crate::fragment_index_cluster::decode_artifact(
+                &blob, &artifact,
+            )?)
+        } else {
+            crate::fragment_index_cluster::hydrate(
+                self.shared.store.as_ref(),
+                self.shared.cluster_calls.as_ref(),
+                self.shared.cluster_directory.as_ref(),
+                node_id,
+                root,
+                &artifact,
+            )
+            .await?
+        };
         let Some(mut index) = index else {
             let repair = repair_job_for_artifact(repair, &artifact);
             // Lost work: without this transition the exact artifact remains

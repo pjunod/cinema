@@ -6,7 +6,7 @@
 
 - **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-10-26.
 - **Where it stands:**
-  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-26.
+  - Live reference; maintained with behavior changes. The intro states the merged route inventory as of 2026-11-20.
 - **Read further only for:**
   - the five surfaces and credentials: `## 1. Surfaces — five things on one port`; `## 2. Authentication — two bearer kinds and five capabilities`
   - error envelopes: `## 3. Errors — three envelopes, and the gates that answer first`
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 448 routes across the registered routers.
+plurx has 450 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -1543,9 +1543,9 @@ cadence.
 | POST | `/files/{id}/decision` | bearer | The same, from a v2 capabilities document; body ≤ 64 KiB |
 | PUT | `/files/{id}/audio-offset` | bearer | Deprecated. Validates and echoes `offset_ms` clamped to ±15 000; persists nothing |
 
-Both decision handlers answer the same question and return the same body; the
-`POST` validates the document, marks the caps as v2, and calls the `GET`
-handler's logic directly. The only difference is where the capabilities live.
+Both decision handlers answer the same question and return the same body.
+`POST` validates the document, marks the caps as v2, and uses the same
+decision logic.
 `force`, `audio` and `subtitle` stay on the query string in both forms,
 because they are request-local choices rather than capabilities.
 
@@ -1959,9 +1959,20 @@ the ffmpeg is taken down.
                   DELETE /hls/{session}   → 204 No Content
 ```
 
+A full login can preview the ordinary local playback decision using stored
+evidence at `POST /files/{id}/hls/startup-decision`. The preview uses the
+same capabilities document and selection query as `POST /files/{id}/decision`.
+A full login can then pass the same fresh VOD request to
+`POST /files/{id}/hls/prepare-startup` before Play. The server resolves
+the ordinary create recipe and returns `202` for the advisory request.
+An eligible indexed copy can then prepare media at `start` under the
+existing cache and source budgets. The hint creates no viewer session.
+
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | POST | `/files/{id}/hls/sessions` | bearer | Creates a session; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/startup-decision` | full bearer | Previews local playback using stored evidence; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/prepare-startup` | full bearer | Accepts fresh VOD create inputs for bounded copy preparation; body ≤ 64 KiB |
 | POST | `/files/{id}/hls/continuous-candidates` | bearer | Read-only continuous-quality pair negotiation; body ≤ 64 KiB (§9.6) |
 | POST | `/files/{id}/hls/continuous-sessions` | bearer | Creates a continuous-quality family session; body ≤ 64 KiB (§9.6) |
 | GET | `/files/{id}/hls/start` | bearer | Deprecated bridge over the same handler |
@@ -2132,6 +2143,18 @@ clients should not use it.
 All playlists are `application/vnd.apple.mpegurl` with `Cache-Control:
 no-store`, and relay to the owning cluster node when this node is not the
 owner.
+
+An Android prepared scalar VOD successor can use
+`index.m3u8?native=2`. Its durable route selects a single-variant wrapper
+whose child remains the immutable `index.m3u8` without the query. The wrapper
+has no subtitle group or codec declaration. Its optional `FRAME-RATE` is a
+conservative bound from the exact attachment's verified fitted-index sample
+cadence, rounded upward through the client's Float representation; source
+average FPS is not a substitute. Missing cadence leaves the rate absent.
+Other platforms and ordinary creation retain their existing URLs. Older
+local handlers return the bare media playlist for this query, while older
+relay owners reject the unsupported value; neither is evidence for the new
+timing contract.
 
 `master.m3u8` takes `?subtitle=` (initially selected rendition) and
 `?diagnostic=` (`video-only`, `video-only-codecs`, `video-only-range`,
@@ -4285,6 +4308,16 @@ Headers: `x-plurx-cluster-node`, `-target`, `-time-ms`, `-nonce`,
 predicates gate the routes — one for the activity snapshot (committed voters),
 one for exact request authority (any committed member, learners included), a
 read variant under a tighter window, and a voter-only variant.
+
+A private additive response header, `x-plurx-peer-auth-refusal`, distinguishes
+`invalid_proof`, `rate_limited`, `replay_capacity` and
+`authority_unavailable` on a peer-authentication **401**. The status and
+response body are unchanged. Ordinary user-token refusals have no header.
+This is advisory diagnostic metadata, never an acknowledgement, response
+signature or authority proof. Missing, unknown, repeated or over-32-byte
+values remain an unclassified refusal; metadata on a successful response is
+ignored and cannot replace its mandatory exact signature. It neither extends
+a deadline nor requests an automatic retry.
 
 Common checks: the target must be this node; the timestamp must be within
 **30 s** (**5 s** for the read variant); sender and target must differ; the

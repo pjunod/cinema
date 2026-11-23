@@ -1899,6 +1899,7 @@ printf '%s\n' '{}'
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
+        window_run: Default::default(),
         failure_episode: digest(b"lifecycle failure"),
         preparation_budget: Duration::from_secs(5),
         report_revision: AtomicU64::new(0),
@@ -1990,6 +1991,7 @@ printf '%s\n' '{}'
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,

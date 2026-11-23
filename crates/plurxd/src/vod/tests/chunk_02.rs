@@ -162,6 +162,7 @@ async fn rendition_install_point_precedes_admission() {
     let duration_ms = index_video_ms(&index);
     let identity = SourceIdentity::new(1, 1, "fingerprint");
     let recipe = Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         retained_logical: None,
@@ -262,6 +263,7 @@ async fn cancelled_real_attach_is_accounted_reusable_and_purgeable() {
     let duration_ms = index_video_ms(&index);
     let identity = SourceIdentity::new(1, 1, "fingerprint");
     let recipe = Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         retained_logical: None,
@@ -1830,6 +1832,7 @@ fn a_v3_recipe_serves_only_the_init_contract_its_index_was_sealed_with() {
     let sealed = crate::copy_normalization::served_init_contract_sha256(&muxer, &index.promotion)
         .expect("the seal's init contract");
     let mut recipe = Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         retained_logical: None,
@@ -2934,6 +2937,7 @@ async fn status_describes_vod_without_touching_its_idle_lease() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            requested_audio_index: None,
             adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
@@ -3088,6 +3092,7 @@ async fn a_far_seek_reports_the_frontier_the_client_can_actually_fetch() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            requested_audio_index: None,
             adopted_reader: None,
             children: Vec::new(),
             root_admission: None,

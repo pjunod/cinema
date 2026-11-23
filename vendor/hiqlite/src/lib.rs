@@ -291,3 +291,10 @@ where
 {
     start::start_node_inner::<C>(Box::new(node_config), None, start::StartupPhase::Normal).await
 }
+
+#[cfg(feature = "sqlite")]
+mod append_timing;
+#[cfg(feature = "sqlite")]
+pub use append_timing::{
+    AppendTimingObservation, AppendTimingSnapshot, AppendTimingStage, append_timing_observations,
+};

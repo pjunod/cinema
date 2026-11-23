@@ -346,6 +346,7 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
             ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
             ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
             ("node-e".to_owned(), PeerActivityOutcome::Unsupported),
+            ("node-f".to_owned(), PeerActivityOutcome::LocalUnavailable),
         ]
         .into(),
     );
@@ -381,11 +382,20 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
     assert_eq!(nodes[2]["status"], "timed_out");
     assert_eq!(nodes[3]["status"], "unhealthy");
     assert_eq!(nodes[4]["status"], "unsupported");
+    assert_eq!(nodes[5]["status"], "local_unavailable");
 
     let missing = missing_activity_summary(&peers).expect("missing-node summary");
     assert!(missing.contains("node-c (timed_out)"), "{missing}");
     assert!(missing.contains("node-d (unhealthy)"), "{missing}");
     assert!(missing.contains("node-e (unsupported)"), "{missing}");
+    assert!(
+        missing.ends_with(", and 1 more did not answer"),
+        "{missing}"
+    );
+    assert!(
+        !missing.contains("node-f"),
+        "bounded summary must not name its fourth missing node: {missing}"
+    );
     assert!(missing.ends_with("did not answer"), "{missing}");
 }
 
@@ -1091,6 +1101,8 @@ fn beacon(event: &str, ms: i64) -> ClientLog {
         attempt: None,
         reason: None,
         runway: None,
+        position: None,
+        buffered: None,
         ms: Some(ms),
         bandwidth: None,
         height: None,
@@ -1829,6 +1841,32 @@ fn client_stall_snapshot_survives_a_superseded_session() {
     let line = client_log_line(&event, 0);
     assert!(line.contains("runway=0.4s"), "{line}");
     assert!(line.contains("bw=12345kbps"), "{line}");
+}
+
+/// A stall line says where the playhead stood and what was buffered, so a
+/// presentation stall with media ahead reads differently from a hole.
+#[test]
+fn stall_line_carries_the_playhead_and_bounded_buffered_ranges() {
+    let mut event = beacon("stall", 8_067);
+    event.runway = Some(20.4);
+    event.position = Some(18.493);
+    event.buffered = Some("0.04-38.91".into());
+    let line = client_log_line(&event, 0);
+    for field in [
+        "stall_ms=8067",
+        "runway=20.4s",
+        "position=18.49s",
+        "buffered=0.04-38.91",
+    ] {
+        assert!(line.contains(field), "{field} in {line}");
+    }
+    event.buffered = Some("0-1 <script>".into());
+    event.position = Some(f64::NAN);
+    let line = client_log_line(&event, 0);
+    assert!(
+        !line.contains("buffered=") && !line.contains("position="),
+        "{line}"
+    );
 }
 
 #[test]

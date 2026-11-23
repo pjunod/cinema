@@ -1,3 +1,4 @@
+use super::shared::AttachmentPurpose;
 use super::*;
 
 /// In-process preparation provenance, never a native/refund capability.
@@ -616,6 +617,38 @@ impl VodServe {
         ),
         String,
     > {
+        self.resolve_rendition_for_purpose(
+            prepared,
+            file,
+            settings,
+            viewer,
+            private_preparation,
+            expected_attempt,
+            capture_before_build,
+            AttachmentPurpose::Playback,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // the exact recipe, adopted attempt, retained capture and purpose
+    pub(super) async fn resolve_rendition_for_purpose(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+        private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        expected_attempt: Option<&Arc<Rendition>>,
+        capture_before_build: bool,
+        purpose: AttachmentPurpose,
+    ) -> Result<
+        (
+            RenditionAttachment,
+            Option<crate::vodserve::retained_manifest::LogicalOutput>,
+            Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>,
+        ),
+        String,
+    > {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let PreparedVodRecipe {
             identity,
@@ -624,7 +657,7 @@ impl VodServe {
             duration_ms,
             incoming_logical,
         } = self
-            .prepare_recipe(prepared, file, settings, viewer)
+            .prepare_recipe(prepared, file, settings, viewer, purpose)
             .await?;
         #[cfg(target_os = "linux")]
         let identity = if finite_software::selected_recipe(
@@ -777,6 +810,7 @@ impl VodServe {
                 } else {
                     None
                 },
+                purpose,
             )
             .await?
             .ok_or_else(|| {
@@ -1376,9 +1410,15 @@ impl VodServe {
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_recipe(&mut prepared, file, settings, viewer)
-            .await
-            .map(|prepared| prepared.recipe.encoding)
+        self.prepare_recipe(
+            &mut prepared,
+            file,
+            settings,
+            viewer,
+            AttachmentPurpose::Playback,
+        )
+        .await
+        .map(|prepared| prepared.recipe.encoding)
     }
 
     async fn prepare_recipe(
@@ -1387,6 +1427,7 @@ impl VodServe {
         file: &MediaFile,
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
     ) -> Result<PreparedVodRecipe, String> {
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
@@ -1440,7 +1481,18 @@ impl VodServe {
             "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
-        let probe_json = if prepared.encoding.is_none() {
+        let probe_json = if purpose == AttachmentPurpose::SelectedDetail {
+            let probe = self
+                .shared
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading the file probe: {error}"))?;
+            if plurx_core::transcode::hevc_census::needs_census(file, probe.as_deref()) {
+                return Err("selected copy needs an HEVC census".into());
+            }
+            Ok(probe)
+        } else if prepared.encoding.is_none() {
             crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
         } else {
             self.shared.store.get_file_probe_json(file.id).await
@@ -1473,7 +1525,7 @@ impl VodServe {
         // A published v3 copy index is preferred over the v2 cluster artifact
         // and the node-local index; without one the order below is unchanged.
         let (copy_index, own_source) = match prepared.encoding {
-            None => match self.try_copy_index_v3(file, video).await {
+            None => match self.try_copy_index_v3(file, video, purpose).await? {
                 Some(found) => (found.index, Some(found.own)),
                 None => (None, None),
             },
@@ -1505,7 +1557,8 @@ impl VodServe {
         } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, viewer).await
+            self.try_cluster_fragment_index(file, video, viewer, purpose)
+                .await
         } else {
             Ok(None)
         };
@@ -1532,6 +1585,7 @@ impl VodServe {
                 None,
                 None,
             ),
+            Err(reason) if purpose == AttachmentPurpose::SelectedDetail => return Err(reason),
             Err(reason) => {
                 // The first rollout phase is write/shadow plus prefer-v2.
                 // Per-key fallback preserves an already healthy v1 title
@@ -1548,6 +1602,9 @@ impl VodServe {
                 )
             }
         };
+        if purpose == AttachmentPurpose::SelectedDetail && index.is_none() {
+            return Err("selected copy needs an existing fragment index".into());
+        }
         // HEVC safety is established on original headers, before filters can
         // hide updates. Bind the proof to this node's current source object;
         // a peer's filesystem identity is not a local attestation.
@@ -1584,7 +1641,10 @@ impl VodServe {
                 } else {
                     "HEVC copy needs preparation; shared preparation is disabled".to_owned()
                 };
-                if reason.is_none() && cluster_cache_enabled {
+                if reason.is_none()
+                    && cluster_cache_enabled
+                    && purpose == AttachmentPurpose::Playback
+                {
                     if let Some(node) = self.shared.cluster_node_id.as_deref() {
                         preparation =
                             match crate::state::enqueue_copy_preparation_for_object_with_viewer(
@@ -1708,6 +1768,18 @@ impl VodServe {
             file,
             video,
         ));
+        // A split copy binds its shared video to the exact source revision its
+        // soundtracks are prepared from, so the family can prove one source.
+        let source_object_version = match source_object_version {
+            None if prepared.encoding.is_none() && !prepared.split_soundtracks.is_empty() => Some(
+                crate::fragment_index_cluster::inspect_source(file)
+                    .await
+                    .map_err(|reason| {
+                        crate::transcode::vod_refusal_error("vod_source_rescan_required", reason)
+                    })?,
+            ),
+            current => current,
+        };
         let recipe = Recipe {
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
@@ -1716,6 +1788,7 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
+            audio_excluded: !prepared.split_soundtracks.is_empty() && prepared.encoding.is_none(),
             audio_delivery: prepared
                 .encoding
                 .as_ref()
@@ -2060,6 +2133,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            split_soundtracks: Vec::new(),
                             admission_priority,
                             root_admission: None,
                             measured_candidate: None,
@@ -2100,6 +2174,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            split_soundtracks: Vec::new(),
                             admission_priority,
                             root_admission: None,
                             measured_candidate: None,
@@ -2124,6 +2199,41 @@ impl VodServe {
             }
             None => None,
         };
+        // A split copy attaches every soundtrack beside its one shared video.
+        let mut split_renditions = Vec::with_capacity(prepared.split_soundtracks.len());
+        for (request, soundtrack) in &prepared.split_soundtracks {
+            let attachment = self
+                .resolve_rendition(
+                    &mut VodRecipeRequest {
+                        admission_priority,
+                        root_admission: None,
+                        measured_candidate: None,
+                        retained_capture: RetainedOutputCapture::New,
+                        companion: None,
+                        request,
+                        encoding: Some(Arc::clone(soundtrack)),
+                        soundtrack: None,
+                        split_soundtracks: Vec::new(),
+                    },
+                    file,
+                    settings,
+                    fences.viewer.as_ref(),
+                    None,
+                    None,
+                    true,
+                )
+                .await?
+                .0;
+            split_renditions.push(Arc::clone(&attachment.rendition));
+            drop(attachment);
+        }
+        let split = !split_renditions.is_empty();
+        if split && (continuous || prepared.encoding.is_some()) {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "split soundtracks require an indexed copy video",
+            ));
+        }
         // Continuous parents serve role-split private children, which no
         // complete retained output can stand in for (see the late capture).
         let (attachment, incoming_logical, early_retained) = self
@@ -2143,10 +2253,17 @@ impl VodServe {
             _build_guard,
         } = attachment;
         let initial_build_guard = initial_hardware.as_ref().map(|_| _build_guard);
+        if split && !rendition.recipe.audio_excluded {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "split soundtracks require the video-only copy",
+            ));
+        }
         let mut media = vec![Arc::clone(&rendition)];
         if let Some(audio) = audio_rendition.as_ref() {
             media.push(Arc::clone(audio));
         }
+        media.extend(split_renditions.iter().cloned());
         if let Some(companion) = companion_rendition.as_ref() {
             media.push(Arc::clone(companion));
         }
@@ -2189,7 +2306,7 @@ impl VodServe {
                 ));
             }
         }
-        let mut private_media = if continuous {
+        let mut private_media = if continuous || split {
             let deferred = |child: &Arc<Rendition>| {
                 req.continuous_media
                     .as_ref()
@@ -2198,9 +2315,14 @@ impl VodServe {
                         .as_ref()
                         .is_some_and(|companion| Arc::ptr_eq(companion, child))
             };
+            // Encoded roles reserve their credit atomically. A split copy's
+            // shared video is a copy and holds no encode credit.
+            let unreserved = |child: &Arc<Rendition>| {
+                deferred(child) || split && child.recipe.encoding.is_none()
+            };
             let admitted = media
                 .iter()
-                .filter(|child| !deferred(child))
+                .filter(|child| !unreserved(child))
                 .cloned()
                 .collect::<Vec<_>>();
             let mut permits = Self::reserve_media_group(&admitted, admission_priority)
@@ -2210,7 +2332,7 @@ impl VodServe {
                 .into_iter()
                 .map(|child| {
                     let companion_bootstrap = deferred(&child);
-                    let permit = if companion_bootstrap {
+                    let permit = if unreserved(&child) {
                         None
                     } else {
                         permits.next()
@@ -2309,7 +2431,8 @@ impl VodServe {
                 &incoming_logical,
                 req,
                 file,
-                continuous,
+                // Neither family serves one complete muxed output.
+                continuous || split,
             )
             .await?
         };
@@ -2372,6 +2495,7 @@ impl VodServe {
                 .expected_attempt
                 .map(|(_, reader)| Arc::clone(reader)),
             children: Vec::new(),
+            requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: processed_reuse_scope
@@ -2507,6 +2631,18 @@ impl VodServe {
             }
             _ => None,
         };
+        // Every split soundtrack's readers, in key order like the build gates.
+        let mut split_order = split_renditions.iter().collect::<Vec<_>>();
+        split_order.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        let mut split_readers = Vec::with_capacity(split_order.len());
+        for audio in split_order {
+            if !previous_rendition
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, audio))
+            {
+                split_readers.push((Arc::clone(audio), audio.readers.lock().await));
+            }
+        }
         let mut replacement_readers = rendition.readers.lock().await;
         let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
@@ -2616,13 +2752,24 @@ impl VodServe {
                     })
                     .expect("private-media reader uses the legacy table");
             } else {
-                let readers = if companion_rendition
+                let split = split_readers
+                    .iter_mut()
+                    .find(|(audio, _)| Arc::ptr_eq(audio, &child.rendition))
+                    .map(|(_, readers)| readers);
+                let readers = if let Some(readers) = split {
+                    Some(readers)
+                } else if companion_rendition
                     .as_ref()
                     .is_some_and(|companion| Arc::ptr_eq(companion, &child.rendition))
                 {
                     companion_readers.as_mut().or(previous_readers.as_mut())
-                } else {
+                } else if audio_rendition
+                    .as_ref()
+                    .is_some_and(|audio| Arc::ptr_eq(audio, &child.rendition))
+                {
                     audio_readers.as_mut().or(previous_readers.as_mut())
+                } else {
+                    previous_readers.as_mut()
                 }
                 .expect("private media reader guard");
                 readers
@@ -2688,6 +2835,7 @@ impl VodServe {
         // would let one viewer's recipe change stall every other reader of the
         // rendition they left or the one they joined.
         drop(replacement_readers);
+        drop(split_readers);
         drop(audio_readers);
         drop(companion_readers);
         drop(previous_readers);
@@ -2706,6 +2854,9 @@ impl VodServe {
         }
         if let Some(companion) = companion_rendition.as_ref() {
             companion.kick();
+        }
+        for audio in &split_renditions {
+            audio.kick();
         }
         if outgoing_children.is_empty() && obsolete_window_flight.is_none() {
             self.emit_lifecycle(
@@ -2856,7 +3007,13 @@ impl ReservedSourceVodRendition {
                 degraded_processing: None,
                 processing_note: None,
                 session_id: session_id.into(),
-                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                // A split copy's entry point is its family master: the
+                // video-only index alone would play without any soundtrack.
+                playlist_url: if self.rendition.recipe.audio_excluded {
+                    format!("/api/v1/hls/{session_id}/master.m3u8")
+                } else {
+                    format!("/api/v1/hls/{session_id}/index.m3u8")
+                },
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -3384,6 +3541,7 @@ impl VodServe {
         let replacement = Session {
             adopted_reader: None,
             children: Vec::new(),
+            requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: None,
@@ -3714,8 +3872,8 @@ impl VodServe {
         // The origin's published v3 copy index serves a Source rendition too:
         // reading it queues nothing and joins no local viewer interest.
         let copy_index = if prepared.encoding.is_none() {
-            self.try_copy_index_v3(file, video)
-                .await
+            self.try_copy_index_v3(file, video, AttachmentPurpose::Playback)
+                .await?
                 .and_then(|found| found.index)
         } else {
             None
@@ -3732,8 +3890,13 @@ impl VodServe {
         } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
-                .await
+            self.try_cluster_fragment_index(
+                file,
+                video,
+                fences.viewer.as_ref(),
+                AttachmentPurpose::Playback,
+            )
+            .await
         } else {
             Ok(None)
         };
@@ -3928,6 +4091,18 @@ impl VodServe {
                 "its parameter sets vary mid-film (the §2 ruling)",
             ));
         }
+        // A split copy binds its shared video to the exact source revision its
+        // soundtracks are prepared from, so the family can prove one source.
+        let source_object_version = match source_object_version {
+            None if prepared.encoding.is_none() && !prepared.split_soundtracks.is_empty() => Some(
+                crate::fragment_index_cluster::inspect_source(file)
+                    .await
+                    .map_err(|reason| {
+                        crate::transcode::vod_refusal_error("vod_source_rescan_required", reason)
+                    })?,
+            ),
+            current => current,
+        };
         let recipe = Recipe {
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
@@ -3941,6 +4116,9 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
+            // A Source rendition serves a remote receiver's muxed copy; it
+            // attaches no split soundtracks, so it never excludes audio.
+            audio_excluded: false,
             video,
             dv_refit_gain,
             source_object_version,
@@ -4046,6 +4224,7 @@ impl VodServe {
                     )
                 }),
                 None,
+                AttachmentPurpose::Playback,
             )
             .await?
             .ok_or_else(|| {
@@ -4245,6 +4424,7 @@ mod principal_demand_tests {
             None,
         );
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
@@ -4291,6 +4471,7 @@ mod principal_demand_tests {
             live_recovery: true,
             output_preparation: OutputPreparation::Off,
             output_budget_bytes: 50 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         };
         let viewer = crate::state::PlaybackViewerDemand {
             principal: PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64))
@@ -4317,7 +4498,12 @@ mod principal_demand_tests {
             "sharing playback demand requires typed source authority"
         );
         let index_refusal = serve
-            .try_cluster_fragment_index(&file, CopyVideoOptions::new(true, false), Some(&viewer))
+            .try_cluster_fragment_index(
+                &file,
+                CopyVideoOptions::new(true, false),
+                Some(&viewer),
+                AttachmentPurpose::Playback,
+            )
             .await
             .expect_err("Shared index needs source admission");
         assert_eq!(index_refusal, refusal);

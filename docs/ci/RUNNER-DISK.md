@@ -373,8 +373,9 @@ over the 20 G budget *or* its filesystem is under the 20 % reserve, it resets
 it: stop the runner, delete the directory whole, start the runner. In steady
 state it decides `within budget` and deletes nothing. Then, only if the Docker
 filesystem is still under its reserve, it prunes stopped containers older than a week, images
-unused for two weeks, and build cache older than a week — not all build cache,
-because the named `plurx-<runner>` builders are kept warm on purpose.
+unused for two weeks, and daemon build cache older than a week. If still short
+and no job container has appeared, it finishes step 2 below (all daemon build
+cache, dangling images). Named `plurx-<runner>` buildx builders are untouched.
 
 On Linux, a cache smaller than 1 GiB is left warm unless deleting it can close
 the measured free-space gap. A Forgejo container in the created, running,
@@ -449,11 +450,9 @@ reset and says so when it did not reach the floor. A `short_after` that is
 non-zero hour after hour is a host to give more disk or fewer lanes, not a
 janitor to tune.
 
-It is only ever counted **after a reset actually happened**. `reset: 0,
-short_after: 1` is not a state this script can write, and it should not be: a
-runner merely busy at the top of every hour is the normal condition of a
-working CI host, and reporting it as short would send an operator to
-re-provision a machine that is fine.
+It counts filesystems, measured at the end of the pass, on which the janitor
+did **everything it may** (a reset that happened, or the full Docker pass). A
+busy runner or a deferred Docker pass is not short.
 
 **`demand_dropped` non-zero means something on this host is running on the
 percentage rule rather than the reserve configured for it** — a demand larger
@@ -531,8 +530,8 @@ names and counts these exceptions, and fails if another lane copies the bar.
 
 - **Docker prunes sooner.** The Docker block calls the same `floor_kb_for`, so
   on a 78 GB host `docker image prune -af --filter until=336h` and the builder
-  prune now fire below 25 G free instead of below 15.6 G. Nothing new is
-  deleted; an existing deleter fires across a wider range.
+  prune now fire below 25 G free instead of below 15.6 G, and a host still
+  short loses its daemon build cache each hour.
 - **Cache resets are less rare.** This page records ~13 G/day of accumulation
   on a 78 G disk, so with 25 G reserved rather than 15.6 G, expect the timer to
   reset caches regularly instead of almost never. That is the intent — a cold

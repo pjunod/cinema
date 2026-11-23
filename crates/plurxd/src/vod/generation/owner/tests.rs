@@ -83,7 +83,13 @@ async fn cancelled_terminal_observer_keeps_actual_sink_in_the_same_owner() {
     });
     let manifest = rendition.manifest.lock().await;
     {
-        let finish = output.finish(&shared, &rendition, rendition.gen_epoch.load(Relaxed), 0);
+        let finish = output.finish(
+            &shared,
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            0,
+            None,
+        );
         tokio::pin!(finish);
         tokio::select! {
             biased;
@@ -106,7 +112,13 @@ async fn cancelled_terminal_observer_keeps_actual_sink_in_the_same_owner() {
     drop(state);
     drop(manifest);
     output
-        .finish(&shared, &rendition, rendition.gen_epoch.load(Relaxed), 0)
+        .finish(
+            &shared,
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            0,
+            None,
+        )
         .await;
     assert!(output.state.lock().await.terminal.is_none());
 }
@@ -116,7 +128,13 @@ async fn readiness_refusal_has_no_terminal_output_or_completion_receipt() {
     let (_root, shared, rendition, output) = fixture().await;
     assert!(output.state.lock().await.terminal.is_none());
     output
-        .finish(&shared, &rendition, rendition.gen_epoch.load(Relaxed), 0)
+        .finish(
+            &shared,
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            0,
+            None,
+        )
         .await;
     assert!(output.state.lock().await.terminal.is_none());
     // This local output operation has no physical-close or refund API.

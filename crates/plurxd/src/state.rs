@@ -2626,27 +2626,25 @@ fn index_file_budget(
         .div_ceil(INDEX_EXPECTED_MIN_READ_BYTES_PER_SEC)
         .saturating_add(INDEX_FILE_HEADROOM_SECS)
         .min(INDEX_MEASURED_BUDGET_CEILING_SECS);
-    let measured = measured_index_budget_secs(duration_ms, previous).unwrap_or(0);
+    let measured = previous
+        .filter(|outcome| {
+            outcome.typed_code
+                == Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded)
+        })
+        .and_then(|outcome| outcome.diagnostic.as_ref())
+        .and_then(|diagnostic| measured_index_budget_secs(duration_ms, diagnostic))
+        .unwrap_or(0);
     Duration::from_secs(estimated.max(by_size).max(measured))
 }
 
 /// What an attempt that ran out of budget measured: the time it would have
 /// needed for the whole film at the rate it actually read, plus a quarter.
 ///
-/// `None` unless the previous attempt is a typed `index_budget_exceeded` with
-/// the elapsed time and the coverage it reached, which is what every budget
-/// failure records.
+/// Budget failures report their elapsed time and the coverage they reached.
 fn measured_index_budget_secs(
     duration_ms: Option<i64>,
-    previous: Option<&plurx_core::segplan::FragmentIndexOutcome>,
+    diagnostic: &plurx_core::content_analysis::IndexDiagnostic,
 ) -> Option<u64> {
-    let previous = previous?;
-    if previous.typed_code
-        != Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded)
-    {
-        return None;
-    }
-    let diagnostic = previous.diagnostic.as_ref()?;
     let elapsed = u128::from(diagnostic.elapsed_ms.filter(|value| *value > 0)?);
     let covered = u128::try_from(diagnostic.covered_ms.filter(|value| *value > 0)?).ok()?;
     let expected = diagnostic
@@ -2732,6 +2730,26 @@ impl Drop for OriginalSourceReadClose {
     }
 }
 
+/// Siblings still retry separately to get their own verdict. They share the
+/// elapsed time and coverage from the read that just timed out.
+fn index_file_budget_after_shared_pass(
+    duration_ms: Option<i64>,
+    size_bytes: i64,
+    previous: Option<&plurx_core::segplan::FragmentIndexOutcome>,
+    shared_outcome: &crate::fragindex::IndexOutcome,
+) -> Duration {
+    let measured = match shared_outcome {
+        crate::fragindex::IndexOutcome::Failed(failure)
+            if failure.code
+                == plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded =>
+        {
+            measured_index_budget_secs(duration_ms, &failure.diagnostic).unwrap_or(0)
+        }
+        _ => 0,
+    };
+    index_file_budget(duration_ms, size_bytes, previous).max(Duration::from_secs(measured))
+}
+
 /// A local whole-file read owes viewers the same preemption as a queued
 /// cluster pass. Cancellation must join the child and companion and remove
 /// the partial subtitle stage before the admission can be released. Callers
@@ -2780,6 +2798,18 @@ pub(crate) async fn local_index_until_foreground<T>(
             None
         },
         result = &mut build => Some(result),
+    }
+}
+
+async fn admit_local_fragment_work(
+    transcode: &TranscodeManager,
+    took_queued_turn: &mut bool,
+) -> Option<crate::transcode::FragmentAdmission> {
+    if *took_queued_turn {
+        transcode.admit_fragment().await
+    } else {
+        *took_queued_turn = true;
+        transcode.admit_fragment_queued().await
     }
 }
 
@@ -3048,6 +3078,11 @@ impl AnalysisRetryPolicy {
 /// `fragment_index_cluster`: this token reopens the request, and that one
 /// invalidates the memo the reopened request would otherwise short-circuit to.
 const ANALYSIS_ATTESTATION_GENERATION: &str = "source-attestation/sampled-v1";
+
+/// A census request has no copy recipe yet. Its versioned identity gives it
+/// a stable generation independent of both provisional and canonical recipes.
+/// Advance this when a new census regime must reopen historical requests.
+const HEVC_CENSUS_ANALYSIS_IDENTITY: &str = "hevc-census/v1";
 
 /// Why a cluster-job attestation did not produce a usable source.
 ///
@@ -9523,6 +9558,35 @@ impl JobManager {
                 self.settle_index_priority(&transcode, file_id);
                 continue;
             }
+            let mut admission = None;
+            if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    self.settle_index_priority(&transcode, file_id);
+                    continue;
+                };
+                if plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref()) {
+                    let Some(held) =
+                        admit_local_fragment_work(&transcode, &mut took_queued_turn).await
+                    else {
+                        return;
+                    };
+                    let held = Arc::new(held);
+                    let established = local_index_until_foreground(
+                        &transcode,
+                        &held,
+                        crate::hevc_census::ensure_index_census(self.store.as_ref(), &file),
+                    )
+                    .await;
+                    match established {
+                        Some(Ok(crate::hevc_census::IndexCensus::Ready)) => admission = Some(held),
+                        Some(Ok(_) | Err(_)) => {
+                            attempted += 1;
+                            continue;
+                        }
+                        None => return,
+                    }
+                }
+            }
             let videos = match fragment_index_video_identities(
                 self.store.as_ref(),
                 &file,
@@ -9622,11 +9686,11 @@ impl JobManager {
             // (a speech pass waiting goes first). Either is still refused when
             // foreground work holds the pool. Deliberately a return: it skips
             // the cursor stamp, so the file stays due rather than half done.
-            let admission = if took_queued_turn {
-                transcode.admit_fragment().await
-            } else {
-                took_queued_turn = true;
-                transcode.admit_fragment_queued().await
+            let admission = match admission {
+                Some(held) => Some(held),
+                None => admit_local_fragment_work(&transcode, &mut took_queued_turn)
+                    .await
+                    .map(Arc::new),
             };
             let Some(admission) = admission else {
                 tracing::info!(
@@ -9635,7 +9699,6 @@ impl JobManager {
                 );
                 return;
             };
-            let admission = Arc::new(admission);
             attempted += missing.len();
             // Asked per pass, so the switch turning off stops the next
             // pass from riding without a restart.
@@ -9725,12 +9788,18 @@ impl JobManager {
                     "a shared index read failed as a pass; building its identities one at a time"
                 );
                 for (slot, (video, _, previous)) in missing.iter().enumerate() {
-                    if !builds
+                    let Some(shared) = builds
                         .get(slot)
-                        .is_some_and(|build| failed_as_a_shared_pass(&build.outcome))
-                    {
+                        .filter(|build| failed_as_a_shared_pass(&build.outcome))
+                    else {
                         continue;
-                    }
+                    };
+                    let budget = index_file_budget_after_shared_pass(
+                        file.duration_ms,
+                        file.size,
+                        previous.as_ref(),
+                        &shared.outcome,
+                    );
                     if transcode.fragment_must_yield(&admission) {
                         // As above: no cursor stamp, the file stays due.
                         return;
@@ -9743,7 +9812,7 @@ impl JobManager {
                             &file,
                             *video,
                             &runtime_cache,
-                            index_file_budget(file.duration_ms, file.size, previous.as_ref()),
+                            budget,
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
                             Some(self.store.as_ref()),
@@ -10161,6 +10230,30 @@ impl JobManager {
                 continue;
             }
             attempted += 1;
+            if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    continue;
+                };
+                if plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref()) {
+                    match self
+                        .request_file_analysis_for_identity(
+                            file_id,
+                            false,
+                            "fragment_index",
+                            "background",
+                            HEVC_CENSUS_ANALYSIS_IDENTITY,
+                        )
+                        .await
+                    {
+                        Ok((_, false)) => enqueued += 1,
+                        Ok((_, true)) => {}
+                        Err(error) => {
+                            tracing::warn!(file_id, %error, "queueing background HEVC census");
+                        }
+                    }
+                    continue;
+                }
+            }
             // One request per copy-video identity this file lacks, rather
             // than one request for whichever identity happened to be first.
             //
@@ -11427,6 +11520,47 @@ impl JobManager {
                 "pipeline_version_unavailable",
             ));
         }
+        // An analysis request can predate the source census. Resolve it under
+        // the existing analysis read reservation before handing any recipe to
+        // the artifact queue. A foreground viewer can preempt this work.
+        self.admit_background_source(request, lost).await?;
+        let census_cancel = lost.child_token();
+        let census = plurx_core::process::bounded::cancellable(
+            census_cancel.clone(),
+            crate::hevc_census::ensure_index_census(self.store.as_ref(), &file),
+        );
+        tokio::pin!(census);
+        let census_admission = AnalysisAttestationBudget::default();
+        let census = tokio::select! {
+            result = &mut census => result.map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                charge_attempt: true,
+            })?,
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &census_admission) => {
+                census_cancel.cancel();
+                let _ = census.await;
+                if lost.is_cancelled() {
+                    return Err(AnalysisResolutionError::ClaimLost);
+                }
+                return Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                });
+            }
+        };
+        if !matches!(census, crate::hevc_census::IndexCensus::Ready) {
+            return Err(AnalysisResolutionError::Retry {
+                code: "hevc_census_pending",
+                charge_attempt: matches!(census, crate::hevc_census::IndexCensus::Failed),
+            });
+        }
+        if request.video_identity == HEVC_CENSUS_ANALYSIS_IDENTITY
+            && request.target_node_id != node_id
+        {
+            // The verdict is shared. Discovery on the target can now derive
+            // recipes from its own capabilities.
+            return Err(AnalysisResolutionError::Terminal("pipeline_superseded"));
+        }
         let video = match fragment_index_requested_video_options(
             self.store.as_ref(),
             &file,
@@ -11453,7 +11587,47 @@ impl JobManager {
                 });
             }
             Err(StoreError::Task(_)) => {
-                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
+                // A census request has no recipe, and a persisted verdict can
+                // supersede historical recipes. Queue missing canonical variants
+                // with their ordinary generations.
+                self.note_fresh_index_files(vec![file.id]);
+                let identities = fragment_index_video_identity_options(
+                    self.store.as_ref(),
+                    &file,
+                    have_dovi,
+                    transcode.dv_convert_enabled().await,
+                )
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                })?;
+                for (video, identity) in identities {
+                    if self
+                        .store
+                        .fragment_index(file.id, &crate::fragindex::identity_for(&file, video))
+                        .await
+                        .map_err(|_| AnalysisResolutionError::Retry {
+                            code: "source_catalog_read_failed",
+                            charge_attempt: true,
+                        })?
+                        .is_none()
+                    {
+                        self.request_file_analysis_for_identity(
+                            file.id,
+                            false,
+                            "fragment_index",
+                            &request.trigger,
+                            &identity,
+                        )
+                        .await
+                        .map_err(|_| AnalysisResolutionError::Retry {
+                            code: "queue_write_failed",
+                            charge_attempt: true,
+                        })?;
+                    }
+                }
+                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"));
             }
             Err(_) => {
                 return Err(AnalysisResolutionError::Retry {

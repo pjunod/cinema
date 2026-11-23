@@ -1725,6 +1725,7 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             node: "title-node".into(),
             scanner_digest: scanner.clone(),
             request: recipe.clone(),
+            measure_if_missing: false,
             now_ms,
             deadline_ms: now_ms + 120_000,
         };
@@ -1842,11 +1843,71 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             .request_dv_fel_head(request(2_000))
             .await
             .expect("rebuild after restart"));
-        let later = demand(&store, file.id, &scanner).await;
+        let later = store
+            .dv_title_demand_for_file(&scanner, file.id, 2_000)
+            .await
+            .expect("look up the warm target independent of the cursor")
+            .expect("existing head episode");
         assert_ne!(later.active_job_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            later.fel_head_recipe.as_deref(),
+            Some(recipe.identity.as_str())
+        );
         assert_eq!(later.probe_revision, settled.probe_revision);
         assert_eq!(later.probe_json, original);
         assert!(q::pending_recipes(&later.probe_json, file.size, file.mtime).is_empty());
+        let later_job = later.active_job_id.expect("later head episode");
+        let worker = claim(&store, &later_job, 2_001).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&settled, &worker, &scanner, 2_002))
+                .await
+                .expect("settle head"),
+            JobPublishOutcome::Published { .. }
+        ));
+
+        // A changed backend must measure its exact recipe in the same generation.
+        let mut refresh = request(2_004);
+        refresh.measure_if_missing = true;
+        refresh.request = q::FelRecipeRequest::new(
+            "d".repeat(64),
+            file.size,
+            file.mtime,
+            recipe.envelope,
+            recipe.output,
+        );
+        assert_ne!(recipe.identity, refresh.request.identity);
+        assert!(store
+            .request_dv_fel_head(refresh.clone())
+            .await
+            .expect("stale backend refresh"));
+        assert!(!store
+            .request_dv_fel_head(refresh.clone())
+            .await
+            .expect("deduplicated refresh"));
+        let pending = store
+            .dv_title_demand_for_file(&scanner, file.id, 2_005)
+            .await
+            .expect("read prewarm demand")
+            .expect("queued refresh");
+        assert_eq!(pending.probe_revision, settled.probe_revision);
+        assert_eq!(
+            pending.probe_json, original,
+            "title aggregate and old verdict remain intact"
+        );
+        assert_eq!(
+            pending.fel_head_recipe.as_deref(),
+            Some(refresh.request.identity.as_str())
+        );
+        assert!(matches!(
+            q::verdict_state(
+                Some(&pending.probe_json),
+                file.size,
+                file.mtime,
+                &refresh.request.identity,
+            ),
+            q::VerdictState::Missing
+        ));
     })
     .await;
 }

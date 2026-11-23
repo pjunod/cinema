@@ -1565,7 +1565,7 @@ impl TranscodeManager {
     }
 
     /// The title scanner has one software decoder thread and never uses a GPU.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn admit_dv_title(
         &self,
         playback_requested: bool,
@@ -1573,6 +1573,18 @@ impl TranscodeManager {
         if !playback_requested {
             return self.admit_source_work(1).await;
         }
+        #[cfg(target_os = "linux")]
+        {
+            self.admit_playback_dv_title().await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn admit_playback_dv_title(&self) -> Option<FragmentAdmission> {
         // Qualification prepares a successor for somebody already playing.
         // Publish distinct pressure while waiting for the heavy lane so local
         // maintenance can yield without creating a foreground encoder waiter.
@@ -1635,7 +1647,7 @@ impl TranscodeManager {
     /// no viewer waits, and it yields only when a viewer waits for capacity
     /// or an offline download does (decision F), or exact playback qualification
     /// needs the lane; an existing playing session alone does not preempt it.
-    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
         let restart_admission = self.serving_authority.try_restart_admission().await?;
         if *self.playback_qualification_waiters.borrow() > 0

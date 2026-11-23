@@ -27,6 +27,10 @@ const MAX_DECODER_NAME_BYTES: usize = 128;
 
 /// Stable revision of the explicit legacy-preference extraction.
 pub const LEGACY_DECODE_POLICY_REVISION: u32 = 1;
+/// Stored-probe key for a persisted HEVC scan verdict
+/// ([`DecodeFacts::with_stored_hevc_scan`]). Rescanning replaces the probe
+/// JSON, so a verdict never outlives the source revision it described.
+pub const HEVC_SCAN_PROBE_KEY: &str = "plurx_hevc_scan_v1";
 
 /// Stable serialization contract for [`ResolvedTranscode::plan_digest`].
 /// Changing the meaning or order of any fed field requires a revision bump.
@@ -1154,7 +1158,7 @@ impl DecodeFacts {
     /// Refine missing HEVC scan metadata from the same held source and parser.
     /// The selected absolute stream must match; a failed or contradictory
     /// configuration preserves the incumbent scan decision and facts digest.
-    pub fn with_hevc_scan_metadata(mut self, document: &Value) -> Self {
+    pub fn with_hevc_scan_metadata(self, document: &Value) -> Self {
         if self.codec() != Some("hevc")
             || self.scan_type() != ScanType::Unknown
             || self.field_order().is_some_and(|order| order != "unknown")
@@ -1174,6 +1178,49 @@ impl DecodeFacts {
         if selected.next().is_some() || !super::hevc_scan::progressive_configuration(stream) {
             return self;
         }
+        self.mark_hevc_progressive()
+    }
+
+    /// Apply a verdict that [`Self::with_hevc_scan_metadata`] reached on an
+    /// earlier probe of the same source revision and persisted under
+    /// [`HEVC_SCAN_PROBE_KEY`]. It needs the same missing scan metadata and
+    /// the same absolute stream, and yields the same facts and digest, so a
+    /// stored plan and a probed plan agree without probing again.
+    pub fn with_stored_hevc_scan(self, document: &Value) -> Self {
+        if self.codec() != Some("hevc")
+            || self.scan_type() != ScanType::Unknown
+            || self.field_order().is_some_and(|order| order != "unknown")
+        {
+            return self;
+        }
+        let Some(stored) = document.get(HEVC_SCAN_PROBE_KEY) else {
+            return self;
+        };
+        let stream = stored
+            .get("stream_index")
+            .and_then(Value::as_u64)
+            .and_then(|index| u32::try_from(index).ok());
+        let progressive = stored
+            .get("progressive_frame_only")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if stream != Some(self.input_video_stream) || !progressive {
+            return self;
+        }
+        self.mark_hevc_progressive()
+    }
+
+    /// The persisted form of a progressive verdict this probe reached, if any.
+    pub fn hevc_scan_evidence(&self) -> Option<Value> {
+        self.hevc_progressive_constraint.then(|| {
+            serde_json::json!({
+                "stream_index": self.input_video_stream,
+                "progressive_frame_only": true,
+            })
+        })
+    }
+
+    fn mark_hevc_progressive(mut self) -> Self {
         self.hevc_progressive_constraint = true;
         let encoded =
             serde_json::to_vec(&(self.facts_digest.as_str(), "hevc_progressive_frame_only_v1"))

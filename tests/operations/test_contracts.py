@@ -1190,24 +1190,16 @@ assert.equal(context.ACT_TIMER, null);
             r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
             config_source,
         )
-        migration_source = read("crates/plurx-core/src/cluster/migration.rs")
-        phase_names = (
+        phases = dict(checker["load_source_limits"]().phase_seconds)
+        self.assertEqual(set(phases), {
             "HIQLITE_HEALTH_TIMEOUT",
             "MEMBERSHIP_ADMISSION_TIMEOUT",
             "SNAPSHOT_CATCHUP_GRACE",
-        )
-        phases = {
-            name: re.search(
-                rf"(?m)^const {name}: Duration = Duration::from_secs\((\d+)\);$",
-                migration_source,
-            )
-            for name in phase_names
-        }
+        })
         self.assertIsNotNone(default_transfer)
         self.assertIsNotNone(default_install)
         self.assertIsNotNone(source_max_transfer)
         self.assertIsNotNone(source_max_install)
-        self.assertTrue(all(value is not None for value in phases.values()))
         assert default_transfer is not None and default_install is not None
         assert source_max_transfer is not None and source_max_install is not None
 
@@ -1217,7 +1209,7 @@ assert.equal(context.ACT_TIMER, null);
             default_transfer.group(1).replace("_", "")
         ) + int(
             default_install.group(1).replace("_", "")
-        ) + sum(int(value.group(1)) for value in phases.values() if value)
+        ) + sum(phases.values())
         self.assertGreaterEqual(
             start_period_seconds, supported_default_startup_seconds
         )
@@ -1250,7 +1242,7 @@ assert.equal(context.ACT_TIMER, null);
         supported_rollout_startup_seconds = (
             rollout_transfer_seconds
             + rollout_install_seconds
-            + sum(int(value.group(1)) for value in phases.values() if value)
+            + sum(phases.values())
         )
         self.assertGreaterEqual(
             rollout_health_seconds, supported_rollout_startup_seconds
@@ -1258,9 +1250,7 @@ assert.equal(context.ACT_TIMER, null);
 
         supported_max_startup_seconds = int(
             source_max_transfer.group(1).replace("_", "")
-        ) + int(source_max_install.group(1).replace("_", "")) + sum(
-            int(value.group(1)) for value in phases.values() if value
-        )
+        ) + int(source_max_install.group(1).replace("_", "")) + sum(phases.values())
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
@@ -2376,6 +2366,7 @@ assert.equal(context.ACT_TIMER, null);
             "retained_units_attachment_uuid": "Private promotion PR evidence attachment UUID",
             "workspace_rust_evidence": "Optional authenticated partial workspace test evidence descriptor",
             "python_unit_evidence": "Authenticated prior preflight and reviewed Python source coverage",
+            "predecessor_run": "Earlier interrupted source gate identified in the live PR enrollment",
             "promotion_pr": "Optional open same-repo effort/integration promotion PR to main",
             "promotion_head_sha": "Immutable promotion head SHA; dispatch on that head branch",
             "promotion_base_sha": "Immutable current main SHA already merged into the promotion head",
@@ -2428,7 +2419,7 @@ assert.equal(context.ACT_TIMER, null);
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
-        def enabled(expression, *, apple, desktop, retained, tv_adopted=False,
+        def enabled(expression, *, apple, desktop, retained, tv_adopted=False, native_adopted=False,
                     preflight="success", train=False, scope_success=True, cancelled=False):
             values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained, "train_selected": train}
             expression = re.sub(
@@ -2440,6 +2431,8 @@ assert.equal(context.ACT_TIMER, null);
             expression = re.sub(r"needs\.preflight\.result == '(success|skipped)'",
                                 lambda match: str(preflight == match[1]), expression)
             expression = expression.replace("needs.scope.result == 'success'", str(scope_success))
+            expression = expression.replace("needs.preflight.outputs.apple_native_retained != 'true'",
+                                            str(not native_adopted))
             expression = expression.replace("!cancelled()", str(not cancelled))
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
@@ -2465,8 +2458,11 @@ assert.equal(context.ACT_TIMER, null);
                 # Retained mobile evidence never suppresses the independent tray step.
                 # Only its own authenticated native proof can adopt tray operations.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
-                self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
-                                        apple=False, desktop=True, retained=True))
+                tray_guard = workflow_step_scalar(desktop, "if")
+                self.assertTrue(enabled(tray_guard, apple=False, desktop=True, retained=True))
+                if path.endswith("/ci.yml"):
+                    self.assertFalse(enabled(tray_guard, apple=False, desktop=True, retained=False,
+                                             native_adopted=True))
                 self.assertFalse(enabled(condition, apple=False, desktop=False, retained=False))
                 self.assertTrue(enabled(condition, apple=True, desktop=False, retained=False))
                 self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
@@ -2545,6 +2541,13 @@ assert.equal(context.ACT_TIMER, null);
                         continue
                     if name == desktop_name:
                         continue
+                    if path.endswith("/ci.yml") and name == "Compile and verify the current iOS reader resource":
+                        self.assertEqual(workflow_step_scalar(step, "if"),
+                            "needs.preflight.outputs.apple_native_retained == 'true' && "
+                            "needs.preflight.outputs.apple_current_reader_required == 'true'")
+                        self.assertEqual(workflow_step_scalar(step, "run"),
+                                         "python3 -m validation.selected_apple_preflight build-current-ios-reader")
+                        continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")
@@ -2555,6 +2558,8 @@ assert.equal(context.ACT_TIMER, null);
                                                 tv_adopted=True), name)
                     if path.endswith("/ci.yml"):
                         self.assertFalse(enabled(guard, apple=True, desktop=True, retained=True), name)
+                        self.assertFalse(enabled(guard, apple=True, desktop=False, retained=False,
+                                                 native_adopted=True), name)
 
     def test_native_macos_tray_unit_output_does_not_pollute_mobile_receipts(self):
         case_line = "Test Case '-[PlurxTrayCoreTests.ProtocolTests testFixture]' passed (0.001 seconds)."
@@ -3269,7 +3274,10 @@ assert.equal(context.ACT_TIMER, null);
             if " snapshot_metrics --lib -- --test-threads=1" in command
         ]
         self.assertEqual(len(snapshot_metrics), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=13", snapshot_metrics[0])
+        # 13 snapshot-metrics regressions, plus the two snapshot-builder cleanup
+        # contracts from the dead-Raft-core exit (10af9426b) and the two
+        # generation-odd restore/install contracts from patch 27 (88b29a2fc).
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=17", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
@@ -3931,8 +3939,17 @@ assert.equal(context.ACT_TIMER, null);
                 jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
                 for name in ("android_jvm", "android_apks")
             ),
-            2,
+            3,
         )
+        # The third login belongs only to an explicit source-gate continuation:
+        # it pulls the already pinned toolchain image by digest and never runs
+        # beside the ordinary reuse step above.
+        continuation = jobs["android_jvm"].split(
+            "- name: Authenticate the pinned Android toolchain image", 1
+        )[1].split("\n      - ", 1)[0]
+        self.assertIn("if: inputs.predecessor_run != ''", continuation)
+        self.assertIn("secrets.LOCAL_REGISTRY_TOKEN", continuation)
+        self.assertIn("noirr/android-build@$ANDROID_IMAGE_DIGEST", continuation)
         self.assertEqual(
             jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
         )
@@ -4496,6 +4513,23 @@ assert.equal(context.ACT_TIMER, null);
         # Ordinary PRs retain only the small identity/digest receipt. Pushes
         # and final qualifications retain exact binaries for one day.
         build = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        before_smoke = "Build the runtime from only the verified binaries"
+        self.assertLess(
+            build.index("Bind the binary set to this candidate tree"),
+            build.index("Retain candidate binaries for push, tag, and qualification runs"),
+        )
+        self.assertLess(
+            build.index("Retain candidate binaries for push, tag, and qualification runs"),
+            build.index(before_smoke),
+        )
+        self.assertLess(
+            build.index("Retain candidate binaries for non-qualification push and tag runs"),
+            build.index(before_smoke),
+        )
+        self.assertLess(
+            build.index("Back up the running image and restore it into a fresh container"),
+            build.index("Retain the exact package receipt"),
+        )
         self.assertIn(
             "name: Retain candidate binaries for push, tag, and qualification runs",
             build,
@@ -4778,7 +4812,12 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
                     continue
                 expected = general
-                if (
+                if path in {
+                    ".github/workflows/ci.yml",
+                    ".github/workflows/effort-ci.yml",
+                } and name == "preflight":
+                    expected = high_cpu
+                elif (
                     path == ".github/workflows/ci.yml" and name == "apple"
                 ) or (
                     path == ".github/workflows/effort-ci.yml"
@@ -5152,9 +5191,9 @@ assert.equal(context.ACT_TIMER, null);
                 )
 
     def test_every_general_lane_job_runs_in_the_pinned_ci_image(self):
-        # A job that selects the plain `general` label set can land on any
-        # host in the fleet. On the host it inherited that host's compiler,
-        # Python, Node and FFmpeg, so the same commit passed on one runner and
+        # The general lane and its bounded formal preflights can land on
+        # multiple hosts in the fleet. On the host it inherited that host's
+        # compiler, Python, Node and FFmpeg, so the same commit passed on one runner and
         # failed on the next (a C fixture under -Werror on one host's gcc;
         # Ubuntu 24.04 guests retired because host jobs behaved differently
         # there). Every such job runs in the one image the Rust unit shards
@@ -5162,6 +5201,10 @@ assert.equal(context.ACT_TIMER, null);
         # container's default is `sh`). The reference is read from the shard
         # job, so the digest is written in the workflows only.
         general = ("self-hosted", "Linux", "X64", "lab", "general")
+        bounded_preflights = {
+            (f".github/workflows/{workflow}.yml", "preflight")
+            for workflow in ("ci", "effort-ci", "main-fast-lane")
+        }
         shard = workflow_job_blocks(".github/workflows/rust-units.yml")["shard"]
         expected = re.search(
             r"(?m)^    container:\n      image: (.+)\n      options: (.+)\n"
@@ -5233,13 +5276,17 @@ assert.equal(context.ACT_TIMER, null);
             for name, block in workflow_job_blocks(relative).items():
                 where = f"{relative}:{name}"
                 selected = label_sets(where, block)
-                if not any(set(labels) == set(general) for labels in selected):
+                expected_labels = (
+                    (*general, "high-cpu")
+                    if (relative, name) in bounded_preflights else general
+                )
+                if not any(set(labels) == set(expected_labels) for labels in selected):
                     continue
                 header = block.split("    steps:\n", 1)[0]
                 with self.subTest(job=where):
                     # A matrix or reordered selector would hide the job from
                     # the rest of this test's reader.
-                    self.assertIn("    runs-on: [" + ", ".join(general) + "]\n", header)
+                    self.assertIn("    runs-on: [" + ", ".join(expected_labels) + "]\n", header)
                     if (relative, name) in outside:
                         seen.add((relative, name))
                         self.assertNotIn(image, header, "this job entered the image; drop its row")
@@ -5260,6 +5307,9 @@ assert.equal(context.ACT_TIMER, null);
                         )
                     )
                     inside.add((relative, name))
+        self.assertLessEqual(
+            bounded_preflights, inside, "a bounded formal preflight escaped image checks"
+        )
         self.assertEqual(outside, seen, "a row names a job that is no longer on the general lane")
         self.assertEqual(1, len(digests), "the workflows pin more than one plurx-ci digest")
         for job in ("paperwork", "scope", "preflight", "web_compile", "promotion_gate"):

@@ -492,10 +492,31 @@ class ReviewedEscapeTests(unittest.TestCase):
                 current = {**pinned[0], **formal.item_pin(source, text, pinned[0]["anchor"], "item")}
                 problems = formal.check_item_pin("authority", source, edited, current, "escape")
                 self.assertEqual(len(problems), 1)
-                if text.count("\n", at, end):
-                    self.assertIn(f"drift requires review: {source} :: {current['item']}", problems[0])
-                else:  # a one-line constant is its own anchor, so editing it removes the anchor
+                # A declaration-only alias anchor survives an RHS edit, even
+                # for a one-line item. A whole-declaration anchor does not.
+                # Determine the exact expected failure from anchor survival,
+                # rather than treating every one-line constant as its anchor.
+                occurrences = edited.count(current["anchor"])
+                if occurrences == 1:
+                    changed = formal.item_pin(source, edited, current["anchor"], "item")
+                    self.assertNotEqual(changed["item_sha256"], current["item_sha256"])
+                    self.assertEqual(
+                        problems,
+                        [f"authority source drift requires review: {source} :: {current['item']} (escape)"],
+                    )
+                else:
+                    self.assertEqual(occurrences, 0)
                     self.assertIn("anchor must occur exactly once", problems[0])
+
+                # Independently prove the reader rejects both lost and
+                # ambiguous anchors; body-drift checks must not mask these.
+                for corrupted in (
+                    text[:at] + text[at:].replace(current["anchor"], "", 1),
+                    text + "\n" + current["anchor"] + "\n",
+                ):
+                    rejected = formal.check_item_pin("authority", source, corrupted, current, "escape")
+                    self.assertEqual(len(rejected), 1)
+                    self.assertIn("anchor must occur exactly once", rejected[0])
 
     def test_the_serial_writer_row_sees_its_loop_and_the_arms_around_it(self) -> None:
         source = "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs"

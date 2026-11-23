@@ -178,8 +178,14 @@ impl RenditionDir {
     }
 
     /// Write a file so that it is absent or complete and never partial.
-    async fn publish_file(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        self.publish_owned(name, bytes.to_vec()).await
+    async fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        allow_init_eviction: bool,
+    ) -> io::Result<()> {
+        self.publish_owned_with(name, bytes.to_vec(), allow_init_eviction)
+            .await
     }
 
     /// Drain actual publication work, independently of trailer/output success.
@@ -198,7 +204,11 @@ impl RenditionDir {
     }
 
     pub async fn write_init(&self, bytes: &[u8]) -> io::Result<()> {
-        self.publish_file(INIT_NAME, bytes).await
+        self.publish_file(INIT_NAME, bytes, true).await
+    }
+
+    pub async fn write_init_without_eviction(&self, bytes: &[u8]) -> io::Result<()> {
+        self.publish_file(INIT_NAME, bytes, false).await
     }
 
     pub async fn has_init(&self) -> bool {
@@ -597,6 +607,7 @@ mod tests {
             let duration = if i % 2 == 0 { 28_016 } else { 28_032 };
             rows.push(IndexRow {
                 dts,
+                first_cto: None,
                 duration,
                 bytes: 104_452,
                 video_bytes: 103_836,

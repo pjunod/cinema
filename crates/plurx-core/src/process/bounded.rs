@@ -289,6 +289,28 @@ pub async fn output_command_clean_env(
     max_output_bytes: usize,
     work: super::ChildWork,
 ) -> io::Result<Output> {
+    output_command_clean_environment(command, wall_time, max_output_bytes, work, None).await
+}
+
+/// A bounded clean-environment child launched under its prepared descriptor manifest.
+pub async fn output_command_clean_env_with_descriptors(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    manifest: std::sync::Arc<super::source_lifetime::DescriptorManifest>,
+) -> io::Result<Output> {
+    output_command_clean_environment(command, wall_time, max_output_bytes, work, Some(manifest))
+        .await
+}
+
+async fn output_command_clean_environment(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    manifest: Option<std::sync::Arc<super::source_lifetime::DescriptorManifest>>,
+) -> io::Result<Output> {
     if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -304,7 +326,7 @@ pub async fn output_command_clean_env(
         None,
         &[],
         None,
-        None,
+        manifest,
     )
     .await
 }
