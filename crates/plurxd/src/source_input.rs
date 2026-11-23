@@ -765,13 +765,8 @@ impl SourceInput {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Whether a failed read was the storage itself (see `physical_read_failed`).
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only the Linux complete-title scan classifies its reads"
-        )
-    )]
+    // Only the Linux complete-title scan classifies its reads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn source_physical_read_failed(&self) -> bool {
         self.state
             .physical_read_failed
