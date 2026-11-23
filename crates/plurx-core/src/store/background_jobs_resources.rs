@@ -229,17 +229,26 @@ pub(crate) fn foreground_blocks(resource: &str, now: &str) -> String {
 fn preparation_blocks(resource: &str, now: &str) -> String {
     format!("EXISTS(SELECT 1 FROM source_io_occupancy prep WHERE prep.owner_kind='lease' AND prep.active_occupancy=1 AND prep.expires_at_ms>{now} AND {resource} LIKE 'source_io%' AND (prep.resource_key={resource} OR prep.resource_key='source_io' OR {resource}='source_io'))")
 }
+/// What stops analysis and job source service: foreground playback or live
+/// viewer preparation. Every gate that admits, continues or resumes analysis
+/// or job reads uses this one rule, so a job is never resumed into a refusal.
+pub(crate) fn analysis_blocks(resource: &str, now: &str) -> String {
+    format!(
+        "({} OR {})",
+        foreground_blocks(resource, now),
+        preparation_blocks(resource, now)
+    )
+}
 /// What stops this background owner's source service: foreground playback
 /// for every owner, and live viewer preparation for analysis and jobs.
 fn background_blocks(owner: &BackgroundSourceOwner, resource: &str, now: &str) -> String {
-    let foreground = foreground_blocks(resource, now);
     if matches!(
         owner,
         BackgroundSourceOwner::Analysis { .. } | BackgroundSourceOwner::Job { .. }
     ) {
-        format!("({foreground} OR {})", preparation_blocks(resource, now))
+        analysis_blocks(resource, now)
     } else {
-        foreground
+        foreground_blocks(resource, now)
     }
 }
 fn token_json() -> &'static str {
@@ -591,7 +600,7 @@ pub(super) async fn resume_background<T: QueueSql>(
     let body = encode(
         &serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"token":token,"now_ms":now_ms}),
     )?;
-    let blocked = foreground_blocks("resource.value", "json_extract($1,'$.now_ms')");
+    let blocked = analysis_blocks("resource.value", "json_extract($1,'$.now_ms')");
     let rows=store.queue_sql(format!(r#"INSERT INTO background_job_commands(id,operation,request_json,result_json)
       SELECT json_extract($1,'$.id'),'source_resume',$1,CASE WHEN EXISTS(SELECT 1 FROM background_jobs job
         JOIN background_source_pauses paused ON paused.job_id=job.id AND paused.fence=job.fence
@@ -3166,6 +3175,62 @@ mod source_tests {
                 .await
                 .expect("analysis authority"),
             "an expired preparation cannot hold analysis back"
+        );
+    }
+    #[tokio::test]
+    async fn a_job_paused_for_viewer_preparation_stays_paused_until_the_lease_ends() {
+        let store = fixture();
+        let job = seed_job(&store);
+        assert!(pause_background(&store, job.clone(), 1000)
+            .await
+            .expect("verified pause"));
+        let lease = crate::cluster::coordination::Lease {
+            resource: "subtitle-read-attest:worker:0".into(),
+            owner_node_id: "worker".into(),
+            fence: 1,
+            revision: 1,
+            expires_at_unix_ms: 30000,
+        };
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO job_leases VALUES(?1,'worker',1,1,30000,1000)",
+                [&lease.resource],
+            )
+            .expect("bounded preparation lease");
+        let read = BackgroundSourceOwner::ReadAttestation {
+            lease,
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+        };
+        assert!(matches!(
+            register_background_typed(&store, read, 1001)
+                .await
+                .expect("preparation admission"),
+            BackgroundSourceRegistration::Registered(_)
+        ));
+        // Resume must apply the same rule as the next byte grant, or the job
+        // flaps between resume and refusal and spends its pause budget.
+        assert!(
+            !resume_background(&store, job.clone(), 1002)
+                .await
+                .expect("resume refused"),
+            "a live preparation lease keeps the paused job paused"
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute("UPDATE job_leases SET expires_at_ms=1500", [])
+            .expect("preparation lease ends");
+        assert!(
+            resume_background(&store, job, 2000)
+                .await
+                .expect("resume admitted"),
+            "an expired preparation cannot hold the job back"
         );
     }
     #[tokio::test]
