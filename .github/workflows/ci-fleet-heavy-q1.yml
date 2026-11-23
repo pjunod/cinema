@@ -1,0 +1,97 @@
+name: CI Fleet heavy qualification
+# Evidence only, never merged: the fast Rust gate, verbatim, in a Firecracker VM.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust_compile:
+    name: fast Rust gate
+    runs-on: [ci-fleet-heavy-q1]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:9bb5c1d51f8b0269a1b58c7d8d2bfa8cab9610707453ff21cd6a2d54324ecac3
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    # All-target Clippy and the vendored hiqlite Clippy; the full Rust unit
+    # and SQLite suites belong to manual full CI, while each change carries
+    # its named, locally run focused regression through preflight.
+    timeout-minutes: 60
+    steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require the gate image built from this tree
+        run: |
+          set -eu
+          want="$(sha256sum Dockerfile.rust-gate | cut -d' ' -f1)"
+          have="$(cat /etc/plurx/rust-gate-input 2>/dev/null || echo none)"
+          if [ "$have" != "$want" ]; then
+            echo "::error::The pinned rust-gate image was built from Dockerfile.rust-gate $have, but this tree's is $want. Run \`scripts/rust-gate-image publish\` and commit the digest with \`scripts/rust-gate-image pin <digest>\` (docs/ci/RUST-GATE-IMAGE.md)."
+            exit 1
+          fi
+          rustc --version | grep -F 'rustc 1.97.1 '
+          cargo clippy --version
+          node --version | grep -Fx 'v22.23.4'
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
+      - name: Install the pinned FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the main fast Rust cache
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: main-fast-rust
+      - name: Run the Rust gate
+        run: make fast-rust-gate
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  # The Rust unit tests this change can affect, each at most once per set of
+  # inputs, fanned out over idle runners: docs/ci/RUST-UNIT-FANOUT.md. Its own
+  # gate job is the stage's one result; a failure that also fails at the
+  # merge-base is reported there and does not block.
