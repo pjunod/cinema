@@ -6920,7 +6920,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Indexed HEVC census sampling uses the cancellable, bounded FFmpeg collector.
 # The indexed-resume fixture synchronously reaps its finite FFmpeg remux.
 # Apple TV startup (#1827) + main 4b5ab2b61 union: main 381 plus the branch's own 2.
-expected_occurrences = 383
+# P49 AC-5: +1 test-only FFmpeg Command in
+# split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_copy;
+# it builds the two-language source and waits for the child to exit.
+# P49 AC-5 merge: main 383 plus the branch's +1; 384.
+expected_occurrences = 384
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7757,7 +7761,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Shared status busy wire test: +1 `Response::builder().status(...)` fixture reply in
 # sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
 # no production task, timer or process.
-expected_occurrences = 1009
+# P49 AC-5 merge: main 1009 plus the branch's +1 test-only output() in the
+# split admission test, which synchronously joins the FFmpeg fixture child; 1010.
+expected_occurrences = 1010
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
