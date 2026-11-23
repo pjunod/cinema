@@ -1,6 +1,5 @@
 # Read a prepared successor's frame cadence from large and MPEG-TS segments
 
-Build: 231
 Issue: #978
 
 A prepared quality handoff needs the successor's frame duration as its

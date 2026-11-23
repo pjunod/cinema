@@ -30,7 +30,9 @@ pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};
 #[cfg(target_os = "linux")]
 mod window_run;
 #[cfg(target_os = "linux")]
-pub(crate) use window_run::{request_key, RunLaunch, WindowRun, WindowRunSlot, RUN_MAX};
+pub(crate) use window_run::{
+    request_key, PreStartRequest, RunLaunch, WindowRun, WindowRunSlot, RUN_MAX,
+};
 
 const DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
@@ -120,13 +122,62 @@ impl SegmentShape {
 pub(crate) enum SegmentAdmission {
     Owned(TranscodePermit),
     Retained(crate::vodencode::EncodeWorkerPermit),
+    /// The one worker claim a window run took for the window whose encoder it
+    /// started ahead of the request, shared with that encoder until its reap.
+    /// The claim is released only when both holders have dropped it.
+    #[cfg(target_os = "linux")]
+    RunShared(Arc<crate::vodencode::EncodeWorkerPermit>),
 }
 impl SegmentAdmission {
     fn resources(&self) -> RetainedTranscodePermit<'_> {
         match self {
             Self::Owned(permit) => permit.retained_resources(),
             Self::Retained(worker) => worker.retained_resources(),
+            #[cfg(target_os = "linux")]
+            Self::RunShared(worker) => worker.retained_resources(),
         }
+    }
+    /// The family reservation a retained or run-shared claim belongs to.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reservation(&self) -> Option<crate::vodencode::EncodePermit> {
+        match self {
+            Self::Owned(_) => None,
+            Self::Retained(worker) => Some(worker.reservation()),
+            Self::RunShared(worker) => Some(worker.reservation()),
+        }
+    }
+}
+
+/// Bound on one window encoder's private output and its diagnostic.
+#[cfg(target_os = "linux")]
+pub(crate) const ENCODER_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+pub(crate) const ENCODER_DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
+
+/// A finished encoder's stdout and stderr, or why reading them failed.
+#[cfg(target_os = "linux")]
+type EncoderOutput = Result<(Vec<u8>, Vec<u8>), String>;
+
+/// A pre-started run window encoder's stdout and stderr, read to their
+/// bounds from the moment it started by the run's pre-start task, which fails
+/// at once when either bound is exceeded.
+#[cfg(target_os = "linux")]
+pub(crate) struct DrainedOutput {
+    output: tokio::sync::oneshot::Receiver<EncoderOutput>,
+    /// Set when the reading task has ended; it ends once the encoder's pipes
+    /// close, which the encoder's reap guarantees.
+    settled: tokio::sync::watch::Receiver<bool>,
+}
+#[cfg(target_os = "linux")]
+impl DrainedOutput {
+    pub(crate) async fn output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
+        (&mut self.output)
+            .await
+            .map_err(|_| "DV pre-started encoder reader ended without output".to_owned())?
+    }
+    /// Join the reading task.
+    pub(crate) async fn join(mut self) {
+        let _ = self.settled.wait_for(|settled| *settled).await;
     }
 }
 
@@ -332,8 +383,25 @@ pub(crate) struct SegmentProducer {
     /// A run window's helper process, which outlives this window's encoder.
     #[cfg(target_os = "linux")]
     run_helper: Option<ProducerRegistration>,
+    /// A pre-started encoder's output, already being read; replaces the
+    /// stdout/stderr pipes.
+    #[cfg(target_os = "linux")]
+    drained: Option<DrainedOutput>,
 }
 impl SegmentProducer {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_drained(&mut self) -> Option<DrainedOutput> {
+        self.drained.take()
+    }
+    /// [`Self::into_parts`] for a producer whose output is [`DrainedOutput`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_registered_parts(mut self) -> (ProducerRegistration, ProducerWriters) {
+        self.unaccepted_cancel.take();
+        (
+            self.registration.clone(),
+            self.writers.take().expect("segment writers"),
+        )
+    }
     /// The registrations a source owner must settle for this window: a run's
     /// helper (still reading the source between windows), then the encoder.
     #[cfg(target_os = "linux")]
@@ -1031,6 +1099,8 @@ async fn run(
         evidence: None,
         #[cfg(target_os = "linux")]
         run_helper: None,
+        #[cfg(target_os = "linux")]
+        drained: None,
     })
 }
 
@@ -1352,6 +1422,8 @@ fn spawn_streaming_encoder(
 struct WindowResources {
     _source_input: SourceInputUse,
     _admission: SegmentAdmission,
+    /// A pre-started encoder's share of the run's worker claim.
+    _run_claim: Option<Arc<crate::vodencode::EncodeWorkerPermit>>,
     _directory: Arc<tempfile::TempDir>,
 }
 
@@ -1505,7 +1577,14 @@ async fn launch_streaming(
     } else {
         cancel.child_token()
     };
-    let stage_cancel = helper_cancel.clone();
+    // A run's helper is stopped by its own token, which the run's end cancels
+    // only after the run's pre-started encoders are reaped.
+    let stage_cancel = if run.is_some() {
+        CancellationToken::new()
+    } else {
+        helper_cancel.clone()
+    };
+    let stage_stop = stage_cancel.clone();
     let stage_resources = resources.clone();
     let helper_deadline = run
         .as_ref()
@@ -1540,6 +1619,7 @@ async fn launch_streaming(
             let helper = window_run::spawn_helper(
                 staged,
                 helper_cancel.clone(),
+                stage_stop,
                 Arc::clone(input),
                 run_outputs
                     .iter()
@@ -1654,6 +1734,7 @@ async fn launch_streaming(
                     helper_completion: Some(completion),
                     evidence: Some(evidence),
                     run_helper: None,
+                    drained: None,
                 },
                 None,
             ))
@@ -1675,6 +1756,7 @@ async fn launch_streaming(
                 Box::new(WindowResources {
                     _source_input: input.physical_owner(),
                     _admission: admission,
+                    _run_claim: None,
                     _directory: Arc::clone(&directory),
                 }),
             );
@@ -1712,6 +1794,7 @@ async fn launch_streaming(
                     helper_completion: Some(completion),
                     evidence: Some(evidence),
                     run_helper: Some(helper_registration),
+                    drained: None,
                 },
                 Some(run),
             ))

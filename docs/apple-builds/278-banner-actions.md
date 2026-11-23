@@ -1,6 +1,5 @@
 # The banner said what went wrong and offered no way to answer it
 
-Build: 152
 Issue: #278
 
 A reachability audit of `main` found one real defect left on Apple, and it was

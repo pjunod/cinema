@@ -1,0 +1,58 @@
+name: fold fragment folders
+
+# Pages that every pull request used to edit at one insertion point are now
+# folded from per-pull-request fragment folders (`scripts/fold --list`).
+# A pull request edits only its own fragment; this rewrites the pages and
+# lands them as a `chore(fold):` pull request that goes through the same
+# paperwork and fast lane as any other and merges itself when they pass. It
+# reads `main` only, so it never races an open pull request; the next fold
+# replaces the `fold/main` branch.
+#
+# It runs on a schedule, not on every push: nearly every landing touches
+# status.d/, and a fold per landing would restart the fold pull request's
+# lane on every merge. A status-only fold is a docs-only lane; the page lags
+# its folder by at most six hours.
+#
+# FOLD_BOT_TOKEN must belong to a bot account with write access whose pushes
+# start workflows. The job's own token cannot: a pull request it opened would
+# never be checked, so it could never merge. Without the secret the job only
+# says so and the pages wait for the next release cut or a hand fold.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fold-fragment-folders
+  cancel-in-progress: true
+
+jobs:
+  fold:
+    name: fold and publish
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out main
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fold and publish
+        env:
+          # Scoped to this one step; scripts/fold passes it to git through
+          # the environment and to the API in a header, never in arguments.
+          FOLD_BOT_TOKEN: ${{ secrets.FOLD_BOT_TOKEN }}
+        run: python3 scripts/fold --publish
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

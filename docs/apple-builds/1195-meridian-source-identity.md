@@ -1,6 +1,5 @@
 # Meridian source changes open the chosen collection
 
-Build: 267
 Issue: #1195
 
 **Status:** built; physical Apple TV acceptance pending.
