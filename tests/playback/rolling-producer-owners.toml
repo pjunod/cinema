@@ -1458,7 +1458,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # The native FEL publisher rechecks retirement and producer failure while no
 # new segment can wake it. The sleep only bounds permit cleanup discovery.
 # PR #1802 relay review adds one 25 ms poll inside the 30s retained-copy test deadline.
-expected_occurrences = 93
+# Preparing-bootstrap regression (mode 64 in transcode/tests/source_actor.rs,
+# source_preparing_bootstrap_outlives_the_retained_ingress_observation): +1
+# test-only 100 ms poll inside a 30 s timeout that waits for the retained
+# ingress observation to age out. It decides nothing and asserts, never hangs.
+expected_occurrences = 94
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -6305,7 +6309,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # direct Status tests (one 11 s sleep spanning a renewal tick, bounded settles
 # and a bounded retirement wait). No production timer.
 # Apple TV startup (#1827) + main 0cca1660a union: main 2331 plus the branch's own 13.
-expected_occurrences = 2344
+# Preparing-bootstrap regression (mode 64): +2 test-only shapes, the 30 s
+# timeout and its 100 ms poll waiting for the retained observation to age out.
+# No production timer.
+expected_occurrences = 2346
 
 [[module_structures]]
 id = "bare-time-constructor"
