@@ -155,9 +155,27 @@ pub(crate) const ENCODER_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
 pub(crate) const ENCODER_DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 
 /// A pre-started run window encoder's stdout and stderr, read to their
-/// bounds (one byte over) from the moment it started.
+/// bounds from the moment it started by the run's pre-start task, which fails
+/// at once when either bound is exceeded.
 #[cfg(target_os = "linux")]
-pub(crate) type DrainedOutput = tokio::task::JoinHandle<Result<(Vec<u8>, Vec<u8>), String>>;
+pub(crate) struct DrainedOutput {
+    output: tokio::sync::oneshot::Receiver<Result<(Vec<u8>, Vec<u8>), String>>,
+    /// Set when the reading task has ended; it ends once the encoder's pipes
+    /// close, which the encoder's reap guarantees.
+    settled: tokio::sync::watch::Receiver<bool>,
+}
+#[cfg(target_os = "linux")]
+impl DrainedOutput {
+    pub(crate) async fn output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
+        (&mut self.output)
+            .await
+            .map_err(|_| "DV pre-started encoder reader ended without output".to_owned())?
+    }
+    /// Join the reading task.
+    pub(crate) async fn join(mut self) {
+        let _ = self.settled.wait_for(|settled| *settled).await;
+    }
+}
 
 /// Executable paths are worker configuration, never request-controlled. Recipe
 /// argv already selects encoder/output and keeps source time with -copyts. Its
@@ -1555,7 +1573,14 @@ async fn launch_streaming(
     } else {
         cancel.child_token()
     };
-    let stage_cancel = helper_cancel.clone();
+    // A run's helper is stopped by its own token, which the run's end cancels
+    // only after the run's pre-started encoders are reaped.
+    let stage_cancel = if run.is_some() {
+        CancellationToken::new()
+    } else {
+        helper_cancel.clone()
+    };
+    let stage_stop = stage_cancel.clone();
     let stage_resources = resources.clone();
     let helper_deadline = run
         .as_ref()
@@ -1590,6 +1615,7 @@ async fn launch_streaming(
             let helper = window_run::spawn_helper(
                 staged,
                 helper_cancel.clone(),
+                stage_stop,
                 Arc::clone(input),
                 run_outputs
                     .iter()

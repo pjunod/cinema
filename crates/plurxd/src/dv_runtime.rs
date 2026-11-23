@@ -1997,6 +1997,12 @@ async fn capture_private_output(
     const DIAGNOSTIC_LIMIT: u64 = crate::dv_segment::ENCODER_DIAGNOSTIC_LIMIT;
     let retirement = registration.retirement();
     let observed_helper = helper.clone();
+    // A pre-started encoder's reader is joined after the encoder's reap below,
+    // on every outcome, cancellation included.
+    let (pipes, mut drained) = match streams {
+        EncoderStreams::Pipes(stdout, stderr) => (Some((stdout, stderr)), None),
+        EncoderStreams::Drained(drained) => (None, Some(drained)),
+    };
     let result = {
         let capture = async {
             // Only an over-limit spool fails here: the reader stopped, so the
@@ -2017,8 +2023,8 @@ async fn capture_private_output(
                 }
             };
             let streams = async {
-                match streams {
-                    EncoderStreams::Pipes(stdout, stderr) => {
+                match (pipes, drained.as_mut()) {
+                    (Some((stdout, stderr)), _) => {
                         let output = async {
                             let mut bytes = Vec::new();
                             stdout
@@ -2039,12 +2045,11 @@ async fn capture_private_output(
                         };
                         tokio::try_join!(output, diagnostic)
                     }
-                    EncoderStreams::Drained(drained) => {
-                        let (bytes, text) = drained
-                            .await
-                            .map_err(|e| format!("DV pre-started encoder reader failed: {e}"))??;
+                    (None, Some(drained)) => {
+                        let (bytes, text) = drained.output().await?;
                         Ok((bounded(bytes)?, bounded_text(text)?))
                     }
+                    (None, None) => Err("DV window encoder has no output".to_owned()),
                 }
             };
             let completed_helper = async {
@@ -2099,6 +2104,9 @@ async fn capture_private_output(
         }
     }
     registration.wait_confirmed_reap().await;
+    if let Some(drained) = drained {
+        drained.join().await;
+    }
     let _ = observed_helper.wait().await;
     result
 }
