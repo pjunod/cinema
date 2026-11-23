@@ -74,6 +74,15 @@ async fn source_producer_preparation_requires_fresh_unsealed_ingress_permission(
     Box::pin(source_copy_preadmission_fixture(52)).await;
 }
 
+/// The first range's bootstrap spawns after the probe and census, which take
+/// longer than a member observation lives on a loaded host. Its authority
+/// carries the ingress permission refreshed for that spawn, not the one the
+/// actor retained when it was created, so a slow preparation still spawns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_preparing_bootstrap_outlives_the_retained_ingress_observation() {
+    Box::pin(source_copy_preadmission_fixture(64)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_retained_permission_survives_zero_open_connections_and_reconnect() {
     Box::pin(source_copy_preadmission_fixture(54)).await;
@@ -85,42 +94,6 @@ async fn source_retired_predecessor_cannot_invalidate_surviving_owner_generation
 
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
-}
-
-fn source_fixture_addresses() -> (std::net::SocketAddr, std::net::SocketAddr) {
-    static USED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeSet<std::net::SocketAddr>>,
-    > = std::sync::OnceLock::new();
-
-    // The voter binds after asynchronous store initialization. Keep every
-    // probed address claimed by this fixture family even after its listener
-    // is dropped, so another fixture cannot reuse a pending boot's address.
-    let mut used = USED
-        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
-        .lock()
-        .expect("Source fixture address registry");
-    let mut reserve = || loop {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture listener");
-        let address = listener.local_addr().expect("Source fixture address");
-        if used.insert(address) {
-            break (listener, address);
-        }
-    };
-    let (raft, raft_address) = reserve();
-    let (api, api_address) = reserve();
-    drop((raft, api));
-    (raft_address, api_address)
-}
-
-#[test]
-fn source_fixture_boots_do_not_reuse_probe_addresses() {
-    let mut addresses = std::collections::BTreeSet::new();
-    for _ in 0..64 {
-        let (raft, api) = source_fixture_addresses();
-        assert!(addresses.insert(raft));
-        assert!(addresses.insert(api));
-    }
-    assert_eq!(addresses.len(), 128);
 }
 
 fn source_fixture_store(
@@ -327,7 +300,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     eprintln!("Source fixture: actual standalone selection");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
+    // The voter binds after asynchronous store initialization; owning the
+    // sockets until it serves on them keeps another fixture off its ports.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture Raft listener");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture API listener");
+    config.cluster.raft_bind = raft.local_addr().expect("Source fixture Raft address");
+    config.cluster.api_bind = api.local_addr().expect("Source fixture API address");
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     config.cluster.advertise_host = "localhost".into();
     let result = source_fixture_store(&config).await;
     let mut selected =
@@ -1326,6 +1305,50 @@ async fn source_actual_actor(
     ))
     .await;
     let ingress_permission = ingress_fixture.permission().await;
+    if mode == 64 {
+        let gate = SourceProducerAuthority::new(
+            Arc::clone(&state.store),
+            state.cluster.source_members(),
+            Arc::clone(&state.sharing.key),
+            state.sharing.accepted_drivers.boot_id(),
+            ingress_permission.clone(),
+        );
+        // Let the retained observation age out, as it does while a loaded
+        // host probes and censuses the first range.
+        let aged = tokio::time::timeout(Duration::from_secs(30), async {
+            while ingress_permission
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(aged.is_ok(), "the retained observation ages out");
+        let retained = gate
+            .retained_ingress(&assignment)
+            .expect("the actual retained ingress");
+        let authority = gate
+            .authorize_preparing_generation(&[retained])
+            .await
+            .expect("a current preparing owner spawns past its retained observation");
+        authority
+            .validate_before_spawn()
+            .expect("the spawn checks a current observation");
+        drop(authority);
+        ingress_fixture.close().await;
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("actual closure and sealed assignment cleanup"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        return;
+    }
     if mode == 52 {
         let gate = SourceProducerAuthority::new(
             Arc::clone(&state.store),

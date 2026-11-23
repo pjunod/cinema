@@ -4,7 +4,7 @@
 //! observes: nothing here changes what the producer does or when.
 use std::{
     future::Future,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
 use tokio::time::Instant;
@@ -43,25 +43,50 @@ impl HoldMirror {
     }
 }
 
-/// What a range's production had committed at one instant (its init and
-/// its published segments, which only ever grow) and the bank's hold count.
-/// Compared later, it says whether production advanced in between. Bytes a
-/// segment has in flight do not count: only a commit is progress.
+/// Where a range's production stood at one instant: what it had committed
+/// (its init and its published segments, which only ever grow), how many
+/// child outputs its mux had accepted, and the bank's hold count. Compared
+/// later, it says whether production advanced in between.
+///
+/// A commit is not the only progress. A healthy producer slower than its
+/// viewer spends longer than one wait window between two commits, and its
+/// FFmpeg child keeps delivering output the whole time; a stuck one delivers
+/// nothing. Each output the mux accepts is that evidence: the same signal the
+/// producer's own stall warning (`child_output`) is judged by. Bytes read
+/// from the child but not yet accepted by the mux do not count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProductionMark {
     committed: usize,
+    outputs: u64,
     holds: u64,
 }
 
-/// Whether a wait that saw no commit met a stuck producer. The read bank's
+/// Whether a wait that saw no commit and no child output met a stuck
+/// producer. The read bank's
 /// hold excuses it: a holding producer pauses by design, ahead of its viewer.
 /// But the hold is the bank's decision from its last demand snapshot, not a
 /// sign the producer is alive, so a viewer that asks for media at the
 /// production head while held re-anchors the bank to that request
 /// ([`Self::reanchored`]). From then until production commits again, a hold
 /// excuses nothing.
+///
+/// Everything it judges by is a mirror the producer updates after each
+/// commit, readable without the range's lock: a resource request judging its
+/// deadline must not wait behind the very read it timed out on.
 pub(super) struct ProductionStall {
     holding: HoldMirror,
+    /// Child outputs the mux has accepted.
+    outputs: AtomicU64,
+    /// The range's init and published segments, as last committed.
+    committed: AtomicUsize,
+    /// Whether the range committed its end.
+    complete: AtomicBool,
+    /// The media end the range has published, or `i64::MIN` before its
+    /// origin is known.
+    produced_end_ms: AtomicI64,
+    /// A viewer waited at the held head: the next read-bank refresh
+    /// re-anchors the bank to the produced end.
+    reanchor: AtomicBool,
     /// The commit count when the bank was last re-anchored at a held head,
     /// or `usize::MAX`.
     reanchored_at: AtomicUsize,
@@ -70,6 +95,11 @@ impl Default for ProductionStall {
     fn default() -> Self {
         Self {
             holding: HoldMirror::default(),
+            outputs: AtomicU64::new(0),
+            committed: AtomicUsize::new(0),
+            complete: AtomicBool::new(false),
+            produced_end_ms: AtomicI64::new(i64::MIN),
+            reanchor: AtomicBool::new(false),
             reanchored_at: AtomicUsize::new(usize::MAX),
         }
     }
@@ -78,20 +108,85 @@ impl ProductionStall {
     pub(super) fn holding(&self) -> &HoldMirror {
         &self.holding
     }
+    /// Mirror what the range has committed.
+    pub(super) fn record(&self, committed: usize, complete: bool, produced_end_ms: Option<i64>) {
+        self.committed.store(committed, Ordering::SeqCst);
+        self.complete.store(complete, Ordering::SeqCst);
+        self.produced_end_ms
+            .store(produced_end_ms.unwrap_or(i64::MIN), Ordering::SeqCst);
+    }
+    pub(super) fn committed(&self) -> usize {
+        self.committed.load(Ordering::SeqCst)
+    }
+    pub(super) fn complete(&self) -> bool {
+        self.complete.load(Ordering::SeqCst)
+    }
+    /// A viewer waited at the head while the bank held: from now until
+    /// production commits again a hold excuses nothing, and the next
+    /// read-bank refresh re-anchors the bank to the produced end.
+    /// Whether a re-anchor was requested: not before the range has an
+    /// origin, when there is no produced end to move the bank to and a hold
+    /// must keep excusing a wait.
+    pub(super) fn request_reanchor(&self) -> bool {
+        if self.produced_end_ms.load(Ordering::SeqCst) == i64::MIN {
+            return false;
+        }
+        self.reanchored(self.committed());
+        self.reanchor.store(true, Ordering::SeqCst);
+        true
+    }
+    #[cfg(test)]
+    pub(super) fn mirrors_for_test(&self) -> (usize, bool, u64) {
+        (
+            self.committed(),
+            self.complete(),
+            self.outputs.load(Ordering::SeqCst),
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn produced_end_for_test(&self) -> Option<i64> {
+        let end = self.produced_end_ms.load(Ordering::SeqCst);
+        (end != i64::MIN).then_some(end)
+    }
+    /// The range committed its end.
+    pub(super) fn complete_now(&self) {
+        self.complete.store(true, Ordering::SeqCst);
+    }
+    /// The viewer's own demand superseded a requested re-anchor.
+    pub(super) fn cancel_reanchor(&self) {
+        self.reanchor.store(false, Ordering::SeqCst);
+    }
+    pub(super) fn reanchor_pending(&self) -> bool {
+        self.reanchor.load(Ordering::SeqCst)
+    }
+    /// The produced end a requested re-anchor moves the bank to, once.
+    pub(super) fn take_reanchor(&self) -> Option<i64> {
+        if !self.reanchor.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        let end = self.produced_end_ms.load(Ordering::SeqCst);
+        (end != i64::MIN).then_some(end)
+    }
     pub(super) fn mark(&self, committed: usize) -> ProductionMark {
         ProductionMark {
             committed,
+            outputs: self.outputs.load(Ordering::SeqCst),
             holds: self.holding.mark(),
         }
+    }
+    /// The mux accepted one more output from the child.
+    pub(super) fn output(&self) {
+        self.outputs.fetch_add(1, Ordering::SeqCst);
     }
     /// The bank was re-anchored to a viewer's request at the head, with
     /// `committed` committed.
     pub(super) fn reanchored(&self, committed: usize) {
         self.reanchored_at.store(committed, Ordering::SeqCst);
     }
-    /// Stuck since `mark`: still running and unfinished, nothing committed,
-    /// and no hold that still excuses it. A copy that stopped or finished is
-    /// not stuck; its callers' own checks end those.
+    /// Stuck since `mark`: still running and unfinished, nothing committed
+    /// and no child output accepted, and no hold that still excuses it. A
+    /// copy that stopped or finished is not stuck; its callers' own checks
+    /// end those.
     pub(super) fn stalled_since(
         &self,
         mark: ProductionMark,
@@ -99,7 +194,11 @@ impl ProductionStall {
         complete: bool,
         live: bool,
     ) -> bool {
-        if !live || complete || committed != mark.committed {
+        if !live
+            || complete
+            || committed != mark.committed
+            || self.outputs.load(Ordering::SeqCst) != mark.outputs
+        {
             return false;
         }
         let excused = self.holding.held_since(mark.holds)
