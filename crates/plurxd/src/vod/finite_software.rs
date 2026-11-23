@@ -1587,6 +1587,18 @@ async fn run_body(
             );
         }
     }
+    if !success
+        && rendition.failure().is_none()
+        && rendition.closed.load(Acquire)
+        && producer.control.stop_requested()
+    {
+        // An owner closed this rendition and asked its producer to stop. The
+        // writer ending early is the requested outcome, not a producer fault,
+        // so it is not filed as a failure; cleanup settles the same output.
+        tracing::debug!(target: "plurxd::vodserve", rendition = %rendition.key,
+            ?completion, "finite producer stopped on request");
+        return;
+    }
     if !success || rendition.failure().is_some() {
         fail(
             &shared,

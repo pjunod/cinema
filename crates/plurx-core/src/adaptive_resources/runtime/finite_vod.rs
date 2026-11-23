@@ -597,6 +597,11 @@ impl SoftwareVodControl {
     pub fn request_stop(&self) -> std::io::Result<()> {
         self.control.request()
     }
+    /// Whether an owner asked this producer to stop (for example an operator
+    /// Stop or its cleanup owner), as opposed to the producer failing alone.
+    pub fn stop_requested(&self) -> bool {
+        self.control.requested()
+    }
     pub fn suspend(&self) -> std::io::Result<()> {
         self.control.suspend(true)
     }
