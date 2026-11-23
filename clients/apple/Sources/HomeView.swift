@@ -317,7 +317,13 @@ private struct HomeDashboard: View {
         let target: PresentationTarget?
         let quality: PlaybackQuality
         let authorizationGeneration: UInt64
+        let routeV1: Bool
+        let deviceSubtitlesOff: Bool
+        let subtitleReadiness: SubtitleReadiness
         let active: Bool
+        /// Play (or its detail fetch) has begun: the key changes, so SwiftUI
+        /// cancels an in-flight preparation before the real HLS create.
+        let playing: Bool
     }
 
     private func featurePreparationKey(_ feature: TvTheaterFeature) -> FeaturePreparationKey? {
@@ -326,15 +332,17 @@ private struct HomeDashboard: View {
             itemId: feature.item.id, positionMs: feature.item.watch?.positionMs ?? 0,
             target: featureTarget, quality: model.playbackQuality,
             authorizationGeneration: Session.shared.playbackAuthorization.generation,
-            active: scenePhase == .active
+            routeV1: model.displayAwareAuto && model.displayAwareAutoProtocol == "route-v1",
+            deviceSubtitlesOff: model.subLang == "off", subtitleReadiness: model.subtitleReadiness,
+            active: scenePhase == .active,
+            playing: featurePresentation.play != nil || featurePresentation.requestedItemID != nil
         )
     }
 
     /// The theater feature plays Continue Watching without title detail, so it
     /// offers the same startup preparation title detail does for that Resume.
     private func prepareFeature(_ feature: TvTheaterFeature) async {
-        guard let key = featurePreparationKey(feature), key.active,
-              featurePresentation.play == nil,
+        guard let key = featurePreparationKey(feature), key.active, !key.playing,
               let detail = try? await model.itemDetail(feature.item.id),
               !Task.isCancelled,
               let context = TvHomeLayoutPolicy.playbackContext(detail),
