@@ -80,14 +80,14 @@ def manual_binding(
         assert pull_request["state"] == "open" and pull_request.get("merged") is False
         assert head["repo"]["full_name"] == repository
         assert base["repo"]["full_name"] == repository
-        assert promotion_ref(head["ref"]) and base["ref"] == "main"
+        assert bool(re.fullmatch(r"[A-Za-z0-9._/-]+", head["ref"])) and base["ref"] == "main"
         assert environment.get("GITHUB_REF") == "refs/heads/" + head["ref"]
         assert head["sha"] == head_tip == expected_head == tested_sha == environment.get("GITHUB_SHA")
         assert base["sha"] == base_tip == expected_base
         assert base_is_ancestor
     except (KeyError, TypeError, AssertionError) as exc:
         raise QualificationError("promotion PR identity, route, immutable tips or ancestry mismatch") from exc
-    return dict(schema=1, repository=repository, pull_request=int(number),
+    return dict(schema=1 if promotion_ref(head["ref"]) else 2, repository=repository, pull_request=int(number),
                 head_ref=head["ref"], base_ref="main", head_sha=head_tip, base_sha=base_tip)
 
 
@@ -121,6 +121,13 @@ def api_document(environment: Mapping[str, str], path: str) -> dict[str, object]
 
 
 def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
+    binding, _ = _resolve_manual_binding_and_pull(environment, repository)
+    return binding
+
+
+def _resolve_manual_binding_and_pull(
+    environment: Mapping[str, str], repository: Path,
+) -> tuple[dict[str, object], dict[str, object]]:
     """Read live PR/branch facts and prove current main is already in the head."""
     number = environment.get("PLURX_PROMOTION_PR", "")
     if not number.isdecimal() or int(number) <= 0:
@@ -128,7 +135,7 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
     pr = api_document(environment, "/pulls/" + number)
     try:
         head_ref = pr["head"]["ref"]
-        if not isinstance(head_ref, str) or not promotion_ref(head_ref):
+        if not isinstance(head_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", head_ref):
             raise QualificationError("promotion branch route refused")
         head_tip = api_document(environment, "/branches/" + urllib.parse.quote(head_ref, safe=""))["commit"]["id"]
         base_tip = api_document(environment, "/branches/main")["commit"]["id"]
@@ -136,8 +143,41 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
                                   cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
     except (KeyError, TypeError) as exc:
         raise QualificationError("promotion API facts are incomplete") from exc
-    return manual_binding(environment, pr, head_tip, base_tip,
-                          git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
+    binding = manual_binding(environment, pr, head_tip, base_tip,
+                             git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
+    return binding, pr
+
+
+def bind_manual_scope(environment, repository):
+    binding, pull = _resolve_manual_binding_and_pull(environment, repository)
+    continuation = environment.get('PLURX_PREDECESSOR_RUN')
+    if binding['schema'] != 2:
+        if continuation:
+            raise QualificationError('Only an enrolled ordinary PR may resume a prior source gate')
+        return binding
+
+    from validation import paperwork_continuation as paperwork
+    from validation import promotion_unit_retention as retention
+    from validation.python_unit_receipts import ReceiptError
+
+    if paperwork.is_enrolled(pull.get('body')):
+        try:
+            enrollment = paperwork.enrollment(pull['body'])
+            api = retention.runner_api(environment)
+            if enrollment['version'] == 2:
+                from validation import source_gate_repair
+                _, _, verified, _ = source_gate_repair.runner_event(api, environment, repository)
+            else:
+                if continuation:
+                    raise QualificationError('An ordinary Python enrollment cannot resume a prior source gate')
+                verified, _ = paperwork.binding(api, enrollment, environment, repository, 'final')
+        except (KeyError, ValueError, TypeError, ReceiptError) as error:
+            raise QualificationError('Enrolled source gate requires its exact dispatched Python unit evidence') from error
+        if verified != binding:
+            raise QualificationError('Paperwork dispatch binding differs from live promotion scope')
+    elif continuation:
+        raise QualificationError('An ordinary PR must explicitly enroll to resume a prior source gate')
+    return binding
 
 
 def _ensure_task_history_tips(environment: Mapping[str, str], repository: Path,
@@ -232,7 +272,7 @@ def build_receipt(
     if environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         try:
             binding = json.loads(environment["PLURX_PROMOTION_BINDING"])
-            assert binding["schema"] == 1 and binding["repository"] == environment["GITHUB_REPOSITORY"]
+            assert binding["schema"] in (1, 2) and binding["repository"] == environment["GITHUB_REPOSITORY"]
             assert binding["head_sha"] == tested_sha == environment["GITHUB_SHA"]
             assert binding["head_sha"] == environment["PLURX_PROMOTION_HEAD_SHA"]
             assert binding["base_sha"] == environment["PLURX_PROMOTION_BASE_SHA"]
@@ -288,7 +328,7 @@ def build_receipt(
         and head_ref.endswith(integration_suffix)
         and len(head_ref) > len(integration_prefix) + len(integration_suffix)
     )
-    if not (is_effort_head or is_integration_head):
+    if not (is_effort_head or is_integration_head or (binding and binding["schema"] == 2)):
         raise QualificationError(
             "qualification head must match effort/** or "
             f"integration/*-into-main; found {head_ref!r}"
@@ -350,9 +390,9 @@ def build_receipt(
             f"pull request number must be an integer; found {pull_request!r}"
         ) from exc
 
-    return {
+    record = {
         "schema": 1,
-        "kind": "effort-qualification",
+        "kind": ("selected-pr-source-gate" if binding and binding["schema"] == 2 else "effort-qualification"),
         "repository": environment["GITHUB_REPOSITORY"],
         "pull_request": pull_request_number,
         "head_ref": head_ref,
@@ -368,6 +408,41 @@ def build_receipt(
         "retained_unit_evidence": retained,
         "binding_mode": "authenticated-manual-promotion" if binding else "pull-request-event",
     }
+
+
+    if binding and binding['schema'] == 2:
+        from validation.python_unit_receipts import ReceiptError
+        try:
+            paperwork = json.loads(environment['PLURX_SOURCE_GATE_PAPERWORK'])
+            fields = {'version', 'head', 'base', 'pr', 'passed', 'body_sha256', 'title_sha256'}
+            assert paperwork['version'] in {1, 2}
+            assert set(paperwork) == fields | ({'unit_coverage'} if paperwork['version'] == 2 else set())
+            assert paperwork['head'] == tested_sha
+            assert paperwork['base'] == binding['base_sha'] and paperwork['pr'] == binding['pull_request']
+            assert paperwork['passed'] is True
+            if paperwork['version'] == 2:
+                from validation.paperwork_continuation import coverage_shape, current_rule_inventory
+                coverage_shape(paperwork['unit_coverage'], binding, int(environment['GITHUB_RUN_ID']),
+                               current_rule_inventory())
+            assert all(re.fullmatch(r'[0-9a-f]{64}', paperwork[key]) for key in ('body_sha256', 'title_sha256'))
+        except (KeyError, ValueError, TypeError, AssertionError, ReceiptError) as error:
+            raise QualificationError('Current source-gate paperwork evidence missing or inconsistent') from error
+        record['source_gate_paperwork'] = paperwork
+    return record
+
+
+def verify_source_gate_paperwork(environment, binding, pull, root):
+    from validation import promotion_unit_retention as retention
+    from validation import source_gate_landing as landing
+    from validation.python_unit_receipts import ReceiptError
+
+    try:
+        claimed = json.loads(environment['PLURX_SOURCE_GATE_PAPERWORK'])
+        expected = landing.expected_paperwork(retention.runner_api(environment), pull, binding, environment, root)
+    except (KeyError, ValueError, TypeError, ReceiptError) as error:
+        raise QualificationError('Current source-gate paperwork cannot be authenticated') from error
+    if claimed != expected:
+        raise QualificationError('Current source-gate paperwork or live PR enrollment differs')
 
 
 def git_object(repository: Path, revision: str) -> str:
@@ -396,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.bind_manual:
-            binding = resolve_manual_binding(os.environ, args.repository)
+            binding = bind_manual_scope(os.environ, args.repository)
             print("promotion_binding=" + json.dumps(binding, sort_keys=True, separators=(",", ":")))
             print("promotion_pr=" + str(binding["pull_request"]))
             print("promotion_base_sha=" + str(binding["base_sha"]))
@@ -405,9 +480,11 @@ def main(argv: list[str] | None = None) -> int:
             raise QualificationError("receipt output is required")
         environment = dict(os.environ)
         if environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-            live_binding = resolve_manual_binding(environment, args.repository)
+            live_binding, pull = _resolve_manual_binding_and_pull(environment, args.repository)
             if json.loads(environment.get("PLURX_PROMOTION_BINDING", "null")) != live_binding:
                 raise QualificationError("promotion metadata moved after qualification start")
+            if live_binding['schema'] == 2:
+                verify_source_gate_paperwork(environment, live_binding, pull, args.repository)
         if environment.get('PLURX_RETAINED_UNITS'):
             from validation import promotion_unit_retention as retention
             from validation.python_unit_receipts import ReceiptError

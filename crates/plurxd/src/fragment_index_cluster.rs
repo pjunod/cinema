@@ -1470,6 +1470,12 @@ fn pipeline_digest_for_transform(
     transform: Option<&str>,
 ) -> String {
     let mut args = plurx_core::transcode::copy_index_pipe_args(file, video);
+    if video.dolby_vision_refit().is_none() {
+        args.push(format!(
+            "{{plurx-copy-landing-clock:{}}}",
+            plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+        ));
+    }
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push(format!(
             "{{plurx-hdr10-index:{}}}",
@@ -1495,6 +1501,7 @@ fn pipeline_digest_for_transform(
         args.push(format!("{{plurx-output-transform:{transform}}}"));
         if let Some(digest) = video.dolby_vision_refit() {
             args.push(format!("{{plurx-dv-refit-digest:{}}}", hex::encode(digest)));
+            args.push("{plurx-dv-refit-cadence:1}".into());
         }
     }
     cluster_fragment_index_pipeline_digest(engine_sha256, &args)
