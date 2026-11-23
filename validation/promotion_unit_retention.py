@@ -20,6 +20,57 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    'validation/ci_scope.py',
+    'tests/validation/test_runner.py',
+    'validation/native_receipts.py',
+    'validation/selected_apple_preflight.py',
+    'validation/selected_formal_preflight.py',
+    'tests/validation/test_selected_formal_preflight.py',
+    'tests/validation/test_selected_formal_preflight.py',
+    'tests/validation/test_selected_apple_preflight.py',
+    'tests/operations/test_apple_tv_navigation_gate.py',
+    'validation/selected_node_preflight.py',
+    'validation/selected_root_custody.py',
+    'tests/validation/test_selected_node_preflight.py',
+    'validation/selected_python_dependencies.py',
+    'tests/validation/test_selected_python_dependencies.py',
+    'scripts/paperwork',
+    'validation/paperwork_continuation.py',
+    'tests/validation/test_paperwork_continuation.py',
+    'CHANGELOG.md',
+    'tests/playback/rolling-producer-owners.toml',
+    'tests/client-fixes.toml',
+    'verification/durable-jobs/mapping.json',
+    '.github/workflows/main-fast-lane.yml',
+    'validation/merge_train.py',
+    'tests/validation/test_manual_source_guard.py',
+    'validation/source_gate_landing.py',
+    'validation/landing.py',
+    'validation/main_python_continuation.py',
+    'validation/selected_pr_android_capture.py',
+    'validation/jvm_unit_discovery.py',
+    'tests/validation/test_jvm_unit_discovery.py',
+    'tests/validation/test_selected_pr_jvm_discovery.py',
+    'tests/validation/test_selected_pr_envelope.py',
+    'tests/operations/test_codec_hdr_score.py',
+    'tests/operations/test_contracts.py',
+    'STATUS.md',
+    'docs/features/PROJECT-BACKLOG.md',
+    'docs/performance/HDR-REFERENCE-SCORING.md',
+    'validation/nonrust_unit_cohort.py',
+    'tests/validation/test_selected_pr_android_capture.py',
+    'validation/native_python_execute.py',
+    'tests/validation/test_source_gate_landing.py',
+    'tests/validation/test_main_python_continuation.py',
+    'validation/nextest_shard_continuation.py',
+    'tests/validation/test_nextest_shard_continuation.py',
+    'validation/workspace_rust_continuation.py',
+    'validation/workspace_rust_execute.py',
+    'tests/validation/test_workspace_rust_continuation.py',
+    'tests/validation/test_qualification.py',
+    'docs/ci/RUST-UNIT-FANOUT.md',
+    'docs/streaming/FEL-RPU-REFIT-GRADUATION-AND-M7.md',
+    'docs/ci/README.md',
     '.github/workflows/ci.yml', 'validation/qualification.py',
     'validation/promotion_unit_retention.py',
     'tests/validation/test_promotion_unit_retention.py',
@@ -250,7 +301,7 @@ def shared_blob(document, item):
     return logs[value]
 
 
-def expanded_document(document, objects=None):
+def expanded_document(document, objects=None, *, selected_pr=False):
     """Authenticate and validate one bounded view of the original signed bytes."""
     if document.get('version') != 2:
         return document
@@ -258,7 +309,8 @@ def expanded_document(document, objects=None):
     from validation import qualification_unit_continuation as commands
     lanes = document['lanes']
     units = document['command_units']
-    r.require(isinstance(lanes, dict) and lanes and set(lanes) <= LANES
+    r.require(isinstance(lanes, dict) and (lanes or (selected_pr is True and isinstance(units, dict)
+              and isinstance(units.get('commands'), list) and bool(units['commands']))) and set(lanes) <= LANES
               and all(isinstance(slots, list) for slots in lanes.values())
               and sum(len(slots) for slots in lanes.values()) <= 8,
               'Unknown or oversized structural suite slots')
@@ -487,7 +539,7 @@ def log_outcomes(log, format_name, *, source_commit=None, source=git_bytes):
     return outcomes
 
 
-def validate(document, candidate, source=git_bytes, differences=changed):
+def validate(document, candidate, source=git_bytes, differences=changed, *, selected_pr=False):
     """The authenticated writer attests dependency classification and local origin.
 
     Every changed input is enumerated and source-hashed. Its affected IDs must
@@ -499,12 +551,15 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         keys.add('command_units')
     r.require(set(document) == keys, 'Unknown retention proof fields')
     r.require(document['version'] in {1, 2} and isinstance(document['lanes'], dict)
-              and document['lanes'] and set(document['lanes']) <= LANES,
+              and (document['lanes'] or (selected_pr is True and document['version'] == 2
+                   and isinstance(document.get('command_units'), dict)
+                   and isinstance(document['command_units'].get('commands'), list)
+                   and bool(document['command_units']['commands']))) and set(document['lanes']) <= LANES,
               'Invalid retained lane inventory')
     frozen = r.sha(document['source_commit'])
     if document['version'] == 2:
         r.require(frozen == candidate, 'Command adoption binds the exact candidate')
-        document = expanded_document(document)
+        document = expanded_document(document, selected_pr=selected_pr)
     protocol_paths = set(PROTOCOL_PATHS)
     r.require(differences(frozen, candidate) <= protocol_paths,
               'Candidate changed beyond reviewed retention protocol')
@@ -712,7 +767,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         adopted['windows_compile'] = {'mode': 'explicit-human-waiver', **waiver}
     if document['version'] == 2:
         from validation import qualification_unit_continuation as commands
-        adopted_commands = commands.validate(document['command_units'], candidate, existing=document['lanes'])
+        adopted_commands = commands.validate(document['command_units'], candidate, existing=document['lanes'], selected_pr=selected_pr)
         return adopted, adopted_commands
     return adopted
 
@@ -837,7 +892,8 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
            *, objects=None, live_logs=None):
     document, pull, repository, attested = verify_identity(
         api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
-    document = expanded_document(document) if objects is None else expanded_document(document, objects)
+    selected_pr = binding.get('schema') == 2 and 'landing_sha' not in binding
+    document = expanded_document(document, objects, selected_pr=selected_pr)
     # Evidence targets the declared commit. Earlier dispatches ran under this
     # authenticated promotion PR's original head ref, even after the PR merged.
     dispatch_context = {**document, 'branch': binding['head_ref']}
@@ -889,7 +945,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     if document.get('version') == 2:
         from validation import qualification_unit_continuation as commands
         commands.authenticate(api, document['command_units'], dispatch_context, repository, live_logs=live_logs)
-        adopted, command_units = validate(document, candidate)
+        adopted, command_units = validate(document, candidate, selected_pr=selected_pr)
     else:
         adopted = validate(document, candidate)
     proof = {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],

@@ -1,5 +1,5 @@
 //! Full-title facts acquired only by the persistent, admitted title job.
-use crate::vodencode::dv_runtime::ToolSet;
+use crate::{dv_tools::ToolSet, source_input::SourceInput};
 use plurx_core::{
     domain::MediaFile,
     scan::dv_title::{DvTitleStats, TitleEligibility},
@@ -54,7 +54,7 @@ pub(super) enum SourceRead {
 }
 
 #[cfg(unix)]
-fn source_read(input: Option<&crate::source_input::SourceInput>) -> SourceRead {
+fn source_read(input: Option<&SourceInput>) -> SourceRead {
     match input {
         Some(input) if input.source_physical_read_failed() => SourceRead::StorageFailed,
         Some(input) if input.source_read_failed() => SourceRead::Interrupted,
@@ -113,13 +113,58 @@ pub(super) fn scanner_verdict(
     }
 }
 
+use std::{path::Path, time::Duration};
+
+/// Launch from the held source or its budgeted bridge under one owned child.
+pub(crate) async fn launch_scanner(
+    scanner: &Path,
+    index: &str,
+    held: &std::fs::File,
+    input: Option<&SourceInput>,
+    runtime_cache: &Path,
+    wall_time: Duration,
+    work: plurx_core::process::ChildWork,
+) -> std::io::Result<plurx_core::process::bounded::Output> {
+    use crate::producer_spawn::{ChildStdio, ChildStdios, Descriptors};
+
+    let mut command = tokio::process::Command::new(scanner);
+    command.current_dir(runtime_cache);
+    let descriptor = if cfg!(target_os = "linux") {
+        "/proc/self/fd/3"
+    } else {
+        "/dev/fd/3"
+    };
+    command.args([input.map_or(descriptor, SourceInput::url), index]);
+    let manifest = Descriptors::from_files(input.is_none().then_some(held), None, None, false)
+        .prepare(
+            &mut command,
+            ChildStdios {
+                stdin: ChildStdio::Null,
+                stdout: ChildStdio::Piped,
+                stderr: ChildStdio::Piped,
+            },
+        )?;
+    let output = plurx_core::process::bounded::output_command_clean_env_with_descriptors(
+        &mut command,
+        wall_time,
+        64 * 1024,
+        work,
+        manifest,
+    );
+    if input.is_some() {
+        plurx_core::process::source_lifetime::mediated(output).await
+    } else {
+        output.await
+    }
+}
+
 #[cfg(unix)]
 pub(super) async fn scan(
     file: &MediaFile,
     document: &str,
     tools: &ToolSet,
+    runtime_cache: &Path,
 ) -> Result<DvTitleStats, TitleScanError> {
-    use std::{os::fd::AsRawFd, time::Duration};
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let index = selected_video_index(&document).ok_or("unknown selected video stream")?;
@@ -140,34 +185,16 @@ pub(super) async fn scan(
         ),
         None => None,
     };
-    let mut command = tokio::process::Command::new(&tools.scanner);
-    let descriptor = if cfg!(target_os = "linux") {
-        "/proc/self/fd/3"
-    } else {
-        "/dev/fd/3"
-    };
-    command.args([
-        input.as_ref().map_or(descriptor, |input| input.url()),
+    let output = launch_scanner(
+        &tools.scanner,
         &index.to_string(),
-    ]);
-    if input.is_none() {
-        crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-            &mut command,
-            &[(source.handle.as_raw_fd(), 3)],
-            None,
-        );
-    }
-    let output = plurx_core::process::bounded::output_command_clean_env(
-        &mut command,
+        &source.handle,
+        input.as_ref(),
+        runtime_cache,
         Duration::from_secs(6 * 60 * 60),
-        64 * 1024,
         plurx_core::process::ChildWork::background("complete-title Dolby Vision scan"),
-    );
-    let output = if input.is_some() {
-        plurx_core::process::source_lifetime::mediated(output).await
-    } else {
-        output.await
-    };
+    )
+    .await;
     // Read the bridge's verdict before it is closed: the scanner has exited,
     // so every served read that could fail has already been observed.
     let read = source_read(input.as_ref());
@@ -345,7 +372,12 @@ pub(crate) async fn publish_title_with_tools_for_control(
                         .ok()
                         == source_version
             },
-            scan(file, &demand.probe_json, &tools),
+            scan(
+                file,
+                &demand.probe_json,
+                &tools,
+                transcode.runtime_cache_dir(),
+            ),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -411,5 +443,111 @@ mod tests {
             selected_video_index(&serde_json::json!({"streams":[]})),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod scanner_launch_tests {
+    use super::*;
+    use plurx_core::process::source_lifetime as lifetime;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn managed_title_scanner_reads_the_broker_with_a_bound_manifest() {
+        const CHILD: &str = "PLURX_TITLE_SCANNER_MANIFEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = tokio::process::Command::new(std::env::current_exe().expect("test image"))
+                .args([
+                    "--exact",
+                    concat!(
+                        module_path!(),
+                        "::managed_title_scanner_reads_the_broker_with_a_bound_manifest"
+                    )
+                    .trim_start_matches("plurxd::"),
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .kill_on_drop(true)
+                .output()
+                .await
+                .expect("isolated source-policy test");
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        static OBSERVED: AtomicUsize = AtomicUsize::new(0);
+
+        fn observe(value: &lifetime::LaunchObservation) -> std::io::Result<()> {
+            assert_eq!(value.declared, lifetime::SourceAccess::Brokered);
+            assert_eq!(
+                value.reason,
+                Some("broker_confinement_unqualified"),
+                "the command, manifest, registered broker and daemon cwd must pass all preceding checks"
+            );
+            assert!(!value.verified, "the fixture cannot grant confinement");
+            assert!(!value.descriptor_handoff, "legacy descriptor hook");
+            OBSERVED.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let root = crate::test_tempdir().expect("scanner fixture");
+        let runtime = root.path().join("runtime");
+        let tools = root.path().join("tools");
+        std::fs::create_dir(&runtime).expect("managed runtime cwd");
+        std::fs::create_dir(&tools).expect("managed tool root");
+        let scanner = tools.join("scan_title");
+        std::fs::write(
+            &scanner,
+            r#"#!/bin/sh
+set -eu
+test "$(pwd -P)" = "$(cd "${0%/*}/../runtime" && pwd -P)"
+test "$2" = 0
+test ! -e /dev/fd/3
+exec /usr/bin/curl --noproxy '*' -fsS "$1"
+"#,
+        )
+        .expect("write scanner fixture");
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
+            .expect("executable scanner fixture");
+        let body = b"scanner source fixture\n".repeat(4096);
+        let path = root.path().join("original.mkv");
+        std::fs::write(&path, &body).expect("write source");
+        let held = std::fs::File::open(&path).expect("hold source");
+
+        let (_store, _id, active) = crate::background_jobs::tests::active().await;
+        lifetime::set_daemon_roots(std::slice::from_ref(&runtime), &[tools])
+            .expect("source-policy roots");
+        lifetime::install_observer(observe).expect("isolated observer");
+        let input = SourceInput::open_background_held(
+            crate::fragment_index_cluster::SourceFence::clone_current_held(&held).expect("source"),
+            "application/octet-stream",
+            active.fence().source_budget(),
+        )
+        .await
+        .expect("budgeted broker");
+        let output = launch_scanner(
+            &scanner,
+            "0",
+            &held,
+            Some(&input),
+            &runtime,
+            Duration::from_secs(10),
+            plurx_core::process::ChildWork::background("scanner manifest regression"),
+        )
+        .await
+        .expect("bounded managed scanner");
+        assert_eq!(input.observation().source_bytes, body.len() as u64);
+        input.close_and_wait().await.expect("join broker");
+        active.finish().await;
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert_eq!(output.stdout, body[..64 * 1024]);
+        assert_eq!(OBSERVED.load(Ordering::SeqCst), 1);
     }
 }

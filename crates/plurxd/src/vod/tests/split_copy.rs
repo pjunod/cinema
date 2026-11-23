@@ -41,7 +41,14 @@ async fn split_copy_video_plan_has_no_audio_tail_or_audio_bytes() {
     let tracks = track_durations(&index, &recipe, video_ms + 3_000);
     assert_eq!(tracks.audio_ms, tracks.video_ms);
     assert_eq!(tracks.audio_bits_per_second, 0);
+    // A muxed copy that maps real audio plans the container's audio tail; a
+    // silent source would end with indexed video either way.
     recipe.audio_excluded = false;
+    recipe.file.audio_streams.push(plurx_core::domain::AudioStream {
+        codec: "aac".into(),
+        channels: Some(2),
+        ..Default::default()
+    });
     assert_eq!(track_durations(&index, &recipe, video_ms + 3_000).audio_ms, video_ms + 3_000);
 }
 

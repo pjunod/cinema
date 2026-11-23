@@ -2404,6 +2404,21 @@ pub(super) async fn process_preparation_candidate(
         successor_owner
     };
     if let Some(successor_owner) = successor_owner {
+        if let Err(reason) = crate::dv_refit_serving::pin_for_session(
+            state.store.as_ref(),
+            source,
+            &mut candidate,
+            Some(platform),
+        )
+        .await
+        {
+            tracing::warn!(target: "plurxd::http::hls", %reason, "prepared successor could not resolve its F+ fit");
+            PreparationStageOutcome::refused(
+                &session_id,
+                PreparationStageRefusal::RefitUnavailable,
+            );
+            return;
+        }
         // Production always stages and primes. Hooks that decline priming (the
         // test hooks of `AppState::new` do, until a test calls
         // `prime_prepared_successors`) stage the durable row only, on this
@@ -2427,6 +2442,7 @@ pub(super) async fn process_preparation_candidate(
             purpose,
             AcceptedAsk {
                 prepared_proof,
+                platform: Some(platform),
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
                 planning_cancellation: Some(pending.cancellation_token()),
@@ -2484,6 +2500,9 @@ const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_
 pub(super) const PREPARATION_STORE_BUDGET: Duration = Duration::from_secs(5);
 pub(super) const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 
+pub(super) const PREPARED_PLAYLIST_SHAPE_FIELD: &str = "prepared_playlist_shape";
+pub(super) const PREPARED_SINGLE_VARIANT_SHAPE: &str = "single_variant_v1";
+
 /// M6 §3.4 — stage the successor the decision just admitted.
 ///
 /// This joins stage with reserve-and-prime: the durable row is written first,
@@ -2506,6 +2525,8 @@ pub(super) const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 /// a selection that never coexisted.
 pub(super) struct AcceptedAsk {
     pub(super) prepared_proof: Option<super::prepared_link::PreparedProof>,
+    /// Platform from the accepted control exchange, when staging has one.
+    pub(super) platform: Option<crate::playback_control::ClientPlatform>,
     /// The absolute film time the accepted envelope settled on — the viewer's
     /// seek target where they asked for one, their playhead otherwise.
     pub(super) film_time_ms: i64,
@@ -2672,6 +2693,7 @@ pub(super) enum PreparationStageRefusal {
     RelocationSuperseded,
     NoLocalWorkerGate,
     SourceUnavailable,
+    RefitUnavailable,
     PrincipalUnsupported,
     RecipeSerialization,
     ResponseSerialization,
@@ -2806,6 +2828,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     }
     let AcceptedAsk {
         prepared_proof,
+        platform,
         film_time_ms: accepted_film_time_ms,
         desired_digest,
         planning_cancellation,
@@ -2904,7 +2927,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         retain_output: None,
-        dv_refit_digest: None,
+        dv_refit_digest: match candidate.kind {
+            crate::transcode::SessionKind::Copy {
+                convert_dolby_vision: true,
+                ..
+            } => candidate.dv_refit_digest.clone(),
+            _ => None,
+        },
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),
@@ -3014,6 +3043,19 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             enhancement.requires_effective_processing = true;
         }
     }
+    // Media3 reads variant frame rate from a multivariant playlist. Freeze
+    // the Android successor's envelope beside its capability so the serving
+    // owner uses the same shape through preparation, commit and takeover.
+    let single_variant = platform == Some(crate::playback_control::ClientPlatform::Android)
+        && staged_request.presentation == crate::transcode::Presentation::Vod
+        && candidate.continuous_media.is_none();
+    let playlist_url = format!("/api/v1/hls/{staged_session_id}/index.m3u8");
+    let playlist_url = if single_variant {
+        let mode = crate::media_sessions::PREPARED_VOD_NATIVE_MODE;
+        format!("{playlist_url}?native={mode}")
+    } else {
+        playlist_url
+    };
     let response = StartResponse {
         processed_upgrade: None,
         enhancement,
@@ -3041,7 +3083,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
                 .collect()
         }),
         session_id: staged_session_id.clone(),
-        playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
+        playlist_url,
         duration_ms: source.duration_ms,
         start_seconds: resume_ms as f64 / 1_000.0,
         // VOD playlists retain the film's absolute zero origin. A rolling
@@ -3097,6 +3139,15 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             )
         }
     };
+    if single_variant {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse object")
+            .insert(
+                PREPARED_PLAYLIST_SHAPE_FIELD.to_owned(),
+                serde_json::Value::String(PREPARED_SINGLE_VARIANT_SHAPE.to_owned()),
+            );
+    }
     let captures_output = successor_owner_captures_output(
         state,
         successor_owner,
