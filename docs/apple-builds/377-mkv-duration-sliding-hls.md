@@ -1,6 +1,5 @@
 # Stop treating an intentional HLS pause as a retryable failure
 
-Build: 173
 Issue: #377
 
 Apple now recognizes the server's typed terminal pause-expiry response and

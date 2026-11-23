@@ -168,7 +168,12 @@ class StatusPullRequestClaimCase(unittest.TestCase):
         )
 
         stale: list[str] = []
-        for page in STATUS_PAGES:
+        # status.d/ holds each effort's entry; STATUS.md is folded from it after
+        # merge (scripts/fold), so the entries are read where they are written.
+        fragments = tuple(
+            str(path.relative_to(ROOT)) for path in sorted((ROOT / "status.d").glob("*.md"))
+        )
+        for page in (*STATUS_PAGES, *fragments):
             path = ROOT / page
             if not path.exists():
                 continue

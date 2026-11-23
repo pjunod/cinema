@@ -1,6 +1,5 @@
 # Return Apple TV playback to its title after sleep
 
-Build: 284
 Issue: #1347
 
 On Apple TV, putting Cinema's on-demand player in the background, including

@@ -1,6 +1,5 @@
 # Make every Apple TV screen reachable and readable with the Siri Remote
 
-Build: 259
 Issue: #1130
 
 Choice menus own native focus, select the current value and return to their
