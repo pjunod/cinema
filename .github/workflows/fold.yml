@@ -1,0 +1,40 @@
+name: fold fragment folders
+
+# Pages that every pull request used to edit at one insertion point are now
+# folded from per-pull-request fragment folders (`scripts/fold --list`).
+# A pull request edits only its own fragment; after each merge into `main`
+# this rewrites the pages and lands them as a `chore(fold):` pull request
+# that goes through the same paperwork and fast lane as any other and merges
+# itself when they pass. Merges into `main` are serial, so this never races
+# an open pull request; a newer push cancels an older fold and the next fold
+# replaces the `fold/main` branch.
+#
+# FOLD_BOT_TOKEN must belong to a bot account with write access whose pushes
+# start workflows. The job's own token cannot: a pull request it opened would
+# never be checked, so it could never merge. Without the secret the job only
+# says so and the pages wait for the next release cut or a hand fold.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fold-fragment-folders
+  cancel-in-progress: true
+
+jobs:
+  fold:
+    name: fold and publish
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    steps:
+      - name: Check out main
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fold and publish
+        env:
+          # Scoped to this one step; scripts/fold passes it to git through
+          # the environment and to the API in a header, never in arguments.
+          FOLD_BOT_TOKEN: ${{ secrets.FOLD_BOT_TOKEN }}
+        run: python3 scripts/fold --publish
