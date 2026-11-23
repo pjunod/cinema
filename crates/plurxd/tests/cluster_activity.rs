@@ -2922,8 +2922,9 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // - With display-aware Auto always on, the caps-v2 create builds its
     //   quality catalog. It paid one `get_file` per rung, twice (catalog and
     //   link receipts), for a measured-cost proof that cannot exist without
-    //   an audio claim; that wasted read is fixed in
-    //   `measured_candidate_cost`, so the shape is 21 - 2 = 19.
+    //   an audio claim (21 -> 25..27 on Main); `measured_candidate_cost` now
+    //   answers before that read, so those reads are gone again and the
+    //   shape's 21 -> 19 is #1827's two reads above.
     // Layout reads exist only on this fixture's Legacy layout (see below).
     let expected: [(&str, (u64, u64, u64)); 5] = [
         ("first play, VOD index", (21, 1, 6)),

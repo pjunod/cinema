@@ -719,11 +719,12 @@ async fn read_snapshot_response(
     }
 }
 
-/// An unsigned error status is classified like the signed one it stands for,
-/// with no body: its bytes are never decoded as a snapshot.
+/// An unsigned error status is an HTTP error on the path to the peer: never a
+/// snapshot, and never the peer's own authentication refusal (an unsigned 403
+/// may come from any hop).
 fn unauthenticated_status_outcome(status: u16) -> PeerActivityOutcome {
     match StatusCode::from_u16(status) {
-        Ok(status) if !status.is_success() => classify_snapshot_response(status, &[], ""),
+        Ok(status) if !status.is_success() => PeerActivityOutcome::HttpError,
         _ => PeerActivityOutcome::InvalidResponse,
     }
 }
@@ -2189,7 +2190,7 @@ mod tests {
         );
         assert_eq!(
             unauthenticated_status_outcome(403),
-            PeerActivityOutcome::Refused
+            PeerActivityOutcome::HttpError
         );
         // An unsigned success never stands for a snapshot.
         assert_eq!(

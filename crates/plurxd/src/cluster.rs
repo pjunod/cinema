@@ -2054,8 +2054,9 @@ pub(crate) mod calls {
             match error {
                 PeerTransportError::LocalUnavailable => None,
                 PeerTransportError::AuthenticationRefused(refusal) => Some(Self::Refused(refusal)),
-                // The same wire answer an unbound call reports as `Responded`.
-                PeerTransportError::UnauthenticatedStatus(status) => Some(Self::Responded(status)),
+                // A bound call answered unsigned never reached the signer, so
+                // it must not rank this origin as a healthy answering peer.
+                PeerTransportError::UnauthenticatedStatus(_) => Some(Self::InvalidResponse),
                 PeerTransportError::Unreachable => Some(Self::Unreachable),
                 PeerTransportError::TimedOut => Some(Self::TimedOut),
                 PeerTransportError::InvalidResponse => Some(Self::InvalidResponse),
