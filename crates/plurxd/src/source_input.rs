@@ -261,9 +261,22 @@ struct InputState {
     /// consumer saw truncated input, so what it concluded is not a verdict
     /// on the file.
     read_failed: std::sync::atomic::AtomicBool,
+    /// The failure was the storage itself: `read_at` returned an error (EIO)
+    /// or the object ended early. Unlike a revoked budget, an exhausted pause
+    /// or a closed service, retrying the same bytes may fail the same way.
+    physical_read_failed: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     read_gate: Option<Arc<tests::ReadGate>>,
 }
+impl InputState {
+    /// Record a storage-side failure. `input_body` still sets `read_failed`
+    /// when the error reaches the consumer; this only classifies it.
+    fn mark_physical_read_failure(&self) {
+        self.physical_read_failed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct ByteBudget {
     /// Conservative issued bytes; never reset or refunded across seeks.
@@ -391,6 +404,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -461,6 +475,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -516,6 +531,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             read_gate: Some(Arc::clone(&gate)),
             read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
@@ -560,6 +576,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -745,6 +762,14 @@ impl SourceInput {
     pub(crate) fn source_read_failed(&self) -> bool {
         self.state
             .read_failed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Whether a failed read was the storage itself (see `physical_read_failed`).
+    // Only the Linux complete-title scan classifies its reads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn source_physical_read_failed(&self) -> bool {
+        self.state
+            .physical_read_failed
             .load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Publish only for this physical input's lifetime. A cached rendition may
@@ -1148,14 +1173,16 @@ async fn read_source(
                 use std::os::unix::fs::FileExt;
                 source
                     .handle
-                    .read_at(&mut window[count..], offset + count as u64)?
+                    .read_at(&mut window[count..], offset + count as u64)
+                    .inspect_err(|_| read_state.mark_physical_read_failure())?
             };
             #[cfg(windows)]
             let read = {
                 use std::os::windows::fs::FileExt;
                 source
                     .handle
-                    .seek_read(&mut window[count..], offset + count as u64)?
+                    .seek_read(&mut window[count..], offset + count as u64)
+                    .inspect_err(|_| read_state.mark_physical_read_failure())?
             };
             if read == 0 {
                 break;
@@ -1181,6 +1208,7 @@ async fn read_source(
         result=job=>result.map_err(std::io::Error::other)??,
     };
     if bytes.is_empty() {
+        state.mark_physical_read_failure();
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "source input truncated",

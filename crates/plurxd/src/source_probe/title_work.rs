@@ -3,7 +3,7 @@
 #[path = "title_work_tests.rs"]
 mod tests;
 
-use super::{now_ms, snapshot};
+use super::{dv_title::TitleScanError, now_ms, snapshot};
 use crate::{background_jobs::ActiveBackgroundJob, dv_tools::ToolSet, state::AppState};
 use plurx_core::{
     error::StoreError,
@@ -914,16 +914,11 @@ async fn execute(
             Ok(TitleAcquisition::QualificationOnly(_)) => {
                 unreachable!("live work returned after yielding")
             }
-            Err(error) => {
-                tracing::warn!(%error,"complete-title scan failed");
-                Some(JobSettlement::Retry {
-                    error_code: "title_scan_failed".into(),
-                    not_before_ms: now_ms().saturating_add(crate::background_jobs::retry_delay_ms(
-                        &job.id,
-                        job.failed_attempts,
-                    )),
-                })
-            }
+            Err(error) => Some(scan_failure_settlement(
+                &error,
+                &job.id,
+                job.failed_attempts,
+            )),
         }
     };
     if let Some(settlement) = settlement {
@@ -1046,6 +1041,52 @@ enum TitleAcquisition {
     Complete(plurx_core::scan::dv_title::DvTitleStats),
 }
 
+/// Settle a complete-title scan that produced no aggregate.
+///
+/// A service interruption (pause, budget or grant) is contention, not a fault
+/// in the title, so it yields without charging the attempt budget, as a
+/// scheduler preemption does; charging it would let source contention
+/// permanently fail a readable title. A storage read failure is charged like
+/// any other transient read failure (the probe and subtitle paths do the
+/// same), so a bad sector stays bounded by the attempt limit, but under its own
+/// code. A scanner refusal of readable input stays `title_scan_failed`. Every
+/// case keeps the retry backoff, so a whole-title read never restarts in a
+/// tight loop.
+fn scan_failure_settlement(
+    error: &TitleScanError,
+    job_id: &str,
+    failed_attempts: i64,
+) -> JobSettlement {
+    let not_before_ms = now_ms().saturating_add(crate::background_jobs::retry_delay_ms(
+        job_id,
+        failed_attempts,
+    ));
+    match error {
+        TitleScanError::SourceInterrupted(_) => {
+            tracing::info!(%error, job = job_id, "complete-title scan source interrupted");
+            JobSettlement::Yield {
+                error_code: Some("title_source_interrupted".into()),
+                not_before_ms,
+                checkpoint: None,
+            }
+        }
+        TitleScanError::SourceReadFailed(_) => {
+            tracing::warn!(%error, job = job_id, "complete-title scan source read failed");
+            JobSettlement::Retry {
+                error_code: "title_source_read_failed".into(),
+                not_before_ms,
+            }
+        }
+        TitleScanError::Failed(_) => {
+            tracing::warn!(%error, job = job_id, "complete-title scan failed");
+            JobSettlement::Retry {
+                error_code: "title_scan_failed".into(),
+                not_before_ms,
+            }
+        }
+    }
+}
+
 enum TitleAcquisitionMode {
     Playback,
     NativePrewarm,
@@ -1057,9 +1098,9 @@ async fn acquire_title<S, Q>(
     reused: Option<plurx_core::scan::dv_title::DvTitleStats>,
     scan: S,
     qualify: Q,
-) -> Result<TitleAcquisition, String>
+) -> Result<TitleAcquisition, TitleScanError>
 where
-    S: Future<Output = Result<plurx_core::scan::dv_title::DvTitleStats, String>>,
+    S: Future<Output = Result<plurx_core::scan::dv_title::DvTitleStats, TitleScanError>>,
     Q: Future<Output = ()>,
 {
     let scan = async {

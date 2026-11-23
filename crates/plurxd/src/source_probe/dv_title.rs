@@ -5,6 +5,114 @@ use plurx_core::{
     scan::dv_title::{DvTitleStats, TitleEligibility},
 };
 
+/// Why a complete-title scan produced no aggregate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TitleScanError {
+    /// The source service withdrew a read the scanner was waiting on (an
+    /// exhausted pause, a revoked or unavailable budget grant). The storage
+    /// was not at fault, so this is contention, like a scheduler preemption.
+    SourceInterrupted(String),
+    /// The storage itself failed a read (an I/O error, or the object ended
+    /// early). The scanner saw truncated input, so its result is not a
+    /// verdict on the content, but rereading may fail the same way.
+    SourceReadFailed(String),
+    /// The scanner, its aggregate or its prerequisites refused readable input.
+    Failed(String),
+}
+
+impl std::fmt::Display for TitleScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceInterrupted(reason)
+            | Self::SourceReadFailed(reason)
+            | Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for TitleScanError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for TitleScanError {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.to_owned())
+    }
+}
+
+/// What the source bridge observed while the scanner read through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceRead {
+    /// Every served read succeeded, or there was no bridge.
+    Clean,
+    /// A served read failed for a service reason: budget, grant or pause.
+    Interrupted,
+    /// A served read failed in the storage itself.
+    StorageFailed,
+}
+
+#[cfg(unix)]
+fn source_read(input: Option<&SourceInput>) -> SourceRead {
+    match input {
+        Some(input) if input.source_physical_read_failed() => SourceRead::StorageFailed,
+        Some(input) if input.source_read_failed() => SourceRead::Interrupted,
+        _ => SourceRead::Clean,
+    }
+}
+
+/// Bounded stderr carried into a failure reason: the final bytes, where a
+/// scanner prints its fatal error, on one line, with the bridge's private
+/// capability URL redacted.
+const STDERR_TAIL_BYTES: usize = 512;
+
+fn stderr_tail(stderr: &[u8]) -> String {
+    let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+    let line = String::from_utf8_lossy(&stderr[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::scratch_put::redact(&line)
+}
+
+/// Classify the scanner's exit before its aggregate is trusted. A failed
+/// source read outranks every scanner outcome, including an apparent
+/// success: an aggregate computed over truncated input is never published.
+pub(super) fn scanner_verdict(
+    output: std::io::Result<plurx_core::process::bounded::Output>,
+    read: SourceRead,
+) -> Result<Vec<u8>, TitleScanError> {
+    let describe = |output: &std::io::Result<plurx_core::process::bounded::Output>| match output {
+        Ok(output) => {
+            let tail = stderr_tail(&output.stderr);
+            if tail.is_empty() {
+                output.status.to_string()
+            } else {
+                format!("{}; stderr: {tail}", output.status)
+            }
+        }
+        Err(error) => error.to_string(),
+    };
+    match read {
+        SourceRead::StorageFailed => Err(TitleScanError::SourceReadFailed(format!(
+            "source storage read failed during title scan ({})",
+            describe(&output)
+        ))),
+        SourceRead::Interrupted => Err(TitleScanError::SourceInterrupted(format!(
+            "source service interrupted the title scan ({})",
+            describe(&output)
+        ))),
+        SourceRead::Clean => match output {
+            Ok(output) if output.status.success() => Ok(output.stdout),
+            failed => Err(TitleScanError::Failed(format!(
+                "complete-title DV scan failed ({})",
+                describe(&failed)
+            ))),
+        },
+    }
+}
+
 use std::{path::Path, time::Duration};
 
 /// Launch from the held source or its budgeted bridge under one owned child.
@@ -56,7 +164,7 @@ pub(super) async fn scan(
     document: &str,
     tools: &ToolSet,
     runtime_cache: &Path,
-) -> Result<DvTitleStats, String> {
+) -> Result<DvTitleStats, TitleScanError> {
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let index = selected_video_index(&document).ok_or("unknown selected video stream")?;
@@ -87,16 +195,16 @@ pub(super) async fn scan(
         plurx_core::process::ChildWork::background("complete-title Dolby Vision scan"),
     )
     .await;
+    // Read the bridge's verdict before it is closed: the scanner has exited,
+    // so every served read that could fail has already been observed.
+    let read = source_read(input.as_ref());
     if let Some(input) = input {
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining title source input: {error}"))?;
     }
-    let output = output.map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err("complete-title DV scan failed".into());
-    }
+    let stdout = scanner_verdict(output, read)?;
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
     }
@@ -104,7 +212,7 @@ pub(super) async fn scan(
         return Err("source changed during title scan".into());
     }
     let stats: DvTitleStats =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
+        serde_json::from_slice(&stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
     if stats.eligibility() == TitleEligibility::InvalidAggregate || !stats.complete {
         return Err("incomplete or inconsistent DV aggregate".into());
     }
@@ -271,7 +379,8 @@ pub(crate) async fn publish_title_with_tools_for_control(
                 transcode.runtime_cache_dir(),
             ),
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         if !tools.is_current().await || !source.unchanged() || source.reopen(file).await.is_err() {
             return Err("title scanner or source changed before control publication".into());
         }
