@@ -392,6 +392,10 @@ struct PreStart {
     directory: Arc<tempfile::TempDir>,
     held: Arc<std::fs::File>,
     claim: Arc<crate::vodencode::EncodeWorkerPermit>,
+    /// The encoder reads the window's audio through the run's source reader
+    /// before any window attaches it; the reader closes only after this use.
+    /// `None` only in unit tests, which have no reader.
+    _source_input: Option<SourceInputUse>,
     cancel: CancellationToken,
     /// Resolves once the encoder is spawned (or could not be).
     started: Option<tokio::sync::oneshot::Receiver<StartedEncoder>>,
@@ -697,6 +701,7 @@ impl WindowRun {
             directory: output.directory,
             held: output.held,
             claim: Arc::new(claim),
+            _source_input: Some(self.input.physical_owner()),
             cancel,
             started: Some(started),
             child: None,
@@ -1312,6 +1317,7 @@ mod tests {
             directory: output.directory,
             held: output.held,
             claim,
+            _source_input: None,
             cancel,
             started: Some(started),
             child: None,
