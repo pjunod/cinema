@@ -64,14 +64,16 @@ pub(crate) struct ToolSet {
 /// it measures (`refit_compose.h`). Bump it whenever either changes what a
 /// run prints; [`REFIT_MODE_SOURCES`] makes a change to them fail a test
 /// until it is bumped and re-pinned.
-pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
+pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v3";
 /// sha256 of `refit_mode.h` followed by `refit_compose.h`, as
-/// [`REFIT_MODE_VERSION`] was last reviewed against. The diagnostic-only
+/// [`REFIT_MODE_VERSION`] was last reviewed against. v3: the mapping
+/// cross-check accumulates libdovi's delta-coded pivots (multi-pivot titles
+/// were refused before). The diagnostic-only
 /// TopLeft export and M7 sample modes preserve the v2 statistics and pooling.
 /// Their representations are versioned in `refit_topleft.h` and `m7_sample_v1.h`.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "e29781ee0a3d8dc11d5c8f3d7887916e802315e657cc2eba3e5a78a7889fd1a2";
+    "142627bfd42de61ecd609c064edec0eece04ea8c162f73b099979acba635f19e";
 
 #[cfg(test)]
 impl ToolSet {
