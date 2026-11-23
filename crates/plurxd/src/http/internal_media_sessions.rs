@@ -1367,6 +1367,7 @@ mod tests {
             height: 720,
             encoder: "software".to_owned(),
             vod: false,
+            startup_seek_ready_ms: None,
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),

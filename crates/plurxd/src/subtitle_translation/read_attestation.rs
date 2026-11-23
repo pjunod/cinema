@@ -20,6 +20,7 @@ use plurx_core::{
 use std::{
     collections::VecDeque,
     path::PathBuf,
+    sync::atomic::{AtomicU8, Ordering},
     sync::{Arc, LazyLock, Mutex, Weak},
     time::{Duration, Instant},
 };
@@ -27,6 +28,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 const MAX_ENTRIES: usize = 64;
+const NO_BORROWED_SLOT: u8 = MAX_ENTRIES as u8;
 static HASH_IO: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 #[derive(Clone, PartialEq, Eq)]
@@ -56,7 +58,27 @@ struct Entry {
 }
 pub(crate) struct ReadAttestations {
     entries: Mutex<VecDeque<Entry>>,
+    borrowed_slot: AtomicU8,
     cancel: CancellationToken,
+}
+pub(crate) struct ReadPreparationSlot {
+    owner: Arc<ReadAttestations>,
+    slot: u8,
+}
+
+impl ReadPreparationSlot {
+    pub(crate) fn resource(&self, node_id: &str) -> String {
+        format!("subtitle-read-attest:{node_id}:{}", self.slot)
+    }
+}
+
+impl Drop for ReadPreparationSlot {
+    fn drop(&mut self) {
+        let _entries = self.owner.entries();
+        self.owner
+            .borrowed_slot
+            .store(NO_BORROWED_SLOT, Ordering::Relaxed);
+    }
 }
 impl Drop for ReadAttestations {
     fn drop(&mut self) {
@@ -78,7 +100,23 @@ impl ReadAttestations {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             entries: Mutex::new(VecDeque::new()),
+            borrowed_slot: AtomicU8::new(NO_BORROWED_SLOT),
             cancel: CancellationToken::new(),
+        })
+    }
+    /// Allocation shares the subtitle cache lock and its existing lease keys.
+    pub(super) fn try_borrow_slot(self: &Arc<Self>) -> Option<ReadPreparationSlot> {
+        let entries = self.entries.try_lock().ok()?;
+        if self.borrowed_slot.load(Ordering::Relaxed) != NO_BORROWED_SLOT {
+            return None;
+        }
+        let slot = (0..MAX_ENTRIES as u8)
+            .rev()
+            .find(|slot| !entries.iter().any(|entry| entry.slot == *slot))?;
+        self.borrowed_slot.store(slot, Ordering::Relaxed);
+        Some(ReadPreparationSlot {
+            owner: Arc::clone(self),
+            slot,
         })
     }
     fn entries(&self) -> std::sync::MutexGuard<'_, VecDeque<Entry>> {
@@ -132,7 +170,9 @@ impl ReadAttestations {
                 },
             );
         }
-        if entries.len() >= MAX_ENTRIES {
+        let borrowed = self.borrowed_slot.load(Ordering::Relaxed);
+        let capacity = MAX_ENTRIES - usize::from(borrowed != NO_BORROWED_SLOT);
+        if entries.len() >= capacity {
             let idle = entries
                 .iter()
                 .position(|entry| !matches!(entry.status, Status::Running))
@@ -140,7 +180,7 @@ impl ReadAttestations {
             entries.remove(idle);
         }
         let slot = (0..MAX_ENTRIES as u8)
-            .find(|slot| !entries.iter().any(|entry| entry.slot == *slot))
+            .find(|slot| *slot != borrowed && !entries.iter().any(|entry| entry.slot == *slot))
             .ok_or_else(pending)?;
         entries.push_back(Entry {
             slot,
@@ -251,7 +291,8 @@ impl ReadAttestations {
             {
                 Ok(BackgroundSourceRegistration::Registered(receipt)) => receipt,
                 _ => {
-                    settle_read_owner(&store, &source_owner, None, false).await;
+                    crate::background_jobs::settle_read_lease(&store, &source_owner, None, false)
+                        .await;
                     finish(&owner, &key, Status::Paused(work));
                     return;
                 }
@@ -260,7 +301,13 @@ impl ReadAttestations {
                 .await
                 .is_err()
             {
-                settle_read_owner(&store, &source_owner, Some(custody), false).await;
+                crate::background_jobs::settle_read_lease(
+                    &store,
+                    &source_owner,
+                    Some(custody),
+                    false,
+                )
+                .await;
                 finish(&owner, &key, Status::Paused(work));
                 return;
             }
@@ -343,7 +390,8 @@ impl ReadAttestations {
             };
             // Every hash/read future has physically joined before either its
             // exact coordinator fence or its source custody can be returned.
-            settle_read_owner(&store, &source_owner, Some(custody), true).await;
+            crate::background_jobs::settle_read_lease(&store, &source_owner, Some(custody), true)
+                .await;
             finish(&owner, &key, status);
         });
         Err(pending())
@@ -356,56 +404,7 @@ async fn settle_activated_without_reader(
 ) {
     // This scope activated successfully and started no reader. Its physical
     // join proof must be recorded before the armed receipt can be deleted.
-    settle_read_owner(store, owner, Some(receipt), true).await;
-}
-
-/// This runs inside the pre-existing read owner, never in Drop or a new actor.
-/// Close-before-resolve fences delayed registration/renewal acknowledgements.
-async fn settle_read_owner(
-    store: &Arc<dyn plurx_core::store::Store>,
-    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
-    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
-    physical_joined: bool,
-) {
-    loop {
-        match store
-            .close_read_attestation_source_lease(owner.clone(), crate::state::clock_ms())
-            .await
-        {
-            Ok(_) => break,
-            Err(error) => {
-                tracing::warn!(%error,"read attestation lease settlement pending");
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    }
-    loop {
-        if let Some(held) = receipt.take() {
-            if physical_joined {
-                crate::background_jobs::settle_joined_source_custody(store, held).await;
-            } else {
-                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
-            }
-            return;
-        } else {
-            use plurx_core::store::background_jobs_resources::BackgroundSourceRegistration;
-            match store
-                .register_background_source_custody(owner.clone(), crate::state::clock_ms())
-                .await
-            {
-                Ok(BackgroundSourceRegistration::Registered(held)) => {
-                    receipt = Some(held);
-                    continue;
-                }
-                Ok(
-                    BackgroundSourceRegistration::LostOwnership
-                    | BackgroundSourceRegistration::NotRequired,
-                ) => return,
-                Err(error) => tracing::warn!(%error,"resolving read attestation source receipt"),
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    crate::background_jobs::settle_read_lease(store, owner, Some(receipt), true).await;
 }
 
 fn failed(changed: bool) -> Status {
@@ -447,6 +446,37 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::io::Write;
+
+    #[tokio::test]
+    async fn borrowed_source_read_slot_uses_the_existing_pool_and_is_released() {
+        let directory = crate::test_tempdir().expect("source directory");
+        let path = directory.path().join("source.mkv");
+        std::fs::write(&path, b"source").expect("source");
+        let (key, fresh) = work(&file(path), &"a".repeat(64)).await;
+        let cache = ReadAttestations::new();
+        let slot = cache.try_borrow_slot().expect("one free slot");
+        assert_eq!(
+            slot.resource("media-node"),
+            "subtitle-read-attest:media-node:63"
+        );
+        assert!(cache.try_borrow_slot().is_none());
+        {
+            let mut entries = cache.entries();
+            for index in 0..(MAX_ENTRIES as u8 - 1) {
+                let mut occupied = key.clone();
+                occupied.file_id += i64::from(index) + 1;
+                entries.push_back(Entry {
+                    slot: index,
+                    key: occupied,
+                    status: Status::Running,
+                });
+            }
+        }
+        drop(slot);
+        assert!(cache.start(&key, fresh).is_ok());
+        assert_eq!(cache.entries().back().expect("new subtitle entry").slot, 63);
+        assert!(cache.try_borrow_slot().is_none());
+    }
 
     fn file(path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");

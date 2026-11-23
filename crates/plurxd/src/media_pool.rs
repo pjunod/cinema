@@ -1589,6 +1589,25 @@ impl MediaPool {
         result
     }
 
+    /// Speculative detail planning may use the local snapshot but may not
+    /// probe the media or ask a peer to run its interactive catalogue.
+    pub(crate) async fn stored_quality_catalog(
+        &self,
+        state: &AppState,
+        request: &QualityCatalogRequest,
+    ) -> QualityCatalogResult {
+        let plan = create_plan_for(request.file_id);
+        let result = local_quality_catalog(
+            state,
+            request,
+            create_stage_deadline(QUALITY_CATALOG_DEADLINE),
+            CatalogSource::Stored(plan.as_ref()),
+        )
+        .await;
+        note_create_catalog(&result);
+        result
+    }
+
     async fn quality_catalog_answer(
         &self,
         state: &AppState,
@@ -2171,6 +2190,8 @@ pub(crate) enum CatalogSource<'a> {
     Quorum(Option<&'a PlanningBinding>),
     /// The create's own plan (D3d): no read.
     Plan(&'a crate::http::hls::start_plan::StartPlan),
+    /// The local plan or a local catalogue snapshot, using stored facts only.
+    Stored(Option<&'a crate::http::hls::start_plan::StartPlan>),
     /// A peer's request at the ingress's binding (D3d): this node's view,
     /// then Authority once, `StaleSource` when Authority differs.
     PeerView(&'a PlanningBinding),
@@ -2202,7 +2223,9 @@ pub(crate) async fn local_quality_catalog(
         let peer_plan;
         let (snapshot, plan_binding): (&plurx_core::store::PlaybackPlanningSnapshot, _) =
             match source {
-                CatalogSource::Plan(plan) => (&*plan.snapshot, Some(plan.binding.clone())),
+                CatalogSource::Plan(plan) | CatalogSource::Stored(Some(plan)) => {
+                    (&*plan.snapshot, Some(plan.binding.clone()))
+                }
                 CatalogSource::PeerView(expected) => {
                     peer_plan = crate::http::hls::start_plan::peer_catalog_plan(
                         &state.applied,
@@ -2212,7 +2235,7 @@ pub(crate) async fn local_quality_catalog(
                     .await?;
                     (&*peer_plan.snapshot, Some(peer_plan.binding.clone()))
                 }
-                CatalogSource::Quorum(_) => {
+                CatalogSource::Quorum(_) | CatalogSource::Stored(None) => {
                     quorum_snapshot = state
                         .store
                         .playback_planning_snapshot(
@@ -2255,7 +2278,7 @@ pub(crate) async fn local_quality_catalog(
         state.transcode.before_quality_catalog_ordinary().await;
         state
             .transcode
-            .quality_catalog_from_snapshot_progress(
+            .quality_catalog_from_snapshot_with_probe_policy(
                 snapshot,
                 &request.caps,
                 request.audio_index,
@@ -2267,6 +2290,7 @@ pub(crate) async fn local_quality_catalog(
                 request.audio_claim.as_ref(),
                 Some(&progress),
                 None,
+                !matches!(source, CatalogSource::Stored(_)),
             )
             .await;
         Ok(())

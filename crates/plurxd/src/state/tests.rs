@@ -1898,6 +1898,142 @@ fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> 
     Arc::new(JobManager::new(store, artwork.to_path_buf()))
 }
 
+#[tokio::test]
+async fn cluster_discovery_queues_a_census_after_a_historical_ready_request() {
+    use plurx_core::transcode::hevc_census::{Census, Verdict, REVISION};
+
+    let dir = crate::test_tempdir().expect("work directory");
+    let database = dir.path().join("catalogue.sqlite");
+    let store = Arc::new(SqliteStore::open(&database).expect("store"));
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Movies".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![dir.path().to_path_buf()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Historical HEVC".to_owned(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file_id = store
+        .upsert_file(
+            item,
+            dir.path().join("historical.mkv").to_str().expect("path"),
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("hevc".to_owned()),
+                raw_json: Some(
+                    r#"{"streams":[{"codec_type":"video","codec_name":"hevc"}]}"#.to_owned(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let file = store.get_file(file_id).await.expect("read").expect("file");
+    let jobs = manager(store.clone(), dir.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let convert = transcode.dv_convert_enabled().await;
+    let identities = fragment_index_video_identity_options(
+        store.as_ref(),
+        &file,
+        transcode.dv_strippable(),
+        convert,
+    )
+    .await
+    .expect("historical identities");
+    let old_identity = &identities[0].1;
+    let (old, joined) = jobs
+        .request_file_analysis_for_identity(
+            file_id,
+            false,
+            "fragment_index",
+            "background",
+            old_identity,
+        )
+        .await
+        .expect("historical request");
+    assert!(!joined);
+    rusqlite::Connection::open(&database)
+        .expect("historical connection")
+        .execute(
+            "UPDATE analysis_requests SET state = 'ready' WHERE request_id = ?1",
+            [&old.request_id],
+        )
+        .expect("historical ready row");
+
+    let permit = tokio_util::sync::CancellationToken::new();
+    for _ in 0..2 {
+        jobs.discover_cluster_fragment_indexes_with_permit(Arc::clone(&transcode), &permit)
+            .await;
+    }
+    let rows = store.analysis_requests(10).await.expect("requests");
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .any(|row| row.request_id == old.request_id && row.state == "ready"));
+    let census = rows
+        .iter()
+        .find(|row| row.state == "queued")
+        .expect("census request");
+    assert_eq!(census.video_identity, HEVC_CENSUS_ANALYSIS_IDENTITY);
+    assert_ne!(census.requested_generation, old.requested_generation);
+    assert!(!census.force_rebuild);
+
+    let verdict = Census {
+        revision: REVISION,
+        verdict: Verdict::Varying,
+        size: file.size,
+        mtime: file.mtime,
+        samples: 7,
+        differing: 1,
+    };
+    assert!(store
+        .merge_file_probe_hevc_parameter_sets(file_id, file.size, file.mtime, &verdict.to_json())
+        .await
+        .expect("persist the census"));
+    jobs.discover_cluster_fragment_indexes_with_permit(transcode, &permit)
+        .await;
+    let rows = store
+        .analysis_requests(10)
+        .await
+        .expect("canonical discovery");
+    assert_eq!(rows.len(), 3);
+    let canonical = rows
+        .iter()
+        .find(|row| row.request_id != old.request_id && row.request_id != census.request_id)
+        .expect("canonical request after the census");
+    assert_eq!(canonical.state, "queued");
+    assert_ne!(&canonical.video_identity, old_identity);
+    assert_eq!(
+        canonical.requested_generation,
+        analysis_request_generation(
+            &file,
+            "fragment_index",
+            &old.pipeline_version,
+            &canonical.video_identity,
+            false,
+        )
+    );
+}
+
 /// Co-resolve (shared-read §5.5): once one identity's request has
 /// attested the source, every other identity of the file is on the queue
 /// beside it — keyed as its own request would key it, at background
@@ -5783,6 +5919,47 @@ fn a_budget_failure_budgets_the_retry_from_the_rate_it_measured() {
     assert_eq!(
         index_file_budget(Some(film_ms), 0, Some(&crawl)),
         Duration::from_secs(INDEX_MEASURED_BUDGET_CEILING_SECS)
+    );
+}
+
+#[test]
+fn shared_timeout_budgets_the_first_individual_index_retry() {
+    use crate::fragindex::{IndexFailure, IndexOutcome};
+    use plurx_core::content_analysis::IndexFailureCode;
+
+    let film_ms = 10_700_000;
+    let duration_ms = Some(film_ms);
+    let size_bytes = 52_384_545_280;
+    let measured = budget_exceeded(2_112_000, 8_700_000, film_ms);
+    let shared = IndexFailure {
+        code: IndexFailureCode::IndexBudgetExceeded,
+        reason: measured.reason.clone(),
+        rows: 900,
+        transient_allowlisted: false,
+        diagnostic: measured
+            .diagnostic
+            .clone()
+            .expect("measured budget diagnostic"),
+    };
+    let retry = index_file_budget_after_shared_pass(
+        duration_ms,
+        size_bytes,
+        None,
+        &IndexOutcome::Failed(Box::new(shared.clone())),
+    );
+    assert_eq!(
+        retry,
+        index_file_budget(duration_ms, size_bytes, Some(&measured))
+    );
+    assert!(retry > index_file_budget(duration_ms, size_bytes, None));
+
+    let process_error = IndexOutcome::Failed(Box::new(IndexFailure {
+        code: IndexFailureCode::IndexProcessFailed,
+        ..shared
+    }));
+    assert_eq!(
+        index_file_budget_after_shared_pass(duration_ms, size_bytes, None, &process_error),
+        index_file_budget(duration_ms, size_bytes, None)
     );
 }
 

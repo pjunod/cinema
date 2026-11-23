@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-19, plurx has 443 routes declared by the ordinary listener's
+As of 2026-11-19, plurx has 445 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 443 routes across the registered routers.
+plurx has 445 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -1478,9 +1478,9 @@ cadence.
 | POST | `/files/{id}/decision` | bearer | The same, from a v2 capabilities document; body ≤ 64 KiB |
 | PUT | `/files/{id}/audio-offset` | bearer | Deprecated. Validates and echoes `offset_ms` clamped to ±15 000; persists nothing |
 
-Both decision handlers answer the same question and return the same body; the
-`POST` validates the document, marks the caps as v2, and calls the `GET`
-handler's logic directly. The only difference is where the capabilities live.
+Both decision handlers answer the same question and return the same body.
+`POST` validates the document, marks the caps as v2, and uses the same
+decision logic.
 `force`, `audio` and `subtitle` stay on the query string in both forms,
 because they are request-local choices rather than capabilities.
 
@@ -1894,9 +1894,20 @@ the ffmpeg is taken down.
                   DELETE /hls/{session}   → 204 No Content
 ```
 
+A full login can preview the ordinary local playback decision using stored
+evidence at `POST /files/{id}/hls/startup-decision`. The preview uses the
+same capabilities document and selection query as `POST /files/{id}/decision`.
+A full login can then pass the same fresh VOD request to
+`POST /files/{id}/hls/prepare-startup` before Play. The server resolves
+the ordinary create recipe and returns `202` for the advisory request.
+An eligible indexed copy can then prepare media at `start` under the
+existing cache and source budgets. The hint creates no viewer session.
+
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | POST | `/files/{id}/hls/sessions` | bearer | Creates a session; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/startup-decision` | full bearer | Previews local playback using stored evidence; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/prepare-startup` | full bearer | Accepts fresh VOD create inputs for bounded copy preparation; body ≤ 64 KiB |
 | POST | `/files/{id}/hls/continuous-candidates` | bearer | Read-only continuous-quality pair negotiation; body ≤ 64 KiB (§9.6) |
 | POST | `/files/{id}/hls/continuous-sessions` | bearer | Creates a continuous-quality family session; body ≤ 64 KiB (§9.6) |
 | GET | `/files/{id}/hls/start` | bearer | Deprecated bridge over the same handler |

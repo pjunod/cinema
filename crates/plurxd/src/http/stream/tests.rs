@@ -2773,14 +2773,14 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
         .await
         .expect("file read")
         .expect("file");
-    let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
+    let caps: playback::DeviceCaps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         decision_for_source_file(
             &state,
             file.clone(),
             Caps {
-                caps_v2: Some(caps),
+                caps_v2: Some(caps.clone()),
                 ..Default::default()
             },
         ),
@@ -2791,6 +2791,30 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
     assert!(
         decision.markers.is_empty(),
         "unobserved chapters are unknown"
+    );
+    let user = state
+        .store
+        .create_user("startup-preview", "hash", true)
+        .await
+        .expect("preview user");
+    let Json(preview) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        startup_decision_post(
+            AuthUser(user),
+            State(state.clone()),
+            AxPath(id),
+            Query(Caps::default()),
+            HeaderMap::new(),
+            crate::http::network::RemoteAddress(None),
+            Json(DecisionBody { caps }),
+        ),
+    )
+    .await
+    .expect("startup preview never enters the paused live-probe fallback")
+    .expect("authenticated startup preview");
+    assert_eq!(
+        serde_json::to_value(&preview.markers).expect("preview markers"),
+        serde_json::to_value(&decision.markers).expect("source markers"),
     );
     assert_eq!(
         state

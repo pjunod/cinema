@@ -14,6 +14,10 @@ const MICROS: u128 = 1_000_000;
 pub struct WireDuration(u64);
 
 impl WireDuration {
+    pub fn as_micros(self) -> u64 {
+        self.0
+    }
+
     pub fn parse(text: &str) -> Option<Self> {
         let (seconds, fraction) = text.split_once('.')?;
         if seconds.is_empty()

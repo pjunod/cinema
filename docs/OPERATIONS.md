@@ -5023,6 +5023,12 @@ snapshot. When the optional retained-output lookup cannot plan, the start goes
 ahead without it and counts
 `plurx_rolling_retained_lookup_skipped_total{reason}`.
 
+A copy resume can attach a complete retained output on the serving node when
+the source, selected audio, playback recipe and media engine match. The
+playlist retains its original timeline, and the player seeks to the saved
+position. If the complete output is unavailable, the server produces media
+from the requested position using the normal startup window.
+
 **Pre-transcode audio and the rollout rule.** Speculative pre-transcodes are
 now produced with the canonical stereo AAC audio claim, so a current client
 on a stereo route computes the same cache key (see

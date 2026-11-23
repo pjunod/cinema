@@ -1936,6 +1936,7 @@ pub(crate) const CHAPTER_EVIDENCE_VERSION: u32 = 2;
 #[derive(Clone, Copy)]
 enum PlanningReadPolicy {
     LocalDerivation,
+    StoredLocalEvidence,
     StoredSourceEvidence,
 }
 
@@ -2232,11 +2233,23 @@ pub async fn decision_post(
     auth: AuthUser,
     state: State<AppState>,
     path: AxPath<i64>,
-    Query(mut q): Query<Caps>,
+    Query(q): Query<Caps>,
     headers: HeaderMap,
     remote: super::network::RemoteAddress,
     Json(body): Json<DecisionBody>,
 ) -> Result<Json<DecisionResponse>, ApiError> {
+    decision(
+        auth,
+        state,
+        path,
+        Query(decision_document(q, body)?),
+        headers,
+        remote,
+    )
+    .await
+}
+
+fn decision_document(mut q: Caps, body: DecisionBody) -> Result<Caps, ApiError> {
     validate_device_caps(&body.caps)?;
     if body.caps.v != playback::DeviceCaps::VERSION {
         return Err(ApiError::BadRequest(format!(
@@ -2246,7 +2259,30 @@ pub async fn decision_post(
         )));
     }
     q.caps_v2 = Some(body.caps);
-    decision(auth, state, path, Query(q), headers, remote).await
+    Ok(q)
+}
+
+/// Detail preparation may plan from stored evidence before a source owner is
+/// admitted. A separate route keeps older servers from running Play's probes.
+pub async fn startup_decision_post(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Query(q): Query<Caps>,
+    headers: HeaderMap,
+    super::network::RemoteAddress(remote): super::network::RemoteAddress,
+    Json(body): Json<DecisionBody>,
+) -> Result<Json<DecisionResponse>, ApiError> {
+    local_decision(
+        &state,
+        &user,
+        id,
+        decision_document(q, body)?,
+        &headers,
+        remote,
+        PlanningReadPolicy::StoredLocalEvidence,
+    )
+    .await
 }
 
 /// Legacy priors have neither completed-body nor candidate-recipe provenance.
@@ -2270,7 +2306,28 @@ pub async fn decision(
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
 ) -> Result<Json<DecisionResponse>, ApiError> {
-    let mut identity = super::network::identity(&headers, remote);
+    local_decision(
+        &state,
+        &user,
+        id,
+        q,
+        &headers,
+        remote,
+        PlanningReadPolicy::LocalDerivation,
+    )
+    .await
+}
+
+async fn local_decision(
+    state: &AppState,
+    user: &plurx_core::domain::User,
+    id: i64,
+    q: Caps,
+    headers: &HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    policy: PlanningReadPolicy,
+) -> Result<Json<DecisionResponse>, ApiError> {
+    let mut identity = super::network::identity(headers, remote);
     if let Some(ref mut id) = identity {
         id.user_id = Some(user.id);
         id.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
@@ -2281,18 +2338,18 @@ pub async fn decision(
     }
     let network_prior =
         super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
-    let file = load_file(&state, id).await?;
+    let file = load_file(state, id).await?;
     decision_for_file(
-        &state,
+        state,
         file,
         q,
         network_prior,
-        Some(&user),
+        Some(user),
         (
             identity.as_ref(),
-            super::hls::link_receipts::requested_receipt(&headers),
+            super::hls::link_receipts::requested_receipt(headers),
         ),
-        PlanningReadPolicy::LocalDerivation,
+        policy,
     )
     .await
     .map(Json)
@@ -2517,13 +2574,15 @@ async fn decision_for_file(
         // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
-    // Source planning uses the node's boot-measured `dovi_rpu` — the value
-    // the strip decision above was made from and Source preparation cuts
-    // with — so a Dolby Vision copy indexed locally is the one it finds.
-    let have_dovi = if local_derivation {
-        crate::ffmpeg::has_dovi_rpu().await
-    } else {
+    // Local planning (derived or from this node's stored evidence) asks this
+    // node's FFmpeg. Source planning uses the node's boot-measured `dovi_rpu`
+    // — the value the strip decision above was made from and Source
+    // preparation cuts with — so a Dolby Vision copy indexed locally is the
+    // one it finds.
+    let have_dovi = if matches!(marker_policy, PlanningReadPolicy::StoredSourceEvidence) {
         state.system.dovi_rpu
+    } else {
+        crate::ffmpeg::has_dovi_rpu().await
     };
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
@@ -2615,7 +2674,9 @@ async fn decision_for_file(
     };
     let markers = match marker_policy {
         PlanningReadPolicy::LocalDerivation => markers_for(state, &file).await,
-        PlanningReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+        PlanningReadPolicy::StoredLocalEvidence | PlanningReadPolicy::StoredSourceEvidence => {
+            stored_markers_for_source(state, &file).await
+        }
     };
 
     // DTO defaults and the verdict now come from the same selection above.
@@ -2644,6 +2705,7 @@ async fn decision_for_file(
     // once the catalogue itself is in hand so its enumeration cannot spend
     // it. Missing evidence is Unknown; it never refuses the decision.
     let mut advisory = None;
+    let stored_local_evidence = matches!(marker_policy, PlanningReadPolicy::StoredLocalEvidence);
     let quality_candidates = if let Some(caps) = q.caps_v2.as_ref() {
         let request = crate::media_pool::QualityCatalogRequest {
             audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
@@ -2660,49 +2722,59 @@ async fn decision_for_file(
             subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
             presentation: crate::transcode::Presentation::Vod,
         };
-        let accepted = state
-            .media_pool
-            .quality_candidates(state, request.clone())
-            .await;
+        let accepted = if stored_local_evidence {
+            state
+                .media_pool
+                .stored_quality_catalog(state, &request)
+                .await
+                .candidates
+        } else {
+            state
+                .media_pool
+                .quality_candidates(state, request.clone())
+                .await
+        };
         // Costs are advisory, but their source/settings must be the exact
         // accepted local row. Acquisition and projection share one deadline.
-        let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
-        measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
-            let planning = state
-                .store
-                .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        if !stored_local_evidence {
+            let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
+            measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
+                let planning = state
+                    .store
+                    .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+                    .await
+                    .ok()??;
+                let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+                if planning.file.id != file.id
+                    || planning.file.size != file.size
+                    || planning.file.mtime != file.mtime
+                    || !accepted.iter().any(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                {
+                    return None;
+                }
+                let local: Vec<_> = accepted
+                    .iter()
+                    .filter(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                    .cloned()
+                    .collect();
+                super::hls::link_receipts::measured_outputs(
+                    state,
+                    &file,
+                    &request,
+                    &local,
+                    Some(&planning),
+                    deadline,
+                )
                 .await
-                .ok()??;
-            let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
-            if planning.file.id != file.id
-                || planning.file.size != file.size
-                || planning.file.mtime != file.mtime
-                || !accepted.iter().any(|entry| {
-                    entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
-                })
-            {
-                return None;
-            }
-            let local: Vec<_> = accepted
-                .iter()
-                .filter(|entry| {
-                    entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
-                })
-                .cloned()
-                .collect();
-            super::hls::link_receipts::measured_outputs(
-                state,
-                &file,
-                &request,
-                &local,
-                Some(&planning),
-                deadline,
-            )
+            })
             .await
-        })
-        .await
-        .ok()
-        .flatten();
+            .ok()
+            .flatten();
+        }
 
         Some(
             accepted
@@ -2716,7 +2788,9 @@ async fn decision_for_file(
     };
     // Keep the public menu/explicit choices. This narrows only this warm Auto
     // advisory selection, never the feature switch or a manual request.
-    let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
+    let selection_candidates = if stored_local_evidence {
+        quality_candidates.clone()
+    } else if q.force.as_deref().unwrap_or("auto") == "auto" {
         if let Some(catalog) = quality_candidates.as_ref() {
             let advisory = advisory.unwrap_or_else(super::hls::link_receipts::advisory_deadline);
             // One source fence for every advisory read of this Decision, as
