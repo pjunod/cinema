@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -16,6 +17,9 @@ def _load(name: str, path: str):
     loader = importlib.machinery.SourceFileLoader(name, str(ROOT / path))
     spec = importlib.util.spec_from_loader(name, loader)
     module = importlib.util.module_from_spec(spec)
+    # Registered before it runs: a dataclass in it looks its module up
+    # in sys.modules (Python 3.12 fails on an unregistered one).
+    sys.modules[spec.name] = module
     loader.exec_module(module)
     return module
 

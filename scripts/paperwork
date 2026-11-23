@@ -331,6 +331,9 @@ def check_folded_pages(base: str, paths: list[str], title: str) -> Result:
     loader = importlib.machinery.SourceFileLoader("fold_script", str(ROOT / "scripts/fold"))
     spec = importlib.util.spec_from_loader("fold_script", loader)
     fold = importlib.util.module_from_spec(spec)
+    # Registered before it runs: a dataclass in it looks its module up
+    # in sys.modules (Python 3.12 fails on an unregistered one).
+    sys.modules[spec.name] = fold
     loader.exec_module(fold)
     name = "folded pages change only through scripts/fold"
     hint = ("edit your own file in the page's fragment folder (`scripts/fold --list` names them) "

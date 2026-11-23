@@ -160,6 +160,9 @@ class PaperworkChangelogCase(unittest.TestCase):
         loader = importlib.machinery.SourceFileLoader("paperwork_script", str(REPO_ROOT / "scripts/paperwork"))
         spec = importlib.util.spec_from_loader("paperwork_script", loader)
         module = importlib.util.module_from_spec(spec)
+        # Registered before it runs: a dataclass in it looks its module up
+        # in sys.modules (Python 3.12 fails on an unregistered one).
+        sys.modules[spec.name] = module
         loader.exec_module(module)
         return module.check_changelog(base, body, merge_target, list(paths))
 
