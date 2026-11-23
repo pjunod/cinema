@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -84,6 +85,31 @@ class FormalWorkflowContracts(unittest.TestCase):
                     self.assertIn("!inputs.compile_only", fetch)
                     self.assertIn("!inputs.compile_only", smoke)
                     self.assertIn("!inputs.compile_only", progress_smoke)
+
+    def test_bounded_formal_preflights_require_capacity_without_widening_budget(self) -> None:
+        # A generic worker can finish Python yet time out the unchanged TLC
+        # state-space exploration. All entrypoints owe the same capacity class.
+        for path in WORKFLOWS:
+            with self.subTest(workflow=path):
+                name = "Python unit receipts" if path.endswith("effort-ci.yml") else "fast policy and contract preflight"
+                preflight = gate_block(self.read(path), name)
+                selector = re.search(r"^    runs-on: \[(.*?)\]$", preflight, re.MULTILINE)
+                self.assertIsNotNone(selector)
+                labels = {value.strip() for value in selector.group(1).split(",")}
+                self.assertTrue({"self-hosted", "Linux", "X64", "lab", "general"}.issubset(labels))
+                self.assertIn("high-cpu", labels)
+                _, history = step_block(preflight, "Audit corrective-history evidence")
+                self.assertIn("run: make history-check", history)
+                _, smoke = step_block(preflight, "Complete the bounded formal smoke configuration")
+                self.assertRegex(smoke, r"(?m)^\s*run: python3 scripts/check-formal smoke --package durable-jobs --cache-dir target/formal-toolchain$")
+        # Placement buys capacity; the model's required completion bound stays
+        # fixed rather than making a timed-out exploration count as evidence.
+        tree = ast.parse(self.read("scripts/check-formal"))
+        budgets = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "SMOKE_CONFIG_TIMEOUTS" for target in node.targets))
+        smoke_budget = next(value for key, value in zip(budgets.keys, budgets.values)
+                            if isinstance(key, ast.Constant) and key.value == "smoke.cfg")
+        self.assertEqual(ast.literal_eval(smoke_budget), 60)
 
     def test_artifact_upload_runs_after_failure_and_retains_receipts(self) -> None:
         for path in WORKFLOWS:

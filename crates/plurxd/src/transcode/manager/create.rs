@@ -4492,7 +4492,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
         encoding: Option<&Arc<crate::vodencode::Encoding>>,
-    ) -> Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)> {
+    ) -> Result<Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)>, String> {
         if !req.split_audio
             || encoding.is_some()
             // The split master describes an AVC copy; HEVC and Dolby Vision
@@ -4514,7 +4514,7 @@ impl TranscodeManager {
             // admission holds at most three. Larger sets stay muxed for now.
             || file.audio_streams.len() > 3
         {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let height = file.height.unwrap_or(0).max(2);
         let generation = uuid::Uuid::new_v4().to_string();
@@ -4555,18 +4555,23 @@ impl TranscodeManager {
                     soundtracks.push((audio, soundtrack))
                 }
                 outcome => {
+                    let reason = match outcome {
+                        Err(error) => error,
+                        Ok(Some(_)) => "the soundtrack recipe is not shared AAC".to_owned(),
+                        Ok(None) => "no encoded soundtrack recipe was resolved".to_owned(),
+                    };
                     tracing::info!(
                         target: "plurxd::transcode",
                         file_id = file.id,
                         audio_index = ?audio.audio_index,
-                        refused = ?outcome.err(),
+                        %reason,
                         "split copy soundtrack unavailable; serving the muxed copy"
                     );
-                    return Vec::new();
+                    return Err(reason);
                 }
             }
         }
-        soundtracks
+        Ok(soundtracks)
     }
 
     /// Negotiation shares native encoded preparation and the exact copy
@@ -5165,7 +5170,8 @@ impl TranscodeManager {
             .await?;
         let split_soundtracks = self
             .prepare_vod_split_soundtracks(req, &file, encoding.as_ref())
-            .await;
+            .await
+            .unwrap_or_default();
         let split_master = !split_soundtracks.is_empty();
         let companion = self.prepare_vod_companion(req, &file).await?;
         // A continuous family role executes a video-only or shared-AAC split of
@@ -6362,7 +6368,8 @@ impl TranscodeManager {
             // A resurrected split copy keeps its soundtrack alternates.
             let split_soundtracks = self
                 .prepare_vod_split_soundtracks(&req, &file, encoding.as_ref())
-                .await;
+                .await
+                .unwrap_or_default();
             let measured_candidate = if first_capture && root_admission.is_none() {
                 match self
                     .resolved_retained_candidate_binding(&req, &file, &encoding)

@@ -915,6 +915,25 @@ impl SourceViewerActor {
             .await
             .expect("the gate outlives its owner");
     }
+    /// Open `resource` with its read job parked past `deadline`, so the
+    /// request's own deadline answers it, then release the job.
+    #[cfg(test)]
+    pub(crate) async fn open_resource_past_deadline_for_test(
+        &self,
+        resource: &SharingHlsResource,
+        deadline: Instant,
+    ) -> Result<SourceOpenedResource, LiveRefusal> {
+        let pause = self.0.resource_hooks.pause();
+        let call = self.open_resource(resource, deadline);
+        tokio::pin!(call);
+        let held = tokio::select! {
+            held = pause.reached() => held,
+            answered = &mut call => return answered,
+        };
+        let answered = call.await;
+        drop(held);
+        answered
+    }
     /// The growing deadline judgement, on this real owner.
     #[cfg(all(test, unix))]
     pub(crate) fn deadline_refusal_for_test(&self, stalled: bool) -> LiveRefusal {
@@ -1165,7 +1184,7 @@ impl SourceViewerActor {
         #[cfg(unix)]
         let growing = match self.growing_backing().filter(|_| segment) {
             Some(backing) => {
-                let waited = backing.production.mark().await;
+                let waited = backing.production.mark();
                 Some((backing, waited))
             }
             None => None,
@@ -1185,7 +1204,8 @@ impl SourceViewerActor {
             #[cfg(unix)]
             Err(_) if growing.is_some() => {
                 let (backing, waited) = growing.expect("growing wait");
-                Err(self.deadline_refusal(backing.production.stalled_since(waited).await))
+                // Lock-free: the timed-out read may still hold the range.
+                Err(self.deadline_refusal(backing.production.stalled_since(waited)))
             }
             Err(_) if vod_segment => Err(LiveRefusal::terminal(SourceWorkerError::Deadline)),
             Err(_) => Err(LiveRefusal::transient(SourceWorkerError::Deadline)),

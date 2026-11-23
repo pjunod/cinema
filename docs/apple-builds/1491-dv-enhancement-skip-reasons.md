@@ -1,6 +1,5 @@
 # Show the real reason a Dolby Vision enhancement was skipped
 
-Build: 295
 Issue: #1491
 
 **Status:** built; focused native tests passed; hardware qualification and device acceptance pending.

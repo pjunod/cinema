@@ -37,12 +37,14 @@ struct PublishedSourceObserver {
 pub(crate) struct SourceObserverPublication {
     ledger: Weak<StdMutex<SourceOwnersState>>,
     identity: Arc<()>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     epoch: u64,
 }
 impl SourceObserverPublication {
     /// Publish `observer` for the same rendition and generation epoch as this
     /// publication. A DV window run's later windows read through the run's
     /// input, so that input's observer replaces the unused window input's.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn republish(
         &self,
         observer: crate::source_custody::SourceObserver,

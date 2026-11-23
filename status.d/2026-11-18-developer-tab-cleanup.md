@@ -1,0 +1,1 @@
+- **2026-11-18 · Developer tab cleanup:** Owner Claude (claude-opus-5-5); [PR #1802](http://forge.lan:3000/noirr/plurx/pulls/1802), [plan](docs/reviews/PLAN-developer-tab-cleanup-2026-11-18.md). Developer keeps three in-development switches; the rest moved, became always on or went.

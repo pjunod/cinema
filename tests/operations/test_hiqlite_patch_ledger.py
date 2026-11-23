@@ -10,11 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 34),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 36),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 7),
 )
 
-NUMBER_WORDS = {7: "seven", 34: "thirty-four"}
+NUMBER_WORDS = {7: "seven", 36: "thirty-six"}
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as

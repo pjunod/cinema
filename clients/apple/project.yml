@@ -16,7 +16,12 @@ settings:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.8.0"
-    CURRENT_PROJECT_VERSION: "311"
+    # A fixed development placeholder, never bumped. The real build number is
+    # derived from Git history by scripts/build-number and written into each
+    # built app's Info.plist by the "Stamp derived build number" phase below;
+    # a stored counter every client pull request had to raise made any two of
+    # them conflict.
+    CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -40,11 +45,27 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"          # iPhone + iPad
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: iOS.entitlements
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"    # the build-number phase reads .git
       configs:
         Debug:
           APNS_ENVIRONMENT: development
         Release:
           APNS_ENVIRONMENT: production
+    postBuildScripts:
+      # Runs every build (no dependency analysis) and before code signing, so
+      # the signed bundle carries the derived number. It reads the repository's
+      # Git history, which user-script sandboxing would forbid; the target
+      # turns sandboxing off for that reason.
+      - name: Stamp derived build number
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        script: |
+          set -eu
+          mode=""
+          if [ "${CONFIGURATION}" = "Release" ]; then mode="--release"; fi
+          number="$("${SRCROOT}/../../scripts/build-number" ${mode})"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${number}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
     info:
       path: Support/iOS-Info.plist
       properties:
@@ -98,6 +119,22 @@ targets:
         # Names tvOS.brandassets inside Resources/tvOS.xcassets. Without it the
         # tvOS archive cannot be uploaded at all.
         ASSETCATALOG_COMPILER_APPICON_NAME: tvOS
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"    # the build-number phase reads .git
+    postBuildScripts:
+      # Runs every build (no dependency analysis) and before code signing, so
+      # the signed bundle carries the derived number. It reads the repository's
+      # Git history, which user-script sandboxing would forbid; the target
+      # turns sandboxing off for that reason.
+      - name: Stamp derived build number
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        script: |
+          set -eu
+          mode=""
+          if [ "${CONFIGURATION}" = "Release" ]; then mode="--release"; fi
+          number="$("${SRCROOT}/../../scripts/build-number" ${mode})"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${number}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
     info:
       path: Support/tvOS-Info.plist
       properties:

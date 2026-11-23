@@ -1,7 +1,15 @@
 # Cluster facade slice 4 — operations keep their exact authority
 
-**Status:** open — #1646 landed on main (`2218f207`); integrated with slices 5–7c on one task branch, with the C7-sensitive shutdown wiring migrated; review, gate and landing pending.
+**Status:** built — implemented and independently reviewed.
 **Owner:** Codex. **Prepared:** 2026-11-16.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
+
+**Historical preparation:** C7 (#1646) landed on main at `2218f207` before
+this slice was integrated with slices 5–7c and its shutdown wiring migrated.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md),
 [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) and

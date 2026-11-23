@@ -384,6 +384,7 @@ impl NodeConfig {
             nodes,
             listen_addr_api,
             listen_addr_raft,
+            listeners: None,
             data_dir,
             filename_db,
             log_statements,

@@ -194,31 +194,21 @@ class PaperworkFixTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "base")
 
-    def test_the_android_counter_is_raised_above_the_merge_target(self):
-        self.repository()
-        self.git("branch", "target")
-        self.git("checkout", "-q", "target")
-        self.write("clients/android/app/build.gradle.kts", 'android {\n        versionCode = 200\n        versionName = "0.8.0"\n}\n')
-        self.git("commit", "-qam", "main took 200")
-        self.git("checkout", "-q", "main")
-        self.assertEqual(self.fix.fix_android("target"),
-                         ["clients/android/app/build.gradle.kts", "clients/android/README.md"])
-        self.assertIn("versionCode = 201", (self.root / "clients/android/app/build.gradle.kts").read_text())
-        self.assertIn("build `201` — a change.", (self.root / "clients/android/README.md").read_text())
-        self.assertEqual(self.fix.non_bookkeeping(self.fix.dirty_paths()), [])
-        self.assertEqual(self.fix.fix_android("target"), [], "a claim above the target is kept")
-
-    def test_only_numbers_or_markdown_may_change(self):
+    def test_only_markdown_may_change(self):
         self.repository()
         self.write("src/code.rs", "fn main() { println!(\"x\"); }\n")
         self.write("clients/android/app/build.gradle.kts", 'android {\n        versionCode = 300\n        versionName = "0.9.0"\n}\n')
-        self.assertTrue(self.fix.numbers_only("versionCode = 1\n", "versionCode = 2\n"))
-        self.assertFalse(self.fix.numbers_only("versionCode = 1\n", "versionCode = 2\nextra\n"))
-        self.assertFalse(self.fix.numbers_only('name = "a1"\n', 'name = "b1"\n'))
-        refused = self.fix.non_bookkeeping(["src/code.rs", "clients/android/app/build.gradle.kts"])
-        self.assertIn("src/code.rs", refused)
+        self.write(f"{FIXTURE_DOCS}/A.md", "# A, edited\n")
+        refused = self.fix.non_bookkeeping(
+            ["src/code.rs", "clients/android/app/build.gradle.kts", f"{FIXTURE_DOCS}/A.md"])
+        self.assertEqual(refused, ["src/code.rs", "clients/android/app/build.gradle.kts"])
         self.write("new.txt", "x")
         self.assertTrue(any("added" in item for item in self.fix.non_bookkeeping([])))
+
+    def test_no_release_counter_fixer_remains(self):
+        """Build numbers are derived by scripts/build-number; nothing bumps one."""
+        for name in ("fix_counters", "fix_apple", "fix_android", "counter_errors", "numbers_only"):
+            self.assertFalse(hasattr(self.fix, name), name)
 
     def test_a_missing_index_row_is_derived_from_the_document(self):
         self.repository()
@@ -233,7 +223,7 @@ class PaperworkFixTests(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "-m", "chore(paperwork): x\n\nPaperwork-Fix: run 1")
         self.assertTrue(self.fix.head_is_fix())
         head = self.git("rev-parse", "HEAD").strip()
-        args = mock.Mock(head_sha=head, base=head, merge_target="main", run_url="u")
+        args = mock.Mock(head_sha=head, run_url="u")
         self.assertEqual(self.fix.ci(args), 1)
 
     def test_pr_workflows_never_receive_a_persistent_publisher_token(self):
@@ -253,7 +243,8 @@ class PaperworkFixTests(unittest.TestCase):
                     self.assertIn("needs: paperwork", path.read_text())
         effort_check = run_text(steps(PAPERWORK_PR, "paperwork")[
             "Check index rows, release counters, names and Regression-Test fields"])
-        self.assertIn("--counter-target origin/main", effort_check)
+        # Build numbers are derived, so no lane judges a counter against main.
+        self.assertNotIn("--counter-target", effort_check)
 
 
 
@@ -281,13 +272,12 @@ class PaperworkFixCommitAndPushTests(unittest.TestCase):
         self.head = self.git("rev-parse", "HEAD").strip()
 
     def args(self, **extra):
-        values = dict(head_sha=self.head, base=self.head, merge_target="main", counter_target=None,
-                      run_url="u", head_ref="work", base_ref="main")
+        values = dict(head_sha=self.head, run_url="u", head_ref="work", base_ref="main")
         values.update(extra)
         return mock.Mock(**values)
 
     def fixed(self, changes):
-        def apply(base, target):
+        def apply():
             for path, text in changes.items():
                 self.write(path, text)
             return sorted(changes)

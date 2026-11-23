@@ -1655,13 +1655,14 @@ async fn sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_th
         );
         let retry = answer
             .headers()
-            .contains_key(axum::http::header::RETRY_AFTER);
-        assert!(retry, "{what} names when to ask again");
+            .get(axum::http::header::RETRY_AFTER)
+            .cloned();
+        assert!(retry.is_some(), "{what} names when to ask again");
         // What the receiver reads it as: the Source unavailable for now,
         // which its Status owner and resource relay both keep a session
         // through (`peer_failure` maps it to `PeerUnavailable`).
         assert!(matches!(
-            crate::sharing_client::peer_status_refusal(answer.status(), retry),
+            crate::sharing_client::peer_status_refusal(answer.status(), retry.as_ref()),
             crate::sharing_client::PeerError::Unavailable
         ));
         let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
@@ -2006,6 +2007,97 @@ async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_n
         .await
         .expect("the stuck owner settles")
         .expect("settled cleanly");
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
+/// A segment request whose own deadline passes, its read parked, is judged
+/// by production progress on the real owner. A copy that finished producing
+/// committed nothing during the wait, and is still not stuck: the refusal
+/// passes and the session stays live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_finished_copys_segment_deadline_is_not_a_stall() {
+    use std::time::{Duration, Instant};
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let init = plurx_core::sharing_resources::SharingHlsResource::parse("init.mp4")
+        .expect("the copy's init");
+    // A hang here is the regression: the deadline must answer while the
+    // parked read still holds its open.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(20),
+        owned
+            .actor
+            .open_resource_past_deadline_for_test(&init, Instant::now() + Duration::from_secs(2)),
+    )
+    .await
+    .expect("the request answers at its deadline")
+    .err()
+    .expect("the parked read misses its deadline");
+    assert_eq!(
+        refused.error,
+        crate::transcode::source_actor::SourceWorkerError::Deadline
+    );
+    assert!(refused.is_transient(), "a finished copy is not stuck");
+    assert!(!owned.actor.retirement_requested_for_test());
+    session
+        .assert_live(&fixture, "the session outlives the missed deadline")
+        .await;
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
+/// The stall judgement reads lock-free mirrors of the real range: once the
+/// copy has produced, they agree with the range itself, and the child's
+/// delivered media was counted. A re-anchor a waiting viewer requests moves the
+/// real read bank to the produced end at its next refresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_real_copy_mirrors_its_progress_and_applies_a_reanchor() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let production = owned
+        .actor
+        .growing_backing()
+        .expect("growing copy")
+        .production
+        .clone();
+    let (mirror, real) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let (mirror, real) = production.stall_mirrors_for_test().await;
+            if real.1 {
+                return (mirror, real);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the fixture copy finishes");
+    assert_eq!(
+        (mirror.0, mirror.1),
+        real,
+        "the mirrors are the range's own counts"
+    );
+    assert!(real.0 > 1, "the copy committed its init and segments");
+    assert!(mirror.2 > 0, "the child's delivered media was counted");
+    let end = production.produced_end_for_test().expect("an origin");
+    production.reanchor_at_head();
+    production
+        .refresh_read_bank()
+        .await
+        .expect("the bank refreshes");
+    assert_eq!(production.bank_anchor_for_test().await, end);
+    assert!(!production.reanchor_pending());
     session.stop().await;
     fixture.shutdown().await;
 }

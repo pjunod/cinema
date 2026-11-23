@@ -26,10 +26,12 @@ use plurx_core::store::{
 use plurx_core::transcode::CopyVideoOptions;
 
 use crate::copy_analysis::{CopyAnalysisRegistry, CopyIndexDefect, CopyIndexDefectKind};
+use futures_util::StreamExt;
+
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/copy-index-v3/";
-const PEER_DEADLINE: Duration = Duration::from_secs(8);
+const PEER_DEADLINE: Duration = plurx_core::cluster::timing::holders::COPY_INDEX_V3_PEER_DEADLINE;
 
 /// The body of the one 404 that means "this route knows the variant and this
 /// node does not hold its bytes". Only that answer retires a holder's row: a
@@ -667,7 +669,7 @@ async fn load_blob(
     }
     // This node's own row, if any, is gone or was never there: its bytes are
     // not here. Whether anyone else holds them is what remains.
-    let locations = store
+    let mut locations = store
         .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
         .await
         .map_err(|error| format!("listing copy index holders: {error}"))?
@@ -696,49 +698,75 @@ async fn load_blob(
         .collect::<HashMap<_, _>>();
     let transport = calls;
     let request_path = peer_path(source_key, &artifact.blob_sha256);
-    for location in locations {
-        let Some((base, _)) = peers.get(&location.node_id) else {
-            continue;
+    enum HolderAnswer {
+        Absent,
+        Blob(String, Vec<u8>),
+        Unknown,
+    }
+    locations.sort_by_cached_key(|location| {
+        peers.get(&location.node_id).map_or(1, |(base, _)| {
+            transport.preference(&location.node_id, base, PEER_DEADLINE)
+        })
+    });
+    let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
+    let requests = locations.into_iter().filter_map(|location| {
+        let (base, _) = peers.get(&location.node_id)?;
+        let request_path = &request_path;
+        Some(async move {
+            let response = transport
+                .request(
+                    &location.node_id,
+                    base,
+                    reqwest::Method::GET,
+                    request_path,
+                    Vec::new(),
+                    deadline,
+                    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await;
+            let Ok(response) = response else {
+                return HolderAnswer::Unknown;
+            };
+            if response.status == reqwest::StatusCode::NOT_FOUND && response.body == ABSENT_BODY {
+                // Only the exact holder's absence can retire its row. Keep
+                // this cleanup independent of other candidate responses.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ForgetMissingPeerIndex,
+                    crate::store_result::Discard::BestEffort,
+                    store
+                        .forget_copy_index_v3_location(
+                            &artifact.contract_key,
+                            &artifact.blob_sha256,
+                            &location.node_id,
+                        )
+                        .await,
+                );
+                return HolderAnswer::Absent;
+            }
+            if response.status.is_success() && blob_matches(&response.body, artifact) {
+                HolderAnswer::Blob(location.node_id, response.body)
+            } else {
+                HolderAnswer::Unknown
+            }
+        })
+    });
+    let responses = crate::cluster::calls::race_holders(requests, deadline);
+    futures_util::pin_mut!(responses);
+    while let Some(answer) = responses.next().await {
+        let (holder, body) = match answer {
+            HolderAnswer::Absent => {
+                possible -= 1;
+                continue;
+            }
+            HolderAnswer::Unknown => continue,
+            HolderAnswer::Blob(holder, body) => (holder, body),
         };
-        let response = transport
-            .request(
-                &location.node_id,
-                base,
-                reqwest::Method::GET,
-                &request_path,
-                Vec::new(),
-                tokio::time::Instant::now() + PEER_DEADLINE,
-                MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-                PeerAuthMode::ExactRequest,
-            )
-            .await;
-        let Ok(response) = response else { continue };
-        if response.status == reqwest::StatusCode::NOT_FOUND && response.body == ABSENT_BODY {
-            // Best-effort: the holder itself said it lacks these bytes. Any
-            // other answer (a node without this route, a refusal, a damaged
-            // transfer) leaves its row alone.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetMissingPeerIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_copy_index_v3_location(
-                        &artifact.contract_key,
-                        &artifact.blob_sha256,
-                        &location.node_id,
-                    )
-                    .await,
-            );
-            possible -= 1;
-            continue;
-        }
-        if !response.status.is_success() || !blob_matches(&response.body, artifact) {
-            continue;
-        }
         crate::copy_analysis::install_blob(
             root,
             &artifact.contract_key,
             &artifact.blob_sha256,
-            &response.body,
+            &body,
         )
         .await?;
         // Only now is this node a holder: the exact bytes are verified and
@@ -748,10 +776,10 @@ async fn load_blob(
             file_id = artifact.file_id,
             contract_key = artifact.contract_key,
             blob_sha256 = artifact.blob_sha256,
-            holder = location.node_id,
+            holder,
             "copy index v3 hydrated from a peer"
         );
-        return Ok(Loaded::Blob(response.body));
+        return Ok(Loaded::Blob(body));
     }
     Ok(if possible == 0 {
         Loaded::NoHolder
