@@ -7,9 +7,11 @@ import runpy
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGING = runpy.run_path(str(ROOT / "tools/dv_processing/bundle-manifest.py"))
+DARWIN_PACKAGING = runpy.run_path(str(ROOT / "tools/dv_processing/build-macos-bundle.py"))
 
 
 class DvBundleManifestTests(unittest.TestCase):
@@ -59,6 +61,45 @@ class DvBundleManifestTests(unittest.TestCase):
         path.write_text(json.dumps(changed))
         with self.assertRaises(AssertionError):
             self.verify()
+
+    def test_darwin_manifest_binds_the_relocated_library_closure_without_loader_env(self):
+        sources = self.bundle / "lib"
+        libraries = ["libdependency.1.dylib", "libplacebo.387.dylib"]
+        for name in libraries:
+            (sources / name).write_bytes(name.encode())
+        with contextlib.redirect_stdout(io.StringIO()):
+            PACKAGING["build"](self.source, self.bundle, darwin=True)
+        manifest = json.loads((self.bundle / "build-identity.json").read_text())
+        self.assertEqual(manifest["environment"], {})
+        self.assertEqual([row["path"] for row in manifest["libraries"]], [f"lib/{name}" for name in libraries])
+        (sources / libraries[0]).write_bytes(b"changed after signing")
+        with self.assertRaises(AssertionError):
+            PACKAGING["verify"](self.source, self.bundle, darwin=True)
+
+    def test_darwin_graph_resolves_inherited_rpaths_and_refuses_ambiguous_dependencies(self):
+        executable = self.bundle / "bin/segment_decode_render"
+        prefix = Path(self.scratch.name) / "external"
+        first = prefix / "first"
+        second = prefix / "second"
+        first.mkdir(parents=True)
+        second.mkdir()
+        renderer = first / "libplacebo.387.dylib"
+        dependency = first / "libdependency.1.dylib"
+        for image in (renderer, dependency):
+            image.touch()
+        graph_fn = DARWIN_PACKAGING["dependency_graph"]
+        links = {
+            executable: (["@rpath/libplacebo.387.dylib"], [str(first), str(second)], []),
+            renderer: (["@rpath/libdependency.1.dylib"], [], [renderer.name]),
+            dependency: (["/usr/lib/libSystem.B.dylib"], [], [dependency.name]),
+        }
+        with patch.dict(graph_fn.__globals__, {"macho_links": links.__getitem__}):
+            graph, libraries = graph_fn([executable], [prefix])
+            self.assertEqual(libraries, {renderer.name: renderer, dependency.name: dependency})
+            self.assertEqual(graph[renderer], {"@rpath/libdependency.1.dylib": dependency})
+            (second / dependency.name).touch()
+            with self.assertRaisesRegex(ValueError, "ambiguous Mach-O dependency"):
+                graph_fn([executable], [prefix])
 
     def test_vulkan_discovery_replaces_only_the_obsolete_intel_provider(self):
         package = Path(self.scratch.name) / "media-package"
