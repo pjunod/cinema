@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+<!-- New entries no longer go here. Each pull request's entries live in its description's
+`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
+from the landing commits into the dated section. The entries below were written by hand
+before that and are released with the next cut. -->
+
 ### Added
 
 - Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.

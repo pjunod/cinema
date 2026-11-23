@@ -1,6 +1,5 @@
 # Keep Library channel failures visible and controls readable
 
-Build: 137
 Issue: #245
 
 Library channels observe player startup and playback failures and show the

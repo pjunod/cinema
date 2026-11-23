@@ -225,9 +225,7 @@ def one(pattern, text, label):
     return m.group(1)
 
 marketing = one(r'MARKETING_VERSION:\s*"([^"]+)"', proj, "MARKETING_VERSION")
-build = one(r'CURRENT_PROJECT_VERSION:\s*"([^"]+)"', proj, "CURRENT_PROJECT_VERSION")
 name = one(r'versionName\s*=\s*"([^"]+)"', gradle, "versionName")
-code = one(r'versionCode\s*=\s*(\d+)', gradle, "versionCode")
 workspace = one(r'(?m)^version\s*=\s*"([^"]+)"', cargo, "workspace version")
 
 # The Ansible role refuses to ship apps whose version names disagree, and so
@@ -238,17 +236,19 @@ if not (marketing == name == workspace):
         f"Android {name}. Reconcile them before shipping."
     )
 
-print(f"{marketing}\n{build}\n{code}")
+print(marketing)
 PY
 }
 
 if [[ $DRY_RUN -eq 0 ]]; then
   # Not `mapfile` — macOS ships bash 3.2 and this script must run under it.
-  VERSION_BLOB="$(read_versions)" || fail "version check failed"
-  VERSION="$(printf '%s\n' "$VERSION_BLOB" | sed -n 1p)"
-  APPLE_BUILD="$(printf '%s\n' "$VERSION_BLOB" | sed -n 2p)"
-  ANDROID_CODE="$(printf '%s\n' "$VERSION_BLOB" | sed -n 3p)"
-  [[ -n "$VERSION" && -n "$APPLE_BUILD" && -n "$ANDROID_CODE" ]] || fail "version check returned nothing"
+  VERSION="$(read_versions)" || fail "version check failed"
+  # Both apps carry the one build number derived from main's history; the
+  # Xcode phase and the Gradle build compute the same value in this worktree.
+  BUILD_NUMBER="$("$WORKTREE/scripts/build-number" --release)" || fail "cannot derive the build number"
+  APPLE_BUILD="$BUILD_NUMBER"
+  ANDROID_CODE="$BUILD_NUMBER"
+  [[ -n "$VERSION" && -n "$BUILD_NUMBER" ]] || fail "version check returned nothing"
 else
   VERSION="?"; APPLE_BUILD="?"; ANDROID_CODE="?"
 fi

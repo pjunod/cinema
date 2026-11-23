@@ -2,7 +2,6 @@
 
 **Status:** built · **Reconciled:** 2026-09-20
 
-Build: 168
 Issue: #359
 
 On-demand playback now uses retained, ready media immediately when it has more

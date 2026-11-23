@@ -1,6 +1,5 @@
 # Prepare the resume point while Apple TV shows title details
 
-Build: 311
 Issue: #1827
 
 Opening a title's details on Apple TV asks the server to prepare the media at
