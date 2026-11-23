@@ -3984,8 +3984,10 @@ final class PlayerController: ObservableObject {
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
                   attemptStillCurrent(layoutAttempt, fence: .autoInitialLayout) else { return }
             let target = presentationTarget
-            let playbackDecision = try await Caps.PresentationContext.$target.withValue(target) {
-                try await requestPlaybackDecision(model, try contextForFile(file), request.selection, request.quality)
+            let playbackDecision = try await Caps.PresentationContext.$admittedDisplay.withValue(decisionCaps?.display) {
+                try await Caps.PresentationContext.$target.withValue(target) {
+                    try await requestPlaybackDecision(model, try contextForFile(file), request.selection, request.quality)
+                }
             }
             let decision = playbackDecision.decision
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
@@ -4783,11 +4785,14 @@ final class PlayerController: ObservableObject {
         guard started, result.fileId == String(fileId), let model, let context = fileContext else { return }
         _ = beginViewerAction()
         let captionAttempt = snapshotAttempt(), lifecycle = lifecycleGeneration
+        let admitted = decisionCaps?.display
         Task {
             do {
                 let quality: PlaybackQuality = selectedHeight.map(Self.initialQuality(height:)) ?? (selectedQualityIsOriginal ? .original : .auto)
-                let refreshed = try await requestPlaybackDecision(model, context,
-                    PrePlaySelection(audioIndex: selectedAudio, subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff), quality)
+                let refreshed = try await Caps.PresentationContext.$admittedDisplay.withValue(admitted) {
+                    try await requestPlaybackDecision(model, context,
+                        PrePlaySelection(audioIndex: selectedAudio, subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff), quality)
+                }
                 guard !Task.isCancelled, isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .translatedCaptionDecision),
                       refreshed.decision.fileId == fileId else { return }
                 guard let index = Self.translatedTextCaptionIndex(result, fileId: fileId, tracks: refreshed.decision.subtitles ?? []) else {
@@ -9653,11 +9658,14 @@ extension PlayerController {
                                         subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff)
         let catalogAttempt = snapshotAttempt()
         let target = presentationTarget
+        let admitted = decisionCaps?.display
         Task { @MainActor [weak self] in
             let incumbentReceipt = self?.decision?.fileId == fileId ? self?.currentLinkReceipt() : nil
-            let fresh = try? await Caps.PresentationContext.$target.withValue(target) {
-                try await PlaybackLinkRequestContext.$receipt.withValue(incumbentReceipt) {
-                    try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0, fileContext: fileContext)
+            let fresh = try? await Caps.PresentationContext.$admittedDisplay.withValue(admitted) {
+                try await Caps.PresentationContext.$target.withValue(target) {
+                    try await PlaybackLinkRequestContext.$receipt.withValue(incumbentReceipt) {
+                        try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0, fileContext: fileContext)
+                    }
                 }
             }
             guard let self, self.started,
@@ -9720,6 +9728,7 @@ extension PlayerController {
         let selection = PrePlaySelection(audioIndex: selectedAudio,
             subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff)
         let receipt = currentLinkReceipt()
+        let admitted = decisionCaps?.display
         let refresh = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -9729,10 +9738,12 @@ extension PlayerController {
                     self.autoCostRefreshDeadlineTask = nil
                 }
             }
-            let fresh = try? await Caps.PresentationContext.$target.withValue(owner.target) {
-                try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
-                    try await model.playbackDecision(fileId: owner.file, selection: selection,
-                        quality: .auto, audioOffsetMs: 0, fileContext: context)
+            let fresh = try? await Caps.PresentationContext.$admittedDisplay.withValue(admitted) {
+                try await Caps.PresentationContext.$target.withValue(owner.target) {
+                    try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
+                        try await model.playbackDecision(fileId: owner.file, selection: selection,
+                            quality: .auto, audioOffsetMs: 0, fileContext: context)
+                    }
                 }
             }
             guard !Task.isCancelled, self.autoCostRefreshGeneration == generation,

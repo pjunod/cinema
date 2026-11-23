@@ -8358,6 +8358,114 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(noHEVCJSON["progressive_hevc_sample_entries"])
     }
 
+    private func encodedDisplay(_ document: DeviceCaps) throws -> [String: Any] {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(document)) as? [String: Any]
+        )
+        return try XCTUnwrap(json["display"] as? [String: Any])
+    }
+
+    /// A chosen peak rides `display.max_nits` with `peak_source: "viewer"`;
+    /// Auto sends neither key. Apple never sends a platform source.
+    func testAppleCapsSendAViewerChosenPeakAndOmitBothKeysForAuto() throws {
+        for peak in HDRDisplayPeak.allCases where peak != .auto {
+            let nits = try XCTUnwrap(peak.nits)
+            let display = try encodedDisplay(Caps.capsDocument(
+                hevc: true, av1: false, displayHDR: true, dolbyVision: false, displayPeak: peak
+            ))
+            XCTAssertEqual(display["max_nits"] as? Int, nits)
+            XCTAssertEqual(display["peak_source"] as? String, "viewer")
+        }
+
+        for document in [
+            Caps.capsDocument(hevc: true, av1: false, displayHDR: true, dolbyVision: false, displayPeak: .auto),
+            Caps.capsDocument(hevc: true, av1: false, displayHDR: true, dolbyVision: false),
+        ] {
+            let display = try encodedDisplay(document)
+            XCTAssertNil(display["max_nits"])
+            XCTAssertNil(display["peak_source"])
+            XCTAssertNil(document.display.maxNits)
+            XCTAssertNil(document.display.peakSource)
+        }
+    }
+
+    func testHDRDisplayPeakStorageUsesAndroidsValuesAndFallsBackToAuto() throws {
+        XCTAssertEqual(HDRDisplayPeak.allCases.map(\.storageValue),
+                       ["auto", "400", "600", "1000", "1600", "2000", "4000"])
+        XCTAssertEqual(HDRDisplayPeak.allCases.map(\.label),
+                       ["Auto (unknown)", "400 nits", "600 nits", "1000 nits", "1600 nits", "2000 nits", "4000 nits"])
+        XCTAssertNil(HDRDisplayPeak.auto.nits)
+        for peak in HDRDisplayPeak.allCases {
+            XCTAssertEqual(HDRDisplayPeak.fromStorage(peak.storageValue), peak)
+        }
+        XCTAssertEqual(HDRDisplayPeak.fromStorage(nil), .auto)
+        XCTAssertEqual(HDRDisplayPeak.fromStorage("800"), .auto)
+
+        let suite = "tv.plurx.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(SettingsStore(defaults: defaults).hdrDisplayPeak, .auto)
+        defaults.set("bright", forKey: "plurx.hdrDisplayPeak")
+        XCTAssertEqual(SettingsStore(defaults: defaults).hdrDisplayPeak, .auto)
+        SettingsStore(defaults: defaults).hdrDisplayPeak = .nits1000
+        XCTAssertEqual(defaults.string(forKey: "plurx.hdrDisplayPeak"), "1000")
+        XCTAssertEqual(SettingsStore(defaults: defaults).hdrDisplayPeak, .nits1000)
+    }
+
+    /// A playback keeps the peak admitted at its first decision, including
+    /// "unknown", across later decisions; a changed setting is the next
+    /// playback's.
+    func testAdmittedDisplayPeakSurvivesASettingChangeDuringThePlayback() {
+        func display(_ peak: HDRDisplayPeak) -> DisplayCaps {
+            Caps.capsDocument(hevc: true, av1: false, displayHDR: true, dolbyVision: false, displayPeak: peak).display
+        }
+
+        // Admitted at 1000, then the viewer picks 4000 or Auto: still 1000.
+        let admitted1000 = display(.nits1000)
+        for changed in [HDRDisplayPeak.nits4000, .auto] {
+            let redecided = display(changed).withPeak(from: admitted1000)
+            XCTAssertEqual(redecided.maxNits, 1000)
+            XCTAssertEqual(redecided.peakSource, .viewer)
+        }
+
+        // Admitted as unknown, then the viewer picks 600: still unknown.
+        let admittedUnknown = display(.auto)
+        let stillUnknown = display(.nits600).withPeak(from: admittedUnknown)
+        XCTAssertNil(stillUnknown.maxNits)
+        XCTAssertNil(stillUnknown.peakSource)
+
+        // Nothing admitted yet (first decision, next playback): the setting applies.
+        XCTAssertEqual(display(.nits600).withPeak(from: nil), display(.nits600))
+
+        // Other display facts keep refreshing; only the peak is carried.
+        let refreshed = DisplayCaps(hdr: false, dolbyVision: false, presentationTarget: PresentationTarget(widthPx: 3840, heightPx: 2160, revision: 2))
+            .withPeak(from: admitted1000)
+        XCTAssertFalse(refreshed.hdr)
+        XCTAssertEqual(refreshed.presentationTarget?.revision, 2)
+        XCTAssertEqual(refreshed.maxNits, 1000)
+    }
+
+    /// The peak fields change nothing about the HDR10 versus Dolby Vision claim.
+    func testPeakDoesNotChangeTheHDR10VersusDolbyVisionClaim() {
+        for peak in HDRDisplayPeak.allCases {
+            let hdr10Only = Caps.capsDocument(hevc: true, av1: true, displayHDR: true, dolbyVision: false, displayPeak: peak)
+            XCTAssertTrue(hdr10Only.display.hdr)
+            XCTAssertFalse(hdr10Only.display.dolbyVision)
+            XCTAssertNil(hdr10Only.video.first { $0.codec == "hevc" }?.dvProfiles)
+            XCTAssertEqual(hdr10Only.video.first { $0.codec == "hevc" }?.present, ["sdr", "pq", "hlg"])
+
+            let dolbyVision = Caps.capsDocument(hevc: true, av1: true, displayHDR: true, dolbyVision: true, displayPeak: peak)
+            XCTAssertTrue(dolbyVision.display.dolbyVision)
+            XCTAssertEqual(dolbyVision.video.first { $0.codec == "hevc" }?.dvProfiles, [5, 8])
+
+            let sdr = Caps.capsDocument(hevc: true, av1: true, displayHDR: false, dolbyVision: true, displayPeak: peak)
+            XCTAssertFalse(sdr.display.hdr)
+            XCTAssertFalse(sdr.display.dolbyVision)
+        }
+    }
+
     func testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver() throws {
         let receiver = Caps.audioSinks(route: AudioRouteFacts(outputChannels: 8, hdmi: true))
         let byCodec = Dictionary(uniqueKeysWithValues: receiver.map { ($0.codec, $0) })

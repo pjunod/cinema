@@ -80,10 +80,34 @@ struct PresentationTarget: Codable, Equatable, Sendable {
     let revision: UInt64
 }
 
+/// Where a peak came from. Apple only ever produces `.viewer`: the platform
+/// reports EDR headroom, not a nit value, so there is nothing to derive.
+/// `.platform` exists so the wire vocabulary matches the server's.
+enum DisplayPeakSource: String, Codable, Equatable {
+    case platform
+    case viewer
+}
+
 struct DisplayCaps: Codable, Equatable {
     let hdr: Bool
     let dolbyVision: Bool
     var presentationTarget: PresentationTarget? = nil
+    /// The display's peak luminance, `display.max_nits`. Both peak fields are
+    /// nil (and so absent from the document) when the viewer chose Auto.
+    var maxNits: Int? = nil
+    var peakSource: DisplayPeakSource? = nil
+
+    /// A live playback keeps the peak admitted at its first decision, even an
+    /// unknown one, while other display facts refresh (Android's
+    /// `DisplayCaps.withPeakFrom`). With nothing retained yet this playback
+    /// has no admitted peak, so the current document stands.
+    func withPeak(from retained: DisplayCaps?) -> DisplayCaps {
+        guard let retained else { return self }
+        var copy = self
+        copy.maxNits = retained.maxNits
+        copy.peakSource = retained.peakSource
+        return copy
+    }
 }
 
 /// Native learned limits are M6 work. The type mirrors the accepted document
@@ -114,6 +138,10 @@ enum Caps {
     // Request-local geometry survives suspension without a global "latest player".
     enum PresentationContext {
         @TaskLocal static var target: PresentationTarget?
+        /// The display of this playback's first admitted decision. A later
+        /// decision for the same playback takes its peak from here instead of
+        /// Settings, so a changed setting applies to the next playback only.
+        @TaskLocal static var admittedDisplay: DisplayCaps?
     }
     private static let logger = Logger(subsystem: "tv.plurx.app", category: "capabilities")
 
@@ -122,7 +150,7 @@ enum Caps {
     }
 
     /// Capture the four live probes once, then spell that exact state in both
-    /// protocols. Output format can change while a POST is in flight on tvOS.
+    /// protocols (the legacy query has no peak). Output format can change while a POST is in flight on tvOS.
     static func snapshot() -> CapabilitySnapshot {
         let audioRoute = AudioRouteFacts.current()
         let hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
@@ -147,7 +175,8 @@ enum Caps {
                 displayHDR: displayHDR,
                 dolbyVision: dolbyVision,
                 audioRoute: audioRoute,
-                hlsHevcSampleEntries: hlsHevcSampleEntries()
+                hlsHevcSampleEntries: hlsHevcSampleEntries(),
+                displayPeak: SettingsStore().hdrDisplayPeak
             ),
             legacyQuery: legacyQuery
         )
@@ -161,7 +190,8 @@ enum Caps {
         displayHDR: Bool,
         dolbyVision: Bool,
         audioRoute: AudioRouteFacts? = nil,
-        hlsHevcSampleEntries: [String]? = nil
+        hlsHevcSampleEntries: [String]? = nil,
+        displayPeak: HDRDisplayPeak? = nil
     ) -> DeviceCaps {
         let supportsDolbyVision = hevc && displayHDR && dolbyVision
         let present = displayHDR ? ["sdr", "pq", "hlg"] : ["sdr"]
@@ -213,7 +243,13 @@ enum Caps {
             // with audio and report DV while rendering black. Preserved DV
             // therefore always rides the normalized copy-video HLS envelope.
             dvTransport: "hls",
-            display: DisplayCaps(hdr: displayHDR, dolbyVision: supportsDolbyVision)
+            display: DisplayCaps(
+                hdr: displayHDR,
+                dolbyVision: supportsDolbyVision,
+                // Only a viewer-chosen peak is ever sent; Auto sends neither key.
+                maxNits: displayPeak?.nits,
+                peakSource: displayPeak?.nits == nil ? nil : .viewer
+            )
         )
     }
 

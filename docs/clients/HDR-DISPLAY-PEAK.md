@@ -1,4 +1,4 @@
-# HDR display peak — Android reports and browser choices
+# HDR display peak — Android reports, browser and Apple choices
 
 **Status:** client candidate compiled; independent review and regression
 execution pending · **Written:** 2026-10-22.
@@ -27,12 +27,13 @@ on the same session reports no HDR capability (with or without
 
 ## Peak reports belong to one playback
 
-Both clients send optional integer `display.max_nits` and `display.peak_source`
+Android and the browser (and Apple, from a viewer choice only) send optional integer `display.max_nits` and `display.peak_source`
 (`platform` or `viewer`) in the v2 capability document. Unknown omits both
 fields. Neither HDR support, decoder capability, CSS dynamic range nor the
 player's pixel rectangle implies luminance. The server owns bucket selection;
 clients send the report rather than a rounded bucket. No minimum luminance is
-collected in phase 1. Apple clients do not report a peak in this phase.
+collected in phase 1. Apple has no display report, so it never sends
+`platform`; Auto is Unknown and omits both fields.
 
 A fresh playback captures a peak. Seeks, audio/subtitle changes, Auto-rung
 re-decisions and prepared successors retain that peak, including Unknown, so
@@ -44,6 +45,7 @@ title if you need the new display's target immediately.
 |---|---|---|---|
 | Android / Android TV | Reads the active/default display's `HdrCapabilities.desiredMaxLuminance`; non-finite, ≤0 or ≥5000 nits means Unknown. Valid fractions truncate to integer nits. | 400 · 600 · 1000 · 1600 · 2000 · 4000 nits, sent with `viewer` provenance. | Device DataStore, Settings → Playback → HDR display peak. |
 | Browser | Unknown; the browser has no nits API. | The same six choices, sent with `viewer` provenance. | Per-browser `localStorage` key `plurx.hdrDisplayPeak`, Settings → Playback → HDR display peak. |
+| Apple (iOS, tvOS) | Unknown, labelled "Auto (unknown)"; EDR headroom has no fixed nit value. | The same six choices, sent with `viewer` provenance. | `UserDefaults` key `plurx.hdrDisplayPeak`, Settings → Playback → HDR display peak (added 2026-11-23). |
 
 Android probes fresh capability documents on every decision. A display listener
 lives with the player screen, re-reads HDMI/display changes for the HDR badges

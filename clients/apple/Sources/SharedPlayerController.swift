@@ -538,7 +538,7 @@ final class SharedPlayerController: ObservableObject {
                                                 resumeMs: Int64(max(0, positionMs)), watchSequence: plan.subject.watchSequence)
             let decided = try await client.decision(context: subject.context,
                 selection: PrePlaySelection(audioIndex: audio, subtitleIndex: subtitle ?? PrePlaySelection.subtitleOff),
-                quality: quality)
+                quality: quality, admittedDisplay: plan.caps.display)
             let next = try SharedPlaybackPlan.make(subject: subject, decision: decided.decision, caps: decided.caps,
                 quality: quality, audioIndex: audio, subtitleIndex: subtitle, playbackId: plan.request.playbackId)
             try await attach(next, client: client, play: play, predecessor: predecessor)

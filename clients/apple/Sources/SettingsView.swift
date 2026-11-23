@@ -208,9 +208,9 @@ struct SettingsView: View {
 
     private var playbackFooter: String {
         #if os(tvOS)
-        return "Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on."
+        return "Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. HDR display peak applies to HDR10 playback of Dolby Vision titles when this device is not playing Dolby Vision natively, and takes effect on the next playback."
         #else
-        return "Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch."
+        return "Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. HDR display peak applies to HDR10 playback of Dolby Vision titles when this device is not playing Dolby Vision natively, and takes effect on the next playback. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch."
         #endif
     }
 
@@ -289,6 +289,14 @@ struct SettingsView: View {
                     }
                 }
                 .focused($focusedEntry, equals: .playback)
+                SettingsPicker("HDR display peak", value: model.hdrDisplayPeak.label, selection: Binding(
+                    get: { model.hdrDisplayPeak },
+                    set: { model.setHdrDisplayPeak($0) }
+                ), identifier: "settings-hdr-display-peak") {
+                    ForEach(HDRDisplayPeak.allCases) { peak in
+                        Text(peak.label).tag(peak)
+                    }
+                }
                 SettingsPicker("Audio language", value: languages.first { $0.id == model.audioLang }?.name ?? model.audioLang, selection: audioBinding) {
                     ForEach(languages) { Text($0.name).tag($0.id) }
                 }

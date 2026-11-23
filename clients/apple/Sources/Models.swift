@@ -418,6 +418,37 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
     }
 }
 
+/// The viewer's stated peak luminance for this device's display, with the
+/// Android client's storage values and wording. Apple has no display report
+/// to derive a number from (EDR headroom is a ratio, not nits), so `.auto`
+/// means the peak is unknown and the server serves the unmapped master grade.
+/// A chosen value is sent as `display.max_nits` with `peak_source: "viewer"`.
+enum HDRDisplayPeak: String, CaseIterable, Identifiable {
+    case auto
+    case nits400 = "400"
+    case nits600 = "600"
+    case nits1000 = "1000"
+    case nits1600 = "1600"
+    case nits2000 = "2000"
+    case nits4000 = "4000"
+
+    var id: String { rawValue }
+    var storageValue: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "Auto (unknown)"
+        default: return "\(rawValue) nits"
+        }
+    }
+    /// The peak to send, or nil when the viewer has not chosen one.
+    var nits: Int? { Int(rawValue) }
+
+    /// Missing or unreadable storage reads as Auto, like `playbackQuality`.
+    static func fromStorage(_ value: String?) -> HDRDisplayPeak {
+        value.flatMap(HDRDisplayPeak.init(rawValue:)) ?? .auto
+    }
+}
+
 enum PosterSize: String, CaseIterable, Identifiable {
     case small = "s"
     case medium = "m"

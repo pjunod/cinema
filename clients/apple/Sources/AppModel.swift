@@ -47,6 +47,7 @@ final class AppModel: ObservableObject {
     @Published var posterSize: PosterSize
     @Published var subtitleReadiness: SubtitleReadiness
     @Published var playbackQuality: PlaybackQuality
+    @Published var hdrDisplayPeak: HDRDisplayPeak
     @Published var autoSkip: Bool
     @Published var offlineQuality: OfflineQuality
     @Published var offlineNetwork: OfflineNetworkPolicy
@@ -106,6 +107,7 @@ final class AppModel: ObservableObject {
         posterSize = settings.posterSize
         subtitleReadiness = settings.subtitleReadiness
         playbackQuality = settings.playbackQuality
+        hdrDisplayPeak = settings.hdrDisplayPeak
         autoSkip = settings.autoSkip
         libraryGrouping = settings.libraryGrouping
         offlineQuality = settings.offlineQuality
@@ -879,6 +881,13 @@ final class AppModel: ObservableObject {
         settings.playbackQuality = quality
     }
 
+    /// A change takes effect on the next playback: a playing title keeps the
+    /// peak admitted at its first decision (`DisplayCaps.withPeak(from:)`).
+    func setHdrDisplayPeak(_ peak: HDRDisplayPeak) {
+        hdrDisplayPeak = peak
+        settings.hdrDisplayPeak = peak
+    }
+
     /// Read live by the player on every clock tick, like the Android and web
     /// clients: nothing about the stream depends on it, so a change mid-film
     /// is safe to honor immediately.
@@ -1244,6 +1253,8 @@ final class AppModel: ObservableObject {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
         document.display.presentationTarget = displayAwareAuto ? Caps.PresentationContext.target : nil
+        // A re-decision of a playing title keeps the peak it was admitted with.
+        document.display = document.display.withPeak(from: Caps.PresentationContext.admittedDisplay)
         let query = quality.decisionQueryItems + selection.queryItems +
             (displayAwareAuto && displayAwareAutoProtocol == "route-v1"
                 ? [URLQueryItem(name: "audio_offset_ms", value: String(audioOffsetMs))] : [])

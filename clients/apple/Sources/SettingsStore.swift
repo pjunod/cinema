@@ -29,6 +29,7 @@ struct SettingsStore {
         static let autoplay = "plurx.autoplay"
         static let subtitleReadiness = "plurx.subtitleReadiness"
         static let playbackQuality = "plurx.playbackQuality"
+        static let hdrDisplayPeak = "plurx.hdrDisplayPeak"
         static let autoSkip = "plurx.autoSkip"
         static let layout = "plurx.layout"
         static let theme = "plurx.theme"
@@ -146,6 +147,12 @@ struct SettingsStore {
                 ?? .auto
         }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.playbackQuality) }
+    }
+    /// Auto (peak unknown) until a person chooses a value; unreadable storage
+    /// reads as Auto. Read by `Caps.snapshot()` for each new playback.
+    var hdrDisplayPeak: HDRDisplayPeak {
+        get { HDRDisplayPeak.fromStorage(defaults.string(forKey: Key.hdrDisplayPeak)) }
+        nonmutating set { defaults.set(newValue.storageValue, forKey: Key.hdrDisplayPeak) }
     }
     /// Off by default, matching the Android client: the seek nobody asked for
     /// is opt-in on every surface that offers it.
