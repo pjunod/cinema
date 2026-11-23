@@ -511,7 +511,6 @@ impl CopyRangeProduction {
             plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
         ));
         let peak_held = mux.peak_held();
-        let memory = mux.memory();
         let observed=async{
             loop {
                 let pipes=running.pipes.as_mut().ok_or("copy_output_readers_missing")?;
@@ -571,7 +570,8 @@ impl CopyRangeProduction {
             tokio::time::Instant::now(),
             &result,
             peak_held.load(std::sync::atomic::Ordering::Relaxed),
-            memory.bytes(),
+            // The copy's peak charge: what the pool gave it at most.
+            self.memory.peak(),
         );
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();
