@@ -733,6 +733,9 @@ replacement = "every new sleep requires classification; actor-managed producer v
 # The native FEL publisher rechecks retirement and producer failure while no
 # new segment can wake it. The sleep only bounds permit cleanup discovery.
 # PR #1802 relay review adds one 25 ms poll inside the 30s retained-copy test deadline.
+# Preparing-bootstrap regression (mode 64, source_preparing_bootstrap_outlives_the_retained_ingress_observation):
+# +1 test-only 100 ms poll inside a 30 s timeout waiting for the retained ingress
+# observation to age out (+2 namespaced-time-constructor). It decides nothing; no production timer.
 [symbols.occurrences]
 "crates/plurxd/src/transcode/manager/cache.rs" = 1
 "crates/plurxd/src/transcode/manager/construct.rs" = 1
@@ -756,7 +759,7 @@ replacement = "every new sleep requires classification; actor-managed producer v
 "crates/plurxd/src/transcode/tests/chunk_07.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_09.rs" = 2
 "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs" = 1
-"crates/plurxd/src/transcode/tests/source_actor.rs" = 16
+"crates/plurxd/src/transcode/tests/source_actor.rs" = 17
 
 [[symbols]]
 id = "all-async-intervals"
@@ -5087,7 +5090,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/transcode/tests/chunk_07.rs" = 11
 "crates/plurxd/src/transcode/tests/chunk_09.rs" = 15
 "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs" = 1
-"crates/plurxd/src/transcode/tests/source_actor.rs" = 46
+"crates/plurxd/src/transcode/tests/source_actor.rs" = 48
 "crates/plurxd/src/transcoder_optimization.rs" = 2
 "crates/plurxd/src/transcoder_optimization/comparison.rs" = 2
 "crates/plurxd/src/vod/cache_budget.rs" = 1

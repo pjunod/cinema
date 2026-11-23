@@ -583,13 +583,20 @@ impl TranscodeManager {
             )
             .ok_or(SourceWorkerError::Unavailable)?;
         *stage = "growing.head_dispatch";
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         *stage = "growing.head_input";
         let input = crate::source_input::SourceInput::open_foreground_held(
             request.clone(),
@@ -718,13 +725,20 @@ impl TranscodeManager {
             .args(&file, prepared.request().start_seconds)
             .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.primary_dispatch";
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         // The census Input and every reader are joined. Reopen independently
         // against the exact object before the primary operation gets a URL.
         *stage = "growing.primary_input";

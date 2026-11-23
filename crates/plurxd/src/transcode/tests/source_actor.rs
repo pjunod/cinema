@@ -74,6 +74,15 @@ async fn source_producer_preparation_requires_fresh_unsealed_ingress_permission(
     Box::pin(source_copy_preadmission_fixture(52)).await;
 }
 
+/// The first range's bootstrap spawns after the probe and census, which take
+/// longer than a member observation lives on a loaded host. Its authority
+/// carries the ingress permission refreshed for that spawn, not the one the
+/// actor retained when it was created, so a slow preparation still spawns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_preparing_bootstrap_outlives_the_retained_ingress_observation() {
+    Box::pin(source_copy_preadmission_fixture(64)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_retained_permission_survives_zero_open_connections_and_reconnect() {
     Box::pin(source_copy_preadmission_fixture(54)).await;
@@ -1296,6 +1305,50 @@ async fn source_actual_actor(
     ))
     .await;
     let ingress_permission = ingress_fixture.permission().await;
+    if mode == 64 {
+        let gate = SourceProducerAuthority::new(
+            Arc::clone(&state.store),
+            state.cluster.source_members(),
+            Arc::clone(&state.sharing.key),
+            state.sharing.accepted_drivers.boot_id(),
+            ingress_permission.clone(),
+        );
+        // Let the retained observation age out, as it does while a loaded
+        // host probes and censuses the first range.
+        let aged = tokio::time::timeout(Duration::from_secs(30), async {
+            while ingress_permission
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(aged.is_ok(), "the retained observation ages out");
+        let retained = gate
+            .retained_ingress(&assignment)
+            .expect("the actual retained ingress");
+        let authority = gate
+            .authorize_preparing_generation(&[retained])
+            .await
+            .expect("a current preparing owner spawns past its retained observation");
+        authority
+            .validate_before_spawn()
+            .expect("the spawn checks a current observation");
+        drop(authority);
+        ingress_fixture.close().await;
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("actual closure and sealed assignment cleanup"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        return;
+    }
     if mode == 52 {
         let gate = SourceProducerAuthority::new(
             Arc::clone(&state.store),

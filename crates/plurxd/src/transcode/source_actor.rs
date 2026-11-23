@@ -155,6 +155,13 @@ impl SourceProducerAuthority {
     /// Private first-range bootstrap only: the exact retained preparing
     /// assignment and its existing index-preparation guard authorize physical
     /// input before a measured timeline origin exists. No media is servable.
+    ///
+    /// The retained permissions say which ingress was admitted, not that it
+    /// still is: each was observed when its actor was created, before the
+    /// probe and census that precede this spawn. As in
+    /// [`Self::authorize_generation`], the authority carries the permission
+    /// refreshed now, so the spawn checks a current observation rather than
+    /// failing once that preparation took longer than an observation lives.
     pub(crate) async fn authorize_preparing_generation(
         &self,
         permissions: &[plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission],
@@ -172,8 +179,8 @@ impl SourceProducerAuthority {
             {
                 continue;
             }
-            let proof = self
-                .current_preparation(permission.assignment())
+            let (proof, refreshed) = self
+                .current_preparation_and_ingress(permission.assignment())
                 .await
                 .map_err(|_| "Source preparing authority unavailable".to_owned())?;
             if !self
@@ -185,7 +192,7 @@ impl SourceProducerAuthority {
                 continue;
             }
             preparing.push(*proof);
-            ingress.push(permission.clone());
+            ingress.push(*refreshed);
         }
         if preparing.is_empty() {
             return Err("Source bootstrap has no current preparing owner".into());
@@ -1527,6 +1534,25 @@ impl SourceProducerAuthority {
         Box<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
         SourceWorkerError,
     > {
+        self.current_preparation_and_ingress(assignment)
+            .await
+            .map(|(proof, _)| proof)
+    }
+
+    /// [`Self::current_preparation`] together with the ingress permission it
+    /// refreshed under the same member observation. The retained permission
+    /// only names the admitted ingress; its observation is as old as the
+    /// actor, so a check of freshness needs this one.
+    async fn current_preparation_and_ingress(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> Result<
+        (
+            Box<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
+            Box<plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission>,
+        ),
+        SourceWorkerError,
+    > {
         let members = self
             .source_members.observe()
             .await
@@ -1563,7 +1589,7 @@ impl SourceProducerAuthority {
         {
             tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
         }
-        Ok(proof)
+        Ok((proof, permission))
     }
 
     /// A fence failure as a live refusal: an object proven changed or gone is
