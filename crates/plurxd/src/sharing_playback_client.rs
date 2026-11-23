@@ -687,6 +687,16 @@ pub(crate) struct SourceStatusReceipt {
     direct: Option<SourceDirectStart>,
 }
 impl SourceStatusReceipt {
+    /// The receiver's own Status parse, unchanged, for a test that checks
+    /// what any receiver reads a Source's answer as.
+    #[cfg(test)]
+    pub(crate) fn parse_for_test(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+    ) -> Result<Self, PeerError> {
+        Self::parse_with_receiver(bytes, session, known, true)
+    }
     #[cfg(test)]
     fn parse(
         bytes: &[u8],
