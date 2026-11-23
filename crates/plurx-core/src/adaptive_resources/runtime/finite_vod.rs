@@ -486,11 +486,20 @@ impl FiniteControl {
                 "finite task control already installed",
             ));
         }
-        if self.requested() {
+        // With a registered root, its kill (here or in `install`) ends the
+        // writer's input. Only a writer with no root to kill is aborted.
+        if self.requested() && self.root_unregistered()? {
             abort.abort();
         }
         *task = Some(abort);
         Ok(())
+    }
+    fn root_unregistered(&self) -> std::io::Result<bool> {
+        Ok(self
+            .root
+            .lock()
+            .map_err(|_| std::io::Error::other("finite root control unavailable"))?
+            .is_none())
     }
     /// The original producer task has positively joined. Its abort selection
     /// is no longer needed to signal native work and must not persist in S.
@@ -528,22 +537,35 @@ impl FiniteControl {
         }
         self.requested
             .store(true, std::sync::atomic::Ordering::Release);
-        // Attempt both original controls even when signalling one fails. This
-        // path never waits on the graph mutex held by a concurrent join.
-        let task_result = self
-            .task
-            .lock()
-            .map(|task| {
-                if let Some(task) = task.as_ref() {
-                    task.abort();
-                }
-            })
-            .map_err(|_| std::io::Error::other("finite task control unavailable"));
-        let root_result = self
-            .root
-            .lock()
-            .map_err(|_| std::io::Error::other("finite root control unavailable"))
-            .and_then(|root| root.as_ref().map_or(Ok(()), |root| root.start_kill()));
+        // Killing the registered root ends the writer's input, so the writer
+        // reaches its own terminal and finishes queued publications. Aborting
+        // it as well would replace that known stop with an abandoned task:
+        // the output would stay held as uncertain and a native trial's close
+        // could never qualify. Only a writer with no registered root yet is
+        // aborted; a root registered later is killed by `install`. This path
+        // never waits on the graph mutex held by a concurrent join.
+        let (root_present, root_result) = match self.root.lock() {
+            Ok(root) => (
+                root.is_some(),
+                root.as_ref().map_or(Ok(()), |root| root.start_kill()),
+            ),
+            Err(_) => (
+                false,
+                Err(std::io::Error::other("finite root control unavailable")),
+            ),
+        };
+        let task_result = if root_present {
+            Ok(())
+        } else {
+            self.task
+                .lock()
+                .map(|task| {
+                    if let Some(task) = task.as_ref() {
+                        task.abort();
+                    }
+                })
+                .map_err(|_| std::io::Error::other("finite task control unavailable"))
+        };
         task_result.and(root_result)
     }
 }
