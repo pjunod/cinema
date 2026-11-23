@@ -26,17 +26,10 @@ release-input paths as [the mobile-version validator](../validation/mobile_versi
 Apple source, resources or project metadata select iOS and tvOS TestFlight;
 Android release source or build metadata select Google Play **internal testing**.
 Docs, native test changes and server changes alone do not allocate a signing
-runner. Nobody bumps a build counter: the build number is derived at build
-time by [`scripts/build-number`](../scripts/build-number) from `main`'s
-first-parent history, so every `main` commit already carries its own, higher
-number.
-
-For a tree that contains `scripts/build-number`, a platform is selected by its
-changed paths alone. Older trees, which still stored a counter, publish a
-platform only if no client path changed after the `main` commit that landed
-its counter (first-parent, so an early bump in a merged PR counts); otherwise
-the log says `skipping Cinema <platform>`. The controller guard must apply the
-same two rules.
+runner. Build numbers are derived (`scripts/build-number`), so a tree with that
+script selects platforms by changed paths alone; an older tree skips a
+platform whose client paths changed after its last counter commit. The
+controller guard applies the same rules.
 
 The job calls `media/mobile-channels.yml` in the private Ansible repository,
 selecting `cinema` only. This channel playbook is separate from the physical
@@ -406,14 +399,10 @@ Two numbers, and they are not the same number:
 | Key | Where | Rule |
 |---|---|---|
 | `MARKETING_VERSION` | `project.yml` | The version humans see — `0.1.0`. Tracks the server's number ([RELEASING.md](RELEASING.md)) so a bug report naming one identifies the other |
-| `CFBundleVersion` | the built `Info.plist` | The build number. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete. Derived, never stored: a "Stamp derived build number" build phase sets it from [`scripts/build-number`](../scripts/build-number), with `--release` for the Release configuration. `CURRENT_PROJECT_VERSION` in `project.yml` is a fixed development placeholder (`1`) and is never bumped |
+| `CFBundleVersion` | built `Info.plist` | The build number. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete. A build phase stamps it from `scripts/build-number` (`--release` in Release); `CURRENT_PROJECT_VERSION` is a fixed placeholder `1` |
 
 App Store Connect rejects a duplicate build number at upload time, after the
-whole archive has finished. A derived number is unique per `main` commit, so
-archive from the `main` commit you mean to ship, from a full (not shallow)
-clone: `--release` refuses a shallow or truncated history instead of producing
-a number that already shipped. `scripts/build-number --explain` shows the
-number a checkout will get.
+whole archive has finished; archive from a full clone of `main`.
 
 ### 2.3 Archive and upload
 
@@ -659,9 +648,8 @@ channels, and keeping both is deliberate.
 
 Upload the `.aab` in Play Console → Testing → Closed testing, run the 14-day
 gate, then promote to production. `versionCode` must increase on every upload,
-same rule as Apple's build number, and comes from the same place: Gradle runs
-`scripts/build-number` (with `--release` for a release task) unless
-`-PplurxVersionCode=N` overrides it.
+same rule as Apple's build number and from the same script
+(`-PplurxVersionCode=N` overrides it).
 
 ### 5.3 The Play paperwork
 
