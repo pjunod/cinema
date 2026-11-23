@@ -20,6 +20,10 @@ pub(crate) struct SourceDirectFile {
     recipe_json: String,
 }
 impl SourceDirectFile {
+    #[cfg(test)]
+    pub(crate) fn path_for_test(&self) -> &std::path::Path {
+        &self.file.path
+    }
     pub(crate) fn new(
         file: plurx_core::domain::MediaFile,
         object_version: String,
@@ -35,21 +39,24 @@ impl SourceDirectFile {
             recipe_json,
         }
     }
-    async fn fence(&self) -> Result<crate::fragment_index_cluster::SourceFence, SourceWorkerError> {
-        let fence = crate::fragment_index_cluster::open_source_playback_fence(
+    /// An object proven not the one this session admitted is its end: a
+    /// retry could only keep failing against a replaced file. One that could
+    /// not be read just now passes; the caller bounds that by the confirmed
+    /// lease.
+    async fn fence(&self) -> Result<crate::fragment_index_cluster::SourceFence, LiveRefusal> {
+        let fence = crate::fragment_index_cluster::open_source_playback_fence_classified(
             &self.file,
             Some(&self.object_version),
         )
         .await
-        .map_err(|_| SourceWorkerError::Unavailable)?;
-        if fence
+        .map_err(|error| LiveRefusal::from_fence(&error))?;
+        let length = fence
             .handle
             .metadata()
-            .map_err(|_| SourceWorkerError::Unavailable)?
-            .len()
-            != self.length
-        {
-            return Err(SourceWorkerError::Unavailable);
+            .map_err(|_| LiveRefusal::transient(SourceWorkerError::Unavailable))?
+            .len();
+        if length != self.length {
+            return Err(LiveRefusal::terminal(SourceWorkerError::Unavailable));
         }
         Ok(fence)
     }
@@ -105,17 +112,20 @@ impl SourceViewerActor {
     fn reserve_direct_body(
         &self,
         start: &SourceDirectStart,
-    ) -> Result<SourceResponseGuard, SourceWorkerError> {
+    ) -> Result<SourceResponseGuard, LiveRefusal> {
         let mut state = self.0.state.lock().expect("Source worker state");
         if state.retirement_requested
-            || state.bodies >= 64
             || state
                 .direct_start
                 .as_ref()
                 .and_then(|current| current.as_ref().ok())
                 != Some(start)
         {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(LiveRefusal::terminal(SourceWorkerError::Unavailable));
+        }
+        // Bodies close as their transfers end.
+        if state.bodies >= 64 {
+            return Err(LiveRefusal::transient(SourceWorkerError::Unavailable));
         }
         state.bodies += 1;
         drop(state);
@@ -128,31 +138,50 @@ impl SourceViewerActor {
     /// The published direct session for Start replay and status. It renews
     /// the Source lease under fresh owned-route authority and re-proves the
     /// file, but is never viewer activity.
+    /// Every refusal states whether it passes ([`LiveRefusal`]), decided at
+    /// its check, so Status answers a passing one as a retry.
+    /// A refusal that cannot pass retires this owner.
     pub(crate) async fn open_direct_start(
         &self,
         deadline: Instant,
-    ) -> Result<(SourceDirectStart, SourceResponseGuard), SourceWorkerError> {
-        let start = self.wait_direct_ready(deadline).await?;
+    ) -> Result<(SourceDirectStart, SourceResponseGuard), LiveRefusal> {
+        let opened = self.open_direct_start_classified(deadline).await;
+        self.retire_on_terminal(opened.as_ref().err());
+        opened
+    }
+    async fn open_direct_start_classified(
+        &self,
+        deadline: Instant,
+    ) -> Result<(SourceDirectStart, SourceResponseGuard), LiveRefusal> {
+        let ended = LiveRefusal::terminal(SourceWorkerError::Unavailable);
+        let start = self
+            .wait_direct_ready(deadline)
+            .await
+            .map_err(super::wait_ready_refusal)?;
         let direct = self
             .0
             .direct
             .clone()
-            .ok_or(SourceWorkerError::Unsupported)?;
+            .ok_or(LiveRefusal::terminal(SourceWorkerError::Unsupported))?;
         let mut guard = self.reserve_direct_body(&start)?;
-        guard.source = Some(direct.fence().await?);
+        guard.source = Some(
+            direct
+                .fence()
+                .await
+                .map_err(|refusal| self.0.gate.bounded(refusal))?,
+        );
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != start.session_id
             || route.publication_ready_at_ms != 0
-            || route.response_json
-                != serde_json::to_string(&start).map_err(|_| SourceWorkerError::Unavailable)?
+            || route.response_json != serde_json::to_string(&start).map_err(|_| ended)?
             || self.retirement_requested()
             || guard
                 .source
                 .as_ref()
                 .is_none_or(|source| !source.unchanged())
         {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(ended);
         }
         Ok((start, guard))
     }
@@ -214,7 +243,10 @@ impl SourceViewerActor {
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
-        let fence = direct.fence().await?;
+        let fence = direct
+            .fence()
+            .await
+            .map_err(|refusal| self.0.gate.bounded(refusal))?;
         let file = fence
             .handle
             .try_clone()
@@ -311,13 +343,13 @@ impl TranscodeManager {
             resource_hooks: Arc::new(Default::default()),
             assignment,
             manager: Arc::downgrade(self),
-            gate: Arc::new(SourceProducerAuthority {
-                store: Arc::clone(&self.store),
-                source_members: state.cluster.source_members(),
-                master: Arc::clone(&state.sharing.key),
+            gate: Arc::new(SourceProducerAuthority::new(
+                Arc::clone(&self.store),
+                state.cluster.source_members(),
+                Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
-            }),
+            )),
             retirement_deadline: Default::default(),
             direct: Some(Arc::new(prepared.into_direct_file())),
             state: std::sync::Mutex::new(SourceViewerState {
@@ -411,7 +443,7 @@ impl TranscodeManager {
             publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: now,
-            lease_expires_at_ms: now.saturating_add(60_000),
+            lease_expires_at_ms: now.saturating_add(super::SOURCE_SESSION_LEASE_MS),
             expected_desired_revision: None,
         };
         owner
@@ -428,6 +460,7 @@ impl TranscodeManager {
         if outcome.route.session_id != session_id {
             return Err(SourceWorkerError::Conflict);
         }
+        owner.gate.activated(&outcome.route);
         authority
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -521,9 +554,20 @@ impl TranscodeManager {
                         if idle {
                             break;
                         }
-                        match owner.gate.current_owned(&owner.assignment).await {
-                            Ok(proof) if owner.gate.renew_with(&owner.assignment, &proof).await.is_ok() => {},
-                            _ => {owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;break},
+                        // The lease is renewed only for a file proven the one
+                        // this session admitted. One that could not be read
+                        // just now is retried at the next tick without
+                        // renewing, so the lease the Store last confirmed bounds
+                        // how long it can pass; one proven replaced ends it.
+                        if let Some(direct) = owner.direct.as_ref() {
+                            match owner.gate.tick_fence(direct.fence().await) { super::TickFence::Renew => {}, super::TickFence::Skip => continue, super::TickFence::End => break }
+                        }
+                        // Only a refusal that does not pass ends the owner; a
+                        // transient one is retried at the next tick, bounded by
+                        // the lease the Store last confirmed.
+                        if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
+                            owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
+                            break;
                         }
                     }
                 }
