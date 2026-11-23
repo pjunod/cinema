@@ -923,10 +923,14 @@ where
                         );
                         let mut retry = intent.request.clone();
                         retry.start_seconds = verified_ms as f64 / 1_000.0;
-                        let scoped =
+                        let trial = run_trial(retry, recovery.clone());
+                        #[cfg(any(target_os = "linux", test))]
+                        let trial = crate::vodencode::PROCESSED_TRIAL_ADMISSION.scope(
                             Arc::new(crate::vodencode::ProcessedTrialAdmission::with_claim(
                                 Arc::clone(claim.claim()),
-                            ));
+                            )),
+                            trial,
+                        );
                         // A claim closed mid-trial (a seek past the runway)
                         // means the incumbent must produce now: the trial is
                         // dropped at once rather than holding its capacity
@@ -937,8 +941,7 @@ where
                                 run.skipped(INCUMBENT_RUNWAY_SPENT);
                                 return "declined";
                             }
-                            trial = crate::vodencode::PROCESSED_TRIAL_ADMISSION
-                                .scope(scoped, run_trial(retry, recovery.clone())) => trial,
+                            trial = trial => trial,
                         };
                         incumbent_claim = Some(claim);
                         trial
@@ -1163,6 +1166,7 @@ where
         super::preparation::PreparationPurpose::SelectionChange,
         super::preparation::AcceptedAsk {
             prepared_proof: None,
+            platform: None,
             film_time_ms,
             desired_digest: None,
             planning_cancellation: Some(pending.cancellation_token()),

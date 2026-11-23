@@ -141,6 +141,15 @@ class Forge:
         combined = self._call("GET", f"/commits/{sha}/status") or {}
         return list(combined.get("statuses") or [])
 
+    def source_gate(self, number, head, main, root, run_id):
+        from validation import source_gate_landing
+        from validation import python_unit_receipts as receipts
+        api = receipts.API(self.url + '/api/v1', self.repo, self._token)
+        try:
+            return source_gate_landing.verify(api, number, head, main, root, run_id)
+        except receipts.ReceiptError as error:
+            raise LandRefused('Manual ci source gate refused: ' + str(error)) from error
+
     def merge(self, number: int, head: str, title: str, message: str) -> None:
         self._call("POST", f"/pulls/{number}/merge", {
             "Do": "merge",
@@ -305,8 +314,15 @@ def gate_state(statuses: list[dict]) -> tuple[str, str]:
 
 
 def require_green(forge, number: int, head: str, untested: str | None,
-                  say: Callable[[str], None]) -> bool:
+                  say: Callable[[str], None], *, source_gate_run=None, root=None, main=None) -> bool:
     """Refuse a head whose gate is not green; True when `untested` was what let it through."""
+
+    if source_gate_run is not None:
+        if untested:
+            raise LandRefused('An authenticated source gate cannot be combined with --accept-untested')
+        proof = forge.source_gate(number, head, main, root, source_gate_run)
+        say(f"Verified ci / Main promotion gate: actual run {proof['run']}, job {proof['job']}, {proof['url']}")
+        return False
 
     state, url = gate_state(forge.statuses(head))
     if state == "success":
@@ -353,7 +369,7 @@ def _ready(pull: dict, number: int, head: str) -> None:
 
 def prepare(forge, pull: dict, number: int, head: str, root: Path,
             fetch: Callable[[int], tuple[str, str]], untested: str | None = None,
-            say: Callable[[str], None] = print) -> tuple[str, str, tuple[str, ...], str]:
+            say: Callable[[str], None] = print, *, source_gate_run=None) -> tuple[str, str, tuple[str, ...], str]:
     """Every refusal that can be made before the merge.
 
     Returns (subject, message, the lines the landing must carry, the main the
@@ -362,9 +378,11 @@ def prepare(forge, pull: dict, number: int, head: str, root: Path,
     """
 
     _ready(pull, number, head)
-    if not require_green(forge, number, head, untested, say):
+    prefetched = fetch(number) if source_gate_run is not None else None
+    if not require_green(forge, number, head, untested, say, source_gate_run=source_gate_run,
+                         root=root, main=prefetched[0] if prefetched else None):
         untested = None
-    main_sha, fetched_head = fetch(number)
+    main_sha, fetched_head = prefetched or fetch(number)
     if fetched_head != head:
         raise LandRefused(f"#{number} fetched as {fetched_head}, not the --head {head}; it was pushed to "
                           f"while landing")
@@ -431,7 +449,7 @@ def land(forge, number: int, head: str, root: Path = REPO_ROOT, *,
          fetch: Callable[[int], tuple[str, str]] | None = None,
          fetch_commit: Callable[[str], None] | None = None,
          untested: str | None = None,
-         dry_run: bool = False, retries: int = MERGE_RETRIES, wait: float = MERGE_WAIT,
+         dry_run: bool = False, source_gate_run: int | None = None, retries: int = MERGE_RETRIES, wait: float = MERGE_WAIT,
          sleep: Callable[[float], None] = time.sleep,
          say: Callable[[str], None] = print) -> str | None:
     """Land `number` at `head`; the landing commit's SHA (None for a dry run)."""
@@ -439,7 +457,7 @@ def land(forge, number: int, head: str, root: Path = REPO_ROOT, *,
     fetch = fetch or (lambda pr: forge.fetch(root, pr))
     fetch_commit = fetch_commit or (lambda sha: forge.fetch_commit(root, sha))
     pull = forge.pull(number)
-    subject, message, trailers, main_sha = prepare(forge, pull, number, head, root, fetch, untested, say)
+    subject, message, trailers, main_sha = prepare(forge, pull, number, head, root, fetch, untested, say, source_gate_run=source_gate_run)
     say(subject)
     for line in trailers:
         say(line)
@@ -665,6 +683,8 @@ def main_land(argv: list[str] | None = None) -> int:
     parser.add_argument("--accept-untested", metavar="REASON",
                         help="land a head whose promotion gate is not green; REASON is printed and "
                              "recorded in the landing commit. For a direct merge the owner ordered.")
+    parser.add_argument('--source-gate-run', type=int,
+                        help='explicit authenticated ci.yml ordinary-PR source gate; never a status alias')
     parser.add_argument("--dry-run", action="store_true",
                         help="make every check and print the landing message; merge nothing")
     parser.add_argument("--forge-url", default=os.environ.get("FORGEJO_URL"),
@@ -690,6 +710,9 @@ def main_land(argv: list[str] | None = None) -> int:
         if not untested:
             print("land: --accept-untested needs the reason, in words", file=sys.stderr)
             return 2
+    if args.source_gate_run is not None and (args.source_gate_run <= 0 or untested):
+        print('land: --source-gate-run requires a positive actual run and forbids --accept-untested', file=sys.stderr)
+        return 2
     origin = _origin(args.root)
     url = args.forge_url or (origin[0] if origin else None)
     repo = args.repo or (origin[1] if origin else None)
@@ -707,7 +730,7 @@ def main_land(argv: list[str] | None = None) -> int:
         return 2
     try:
         land(Forge(url, repo, token), args.pr, args.head, args.root, untested=untested,
-             dry_run=args.dry_run, retries=args.retries, wait=args.wait)
+             dry_run=args.dry_run, source_gate_run=args.source_gate_run, retries=args.retries, wait=args.wait)
     except LandConflict as conflict:
         print(f"land: CONFLICT, nothing merged: {conflict}", file=sys.stderr)
         return 1

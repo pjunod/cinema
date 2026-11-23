@@ -126,6 +126,10 @@ DESKTOP_MACOS_PATHS = (
 
 APPLE_PATHS = (
     "clients/apple/**",
+    # The iOS target bundles these files even though the server also serves them.
+    "crates/plurxd/src/web/reader.js",
+    "crates/plurxd/src/web/offline-reader.js",
+    "crates/plurxd/src/web/offline-reader.html",
     # The required TV navigation gate's own inputs.
     "scripts/apple-tv-navigation-test",
     "validation/apple_simulator_runtime.py",

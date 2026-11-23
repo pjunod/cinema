@@ -2879,6 +2879,10 @@ struct BlobHeader {
     dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_cadence: Option<crate::segplan::DvRefitCadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing_composition_offsets: Option<Vec<i64>>,
     source_sha256: String,
     pipeline_sha256: String,
     rows: usize,
@@ -2896,6 +2900,7 @@ pub fn encode_cluster_fragment_index_blob(
             .dv_refit_proofs
             .as_ref()
             .is_some_and(|proofs| proofs.len() != index.rows.len())
+        || (index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none())
         || !is_sha256(source_sha256)
         || !is_sha256(pipeline_sha256)
     {
@@ -2923,6 +2928,10 @@ pub fn encode_cluster_fragment_index_blob(
         parameter_sets_constant: index.parameter_sets_constant,
         dv_refit_origin: index.dv_refit_origin,
         dv_refit_proofs: index.dv_refit_proofs.clone(),
+        dv_refit_cadence: index.dv_refit_cadence,
+        landing_composition_offsets: index
+            .landing_composition_offsets()
+            .map_err(|error| StoreError::Task(error.into()))?,
         source_sha256: source_sha256.to_ascii_lowercase(),
         pipeline_sha256: pipeline_sha256.to_ascii_lowercase(),
         rows: index.rows.len(),
@@ -3022,6 +3031,7 @@ pub fn decode_cluster_fragment_index_blob(
         })?;
         rows.push(IndexRow {
             dts: u64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes")),
+            first_cto: None,
             duration: u64::from(u32::from_le_bytes(
                 chunk[8..12].try_into().expect("four bytes"),
             )),
@@ -3050,6 +3060,13 @@ pub fn decode_cluster_fragment_index_blob(
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
     index.dv_refit_proofs = header.dv_refit_proofs;
+    index.dv_refit_cadence = header.dv_refit_cadence;
+    index
+        .restore_landing_composition_offsets(header.landing_composition_offsets)
+        .map_err(|error| StoreError::Task(error.into()))?;
+    if index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none() {
+        return Err(StoreError::Task("invalid fitted cadence summary".into()));
+    }
     Ok(index)
 }
 
@@ -3118,6 +3135,10 @@ struct V3BlobHeader {
     dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_cadence: Option<crate::segplan::DvRefitCadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing_composition_offsets: Option<Vec<i64>>,
     source_sha256: String,
     output_identity: FragmentIndexOutputIdentity,
     engine: FragmentIndexEngineProvenance,
@@ -3242,6 +3263,21 @@ pub fn cluster_fragment_index_output_identity(
             digest.update(proof.as_bytes());
         }
     }
+    if index.dv_refit_cadence.is_some() {
+        let cadence = index
+            .verified_refit_cadence()
+            .ok_or_else(|| v3_error("has invalid fitted cadence summary"))?;
+        digest.update(b"plurx/fitted-copy/presentation-interval/v1\0");
+        digest.update(cadence.minimum_interval_ticks.to_be_bytes());
+        digest.update(cadence.sample_count.to_be_bytes());
+    }
+    if let Some(offsets) = index.landing_composition_offsets().map_err(v3_error)? {
+        digest.update(b"plurx/copy-landing/first-composition-offset/v1\0");
+        digest.update((offsets.len() as u64).to_be_bytes());
+        for offset in offsets {
+            digest.update(offset.to_be_bytes());
+        }
+    }
     let value = serde_json::to_value(&promotion)
         .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
     hash_v3_promotion_value(&mut digest, &value)?;
@@ -3312,6 +3348,10 @@ pub fn encode_cluster_fragment_index_blob_v3(
         parameter_sets_constant: index.parameter_sets_constant,
         dv_refit_origin: index.dv_refit_origin,
         dv_refit_proofs: index.dv_refit_proofs.clone(),
+        dv_refit_cadence: index.dv_refit_cadence,
+        landing_composition_offsets: index
+            .landing_composition_offsets()
+            .map_err(|error| StoreError::Task(error.into()))?,
         source_sha256: source_sha256.to_ascii_lowercase(),
         output_identity,
         engine: FragmentIndexEngineProvenance {
@@ -3423,6 +3463,7 @@ pub fn decode_cluster_fragment_index_blob_v3(
         }
         rows.push(IndexRow {
             dts: u64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes")),
+            first_cto: None,
             duration: u64::from_le_bytes(chunk[8..16].try_into().expect("eight bytes")),
             bytes: u32::from_le_bytes(chunk[16..20].try_into().expect("four bytes")),
             video_bytes: u32::from_le_bytes(chunk[20..24].try_into().expect("four bytes")),
@@ -3446,6 +3487,10 @@ pub fn decode_cluster_fragment_index_blob_v3(
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
     index.dv_refit_proofs = header.dv_refit_proofs;
+    index.dv_refit_cadence = header.dv_refit_cadence;
+    index
+        .restore_landing_composition_offsets(header.landing_composition_offsets)
+        .map_err(|error| StoreError::Task(error.into()))?;
     let observed = cluster_fragment_index_output_identity(
         &index,
         &header.source_sha256,
@@ -3688,6 +3733,7 @@ mod tests {
             90_000,
             vec![IndexRow {
                 dts: 12,
+                first_cto: None,
                 duration: 3_003,
                 bytes: 45,
                 video_bytes: 31,
@@ -3731,6 +3777,7 @@ mod tests {
             90_000,
             vec![IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 90000,
                 bytes: 100,
                 video_bytes: 90,
@@ -3785,6 +3832,7 @@ mod tests {
     fn blob_bytes_ignore_file_specific_legacy_identity() {
         let row = IndexRow {
             dts: 12,
+            first_cto: None,
             duration: 3_003,
             bytes: 45,
             video_bytes: 31,
@@ -3815,6 +3863,7 @@ mod tests {
             90_000,
             vec![IndexRow {
                 dts: 12,
+                first_cto: None,
                 duration: 3_003,
                 bytes: 45,
                 video_bytes: 31,
@@ -3862,7 +3911,7 @@ mod tests {
 
     #[test]
     fn fitted_clock_and_proofs_roundtrip_both_blob_formats_and_bind_output_identity() {
-        use crate::segplan::{refit_proof::FittedFragmentProof, DvRefitOrigin};
+        use crate::segplan::{refit_proof::FittedFragmentProof, DvRefitCadence, DvRefitOrigin};
         let source = digest('a');
         let semantic = digest('9');
         let engine = codec_engine();
@@ -3884,6 +3933,10 @@ mod tests {
             .expect("typed v4 coded/cadence proof")
         };
         index.dv_refit_proofs = Some(vec![proof('e'), proof('f')]);
+        index.dv_refit_cadence = Some(DvRefitCadence {
+            minimum_interval_ticks: 41,
+            sample_count: 24,
+        });
         let output = cluster_fragment_index_output_identity(&index, &source, &semantic)
             .expect("fitted output identity");
 
@@ -3898,16 +3951,55 @@ mod tests {
                 .expect("v3 fitted roundtrip")
                 .index,
         ];
+        let mut without_cadence = index.clone();
+        without_cadence.dv_refit_cadence = None;
+        let legacy_output =
+            cluster_fragment_index_output_identity(&without_cadence, &source, &semantic)
+                .expect("v3 output identity without cadence");
+        assert_ne!(legacy_output, output);
+        let legacy_v3 =
+            encode_cluster_fragment_index_blob_v3(&without_cadence, &source, &semantic, &engine)
+                .expect("v3 encoding without cadence");
+        assert!(
+            decode_cluster_fragment_index_blob_v3(&legacy_v3, &source, &legacy_output)
+                .expect("legacy v3 roundtrip")
+                .index
+                .dv_refit_cadence
+                .is_none()
+        );
+        assert!(decode_cluster_fragment_index_blob_v3(&current, &source, &legacy_output).is_err());
         for restored in decoded {
             assert_eq!(restored.rows, index.rows);
             assert_eq!(restored.dv_refit_origin, index.dv_refit_origin);
             assert_eq!(restored.dv_refit_proofs, index.dv_refit_proofs);
+            assert_eq!(restored.verified_refit_cadence(), index.dv_refit_cadence);
             assert_eq!(
                 cluster_fragment_index_output_identity(&restored, &source, &semantic)
                     .expect("restored fitted identity"),
                 output
             );
         }
+
+        let mut invalid_cadence = index.clone();
+        invalid_cadence
+            .dv_refit_cadence
+            .as_mut()
+            .expect("portable cadence fixture")
+            .minimum_interval_ticks = 0;
+        assert!(encode_cluster_fragment_index_blob(
+            &invalid_cadence,
+            &source,
+            &engine.pipeline_sha256
+        )
+        .is_err());
+
+        assert!(encode_cluster_fragment_index_blob_v3(
+            &invalid_cadence,
+            &source,
+            &semantic,
+            &engine
+        )
+        .is_err());
 
         let mut changed = index.clone();
         changed.dv_refit_proofs.as_mut().expect("fitted proofs")[0] = proof('8');
@@ -3923,6 +4015,32 @@ mod tests {
             decode_cluster_fragment_index_blob_v3(&changed_blob, &source, &output).is_err(),
             "the prior output identity cannot authorize different fitted proofs"
         );
+    }
+
+    #[test]
+    fn cluster_copy_composition_offsets_round_trip_and_bind_v3_identity() {
+        let source = digest('a');
+        let semantic = digest('9');
+        let engine = codec_engine();
+        let mut index = codec_index();
+        let without_clock = cluster_fragment_index_output_identity(&index, &source, &semantic)
+            .expect("proofless identity");
+        index.rows[0].first_cto = Some(-3_328);
+        let v2 = encode_cluster_fragment_index_blob(&index, &source, &engine.pipeline_sha256)
+            .expect("v2 clock encode");
+        let copy = decode_cluster_fragment_index_blob(&v2, &source, &engine.pipeline_sha256)
+            .expect("v2 clock decode");
+        assert_eq!(copy.rows, index.rows);
+
+        let output = cluster_fragment_index_output_identity(&index, &source, &semantic)
+            .expect("clock identity");
+        assert_ne!(output, without_clock);
+        let v3 = encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &engine)
+            .expect("v3 clock encode");
+        let copy =
+            decode_cluster_fragment_index_blob_v3(&v3, &source, &output).expect("v3 clock decode");
+        assert_eq!(copy.index.rows, index.rows);
+        assert!(decode_cluster_fragment_index_blob_v3(&v3, &source, &without_clock).is_err());
     }
 
     #[test]

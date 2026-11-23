@@ -3910,6 +3910,7 @@ async fn shared_decision_reports_a_locally_indexed_dolby_vision_title_as_indexed
             bytes: 100_000,
             video_bytes: 99_000,
             class: plurx_core::fmp4::CutClass::CleanIdr,
+            first_cto: None,
         }],
         "sha",
         crate::fragindex::identity_for(&file, local),
@@ -3988,4 +3989,79 @@ async fn shared_decision_withholds_dolby_vision_from_an_unaffirmed_receiver() {
     let affirmed = decide(affirming).await;
     assert!(affirmed.decision.preserve_dolby_vision);
     assert_eq!(affirmed.decision.delivered_dynamic_range, "dolby_vision");
+}
+
+/// Regression (M4 Air, 2026-11-22, 'Avatar' and '69 Minutes'): every shared
+/// watch-progress beat committed on B and then answered 503
+/// `sharing_body_authority_unavailable` nine milliseconds later, because the
+/// receiver content guard refused a success body without Source authority.
+/// B's own history is released as such; anything else unmarked is still
+/// refused.
+#[tokio::test]
+async fn sharing_private_history_answers_pass_the_receiver_content_guard() {
+    let (_, state) = super::super::tests::test_app_with_state();
+    let app = Router::new()
+        .route(
+            "/history",
+            axum::routing::post(|| async {
+                receiver_private_history(StatusCode::OK, json!({"sequence": 1}))
+            }),
+        )
+        .route(
+            "/conflict",
+            axum::routing::post(|| async {
+                receiver_private_history(
+                    StatusCode::CONFLICT,
+                    json!({"code": "sharing_progress_stale", "current_sequence": 2}),
+                )
+            }),
+        )
+        .route(
+            "/unmarked",
+            axum::routing::post(|| async {
+                (StatusCode::OK, Json(json!({"sequence": 1}))).into_response()
+            }),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            receiver_content_guard,
+        ))
+        .with_state(state);
+    for (path, status) in [
+        ("/history", StatusCode::OK),
+        ("/conflict", StatusCode::CONFLICT),
+        ("/unmarked", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("guarded response");
+        assert_eq!(response.status(), status, "{path}");
+        if status == StatusCode::OK {
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+        }
+    }
+    // Both B-private history writers answer through the marker.
+    let source = include_str!("../shared_library.rs");
+    for handler in ["async fn viewer_progress(", "async fn viewer_watched("] {
+        let body = &source[source.find(handler).expect(handler)..];
+        let body = &body[..body[1..]
+            .find("\nasync fn ")
+            .map_or(body.len(), |end| end + 1)];
+        assert!(body.contains("receiver_private_history("), "{handler}");
+        assert!(!body.contains(".into_response())"), "{handler}");
+    }
 }

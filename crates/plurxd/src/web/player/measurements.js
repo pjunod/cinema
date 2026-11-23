@@ -19,6 +19,31 @@ function bufferRunway(v){
   }catch(e){}
   return 0;
 }
+// The playhead and the buffered ranges themselves: a runway says how much was
+// ahead, these say where. A presentation stall with media buffered ahead and a
+// playhead that never moves is a different bug from a hole in the ranges.
+// The server prints at most BUFFERED_RANGES_MAX bytes (system.rs drops a longer
+// value whole), so the ranges nearest the playhead are kept up to that length
+// and listed in time order.
+const BUFFERED_RANGES_MAX=128;
+function bufferedRanges(v){
+  try{
+    const t=v.currentTime, ranges=[];
+    for(let i=0;i<v.buffered.length;i++){
+      const start=v.buffered.start(i), end=v.buffered.end(i);
+      ranges.push({start,text:start.toFixed(2)+"-"+end.toFixed(2),
+        distance:t<start?start-t:(t>end?t-end:0)});
+    }
+    const kept=[];
+    let length=-1;
+    for(const range of ranges.slice().sort((a,b)=>a.distance-b.distance)){
+      if(length+1+range.text.length>BUFFERED_RANGES_MAX) break;
+      length+=1+range.text.length;
+      kept.push(range);
+    }
+    return kept.sort((a,b)=>a.start-b.start).map(range=>range.text).join(",");
+  }catch(e){return null;}
+}
 // Every stream start gets an identity and a stated reason. Without them a
 // seek's numbers and a cold start's land in the same bucket, and "time to
 // first frame" stops meaning anything — the restart paths (seek, audio
@@ -159,7 +184,7 @@ function newAttempt(reason){
   PLAYER.attemptAt=performance.now();
 }
 function playbackContext(){
-  const v=document.getElementById("video"), p=/** @type {Player} */(PLAYER||{});
+  const v=/** @type {HTMLVideoElement|null} */(document.getElementById("video")), p=/** @type {Player} */(PLAYER||{});
   return {
     // What is on screen, not what was asked for — under Auto the request
     // carries no height at all, and a beacon that reported null would lose the
@@ -171,6 +196,8 @@ function playbackContext(){
     // alias of its typed `session_id`, so old and native clients stay additive.
     session:p.sessionId||null,
     runway:v?bufferRunway(v):null,
+    position:v&&Number.isFinite(v.currentTime)?+v.currentTime.toFixed(2):null,
+    buffered:v?bufferedRanges(v):null,
     attempt:p.attemptId||null,
     reason:p.attemptReason||null,
     // hls.js's EWMA over real segment downloads. On a just-in-time server this
