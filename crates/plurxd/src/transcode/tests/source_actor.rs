@@ -1090,13 +1090,13 @@ async fn source_actual_copy_attachment(
         assignment,
     ))
     .await;
-    let gate = Arc::new(SourceProducerAuthority {
-        store: Arc::clone(store),
-        source_members: state.cluster.source_members(),
-        master: Arc::clone(master),
-        registry_boot_id: state.sharing.accepted_drivers.boot_id(),
-        ingress: ingress_fixture.permission().await,
-    });
+    let gate = Arc::new(SourceProducerAuthority::new(
+        Arc::clone(store),
+        state.cluster.source_members(),
+        Arc::clone(master),
+        state.sharing.accepted_drivers.boot_id(),
+        ingress_fixture.permission().await,
+    ));
     authority
         .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
         .expect("original postcommit clock");
@@ -1327,13 +1327,13 @@ async fn source_actual_actor(
     .await;
     let ingress_permission = ingress_fixture.permission().await;
     if mode == 52 {
-        let gate = SourceProducerAuthority {
-            store: Arc::clone(&state.store),
-            source_members: state.cluster.source_members(),
-            master: Arc::clone(&state.sharing.key),
-            registry_boot_id: state.sharing.accepted_drivers.boot_id(),
-            ingress: ingress_permission.clone(),
-        };
+        let gate = SourceProducerAuthority::new(
+            Arc::clone(&state.store),
+            state.cluster.source_members(),
+            Arc::clone(&state.sharing.key),
+            state.sharing.accepted_drivers.boot_id(),
+            ingress_permission.clone(),
+        );
         assert!(gate.current_preparation(&assignment).await.is_ok());
         ingress_fixture.close().await;
         assert!(gate.current_preparation(&assignment).await.is_err());

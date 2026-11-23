@@ -20,6 +20,10 @@ pub(crate) struct SourceDirectFile {
     recipe_json: String,
 }
 impl SourceDirectFile {
+    #[cfg(test)]
+    pub(crate) fn path_for_test(&self) -> &std::path::Path {
+        &self.file.path
+    }
     pub(crate) fn new(
         file: plurx_core::domain::MediaFile,
         object_version: String,
@@ -35,18 +39,24 @@ impl SourceDirectFile {
             recipe_json,
         }
     }
-    /// An object that cannot be re-proven the one this session admitted is
-    /// its end: a retry could only keep failing against a replaced file.
+    /// An object proven not the one this session admitted is its end: a
+    /// retry could only keep failing against a replaced file. One that could
+    /// not be read just now passes; the caller bounds that by the confirmed
+    /// lease.
     async fn fence(&self) -> Result<crate::fragment_index_cluster::SourceFence, LiveRefusal> {
-        let changed = LiveRefusal::terminal(SourceWorkerError::Unavailable);
-        let fence = crate::fragment_index_cluster::open_source_playback_fence(
+        let fence = crate::fragment_index_cluster::open_source_playback_fence_classified(
             &self.file,
             Some(&self.object_version),
         )
         .await
-        .map_err(|_| changed)?;
-        if fence.handle.metadata().map_err(|_| changed)?.len() != self.length {
-            return Err(changed);
+        .map_err(|error| LiveRefusal::from_fence(&error))?;
+        let length = fence
+            .handle
+            .metadata()
+            .map_err(|_| LiveRefusal::transient(SourceWorkerError::Unavailable))?
+            .len();
+        if length != self.length {
+            return Err(LiveRefusal::terminal(SourceWorkerError::Unavailable));
         }
         Ok(fence)
     }
@@ -130,7 +140,16 @@ impl SourceViewerActor {
     /// file, but is never viewer activity.
     /// Every refusal states whether it passes ([`LiveRefusal`]), decided at
     /// its check, so Status answers a passing one as a retry.
+    /// A refusal that cannot pass retires this owner.
     pub(crate) async fn open_direct_start(
+        &self,
+        deadline: Instant,
+    ) -> Result<(SourceDirectStart, SourceResponseGuard), LiveRefusal> {
+        let opened = self.open_direct_start_classified(deadline).await;
+        self.retire_on_terminal(opened.as_ref().err());
+        opened
+    }
+    async fn open_direct_start_classified(
         &self,
         deadline: Instant,
     ) -> Result<(SourceDirectStart, SourceResponseGuard), LiveRefusal> {
@@ -145,7 +164,12 @@ impl SourceViewerActor {
             .clone()
             .ok_or(LiveRefusal::terminal(SourceWorkerError::Unsupported))?;
         let mut guard = self.reserve_direct_body(&start)?;
-        guard.source = Some(direct.fence().await?);
+        guard.source = Some(
+            direct
+                .fence()
+                .await
+                .map_err(|refusal| self.0.gate.bounded(refusal))?,
+        );
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != start.session_id
@@ -219,7 +243,10 @@ impl SourceViewerActor {
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
-        let fence = direct.fence().await?;
+        let fence = direct
+            .fence()
+            .await
+            .map_err(|refusal| self.0.gate.bounded(refusal))?;
         let file = fence
             .handle
             .try_clone()
@@ -316,13 +343,13 @@ impl TranscodeManager {
             resource_hooks: Arc::new(Default::default()),
             assignment,
             manager: Arc::downgrade(self),
-            gate: Arc::new(SourceProducerAuthority {
-                store: Arc::clone(&self.store),
-                source_members: state.cluster.source_members(),
-                master: Arc::clone(&state.sharing.key),
+            gate: Arc::new(SourceProducerAuthority::new(
+                Arc::clone(&self.store),
+                state.cluster.source_members(),
+                Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
-            }),
+            )),
             retirement_deadline: Default::default(),
             direct: Some(Arc::new(prepared.into_direct_file())),
             state: std::sync::Mutex::new(SourceViewerState {

@@ -232,6 +232,14 @@ impl SourceFence {
         open_source_fence(file, Some(&self.object_version)).await
     }
 
+    /// [`Self::reopen`], saying whether its failure can pass.
+    pub(crate) async fn reopen_classified(
+        &self,
+        file: &MediaFile,
+    ) -> Result<Self, SourceFenceError> {
+        open_source_fence_classified(file, Some(&self.object_version)).await
+    }
+
     pub(crate) fn unchanged(&self) -> bool {
         self.drift().is_none()
     }
@@ -327,24 +335,79 @@ fn describe_object_version_drift(before: &str, after: &str) -> String {
     moved.join(", ")
 }
 
+/// Why a source fence could not be opened.
+///
+/// A fence answers two different questions, and their failures mean opposite
+/// things. Whether the object is still the one admitted: a size, mtime,
+/// object-version or length mismatch, a missing file, or a link where a file
+/// was named are all proof it is not, and no retry can change that. Whether
+/// it could be read just now: a failed open, stat or blocking task says
+/// nothing about the object, and the next attempt may succeed.
+#[derive(Debug)]
+pub(crate) enum SourceFenceError {
+    /// The object is not the one admitted, or is gone.
+    Changed(String),
+    /// The object could not be read this time.
+    Unreachable(String),
+}
+impl SourceFenceError {
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(self, Self::Unreachable(_))
+    }
+    fn from_open(context: String, error: &std::io::Error) -> Self {
+        #[cfg(unix)]
+        let link = error.raw_os_error() == Some(libc::ELOOP);
+        #[cfg(not(unix))]
+        let link = false;
+        if error.kind() == std::io::ErrorKind::NotFound || link {
+            Self::Changed(context)
+        } else {
+            Self::Unreachable(context)
+        }
+    }
+}
+impl std::fmt::Display for SourceFenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(reason) | Self::Unreachable(reason) => formatter.write_str(reason),
+        }
+    }
+}
+impl From<SourceFenceError> for String {
+    fn from(error: SourceFenceError) -> Self {
+        error.to_string()
+    }
+}
+
 pub(crate) async fn open_source_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    open_source_fence_classified(file, expected_object_version)
+        .await
+        .map_err(String::from)
+}
+
+/// [`open_source_fence`], saying whether its failure can pass.
+pub(crate) async fn open_source_fence_classified(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> Result<SourceFence, SourceFenceError> {
     #[cfg(unix)]
     {
-        let source = tokio::fs::File::open(&file.path)
-            .await
-            .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let metadata = source
-            .metadata()
-            .await
-            .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
-        let object_version = object_version(&metadata)?;
+        let source = tokio::fs::File::open(&file.path).await.map_err(|error| {
+            SourceFenceError::from_open(format!("opening {}: {error}", file.path.display()), &error)
+        })?;
+        let metadata = source.metadata().await.map_err(|error| {
+            SourceFenceError::Unreachable(format!("fstat {}: {error}", file.path.display()))
+        })?;
+        let object_version = object_version(&metadata).map_err(SourceFenceError::Changed)?;
         if let Some(expected) = expected_object_version {
-            scanner_identity_matches(&metadata, file)?;
+            scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
             if expected != object_version {
-                return Err("source changed after cluster index resolution".to_owned());
+                return Err(SourceFenceError::Changed(
+                    "source changed after cluster index resolution".to_owned(),
+                ));
             }
         }
         Ok(SourceFence {
@@ -359,15 +422,22 @@ pub(crate) async fn open_source_fence(
             plurx_core::fs_secure::open_read_nofollow_blocking(&path)
         })
         .await
-        .map_err(|error| format!("opening source task failed: {error}"))?
-        .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let metadata = source
-            .metadata()
-            .map_err(|error| format!("stating {}: {error}", file.path.display()))?;
-        scanner_identity_matches(&metadata, file)?;
-        let object_version = windows_object_version(&source)?;
+        .map_err(|error| {
+            SourceFenceError::Unreachable(format!("opening source task failed: {error}"))
+        })?
+        .map_err(|error| {
+            SourceFenceError::from_open(format!("opening {}: {error}", file.path.display()), &error)
+        })?;
+        let metadata = source.metadata().map_err(|error| {
+            SourceFenceError::Unreachable(format!("stating {}: {error}", file.path.display()))
+        })?;
+        scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
+        let object_version =
+            windows_object_version(&source).map_err(SourceFenceError::Unreachable)?;
         if expected_object_version.is_some_and(|expected| expected != object_version) {
-            return Err("source changed after cluster index resolution".to_owned());
+            return Err(SourceFenceError::Changed(
+                "source changed after cluster index resolution".to_owned(),
+            ));
         }
         Ok(SourceFence {
             handle: source,
@@ -383,26 +453,45 @@ pub(crate) async fn open_source_playback_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    open_source_playback_fence_classified(file, expected_object_version)
+        .await
+        .map_err(String::from)
+}
+
+/// [`open_source_playback_fence`], saying whether its failure can pass.
+pub(crate) async fn open_source_playback_fence_classified(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> Result<SourceFence, SourceFenceError> {
     let path = file.path.clone();
     let source = tokio::task::spawn_blocking(move || {
         plurx_core::fs_secure::open_read_nofollow_blocking(&path)
     })
     .await
-    .map_err(|_| "Source file open task failed".to_owned())?
-    .map_err(|_| "Source file cannot be opened without following links".to_owned())?;
+    .map_err(|_| SourceFenceError::Unreachable("Source file open task failed".to_owned()))?
+    .map_err(|error| {
+        SourceFenceError::from_open(
+            "Source file cannot be opened without following links".to_owned(),
+            &error,
+        )
+    })?;
     let metadata = source
         .metadata()
-        .map_err(|_| "Source file cannot be stated".to_owned())?;
+        .map_err(|_| SourceFenceError::Unreachable("Source file cannot be stated".to_owned()))?;
     if !metadata.is_file() || file.size < 0 {
-        return Err("Source file is not a bounded regular media object".to_owned());
+        return Err(SourceFenceError::Changed(
+            "Source file is not a bounded regular media object".to_owned(),
+        ));
     }
-    scanner_identity_matches(&metadata, file)?;
+    scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
     #[cfg(unix)]
-    let object_version = object_version(&metadata)?;
+    let object_version = object_version(&metadata).map_err(SourceFenceError::Changed)?;
     #[cfg(windows)]
-    let object_version = windows_object_version(&source)?;
+    let object_version = windows_object_version(&source).map_err(SourceFenceError::Unreachable)?;
     if expected_object_version.is_some_and(|expected| expected != object_version) {
-        return Err("Source file changed after its owned observation".to_owned());
+        return Err(SourceFenceError::Changed(
+            "Source file changed after its owned observation".to_owned(),
+        ));
     }
     Ok(SourceFence {
         handle: source,
@@ -1813,6 +1902,87 @@ mod tests {
             .expect("second page");
         assert_eq!(second_removed, 1);
         assert_eq!(cursor, "01/");
+    }
+
+    // ---- fence failures ------------------------------------------------
+
+    /// Only an object that could not be read just now passes. A missing
+    /// file, a link where a file was named, a size or mtime that no longer
+    /// matches the scan, or an object version other than the one held are
+    /// all proof the object is not the one admitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fence_failure_passes_only_when_the_object_could_not_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("fence directory");
+        // The source sits in its own directory, so that directory can be
+        // made unsearchable without touching the file: a mode change on the
+        // file itself moves its ctime, which the held version rightly reads
+        // as a change.
+        let parent = dir.path().join("library");
+        std::fs::create_dir(&parent).expect("library");
+        let path = parent.join("source.mkv");
+        std::fs::write(&path, filler(4096)).expect("source");
+        let file = sampled_file(path.clone());
+        let held = open_source_playback_fence_classified(&file, None)
+            .await
+            .expect("the scanned object");
+        let changed = |result: Result<SourceFence, SourceFenceError>| match result {
+            Err(error) => !error.is_transient(),
+            Ok(_) => panic!("a fence over a different object opened"),
+        };
+
+        assert!(changed(
+            open_source_playback_fence_classified(&file, Some("not-the-held-version")).await
+        ));
+        assert!(changed(
+            open_source_fence_classified(&file, Some("not-the-held-version")).await
+        ));
+        let mut resized = file.clone();
+        resized.size += 1;
+        assert!(changed(
+            open_source_playback_fence_classified(&resized, None).await
+        ));
+        let mut retimed = file.clone();
+        retimed.mtime += 1;
+        assert!(changed(held.reopen_classified(&retimed).await));
+        let link = dir.path().join("link.mkv");
+        std::os::unix::fs::symlink(&path, &link).expect("link");
+        let mut linked = file.clone();
+        linked.path = link;
+        assert!(changed(
+            open_source_playback_fence_classified(&linked, None).await
+        ));
+        let mut missing = file.clone();
+        missing.path = dir.path().join("missing.mkv");
+        assert!(changed(
+            open_source_playback_fence_classified(&missing, None).await
+        ));
+        assert!(changed(held.reopen_classified(&missing).await));
+
+        // The same object, unreadable just now: a retry may succeed, and
+        // does once it is readable again.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable");
+        let playback = open_source_playback_fence_classified(&file, Some(held.object_version()))
+            .await
+            .err()
+            .expect("an unreadable object is not fenced");
+        let reopened = held
+            .reopen_classified(&file)
+            .await
+            .err()
+            .expect("not reopened");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("readable");
+        assert!(playback.is_transient(), "{playback}");
+        assert!(reopened.is_transient(), "{reopened}");
+        assert!(
+            open_source_playback_fence_classified(&file, Some(held.object_version()))
+                .await
+                .is_ok()
+        );
+        assert!(held.reopen_classified(&file).await.is_ok());
     }
 
     // ---- sampled source attestation -----------------------------------

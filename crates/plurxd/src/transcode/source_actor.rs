@@ -25,6 +25,47 @@ pub(crate) struct SourceProducerAuthority {
     master: Arc<plurx_core::secrets::CredentialKey>,
     registry_boot_id: uuid::Uuid,
     ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
+    /// The latest Source session lease the Store confirmed for this owner.
+    lease: LeaseBound,
+}
+
+/// How far one renewal extends this owner's Source session lease.
+pub(crate) const SOURCE_SESSION_LEASE_MS: i64 = 60_000;
+
+/// The Store's own lease, enforced where the Store cannot say so. A refusal
+/// that passes on its own is transient only while the lease the Store last
+/// confirmed still holds: past it, the session is over for this owner
+/// whether or not the Store can be reached to say it, so the refusal is
+/// terminal. Not a timer: it only reads the lease the Store wrote.
+pub(crate) struct LeaseBound {
+    confirmed_until_ms: std::sync::atomic::AtomicI64,
+}
+impl LeaseBound {
+    /// A lease presumed to the renewal window from `now_ms`, as the
+    /// activation that created this owner wrote it.
+    pub(crate) fn from(now_ms: i64) -> Self {
+        Self {
+            confirmed_until_ms: std::sync::atomic::AtomicI64::new(
+                now_ms.saturating_add(SOURCE_SESSION_LEASE_MS),
+            ),
+        }
+    }
+    /// Record a lease the Store confirmed; never moves it backward.
+    pub(crate) fn confirmed(&self, until_ms: i64) {
+        self.confirmed_until_ms
+            .fetch_max(until_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(crate) fn bound(&self, refusal: LiveRefusal, now_ms: i64) -> LiveRefusal {
+        let until = self
+            .confirmed_until_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if refusal.is_transient() && now_ms >= until {
+            tracing::warn!(target: "plurxd::transcode", stage = "source_owner.lease", lease_until_ms = until, "Source admission refused past its confirmed lease");
+            LiveRefusal::terminal(refusal.error)
+        } else {
+            refusal
+        }
+    }
 }
 
 pub(crate) struct SourceGenerationAuthority {
@@ -56,6 +97,22 @@ impl SourceGenerationAuthority {
 }
 
 impl SourceProducerAuthority {
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        source_members: crate::cluster::SourceMembers,
+        master: Arc<plurx_core::secrets::CredentialKey>,
+        registry_boot_id: uuid::Uuid,
+        ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
+    ) -> Self {
+        Self {
+            store,
+            source_members,
+            master,
+            registry_boot_id,
+            ingress,
+            lease: LeaseBound::from(crate::fragment_index_cluster::unix_ms()),
+        }
+    }
     pub(crate) fn retained_ingress(
         &self,
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
@@ -269,6 +326,15 @@ impl LiveRefusal {
             persistence: RefusalPersistence::Transient,
         }
     }
+    /// A fence failure: only an object that could not be read just now
+    /// can pass.
+    pub(crate) fn from_fence(error: &crate::fragment_index_cluster::SourceFenceError) -> Self {
+        if error.is_transient() {
+            Self::transient(SourceWorkerError::Unavailable)
+        } else {
+            Self::terminal(SourceWorkerError::Unavailable)
+        }
+    }
     pub(crate) const fn terminal(error: SourceWorkerError) -> Self {
         Self {
             error,
@@ -305,38 +371,30 @@ mod live_refusal_tests {
     use super::*;
     use SourceWorkerError as E;
 
-    /// Every classifier a live refusal is built with, for every error it can
-    /// see: only what passes on its own is transient.
+    /// A refusal that passes stays transient while the lease the Store last
+    /// confirmed holds, and is terminal once it has passed; a terminal one
+    /// stays terminal, and a confirmation never moves the lease back.
     #[test]
-    fn live_refusal_classifiers_are_pinned() {
-        let all = [
-            E::Unavailable,
-            E::NotYet,
-            E::RescanRequired,
-            E::CopyTargetExceeded,
-            E::CopyInitContractChanged,
-            E::CopyClockUnknown,
-            E::CopySyncUnverified,
-            E::Capacity,
-            E::Conflict,
-            E::Deadline,
-            E::Unresolved,
-            E::Unsupported,
-        ];
-        for error in all {
-            assert_eq!(
-                wait_ready_refusal(error).is_transient(),
-                matches!(error, E::Deadline | E::NotYet),
-                "wait_ready {error:?}"
-            );
-            assert_eq!(
-                growing::subtitle_refusal(error).is_transient(),
-                matches!(error, E::Deadline | E::Capacity),
-                "caption window {error:?}"
-            );
-            assert_eq!(wait_ready_refusal(error).error, error);
-            assert_eq!(SourceWorkerError::from(LiveRefusal::terminal(error)), error);
-        }
+    fn the_confirmed_lease_bounds_what_passes() {
+        let lease = LeaseBound::from(1_000);
+        let until = 1_000 + SOURCE_SESSION_LEASE_MS;
+        assert!(lease
+            .bound(LiveRefusal::transient(E::Unresolved), until - 1)
+            .is_transient());
+        let past = lease.bound(LiveRefusal::transient(E::Unresolved), until);
+        assert!(!past.is_transient());
+        assert_eq!(past.error, E::Unresolved);
+        assert!(!lease
+            .bound(LiveRefusal::terminal(E::Unavailable), 0)
+            .is_transient());
+        lease.confirmed(until + 30_000);
+        assert!(lease
+            .bound(LiveRefusal::transient(E::Unresolved), until)
+            .is_transient());
+        lease.confirmed(0);
+        assert!(lease
+            .bound(LiveRefusal::transient(E::Unresolved), until + 29_999)
+            .is_transient());
     }
 }
 
@@ -721,28 +779,53 @@ impl SourceViewerActor {
         deadline: Instant,
     ) -> Result<(crate::http::hls::StartResponse, SourceResponseGuard), LiveRefusal> {
         let opened = self.open_start_response_classified(deadline).await;
-        if let Err(refusal) = opened {
-            if !refusal.is_transient() {
-                // The same mode the owner's renewal tick ends with when it
-                // loses authority: the session cannot continue, so its
-                // connections close rather than drain.
-                self.0
-                    .state
-                    .lock()
-                    .expect("Source retirement cause")
-                    .retirement_mode = crate::sharing_connection_custody::DriverCloseMode::Revoke;
-                self.request_retirement();
-            }
-        }
+        self.retire_on_terminal(opened.as_ref().err());
         opened
     }
+    /// A Start or Status refusal that cannot pass ends this owner, in the
+    /// same mode its renewal tick ends with when it loses authority: the
+    /// session cannot continue, so its connections close rather than drain.
+    pub(super) fn retire_on_terminal(&self, refusal: Option<&LiveRefusal>) {
+        if refusal.is_some_and(|refusal| !refusal.is_transient()) {
+            self.0
+                .state
+                .lock()
+                .expect("Source retirement cause")
+                .retirement_mode = crate::sharing_connection_custody::DriverCloseMode::Revoke;
+            self.request_retirement();
+        }
+    }
+    /// The source file this owner serves, for a test that makes it
+    /// unreadable without changing it.
     #[cfg(test)]
-    pub(crate) fn retirement_requested_for_test(&self) -> bool {
+    pub(crate) fn source_path_for_test(&self) -> std::path::PathBuf {
+        match (&self.0.direct, self.growing_backing()) {
+            (Some(direct), _) => direct.path_for_test().to_path_buf(),
+            (None, Some(backing)) => backing.file.path.clone(),
+            (None, None) => panic!("a test source owner serves a file"),
+        }
+    }
+    /// Stand in for a minute of wall time: the lease the Store last
+    /// confirmed for this owner has passed.
+    #[cfg(test)]
+    pub(crate) fn lapse_lease_for_test(&self) {
+        self.0
+            .gate
+            .lease
+            .confirmed_until_ms
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Whether this owner is ending: nothing it answers can pass any more.
+    pub(crate) fn is_retiring(&self) -> bool {
         self.0
             .state
             .lock()
             .expect("Source worker state")
             .retirement_requested
+    }
+    #[cfg(test)]
+    pub(crate) fn retirement_requested_for_test(&self) -> bool {
+        self.is_retiring()
     }
     /// Wait for settlement without requesting it.
     #[cfg(test)]
@@ -833,6 +916,7 @@ impl SourceViewerActor {
                 backing
                     .physical_fence()
                     .await
+                    .map_err(|refusal| self.0.gate.bounded(refusal))
                     .inspect_err(traced("physical_fence"))?,
             );
             let proof = self
@@ -892,7 +976,7 @@ impl SourceViewerActor {
                 .vod
                 .source_response_physical_fence(&facts.response_owner)
                 .await
-                .map_err(|_| refused("physical_fence", terminal))?,
+                .map_err(|error| refused("physical_fence", self.0.gate.fence_refusal(&error)))?,
         );
         let proof = self
             .0
@@ -977,15 +1061,32 @@ impl SourceViewerActor {
         resource: &SharingHlsResource,
         deadline: Instant,
     ) -> Result<SourceOpenedResource, LiveRefusal> {
+        // This deadline bounds the same wait the growing segment wait does,
+        // so it is judged the same way: by whether production advanced.
+        #[cfg(unix)]
+        let growing = match self.growing_backing() {
+            Some(backing) => {
+                let waited = backing.production.mark().await;
+                Some((backing, waited))
+            }
+            None => None,
+        };
         let actor = self.clone();
         let resource = resource.clone();
         let job = tokio::spawn(Box::pin(async move {
             actor.open_resource_owned(&resource, deadline).await
         }));
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), job)
-            .await
-            .map_err(|_| LiveRefusal::transient(SourceWorkerError::Deadline))?
-            .map_err(|_| LiveRefusal::terminal(SourceWorkerError::Unresolved))?
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), job).await {
+            Ok(joined) => {
+                joined.map_err(|_| LiveRefusal::terminal(SourceWorkerError::Unresolved))?
+            }
+            #[cfg(unix)]
+            Err(_) if growing.is_some() => {
+                let (backing, waited) = growing.expect("growing wait");
+                Err(self.deadline_refusal(backing.production.stalled_since(waited).await))
+            }
+            Err(_) => Err(LiveRefusal::transient(SourceWorkerError::Deadline)),
+        }
     }
     async fn open_resource_owned(
         &self,
@@ -1078,13 +1179,14 @@ impl SourceViewerActor {
         {
             return Err(ended);
         }
-        // An object that cannot be re-proven is the session's end.
+        // An object proven changed or gone is the session's end; one that
+        // could not be read just now passes, within the confirmed lease.
         guard.source = Some(
             manager
                 .vod
                 .source_response_physical_fence(&facts.response_owner)
                 .await
-                .map_err(|_| ended)?,
+                .map_err(|error| self.0.gate.fence_refusal(&error))?,
         );
         let guard = Arc::new(guard);
         let custody = resource::SourceResourceReadCustody::new(
@@ -1335,9 +1437,36 @@ impl SourceProducerAuthority {
         Ok(proof)
     }
 
+    /// A fence failure as a live refusal: an object proven changed or gone is
+    /// terminal; one that could not be read just now passes, but only within
+    /// the lease the Store last confirmed.
+    pub(super) fn fence_refusal(
+        &self,
+        error: &crate::fragment_index_cluster::SourceFenceError,
+    ) -> LiveRefusal {
+        self.bounded(LiveRefusal::from_fence(error))
+    }
+    /// A refusal bounded by the lease the Store last confirmed.
+    pub(super) fn bounded(&self, refusal: LiveRefusal) -> LiveRefusal {
+        self.lease
+            .bound(refusal, crate::fragment_index_cluster::unix_ms())
+    }
+    /// The owned route, its refusals bounded by the confirmed lease.
+    async fn current_owned(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> Result<Box<plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority>, LiveRefusal>
+    {
+        self.current_owned_read(assignment)
+            .await
+            .map_err(|refusal| {
+                self.lease
+                    .bound(refusal, crate::fragment_index_cluster::unix_ms())
+            })
+    }
     /// A store that could not answer, or a membership not yet observed, can
     /// pass; an owned-route authority the store refused cannot.
-    async fn current_owned(
+    async fn current_owned_read(
         &self,
         assignment: &SourceDispatchAssignment,
     ) -> Result<Box<plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority>, LiveRefusal>
@@ -1393,6 +1522,18 @@ impl SourceProducerAuthority {
         assignment: &SourceDispatchAssignment,
         proof: &plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority,
     ) -> Result<MediaSessionRoute, LiveRefusal> {
+        self.renew_with_read(assignment, proof)
+            .await
+            .map_err(|refusal| {
+                self.lease
+                    .bound(refusal, crate::fragment_index_cluster::unix_ms())
+            })
+    }
+    async fn renew_with_read(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        proof: &plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority,
+    ) -> Result<MediaSessionRoute, LiveRefusal> {
         const ATTEMPTS: usize = 4;
         let mut fresh: Option<Box<plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority>> =
             None;
@@ -1427,6 +1568,7 @@ impl SourceProducerAuthority {
             .await
             .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.route", error_class = "store", "Source admission refused"); LiveRefusal::transient(SourceWorkerError::Unresolved) })?
             .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.route", error_class = "absent", "Source admission refused"); LiveRefusal::terminal(SourceWorkerError::Unavailable) })?;
+        self.lease.confirmed(route.lease_expires_at_ms);
         let now = crate::fragment_index_cluster::unix_ms();
         self.store
             .renew_source_media_session(
@@ -1439,10 +1581,15 @@ impl SourceProducerAuthority {
                     media_sequence: route.media_sequence,
                 },
                 now,
-                now.saturating_add(60_000),
+                now.saturating_add(SOURCE_SESSION_LEASE_MS),
             )
             .await
             .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.renew_write", error_class = "store", "Source admission refused"); LiveRefusal::transient(SourceWorkerError::Unresolved) })
+            .inspect(|renewed| {
+                if let Some(route) = renewed {
+                    self.lease.confirmed(route.lease_expires_at_ms);
+                }
+            })
     }
 }
 
@@ -1541,13 +1688,13 @@ impl TranscodeManager {
             resource_hooks: Arc::new(Default::default()),
             assignment,
             manager: Arc::downgrade(self),
-            gate: Arc::new(SourceProducerAuthority {
-                store: Arc::clone(&self.store),
-                source_members: state.cluster.source_members(),
-                master: Arc::clone(&state.sharing.key),
+            gate: Arc::new(SourceProducerAuthority::new(
+                Arc::clone(&self.store),
+                state.cluster.source_members(),
+                Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
-            }),
+            )),
             retirement_deadline: Default::default(),
             direct: None,
             state: std::sync::Mutex::new(SourceViewerState {
@@ -2395,12 +2542,18 @@ impl TranscodeManager {
                         if let Some(session_id) = session_id {
                             if self.vod.recovered_start(&session_id).await.is_none() { break; }
                             let Some(facts) = self.vod.hls_facts(&session_id).await else {break};
-                            if self.vod.source_response_physical_fence(&facts.response_owner).await.is_err() {break;}
+                            // The lease is renewed only for an object proven
+                            // unchanged. One that could not be read just now is
+                            // retried at the next tick without renewing, so the
+                            // confirmed lease bounds how long it can pass.
+                            if let Err(error) = self.vod.source_response_physical_fence(&facts.response_owner).await {
+                                if owner.gate.fence_refusal(&error).is_transient() { continue; }
+                                break;
+                            }
                         }
                         // Only a refusal that does not pass ends the owner. A
                         // transient one is retried at the next tick, bounded by
-                        // the Store lease itself: renewals that keep failing let
-                        // it expire, and the next read is then refused.
+                        // the lease the Store last confirmed for this owner.
                         if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
                             owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
                             break;

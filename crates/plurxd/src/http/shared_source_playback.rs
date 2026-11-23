@@ -1085,7 +1085,9 @@ async fn status(
         .store
         .source_ingress_custody(&owned.assignment)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", "Source status refused"); live_refusal_retry() })?
+        // A Store that cannot answer passes only for an owner still live: an
+        // ending one cannot be kept by a retry, whatever the Store says later.
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", retiring = owned.actor.is_retiring(), "Source status refused"); if owned.actor.is_retiring() { unavailable() } else { live_refusal_retry() } })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "absent", "Source status refused"); unavailable() })?;
     let cleanup_only = headers.cleanup_only()
         || current.is_err()
@@ -1125,8 +1127,9 @@ async fn status(
                 .await)
             }
             // A direct owner has no HLS Start response to open: a refusal
-            // that passes is answered as a retry, any other with the
-            // terminal projection below.
+            // that passes is answered as a retry. Any other has already
+            // retired the owner and is answered with the terminal
+            // projection below.
             Err(refusal) => {
                 tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", transient = refusal.transient, "Source status refused");
                 if refusal.transient {

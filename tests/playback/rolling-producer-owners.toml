@@ -4205,7 +4205,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # the single/run split without changing count.
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only serve_http listener, stopped
 # and joined before the fixture shuts down. No production task.
-expected_occurrences = 1205
+# Source refusal review and stuck producer: +2 test-only tasks, both joined:
+# the paused-time fake producer in copyrange::production::commit_wait_tests,
+# and the serve_http listener in LiveSourceSession, stopped and joined before
+# each fixture shuts down. No production task.
+expected_occurrences = 1207
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6266,7 +6270,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only tokio::time::timeout (20 s)
 # around a dead copy's actor settling; the test awaits settlement, it does not
 # poll. No production timer.
-expected_occurrences = 2325
+# Source refusal review and stuck producer: the growing segment wait's
+# tokio::time::timeout_at moved into copyrange::production::CommitWaiter
+# (-1 growing.rs, +1 production.rs; same deadline, no new timer). +1 paused-time
+# sleep in the fake producer, +5 test-only waits in the unanswerable-store and
+# direct Status tests (one 11 s sleep spanning a renewal tick, bounded settles
+# and a bounded retirement wait). No production timer.
+expected_occurrences = 2331
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7612,7 +7622,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process launch.
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +7 response.status() reads on the
 # fixture's HTTP answers. No process launch, kill or wait.
-expected_occurrences = 989
+# Source refusal review: +11 response.status() reads on the fixture's HTTP
+# answers in the LiveSourceSession tests. No process launch, kill or wait.
+expected_occurrences = 1000
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7942,7 +7954,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only entry.wait(...) for the
 # fixture's Source owner, bounded by its 1 s deadline. No production lifecycle
 # call.
-expected_occurrences = 409
+# Source refusal review: +1 test-only entry.wait(...) in live_source_owner,
+# bounded by its 1 s deadline. No production lifecycle call.
+expected_occurrences = 410
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

@@ -69,17 +69,20 @@ pub(crate) struct SourceGrowingBacking {
 impl SourceGrowingBacking {
     /// The path is independently reopened and checked against this range's
     /// held object, so a replacement cannot authorize cached old AV bytes.
-    /// A copy that is no longer live, or an object that cannot be re-proven
-    /// the one this range holds, is the session's end: a retry could only
-    /// keep failing against a replaced file.
+    /// A copy that is no longer live, or an object proven not the one this
+    /// range holds, is the session's end: a retry could only keep failing
+    /// against a replaced file. An object that could not be read just now
+    /// passes; the caller bounds that by the confirmed lease.
     pub(crate) async fn physical_fence(
         &self,
     ) -> Result<crate::fragment_index_cluster::SourceFence, super::LiveRefusal> {
-        let ended = super::LiveRefusal::terminal(SourceWorkerError::Unavailable);
         if !self.is_live() {
-            return Err(ended);
+            return Err(super::LiveRefusal::terminal(SourceWorkerError::Unavailable));
         }
-        self.source.reopen(&self.file).await.map_err(|_| ended)
+        self.source
+            .reopen_classified(&self.file)
+            .await
+            .map_err(|error| super::LiveRefusal::from_fence(&error))
     }
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
@@ -192,7 +195,12 @@ impl SourceViewerActor {
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| pending)?;
-        guard.source = Some(backing.physical_fence().await?);
+        guard.source = Some(
+            backing
+                .physical_fence()
+                .await
+                .map_err(|refusal| self.0.gate.bounded(refusal))?,
+        );
         let guard = Arc::new(guard);
         let custody = resource::SourceResourceReadCustody::new(
             Arc::clone(&guard),
@@ -211,6 +219,13 @@ impl SourceViewerActor {
                     .rsplit('/')
                     .next()
                     .unwrap_or("");
+                // The wait window starts here: what production has
+                // committed by now is what a deadline is judged against.
+                let waiter = crate::copyrange::CommitWaiter::begin(
+                    backing.production.as_ref(),
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await;
                 let mut ready = loop {
                     let changed = backing.production.changed.notified();
                     tokio::pin!(changed);
@@ -249,9 +264,9 @@ impl SourceViewerActor {
                         return Err(ended);
                     }
                     drop(files);
-                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
-                        .await
-                        .map_err(|_| LiveRefusal::transient(SourceWorkerError::Deadline))?;
+                    waiter.changed(changed).await.map_err(|end| {
+                        self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
+                    })?;
                 };
                 // The opened immutable segment is pinned through the real body.
                 ready.delivery = Arc::clone(&backing.delivery);
@@ -424,6 +439,26 @@ impl SourceViewerActor {
         let guard = Arc::try_unwrap(guard)
             .map_err(|_| LiveRefusal::transient(SourceWorkerError::Unresolved))?;
         Ok(SourceOpenedResource { payload, guard })
+    }
+}
+
+impl SourceViewerActor {
+    /// A resource wait that reached its deadline. It passes only if the
+    /// range's production advanced during the wait
+    /// ([`crate::copyrange::CopyRangeProduction::stalled_since`]): a slow
+    /// producer is still producing, and the viewer's next request will find
+    /// more. A producer that committed nothing in a whole wait window,
+    /// without holding by design, is stuck: no retry can be served, so the
+    /// refusal is terminal and the session is retired, closing its
+    /// connections, rather than kept alive by its viewer's polling.
+    pub(super) fn deadline_refusal(&self, stalled: bool) -> super::LiveRefusal {
+        if !stalled {
+            return super::LiveRefusal::transient(SourceWorkerError::Deadline);
+        }
+        tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.producer_stalled", "Source growing copy committed nothing in a resource wait; retiring it");
+        let stuck = super::LiveRefusal::terminal(SourceWorkerError::Unavailable);
+        self.retire_on_terminal(Some(&stuck));
+        stuck
     }
 }
 
@@ -1066,9 +1101,17 @@ impl TranscodeManager {
                     ()=retirement=>{},
                     ()=physical=>{},
                     _=renewal.tick()=>{
-                        if backing.activity_expired() || backing.production.refresh_read_bank().await.is_err() || backing.physical_fence().await.is_err(){break;}
+                        if backing.activity_expired() || backing.production.refresh_read_bank().await.is_err() {break;}
+                        // The lease is renewed only for an object proven
+                        // unchanged. One that could not be read just now is
+                        // retried at the next tick without renewing, so the
+                        // confirmed lease bounds how long it can pass.
+                        if let Err(refusal) = backing.physical_fence().await {
+                            if owner.gate.bounded(refusal).is_transient() { continue; }
+                            break;
+                        }
                         // Only a refusal that does not pass ends the owner; the
-                        // Store lease bounds how long transient ones may last.
+                        // confirmed lease bounds how long transient ones may last.
                         if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
                             owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
                             break;

@@ -408,24 +408,6 @@ impl SourceRouteUnavailable {
     }
 }
 
-#[cfg(test)]
-mod route_unavailable_tests {
-    use super::SourceRouteUnavailable as R;
-
-    /// Only a refused authority is the session's end for its owner.
-    #[test]
-    fn only_a_refused_route_authority_does_not_pass() {
-        for (reason, passes) in [
-            (R::Refused, false),
-            (R::MembershipStale, true),
-            (R::RaceExhausted, true),
-            (R::NotPublished, true),
-        ] {
-            assert_eq!(reason.passes(), passes, "{reason:?}");
-        }
-    }
-}
-
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod association_tests {
     use super::*;

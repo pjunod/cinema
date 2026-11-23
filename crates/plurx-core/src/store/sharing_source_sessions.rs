@@ -944,8 +944,13 @@ async fn prepare_publication_route<T: Backend>(
         } else {
             SourcePublicationPhase::Published
         };
+        // No guard can be formed from this membership observation: its write
+        // guard is stale or its local member is not one this Store names.
+        // A fresher observation can form one.
         let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
-            return Ok(refused);
+            return Ok(SourcePublicationAuthorityRead::Unavailable(
+                SourceRouteUnavailable::MembershipStale,
+            ));
         };
         let rows = backend
             .sharing_read(
@@ -964,6 +969,13 @@ async fn prepare_publication_route<T: Backend>(
             // The guard failed with the lease revision still moving: every
             // attempt lost to this owner's own renewals. An unmoved revision
             // is a real refusal.
+            //
+            // A moved revision is read as this owner's own renewal, but the
+            // revision alone cannot say whose it was. A foreign takeover that
+            // committed between the guard and this read is labelled
+            // RaceExhausted once; the caller's next read observes the new
+            // owner's route and refuses it as Refused, so the mislabel costs
+            // one retry and never keeps a lost session alive.
             return Ok(SourcePublicationAuthorityRead::Unavailable(if moved {
                 SourceRouteUnavailable::RaceExhausted
             } else {

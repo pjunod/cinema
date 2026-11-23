@@ -114,8 +114,18 @@ bump may break compatibility and a **patch** bump never does.
   they read the old answer, so nothing regresses for them. The Store now says
   why a Source route could not be read (refused, a stale membership guard, a
   lost lease race, not yet published), and only a refusal ends the session;
-  an owner's renewal tick also ends it only then, the Store lease bounding how
-  long a passing failure may last.
+  an owner's renewal tick also ends it only then. A passing failure lasts at
+  most until the lease the Store last confirmed for the owner, even while the
+  Store cannot be reached to say it has passed. A source file that could not
+  be read just now passes; one that is missing, replaced or no longer matches
+  its scan does not. A direct-play session that cannot continue is retired
+  as a copy is.
+- **A shared copy whose producer is stuck now ends instead of hanging.** A
+  segment request that waited its whole window (25 s) passes only if the
+  copy committed a segment meanwhile, or was holding ahead of its viewer by
+  design. If it committed nothing, the producer is stuck: the Source retires
+  the session and the receiver ends it, rather than retrying it forever while
+  its player polls.
 - **Shared Matroska titles start from the beginning and restart mid-title.** A shared copy of a Matroska title with reordered frames (B-frames) was refused with `copy_clock_unknown` on its first fragment: from the start for titles like *Countdown*, and on every restart after a seek for titles like *Avatar*. Matroska stores no decode times, so FFmpeg makes them up after every start and rounds each into its own output's time base. A 1/1000 packet clock never matched the 1/16000 MP4 to the tick, and a decode time FFmpeg repeated was kept by the clock but raised by one tick in the MP4. The packet clock is now written in the MP4 track's own timescale. Each sample is checked against the decode time the MP4 muxer actually writes, still exactly.
 - **Shared watch progress is saved and acknowledged.** Every progress beat (and every explicit watched toggle) for a shared title was written on the receiver and then answered `503`, because the receiver's catalogue-body guard refused a success that carried no Source content. The player kept resending the first beat, so only the first position of each session was ever recorded. These answers now carry the receiver's own history, marked as such for the guard.
 - **Shared playback-control refusals name their step.** The receiver logs which step refused a shared control exchange (attachment, peer, transport failure or the Source's own refusal code), and the Source logs why its growing copy refused one, instead of both collapsing into an unlogged `control_unavailable`.

@@ -2138,6 +2138,197 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
     }
 }
 
+/// Commits a real same-owner lease renewal, by revision only, before each of
+/// the first `renewals` guard reads: the interleaving a Status, a resource
+/// and the heartbeat produce when they renew one session concurrently.
+struct RenewingBetweenReads<'a> {
+    store: &'a SqliteStore,
+    incarnation: Uuid,
+    renewals: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl super::super::sharing::Backend for RenewingBetweenReads<'_> {
+    fn sharing_is_replicated(&self) -> bool {
+        self.store.sharing_is_replicated()
+    }
+    async fn sharing_read(
+        &self,
+        sql: &str,
+        values: Vec<super::super::sharing::Value>,
+    ) -> Result<Vec<String>, StoreError> {
+        if sql.starts_with("SELECT json_quote(CASE WHEN")
+            && self
+                .renewals
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        {
+            self.store
+                .sharing_txn(vec![(
+                    "UPDATE job_leases SET revision=revision+1 WHERE resource=$1".into(),
+                    vec![format!("session:{}", self.incarnation).into()],
+                )])
+                .await?;
+        }
+        self.store.sharing_read(sql, values).await
+    }
+    async fn sharing_txn(
+        &self,
+        statements: Vec<super::super::sharing::Statement>,
+    ) -> Result<Vec<usize>, StoreError> {
+        self.store.sharing_txn(statements).await
+    }
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_revision_key_rows().await
+    }
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_file_locator_key_rows().await
+    }
+    async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_purpose_archive_rows().await
+    }
+}
+
+/// Each reason an owned route is unavailable, produced by the Store state
+/// that causes it, says whether it passes on its own. A stale membership
+/// observation and a guard lost to this owner's own renewals pass; a route
+/// another owner holds does not.
+#[tokio::test]
+async fn sharing_source_owned_route_refusals_say_whether_they_pass() {
+    let store = SqliteStore::open_in_memory().expect("memory");
+    let (grant, key) = setup(&store).await;
+    let request = intent(&store, grant, &key, "first-activation").await;
+    let SourceClaimOutcome::Acquired(binding) = store
+        .claim_source_media_session(&request, &proof())
+        .await
+        .expect("claim")
+    else {
+        panic!("Source reservation")
+    };
+    let assignment = store
+        .assign_source_dispatch(&binding, &key, &proof())
+        .await
+        .expect("assignment")
+        .expect("actual local worker");
+    let SourceWriteAuthorityRead::Ready(authority) = store
+        .prepare_source_activation_authority(&assignment, &key, &proof())
+        .await
+        .expect("authority")
+    else {
+        panic!("current private witness")
+    };
+    let now = now_ms().expect("clock");
+    store
+        .activate_source_media_session(
+            &authority,
+            &crate::domain::MediaSessionActivation {
+                incarnation_id: binding.incarnation_id.to_string(),
+                session_id: Uuid::new_v4().to_string(),
+                principal: binding.principal.clone(),
+                playback_id: binding.playback_id.clone(),
+                recovery_epoch: String::new(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: Some(binding.request_id.clone()),
+                request_fingerprint: binding.request_fingerprint.clone(),
+                owner_node_id: "voter".into(),
+                recipe_json: "{}".into(),
+                response_json: "{}".into(),
+                publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: now,
+                lease_expires_at_ms: now + 60000,
+                expected_desired_revision: None,
+            },
+        )
+        .await
+        .expect("guarded activation")
+        .expect("Source route");
+    let unavailable = |read: SourceOwnedRouteAuthorityRead| match read {
+        SourceOwnedRouteAuthorityRead::Unavailable(reason) => Some(reason),
+        _ => None,
+    };
+    let pending = unavailable(
+        store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("pending read"),
+    )
+    .expect("unpublished route");
+    assert_eq!(pending, SourceRouteUnavailable::NotPublished);
+    assert!(pending.passes());
+    // Fixture-only published state, as in the renewal test above.
+    store.sharing_txn(vec![("UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$2 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into(),now.into()])]).await.expect("fixture-only resolved route");
+
+    // A membership observed too long ago forms no write guard; a fresher
+    // observation does.
+    let stale = source_admission_members_with_purpose_for_unit_test(
+        1,
+        &BTreeSet::from([1]),
+        now - 3_600_000,
+        &CredentialKey::from_bytes([17; 32]),
+    )
+    .expect("stale observation");
+    let reason = unavailable(
+        store
+            .prepare_source_owned_route_authority(&assignment, &key, &stale)
+            .await
+            .expect("stale read"),
+    )
+    .expect("stale membership refused");
+    assert_eq!(reason, SourceRouteUnavailable::MembershipStale);
+    assert!(reason.passes());
+
+    // One renewal between the observation and its guard is re-observed.
+    let once = RenewingBetweenReads {
+        store: &store,
+        incarnation: binding.incarnation_id,
+        renewals: 1.into(),
+    };
+    assert!(matches!(
+        prepare_owned_route(&once, &assignment, &key, &proof())
+            .await
+            .expect("re-observed read"),
+        SourceOwnedRouteAuthorityRead::Ready(_)
+    ));
+    // Renewals on every attempt exhaust the re-observation, and that passes.
+    let always = RenewingBetweenReads {
+        store: &store,
+        incarnation: binding.incarnation_id,
+        renewals: usize::MAX.into(),
+    };
+    let reason = unavailable(
+        prepare_owned_route(&always, &assignment, &key, &proof())
+            .await
+            .expect("racing read"),
+    )
+    .expect("every guard lost");
+    assert_eq!(reason, SourceRouteUnavailable::RaceExhausted);
+    assert!(reason.passes());
+
+    // A route another owner holds is refused, and that does not pass.
+    store
+        .sharing_txn(vec![(
+            "UPDATE job_leases SET owner_node_id='foreign' WHERE resource=$1".into(),
+            vec![format!("session:{}", binding.incarnation_id).into()],
+        )])
+        .await
+        .expect("foreign lease fixture");
+    let reason = unavailable(
+        store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("foreign read"),
+    )
+    .expect("foreign route refused");
+    assert_eq!(reason, SourceRouteUnavailable::Refused);
+    assert!(!reason.passes());
+}
+
 #[tokio::test]
 async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
     let dir = tempfile::tempdir().expect("directory");
