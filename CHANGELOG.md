@@ -99,6 +99,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Dolby Vision FEL upgrade staged for a session that the viewer then closed no longer keeps
+  rendering for nobody until its deadline. Releasing the session retires its staged successor,
+  which frees the worker's reconstruction slot for the viewer's next session. An upgrade that
+  finds the slot busy now waits for the next rendering exchange instead of being declined for
+  good. Copy sessions now log why a native split layout was declined or never reserved.
 - A shared title no longer ends because its Source briefly could not answer.
   When a healthy Source copy could not answer one Status or resource request
   (a slow store renewal, a lost renewal race, its open-body limit, a segment

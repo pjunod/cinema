@@ -2325,7 +2325,10 @@ id = "m4-exact-release-proof-completion"
 pattern = "complete_release_(?:with_route|absent|settlement)"
 # 29 -> 30 with the E1c review: the fence guard runs a release through
 # `complete_release_absent` with a cached view answer present. Test-only.
-expected_occurrences = 30
+# 30 -> 31: `the_trial_and_release_paths_keep_their_reconstruction_contracts`
+# pins that release retires a staged successor before
+# `complete_release_with_route`. Test-only source-order needle.
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "m4-terminal-route-proof-cache"
@@ -2652,7 +2655,9 @@ id = "m4-terminal-capability-projection"
 pattern = "begin_session_terminal"
 # R1: +1 test-only (`admin_stop_settles_stopped_not_authority_fence`) drives
 # the operator-stop phase-two projection; no new projection owner.
-expected_occurrences = 16
+# +1 test-only: `the_trial_and_release_paths_keep_their_reconstruction_contracts`
+# orders the released-incumbent retirement after this projection.
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-release-shared-settlement"
