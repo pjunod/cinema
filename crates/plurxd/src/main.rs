@@ -2334,7 +2334,10 @@ impl cluster::StartupClock for StartupObservationHttp {
                     node_id,
                     observer: observer.clone(),
                 })
-                .fallback(startup_pending);
+                .fallback(startup_pending)
+                .layer(axum::middleware::from_fn(
+                    crate::cluster::calls::auth_refusal_response,
+                ));
             *self.router.write().map_err(|_| {
                 plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
             })? = pending;

@@ -879,7 +879,7 @@ function activityNodeStatusText(status){
   return ({unhealthy:"unhealthy",unreachable:"unreachable",timed_out:"timed out",
     refused:"refused the activity request",http_error:"returned an HTTP error",
     unsupported:"does not publish Activity HTTP",
-    invalid_response:"sent an invalid response",unavailable:"directory unavailable"})[status]||"unavailable";
+    invalid_response:"sent an invalid response",local_unavailable:"could not be asked from this server",unavailable:"directory unavailable"})[status]||"unavailable";
 }
 // A node id is stable but names nothing: nobody recognizes a machine from
 // `5deeeebc-…`. The response carries the roster's id -> short-hostname map, so

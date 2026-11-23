@@ -368,6 +368,48 @@
         );
     }
 
+    #[test]
+    fn delayed_activation_entry_consumes_the_absolute_lease_instead_of_restarting_it() {
+        let started = tokio::time::Instant::now();
+        let deadline = super::create::activation_lease_deadline_at(13_000, 1_000, started);
+        let entered = started + Duration::from_secs(11);
+        let delayed = super::create::activation_lease_deadline_at(13_000, 12_000, entered);
+        assert_eq!(deadline, started + Duration::from_secs(12));
+        assert_eq!(delayed, deadline);
+        assert_eq!(delayed - entered, Duration::from_secs(1));
+        assert_eq!(
+            super::create::activation_lease_deadline_at(13_000, 13_000, deadline),
+            deadline,
+            "an expired absolute lease yields no new owner lifetime",
+        );
+    }
+
+    #[test]
+    fn activation_reentry_cannot_extend_the_captured_owner_deadline() {
+        let started = tokio::time::Instant::now();
+        let captured = super::create::activation_lease_deadline_at(13_000, 1_000, started);
+        for elapsed in [2_u64, 7, 11] {
+            assert_eq!(
+                super::create::activation_lease_deadline_at(
+                    13_000,
+                    1_000 + elapsed as i64 * 1_000,
+                    started + Duration::from_secs(elapsed),
+                ),
+                captured,
+            );
+        }
+        let source = hls_product_source();
+        let owner = source
+            .split_once("pub(in crate::http) async fn activate_session_under_authority(")
+            .expect("activation owner")
+            .1
+            .split_once("async fn wait_for_exact_activation(")
+            .expect("activation owner end")
+            .0;
+        assert!(owner.contains("lease_deadline: tokio::time::Instant"));
+        assert!(!owner.contains("activation_lease_deadline("));
+    }
+
     /// The reservation is a control-flow property of one `async fn` that needs
     /// a store, a transcode manager and an authenticated owner to reach, so
     /// nothing executes it. Pin it where it lives instead: reverting the

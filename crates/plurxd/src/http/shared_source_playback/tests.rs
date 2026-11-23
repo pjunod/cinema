@@ -1655,13 +1655,14 @@ async fn sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_th
         );
         let retry = answer
             .headers()
-            .contains_key(axum::http::header::RETRY_AFTER);
-        assert!(retry, "{what} names when to ask again");
+            .get(axum::http::header::RETRY_AFTER)
+            .cloned();
+        assert!(retry.is_some(), "{what} names when to ask again");
         // What the receiver reads it as: the Source unavailable for now,
         // which its Status owner and resource relay both keep a session
         // through (`peer_failure` maps it to `PeerUnavailable`).
         assert!(matches!(
-            crate::sharing_client::peer_status_refusal(answer.status(), retry),
+            crate::sharing_client::peer_status_refusal(answer.status(), retry.as_ref()),
             crate::sharing_client::PeerError::Unavailable
         ));
         let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)

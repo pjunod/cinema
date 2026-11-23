@@ -137,15 +137,16 @@ const HIQLITE_READDRESS_BACKUP_DIRNAME: &str = "hiqlite.before-readdress";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_READDRESS_MARKER_FILENAME: &str = "hiqlite-readdress.json";
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
+const HIQLITE_HEALTH_TIMEOUT: Duration = crate::cluster::timing::startup::HIQLITE_HEALTH_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
+const MEMBERSHIP_ADMISSION_TIMEOUT: Duration =
+    crate::cluster::timing::startup::MEMBERSHIP_ADMISSION_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
+const SNAPSHOT_CATCHUP_GRACE: Duration = crate::cluster::timing::startup::SNAPSHOT_CATCHUP_GRACE;
 #[cfg(feature = "hiqlite-store")]
-const JOIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const JOIN_CONNECT_TIMEOUT: Duration = crate::cluster::timing::startup::JOIN_CONNECT_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const JOIN_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+const JOIN_TOTAL_TIMEOUT: Duration = crate::cluster::timing::startup::JOIN_TOTAL_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
 const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
@@ -157,14 +158,18 @@ const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // crash-recovering majority needs a coordinated update: an old leader still
 // owns the old 375 ms sender deadline and cannot be fixed by its new follower.
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_HEARTBEAT_INTERVAL_MS: u64 = 800;
+const HIQLITE_HEARTBEAT_INTERVAL_MS: u64 =
+    crate::cluster::timing::raft::HIQLITE_HEARTBEAT_INTERVAL_MS;
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 = 2_400;
+const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 =
+    crate::cluster::timing::raft::HIQLITE_ELECTION_TIMEOUT_MIN_MS;
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 = 4_000;
+const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 =
+    crate::cluster::timing::raft::HIQLITE_ELECTION_TIMEOUT_MAX_MS;
 /// Accepted end-to-end window for an exact-state write to survive leader loss.
 #[cfg(feature = "hiqlite-store")]
-pub(crate) const REPLICATED_LEADER_RECOVERY_BUDGET: Duration = Duration::from_secs(16);
+pub(crate) const REPLICATED_LEADER_RECOVERY_BUDGET: Duration =
+    crate::cluster::timing::raft::REPLICATED_LEADER_RECOVERY_BUDGET;
 /// Hiqlite Raft WAL segment size used by every plurx voter.
 ///
 /// Hiqlite 0.14 accepts one serialized Raft entry up to `wal_size - 34` bytes:
@@ -5648,17 +5653,22 @@ pub mod status {
     pub use hiqlite::Client as HiqliteClient;
     use std::sync::{Arc, Mutex};
 
-    const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
-    const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
-    const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
-    const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
+    const PASSIVE_METRICS_REFRESH: Duration =
+        crate::cluster::timing::serving::PASSIVE_METRICS_REFRESH;
+    const PASSIVE_METRICS_FRESHNESS_SECS: u64 =
+        crate::cluster::timing::serving::PASSIVE_METRICS_FRESHNESS_SECS;
+    const QUORUM_WATERMARK_REFRESH: Duration =
+        crate::cluster::timing::serving::QUORUM_WATERMARK_REFRESH;
+    const QUORUM_WATERMARK_TIMEOUT: Duration =
+        crate::cluster::timing::serving::QUORUM_WATERMARK_TIMEOUT;
     /// How long one quorum confirmation proves this node's authority to serve
     /// from its replica. The route cache of playback-start E1c holds a fact it
     /// observed directly (a row it committed, or a quorum read) for the same
     /// lease and no longer, so a node without a serving proof costs one quorum
     /// read per session per lease (`docs/streaming/PLAYBACK-START-E1-BUILD.md`
     /// §4.4): one time bound, the proof's own.
-    pub const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
+    pub const QUORUM_WATERMARK_LEASE: Duration =
+        crate::cluster::timing::serving::QUORUM_WATERMARK_LEASE;
     /// How many quorum confirmations of the current generation a node keeps,
     /// so a confirmation it catches up to after a newer one has landed still
     /// proves authority until its own lease ends (C1 of

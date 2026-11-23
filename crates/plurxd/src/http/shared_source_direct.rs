@@ -314,11 +314,15 @@ pub(super) async fn prepare_source_start(
         state, headers, reference, session,
     ))
     .await
-    .map_err(|error| match error {
-        // The shared planner's own refusal of a burn that would cost this
-        // session its HDR grade: a definite answer, not an outage.
-        ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
-        _ => SourceStartFailure::Unavailable,
+    .map_err(|error| {
+        #[cfg(test)]
+        eprintln!("Source Start diagnostic stage=hls_preparation error={error:?}");
+        match error {
+            // The shared planner's own refusal of a burn that would cost this
+            // session its HDR grade: a definite answer, not an outage.
+            ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
+            _ => SourceStartFailure::Unavailable,
+        }
     })?;
     if dolby_vision_withheld && plurx_core::playback::is_dolby_vision(prepared.file()) {
         prepared.add_plan_note(super::receiver_presentation::DOLBY_VISION_WITHHELD_NOTE);

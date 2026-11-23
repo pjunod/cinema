@@ -6,7 +6,7 @@
 
 - **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-10-26.
 - **Where it stands:**
-  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-26.
+  - Live reference; maintained with behavior changes. The intro states the merged route inventory as of 2026-11-20.
 - **Read further only for:**
   - the five surfaces and credentials: `## 1. Surfaces — five things on one port`; `## 2. Authentication — two bearer kinds and five capabilities`
   - error envelopes: `## 3. Errors — three envelopes, and the gates that answer first`
@@ -4204,6 +4204,16 @@ Headers: `x-plurx-cluster-node`, `-target`, `-time-ms`, `-nonce`,
 predicates gate the routes — one for the activity snapshot (committed voters),
 one for exact request authority (any committed member, learners included), a
 read variant under a tighter window, and a voter-only variant.
+
+A private additive response header, `x-plurx-peer-auth-refusal`, distinguishes
+`invalid_proof`, `rate_limited`, `replay_capacity` and
+`authority_unavailable` on a peer-authentication **401**. The status and
+response body are unchanged. Ordinary user-token refusals have no header.
+This is advisory diagnostic metadata, never an acknowledgement, response
+signature or authority proof. Missing, unknown, repeated or over-32-byte
+values remain an unclassified refusal; metadata on a successful response is
+ignored and cannot replace its mandatory exact signature. It neither extends
+a deadline nor requests an automatic retry.
 
 Common checks: the target must be this node; the timestamp must be within
 **30 s** (**5 s** for the read variant); sender and target must differ; the

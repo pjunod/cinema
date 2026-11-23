@@ -76,7 +76,7 @@ pub(crate) enum ReceiverStartError {
 }
 /// A Source that could not be reached or was busy is unavailable, not a
 /// refusal; anything the Source affirmatively answered stays unresolved.
-pub(super) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
+pub(crate) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
     match error {
         crate::sharing_client::PeerError::Unavailable
         | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::PeerUnavailable,
@@ -1493,7 +1493,7 @@ impl ReceiverStartActor {
                     () = tokio::time::sleep_until(looked + Duration::from_secs(1)) => {}
                 }
                 // Re-armed before the look it follows.
-                watch = state.applied.sharing_watch(RECEIVER_CONNECTION_WATCH);
+                watch = state.cluster.watch(RECEIVER_CONNECTION_WATCH);
                 looked = tokio::time::Instant::now();
                 // Original B login and exact delivery binding remain required
                 // while a writer has queued bytes, including after Body EOF.
@@ -4343,7 +4343,7 @@ pub(crate) mod relay_log {
             assert!(matches!(
                 super::super::peer_failure(crate::sharing_client::peer_status_refusal(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    true
+                    Some(&axum::http::HeaderValue::from_static("1"))
                 )),
                 super::super::ReceiverStartError::PeerUnavailable
             ));
@@ -4356,7 +4356,7 @@ pub(crate) mod relay_log {
             assert!(matches!(
                 super::super::peer_failure(crate::sharing_client::peer_status_refusal(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    false
+                    None
                 )),
                 super::super::ReceiverStartError::Unresolved
             ));
