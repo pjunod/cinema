@@ -731,12 +731,20 @@ async fn native_copy_picture_clock_names_why_it_could_not_bind() {
         clock.observe(&init, &fragment).await.err(),
         Some("resume_clock_records_late")
     );
-    // The writer's decline is the layout's recorded reason, once.
+    // The writer's decline is the layout's recorded reason, once, and it does
+    // not decide the layout: the resumed split still owns its FEL processing
+    // until the master chooses, so no hidden successor can start meanwhile.
     let split = NativeSplitInventory::with_startup_budget(100).require_resume_clock();
     split.decline_unselected("resume_clock_records_late", "fixture-session");
     split.decline_unselected("enhancement_layer_not_full", "fixture-session");
     assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
+    assert!(split.owns_fel_processing(), "the layout is still undecided");
     assert!(split.choose(Some((0, 0))).is_none());
+    assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
+    assert!(
+        !split.owns_fel_processing(),
+        "the master chose the ordinary mux"
+    );
 }
 
 #[derive(Default)]
@@ -1010,11 +1018,15 @@ impl NativeSplitInventory {
     }
 
     /// The writer is abandoning the split before the master chose a layout:
-    /// record why, once, so the layout line and this log name the cause.
+    /// record why, once, so the layout line and this log name the cause. The
+    /// layout itself stays undecided, so a resumed split keeps owning its FEL
+    /// processing until the master chooses, exactly as before.
     #[cfg(target_os = "linux")]
     pub(crate) fn decline_unselected(&self, reason: &'static str, session_id: &str) {
-        let (_, declined_here) = self.settle(reason);
-        if declined_here {
+        if self.chosen.get() == Some(&true) {
+            return;
+        }
+        if self.declined.set(reason).is_ok() {
             tracing::info!(
                 target: "plurxd::copyseg",
                 session = %crate::transcode::session_log_id(session_id),
