@@ -136,6 +136,26 @@ final class TvHomeLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testTheaterPlayStartCancelsTheFeaturePreparation() throws {
+        var item = Item(id: 7, kind: "movie", title: "Movie")
+        item.watch = Watch(positionMs: 1_424_363, watched: false)
+        var file = MediaFile(id: 42)
+        file.durationMs = 7_000_000
+        let context = try XCTUnwrap(
+            TvHomeLayoutPolicy.playbackContext(ItemDetail(item: item, files: [file]))
+        )
+        let presentation = HomeFeaturePresentation()
+        XCTAssertFalse(presentation.startsPlayback, "an idle hero may prepare its Resume")
+        presentation.requestedItemID = 7
+        XCTAssertTrue(presentation.startsPlayback, "Resume's detail fetch ends preparation")
+        presentation.requestedItemID = nil
+        presentation.play = context
+        XCTAssertTrue(presentation.startsPlayback, "the presented player ends preparation")
+        presentation.play = nil
+        XCTAssertFalse(presentation.startsPlayback, "dismissal lets the hero prepare again")
+    }
+
+    @MainActor
     func testTheaterPlaybackUsesFreshDetailAndSharedResumeThresholds() throws {
         var item = Item(id: 7, kind: "episode", title: "Episode", showTitle: "Series")
         item.watch = Watch(positionMs: 120_000, watched: false)

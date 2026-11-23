@@ -8976,6 +8976,14 @@ test = "clients/apple/Tests/TvHomeLayoutTests.swift"
 test_anchor = "func testTheaterContinueWatchingOffersPreparationForItsResumeWindow() throws"
 
 [[fixes]]
+id = "apple.tvos-home-feature-preparation-cancelled-on-play"
+commits = ["f8a0f137586f1fc5baf53978a8f826942671f990"]
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "var startsPlayback: Bool"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "func testTheaterPlayStartCancelsTheFeaturePreparation() throws"
+
+[[fixes]]
 id = "apple.cinema-refused-subtitle-keeps-generated-captions"
 commits = ["5ce3268f688f74a586013c3252ea13a89694e094"]
 source = "clients/apple/Sources/PlayerController.swift"

@@ -335,7 +335,7 @@ private struct HomeDashboard: View {
             routeV1: model.displayAwareAuto && model.displayAwareAutoProtocol == "route-v1",
             deviceSubtitlesOff: model.subLang == "off", subtitleReadiness: model.subtitleReadiness,
             active: scenePhase == .active,
-            playing: featurePresentation.play != nil || featurePresentation.requestedItemID != nil
+            playing: featurePresentation.startsPlayback
         )
     }
 
