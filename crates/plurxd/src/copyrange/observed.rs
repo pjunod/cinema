@@ -22,8 +22,16 @@ use std::{
 };
 pub(super) const MAX_HELD: usize = 96 * 1024 * 1024;
 /// What one copy charges against the node's copy memory budget: the most its
-/// observed mux may hold.
-pub(crate) const COPY_HOLD_BYTES: u64 = MAX_HELD as u64;
+/// observed mux may hold. Five disjoint holds are each capped at
+/// [`MAX_HELD`] independently, so the bound is their sum:
+///
+/// 1. `queued_bytes`: pipe bytes not yet framed, and whole canonical and AV
+///    fragments waiting for their pair;
+/// 2. the AV reader's buffer of its in-progress fragment;
+/// 3. the observed-range assembler's in-progress canonical fragment;
+/// 4. the verified copy kernel's pending AV fragments before a cut;
+/// 5. the kernel's split clone when it emits a segment.
+pub(crate) const COPY_HOLD_BYTES: u64 = 5 * MAX_HELD as u64;
 const MAX_FRAGMENTS: usize = 8;
 const MAX_PACKETS: usize = 131072;
 
@@ -139,6 +147,9 @@ impl ObservedCopyMux {
     pub(crate) fn peak_held(&self) -> Arc<std::sync::atomic::AtomicUsize> {
         Arc::clone(&self.peak_held)
     }
+    /// Peak of the holds the mux itself sees (1 and 2 of
+    /// [`COPY_HOLD_BYTES`]); the kernel's and assembler's are bounded by
+    /// their own caps.
     fn note_held(&self) {
         let held = self.queued_bytes.saturating_add(self.av_reader.buffered());
         self.peak_held

@@ -1,9 +1,11 @@
 //! How much memory this node may use: the one place plurxd reads it.
 //!
 //! A container's limit is the node's memory, not the host's. On Linux the
-//! cgroup limit (v2 `memory.max`, else v1 `memory.limit_in_bytes`) is taken
-//! when it is set and below the host total from `/proc/meminfo`; a NUC
-//! container limited to 20 GiB on a 64 GiB host has 20 GiB. macOS reports
+//! lowest limit on this process's own cgroup and its ancestors is taken (v2
+//! `memory.max` and `memory.high`, else v1 `memory.limit_in_bytes`), when it
+//! is below the host total from `/proc/meminfo`: a NUC container limited to
+//! 20 GiB on a 64 GiB host has 20 GiB, and so does a systemd service with
+//! `MemoryMax=20G` in a cgroup below the root. macOS reports
 //! `hw.memsize`. Anywhere else, and whenever a read fails, the answer is
 //! unknown and callers choose their own conservative default.
 
@@ -14,14 +16,31 @@ pub(crate) fn node_memory_bytes() -> Option<u64> {
         let host = std::fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|meminfo| meminfo_total_bytes(&meminfo));
-        let cgroup = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
-            .ok()
-            .and_then(|limit| cgroup_limit_bytes(&limit))
-            .or_else(|| {
-                std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-                    .ok()
-                    .and_then(|limit| cgroup_limit_bytes(&limit))
-            });
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let (v2, v1) = own_cgroups(&own);
+        let read = |path: std::path::PathBuf| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|limit| cgroup_limit_bytes(&limit))
+        };
+        let lowest = |root: &str, relative: &str, files: &[&str]| {
+            ancestors(root, relative)
+                .flat_map(|dir| files.iter().map(move |file| dir.join(file)))
+                .filter_map(read)
+                .min()
+        };
+        let cgroup = lowest(
+            "/sys/fs/cgroup",
+            v2.unwrap_or("/"),
+            &["memory.max", "memory.high"],
+        )
+        .or_else(|| {
+            lowest(
+                "/sys/fs/cgroup/memory",
+                v1.unwrap_or("/"),
+                &["memory.limit_in_bytes"],
+            )
+        });
         effective(host, cgroup)
     }
     #[cfg(target_os = "macos")]
@@ -44,6 +63,53 @@ pub(crate) fn node_memory_bytes() -> Option<u64> {
     {
         None
     }
+}
+
+/// This process's own cgroup paths from `/proc/self/cgroup`: the v2 unified
+/// one (`0::/path`) and the v1 one carrying the memory controller.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn own_cgroups(own: &str) -> (Option<&str>, Option<&str>) {
+    let mut v2 = None;
+    let mut v1 = None;
+    for line in own.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(id), Some(controllers), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if id == "0" && controllers.is_empty() {
+            v2 = Some(path);
+        } else if controllers
+            .split(',')
+            .any(|controller| controller == "memory")
+        {
+            v1 = Some(path);
+        }
+    }
+    (v2, v1)
+}
+
+/// The cgroup directory of `relative` under `root`, then each ancestor up to
+/// `root`. A path that leaves the hierarchy yields only `root`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn ancestors<'a>(
+    root: &'a str,
+    relative: &'a str,
+) -> impl Iterator<Item = std::path::PathBuf> + 'a {
+    let parts: Vec<&str> = relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let escaping = parts.contains(&"..");
+    let depth = if escaping { 0 } else { parts.len() };
+    (0..=depth).rev().map(move |keep| {
+        let mut dir = std::path::PathBuf::from(root);
+        for part in &parts[..keep] {
+            dir.push(part);
+        }
+        dir
+    })
 }
 
 /// The smaller of the host total and a set cgroup limit.
@@ -99,6 +165,30 @@ mod tests {
         );
         assert_eq!(meminfo_total_bytes("MemFree: 3 kB\n"), None);
         assert_eq!(cgroup_limit_bytes("garbage"), None);
+    }
+
+    #[test]
+    fn the_process_own_cgroup_and_its_ancestors_are_read() {
+        let own = "12:memory:/docker/abc\n0::/system.slice/plurxd.service\n";
+        assert_eq!(
+            own_cgroups(own),
+            (Some("/system.slice/plurxd.service"), Some("/docker/abc"))
+        );
+        let dirs: Vec<_> = ancestors("/sys/fs/cgroup", "/system.slice/plurxd.service").collect();
+        assert_eq!(
+            dirs,
+            [
+                "/sys/fs/cgroup/system.slice/plurxd.service",
+                "/sys/fs/cgroup/system.slice",
+                "/sys/fs/cgroup"
+            ]
+            .map(std::path::PathBuf::from)
+        );
+        assert_eq!(
+            ancestors("/sys/fs/cgroup", "/../etc").collect::<Vec<_>>(),
+            [std::path::PathBuf::from("/sys/fs/cgroup")]
+        );
+        assert_eq!(own_cgroups("garbage\n"), (None, None));
     }
 
     #[test]

@@ -4247,7 +4247,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # no production task, timer or process.
 # Copy memory admission: +5 joined test tasks in admission::copy_memory_tests
 # (paused-time waiters, each awaited or aborted and joined). No production task.
-expected_occurrences = 1218
+# Copy memory review: +2 joined test tasks in
+# a_live_copy_is_served_before_waiting_background_work. No production task.
+expected_occurrences = 1220
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6373,7 +6375,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bounded by the caller's own start deadline (no new timer); +1 the gap fill's
 # no-deadline wait bound in copyrange/fill.rs, raced against the phase's stop
 # token; +3 paused-time test sleeps. 
-expected_occurrences = 2354
+# Copy memory review: +3 paused-time test waits in the live-priority test.
+# No production timer.
+expected_occurrences = 2357
 
 [[module_structures]]
 id = "bare-time-constructor"

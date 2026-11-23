@@ -162,6 +162,17 @@ where
     let file = fill.file;
     let failed = failure;
     let video = fill.recipe.video;
+    // Before the head is read, so a wait discards no work. As the rest of
+    // this fill, the wait has no deadline of its own: it ends when the memory
+    // is free or the phase is lost. Live copies are served first.
+    let memory = tokio::select! {
+        memory = fill.copy_memory.acquire(
+            crate::copyrange::COPY_HOLD_BYTES,
+            crate::admission::CopyPriority::Background,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600),
+        ) => memory.ok_or_else(|| failed("copy_memory_unavailable".into()))?,
+        () = fill.stop.cancelled() => return Err(failed("copy_range_cancelled".into())),
+    };
     let census = run_source_census(
         open().await.map_err(failed)?,
         fill.phase.source.object_version.clone(),
@@ -200,15 +211,6 @@ where
         fill.timescale,
     )
     .map_err(Failed)?;
-    // As the rest of this fill, the copy memory wait has no deadline of its
-    // own: it ends when the memory is free or the phase is lost.
-    let memory = tokio::select! {
-        memory = fill.copy_memory.acquire(
-            crate::copyrange::COPY_HOLD_BYTES,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600),
-        ) => memory.ok_or_else(|| failed("copy_memory_unavailable".into()))?,
-        () = fill.stop.cancelled() => return Err(failed("copy_range_cancelled".into())),
-    };
     let mut mux = ObservedCopyMux::new(
         Arc::clone(&contract),
         census.first_dts,
