@@ -122,6 +122,8 @@ type IdleKey = (&'static str, NodeId, String);
 #[derive(Default)]
 pub(crate) struct IdleConnections {
     by_target: StdMutex<HashMap<IdleKey, Vec<IdleConnection>>>,
+    #[cfg(feature = "sqlite")]
+    timing_epoch: std::sync::OnceLock<u64>,
 }
 
 struct IdleConnection {
@@ -1845,6 +1847,20 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
         req: AppendEntriesRequest<TypeConfigSqlite>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
+        if let Some(pool) = self.idle_connections.upgrade() {
+            let source = *pool
+                .timing_epoch
+                .get_or_init(crate::append_timing::new_source_epoch);
+            crate::append_timing::record_append(
+                self.local_node_id,
+                self.node.id,
+                source,
+                req.vote.leader_id.term,
+                &self.node.addr_raft,
+                crate::AppendTimingStage::RpcAttempt,
+                req.entries.is_empty(),
+            );
+        }
         let (ack, rx) = oneshot::channel();
         match self
             .send(

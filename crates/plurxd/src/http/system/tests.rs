@@ -340,6 +340,7 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
             ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
             ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
             ("node-e".to_owned(), PeerActivityOutcome::Unsupported),
+            ("node-f".to_owned(), PeerActivityOutcome::LocalUnavailable),
         ]
         .into(),
     );
@@ -370,11 +371,20 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
     assert_eq!(nodes[2]["status"], "timed_out");
     assert_eq!(nodes[3]["status"], "unhealthy");
     assert_eq!(nodes[4]["status"], "unsupported");
+    assert_eq!(nodes[5]["status"], "local_unavailable");
 
     let missing = missing_activity_summary(&peers).expect("missing-node summary");
     assert!(missing.contains("node-c (timed_out)"), "{missing}");
     assert!(missing.contains("node-d (unhealthy)"), "{missing}");
     assert!(missing.contains("node-e (unsupported)"), "{missing}");
+    assert!(
+        missing.ends_with(", and 1 more did not answer"),
+        "{missing}"
+    );
+    assert!(
+        !missing.contains("node-f"),
+        "bounded summary must not name its fourth missing node: {missing}"
+    );
     assert!(missing.ends_with("did not answer"), "{missing}");
 }
 

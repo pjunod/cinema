@@ -65,8 +65,21 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
     );
     let now_ms = unix_ms();
 
+    let idle_watch = selected.applied_view().watch(&["media_sessions"]);
+    assert!(
+        idle_watch.unchanged(),
+        "fixture must exercise a real trusted mark"
+    );
+
     // Idle: no worker, no remembered lease, no seed, no owned row.
-    let (routes, authority) = authority_reads_of(lease_tick_inventory(&state, true, now_ms)).await;
+    let (routes, authority) = authority_reads_of(lease_tick_inventory(
+        &state,
+        true,
+        now_ms,
+        None,
+        tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE,
+    ))
+    .await;
     assert_eq!(routes.expect("an idle inventory").len(), 0);
     assert_eq!(
         authority,
@@ -74,9 +87,39 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
         "an idle tick must not read the authority"
     );
 
+    // A quiet table eliminates even the repeat local hint SQL. Other table
+    // writes are irrelevant; a session row below invalidates this same watch.
+    let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    let quiet = plurx_core::store::scope_http_store_operations(
+        counts.clone(),
+        lease_tick_inventory(
+            &state,
+            true,
+            now_ms,
+            Some(&idle_watch),
+            tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE,
+        ),
+    )
+    .await
+    .expect("quiet empty inventory");
+    assert!(quiet.is_empty());
+    assert!(counts
+        .method_snapshot()
+        .into_iter()
+        .all(
+            |(method, _)| method != "owned_media_sessions" && method != "owned_media_sessions_hint"
+        ));
+
     // A lease the loop remembers always takes the inventory: loss of a
     // remembered generation is only seen there.
-    let (routes, authority) = authority_reads_of(lease_tick_inventory(&state, false, now_ms)).await;
+    let (routes, authority) = authority_reads_of(lease_tick_inventory(
+        &state,
+        false,
+        now_ms,
+        None,
+        tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE,
+    ))
+    .await;
     assert_eq!(routes.expect("a remembered lease's inventory").len(), 0);
     assert!(
         authority
@@ -129,7 +172,15 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
         .await
         .expect("confirm")
         .expect("confirmed route");
-    let (routes, authority) = authority_reads_of(lease_tick_inventory(&state, true, now_ms)).await;
+    assert!(!idle_watch.unchanged(), "the new session invalidates quiet");
+    let (routes, authority) = authority_reads_of(lease_tick_inventory(
+        &state,
+        true,
+        now_ms,
+        Some(&idle_watch),
+        tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE,
+    ))
+    .await;
     let routes = routes.expect("an owned row's inventory");
     assert!(
         routes
@@ -146,4 +197,226 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
 
     drop(state);
     selected.shutdown().await.expect("stop the voter");
+}
+
+fn publication_phase_fixture(count: usize) -> Vec<OwnedMediaSessionLease> {
+    (0..count)
+        .map(|id| OwnedMediaSessionLease {
+            principal: PlaybackPrincipal::LocalUser { user_id: 7 },
+            incarnation_id: format!("phase-incarnation-{id}"),
+            session_id: format!("phase-session-{id}"),
+            owner_epoch: 1,
+            lease_expires_at_ms: 13_000,
+            drain_deadline_ms: None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_publication_batches_cannot_spend_another_cycle_or_starve_renewal_decisions() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let started = tokio::time::Instant::now();
+    let cycle_deadline = started + LEASE_RENEWAL_DEADLINE;
+    // Inventory and renewal are deliberately nonzero work. Optional work
+    // must spend only the remainder, rather than another four seconds.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let renewed_at = tokio::time::Instant::now();
+    let entered = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    run_publication_reconciliation_phase(
+        publication_phase_fixture(LEASE_RENEWAL_FANOUT * 2 + 1),
+        cycle_deadline,
+        {
+            let entered = Arc::clone(&entered);
+            let completed = Arc::clone(&completed);
+            move |_| {
+                entered.fetch_add(1, Ordering::SeqCst);
+                let completed = Arc::clone(&completed);
+                async move {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        },
+    )
+    .await;
+    assert!(renewed_at < cycle_deadline);
+    assert_eq!(tokio::time::Instant::now(), cycle_deadline);
+    assert_eq!(entered.load(Ordering::SeqCst), LEASE_RENEWAL_FANOUT);
+    assert_eq!(completed.load(Ordering::SeqCst), 0);
+    // The next cycle can decide immediately. A surviving fixed lease still
+    // has its original runway; an expired one cannot obtain another renewal.
+    let next_cycle = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+    assert!(renewal_has_full_runway(13_000, 5_000, next_cycle));
+    assert!(!renewal_has_full_runway(4_000, 5_000, next_cycle));
+    assert!(!renewal_has_full_runway(13_000, 5_000, cycle_deadline));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_exhausted_publication_phase_constructs_no_new_store_operations() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let entered = Arc::new(AtomicUsize::new(0));
+    run_publication_reconciliation_phase(
+        publication_phase_fixture(LEASE_RENEWAL_FANOUT + 1),
+        tokio::time::Instant::now(),
+        {
+            let entered = Arc::clone(&entered);
+            move |_| {
+                entered.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(())
+            }
+        },
+    )
+    .await;
+    assert_eq!(entered.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn renewal_and_publication_work_share_the_existing_cycle_deadline_and_eligibility() {
+    let source = include_str!("../media_sessions.rs");
+    let loop_body = source
+        .split_once("pub(crate) async fn lease_loop(state: AppState) {")
+        .expect("the actual lease owner")
+        .1
+        .split_once("const TAKEOVER_SETTINGS_REFRESH:")
+        .expect("lease owner end")
+        .0;
+    let capture = loop_body
+        .find("let cycle_deadline =")
+        .expect("one captured cycle deadline");
+    let inventory = loop_body
+        .find("let routes = lease_tick_inventory(")
+        .expect("owner inventory");
+    let renewal = loop_body
+        .find("let renewal_deadline = cycle_deadline;")
+        .expect("renewal consumes remaining cycle");
+    let outcomes = loop_body
+        .find("in renewal_outcomes {")
+        .expect("renewal result and fail-closed fencing");
+    let publication = loop_body
+        .find("reconcile_owned_publication_fences(")
+        .expect("optional publication phase");
+    let publication_setup = loop_body
+        .find("let publication_candidates =")
+        .expect("exclude newly fenced owners");
+    let fenced_publication = &loop_body[publication_setup..];
+    let fence = fenced_publication
+        .find("fence_and_reap_sessions(&state, cleanup, cycle_deadline).await;")
+        .expect("fence before optional work on the same cycle");
+    let optional = fenced_publication
+        .find("reconcile_owned_publication_fences(")
+        .expect("optional phase after fencing");
+    assert!(
+        capture < inventory && inventory < renewal && renewal < outcomes && outcomes < publication
+    );
+    assert!(fence < optional);
+    assert!(loop_body.contains("publication_reconciliation_candidates(&routes, &live, &cleanup)"));
+    assert!(loop_body.contains("renewal_has_full_runway("));
+    assert!(!loop_body.contains("let renewal_deadline = tokio::time::Instant::now()"));
+    for backend in [
+        include_str!("../../../plurx-core/src/store/hiqlite_sessions.rs"),
+        include_str!("../../../plurx-core/src/store/sqlite/sessions.rs"),
+    ] {
+        assert!(backend.contains("request.state = 'starting'"));
+        assert!(backend.contains("staged.staged_incarnation_id = media_sessions.incarnation_id"));
+    }
+}
+
+#[test]
+fn publication_reconciliation_excludes_only_the_exact_newly_fenced_owner() {
+    let old = publication_phase_fixture(1).remove(0);
+    let mut successor = old.clone();
+    successor.owner_epoch += 1;
+    let live = HashSet::from([old.session_id.clone()]);
+    let candidates = publication_reconciliation_candidates(
+        &[old.clone(), successor.clone()],
+        &live,
+        &[(
+            old.incarnation_id,
+            old.session_id,
+            old.owner_epoch,
+            false,
+            "ambiguous renewal",
+        )],
+    );
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].owner_epoch, successor.owner_epoch);
+}
+
+#[test]
+fn an_undispatched_renewal_keeps_renewable_leases_and_fails_the_rest_closed() {
+    // A slow inventory spent the shared cycle before this chunk dispatched.
+    // A lease renewed one tick ago, after a three-second interval and a
+    // four-second inventory, still has about five seconds: no write was
+    // issued, so it waits for the next tick instead of being fenced.
+    let now = 10_000;
+    assert!(undispatched_renewal_keeps_lease(
+        now + LEASE_TTL_MS - 3_000 - 4_000,
+        now
+    ));
+    // Too little runway to renew safely fails closed now, not after expiry.
+    assert!(!undispatched_renewal_keeps_lease(
+        now + LEASE_RENEWAL_MIN_REMAINING_MS,
+        now
+    ));
+    assert!(!undispatched_renewal_keeps_lease(now, now));
+    // The kept set is exactly what a dispatched chunk would have sent.
+    let open_cycle = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+    for remaining in (-2_000..=LEASE_TTL_MS).step_by(250) {
+        assert_eq!(
+            undispatched_renewal_keeps_lease(now + remaining, now),
+            renewal_has_full_runway(now + remaining, now, open_cycle),
+            "remaining {remaining} ms"
+        );
+    }
+
+    let source = include_str!("../media_sessions.rs");
+    let loop_body = source
+        .split_once("pub(crate) async fn lease_loop(state: AppState) {")
+        .expect("the actual lease owner")
+        .1
+        .split_once("const TAKEOVER_SETTINGS_REFRESH:")
+        .expect("lease owner end")
+        .0;
+    // Dispatch is decided once, at the same point the Store call is skipped.
+    assert!(loop_body.contains("let dispatched = tokio::time::Instant::now() < renewal_deadline;"));
+    assert!(loop_body.contains("let outcome = if !dispatched {"));
+    let outcomes = loop_body
+        .split_once("in renewal_outcomes {")
+        .expect("renewal outcome pass")
+        .1;
+    let undispatched = outcomes
+        .split_once("if !dispatched {")
+        .expect("undispatched chunks are classified first")
+        .1
+        .split_once("match outcome {")
+        .expect("dispatched outcomes follow")
+        .0;
+    assert!(undispatched.contains("undispatched_renewal_keeps_lease("));
+    assert!(undispatched.contains("frontiers.contains_key(&route.session_id)"));
+    assert!(undispatched.contains("\"cluster lease lost\""));
+    assert!(!undispatched.contains("renewal ambiguous"));
+    assert!(undispatched.contains("continue;"));
+    // A dispatched chunk that errors or times out is still commit-unknown.
+    let dispatched = outcomes
+        .split_once("match outcome {")
+        .expect("dispatched")
+        .1;
+    assert_eq!(
+        dispatched
+            .matches("\"cluster lease renewal ambiguous\"")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn a_late_renewal_receipt_keeps_its_original_expiry_and_fences_after_it() {
+    let dispatched = 1_000;
+    let fixed_expiry = dispatched + LEASE_TTL_MS;
+    assert!(renewal_receipt_is_live(dispatched, dispatched + 4_000));
+    assert!(renewal_receipt_is_live(dispatched, fixed_expiry - 1));
+    assert!(!renewal_receipt_is_live(dispatched, fixed_expiry));
+    assert!(!renewal_receipt_is_live(dispatched, fixed_expiry + 1));
 }

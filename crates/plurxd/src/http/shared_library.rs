@@ -778,7 +778,7 @@ pub(super) async fn guard_source_response(
     };
     // Armed before the admission look, so a revocation applied after the
     // look's read wakes the monitor below (A6 M3).
-    let mut watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+    let mut watch = state.cluster.watch(SOURCE_BODY_WATCH);
     let observed = source_content_observation(&state, &authority).await;
     if observed != SharingObservation::Current {
         return content_refusal(observed).into_response();
@@ -825,7 +825,7 @@ pub(super) async fn guard_source_response(
                 () = tokio::time::sleep_until(looked + std::time::Duration::from_secs(1)) => {},
             }
             // Re-armed before the look it follows.
-            watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+            watch = state.cluster.watch(SOURCE_BODY_WATCH);
             looked = tokio::time::Instant::now();
             tokio::select! {
                 () = body_live.cancelled() => break,

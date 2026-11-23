@@ -2282,6 +2282,8 @@ async fn own_start(
         Err(receipt) => {
             let reason = receipt.reason();
             entry.retain_stage(SourceStartTaskStage::FactoryRefused(receipt));
+            #[cfg(test)]
+            eprintln!("Source Start diagnostic stage=owner_factory reason={reason:?}");
             return Err(SourceStartFailure::from(reason));
         }
     };

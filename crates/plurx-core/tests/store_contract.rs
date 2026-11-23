@@ -171,6 +171,8 @@ mod subtitle_text;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/subtitle_translation_upgrade.rs"]
 mod subtitle_translation_upgrade;
+#[path = "store_contract/token_proofs.rs"]
+mod token_proofs;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -390,6 +392,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting_if_absent_if_artwork_repair_current",
     "prune_unreferenced_book_cover_origins",
     "put_settings",
+    "put_auth_token_policy",
     // The generation-fenced settings write. It belongs beside `put_settings`
     // rather than in a Live TV group: nothing about it is Live TV specific,
     // and any caller that needs a settings batch to land only against an
@@ -443,6 +446,7 @@ const USER_METHODS: &[&str] = &[
     "create_token_if_password_matches",
     "authenticate_token",
     "authenticate_token_for",
+    "authenticate_token_proof_for",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -21841,7 +21845,12 @@ fn contract_inventory_matches_every_store_method() {
     // `merge_file_probe_hevc_scan` grafts a probed HEVC scan verdict onto the
     // measured probe revision, exercised on both backends by
     // media_contract_runs_through_dyn_store. Named in `MEDIA_METHODS`.
-    assert_eq!(declared.len(), 636, "review the Store method count");
+    // 636 -> 638: source-bound token proofs (2c2557edf) add
+    // `put_auth_token_policy` to SETTINGS_METHODS and
+    // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
+    // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
+    // No existing method, trait or supertrait is removed.
+    assert_eq!(declared.len(), 638, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

@@ -8908,6 +8908,14 @@ source_anchor = '"transport": "mpv"'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
 
+# PR #1821: the presented rule-options panel takes native focus before Delete.
+[[fixes]]
+id = "apple.tvos-dvr-rule-options-native-focus"
+commits = ["ae9c167bd8ee00cbc8e122d9818d941d8795d9d2"]
+source = "clients/apple/Sources/DvrRecordings.swift"
+source_anchor = ".focusScope(ruleOptionsFocus)"
+test = "clients/apple/UITests/TVDvrNavigationTests.swift"
+test_anchor = "func testRecordingDetailsRuleConfirmationAndManualChannelReturn() throws"
 
 [[fixes]]
 id = "android.prepared-seek-presented-quality"

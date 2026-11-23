@@ -91,9 +91,14 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         let server = try TVNavigationServer()
         let origin = try server.start()
         defer { server.stop() }
-        let app = openLibrary(origin: origin)
+        let app = openSignIn(origin: origin)
         defer { app.terminate() }
-        openRoot("Settings", in: app)
+        signInToFixture(in: app)
+        let settings = app.viewerTab("Settings")
+        XCTAssertTrue(settings.waitForExistence(timeout: 15), app.debugDescription)
+        reachForSetup(settings, in: app, limit: 8)
+        assertFocus(settings, in: app, context: "Settings tab setup")
+        remote.press(.select)
         let playback = app.buttons["settings-category-Playback"]
         reachForSetup(playback, in: app, limit: 8)
         assertFocus(playback, in: app, context: "Playback category")
