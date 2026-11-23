@@ -1,6 +1,5 @@
 # Bound the verdict and the evidence to the thing they describe
 
-Build: 97
 Issue: #708
 
 Two limits the first cut of the return path did not have.

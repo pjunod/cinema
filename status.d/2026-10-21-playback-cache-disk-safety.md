@@ -1,0 +1,1 @@
+- **2026-10-21 · Playback cache disk safety:** [shared budget contract](docs/streaming/PLAYBACK-CACHE-BUDGET.md); aggregate accounting, owner eviction and write admission built. Astra review addressed; focused qualification in progress; deployment acceptance remains open. Owner: Codex.

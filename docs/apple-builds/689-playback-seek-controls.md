@@ -1,6 +1,5 @@
 # Seek 10 or 30 seconds in either direction
 
-Build: 203
 Issue: #689
 
 The player now offers back 30 seconds, back 10 seconds, play/pause, forward

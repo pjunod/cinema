@@ -194,35 +194,16 @@ CI fetches full Git history and selects from the pull-request base. The main
 workflow runs mobile release hygiene when applicable, plus the history audit,
 catalog and validation unit tests, and operations contracts. The effort
 workflow keeps the latter three policy checks but defers mobile release
-versioning until final qualification, so one large client project claims one
-store build rather than a new build number for every internal task.
+versioning until final qualification.
 
-Mobile release hygiene reads two different refs, and the distinction is
-load-bearing. `PLURX_VALIDATION_BASE` is the recorded pull-request base sha and
-scopes *which* release inputs the branch touched; it is the branch point.
-`PLURX_VALIDATION_MERGE_TARGET` is `origin/<base ref>` re-fetched when the job
-runs, and supplies the counters the branch has to clear, because that is what
-the branch actually merges into. They name the same commit only until the base
-moves. Scope is the whole of scope: both the changed paths and the
-workspace-version comparison that marks a release are read against the recorded
-base, and only the two counters are read against the target. That split is
-load-bearing in both directions. Reading the workspace comparison off the target
-would conflate "this branch shipped a release" with "a release landed on the
-target", so every branch open across a release — including an ordinary
-dependency-only `Cargo.toml` edit, which is in this point's paths — would go red
-and be told to bump two store counters it never touched. Reading the counters
-off the branch point is the original defect. Two branches that bump a build
-counter to the same value auto-merge with
-no conflict marker and produce no `BEHIND` signal in this job, so a branch
-measured only against its branch point stays green forever once an unrelated
-release bump lands that same counter on the base. Re-baselining means a pull
-request can go red without its own head moving; that is correct, and the
-failure names the base ref and both counters so the fix is unambiguous without
-reading the workflow. An unreadable merge target fails the check rather than
-falling back to the branch point: scope selection fails open because a bad diff
-base only costs time, but a missing counter baseline would report green on a
-tree that cannot ship. A local `--changed-from` run passes one ref and uses it
-for both roles, which is right for a branch measured against a fixed point.
+Mobile release hygiene reads only the checked-out tree. Both apps' store
+build number is derived at build time by `scripts/build-number` — the
+first-parent commit count of the `main` commit a build is based on — so there
+is no stored counter to compare against a base or a merge target. The check is
+that both marketing versions equal the workspace version, that
+`CURRENT_PROJECT_VERSION` stays the fixed placeholder `1`, that both Apple
+targets stamp `CFBundleVersion` from `scripts/build-number`, and that
+`build.gradle.kts` assigns `versionCode` from it rather than from a literal.
 Every expensive fan-out job in the main CI workflow waits for that preflight.
 A documentation-only pull request stops after those executable documentation
 contracts; it does not compile the Rust workspace or provision browsers and
@@ -1081,24 +1062,24 @@ pins the Compose project and state mount, configurable HTTP/discovery ports,
 discovery networking, build stamp, real Apple/Android ship targets, concrete
 CI simulators, container port/state/cleanup behavior, and copy-video reporting.
 
-The same operations gate extracts current mobile build claims from the Apple
-and Android READMEs, the Apple parity document, and the status page. Those
-claims must match `CURRENT_PROJECT_VERSION` and `versionCode`; advancing a
-client build without its user-facing status documents is red before a PR opens.
+The same operations gate reads the status lines of the Apple and Android
+READMEs, the Apple parity document, and the status page, and refuses any that
+quotes a current build number: the number is derived, so a mirrored copy could
+only be wrong. Each status line names `scripts/build-number` instead.
 
 The READMEs and the parity document each carry exactly one anchored `> Status:`
-line, so the gate reads a single declared current claim from them. `STATUS.html`
-has no such anchor — it is prose, and every Apple build number in it is treated
-as a current claim. That page also has to narrate history, and a sentence like
-"build 52 corrected the reported iPad mini failure" stays true after the next
-bump while a regex cannot see its tense. Mark such a mention explicitly:
+line, so the gate reads one paragraph from each. `STATUS.html` has no such
+anchor — it is prose, and every Apple build number in it is treated as a
+current claim, which is refused. That page also has to narrate history, and a
+sentence like "build 52 corrected the reported iPad mini failure" stays true
+while a regex cannot see its tense. Mark such a mention explicitly:
 
 ```html
 <span data-build-history>Apple build 52</span> corrects the reported iPad mini failure
 ```
 
 Marking is the exception, never the default. An unmarked mention is still swept,
-so a status page that falls behind a build bump is red; the only way to exempt
+so a status page that quotes a current build number is red; the only way to exempt
 one is to write the marker around it, which is a reviewable edit. Use it only
 for mentions that are genuinely about a past build — rewording a true sentence
 to dodge the sweep degrades the page for its readers.
@@ -1145,30 +1126,22 @@ the opposite gap, and out of scope here; adding that coverage would mean
 adopting the same marker for the historical Android mentions the page already
 carries.
 
-### Who owns the Apple build number
+### Who owns the build number
 
-The number is claimed once, in `clients/apple/project.yml`. Every other copy is
-**generated** from it by `make apple-build-bump`
-(`validation/apple_build.py`), and `tests/operations/test_apple_build_claims.py`
-re-renders the tree to prove no copy was hand-edited. The generated copies are
-exactly the ones the sweep above already reads:
+No file does. `scripts/build-number` derives it at build time, the Xcode
+targets' "Stamp derived build number" phase writes it into the built
+`Info.plist`, and Gradle assigns it to `versionCode`. A pull request therefore
+never raises, claims or mirrors a number, and two client pull requests cannot
+conflict over one. A change's build number is known from its landing commit:
+`scripts/build-number --explain` on that commit.
 
-| Surface | Occurrence |
-| --- | --- |
-| `clients/apple/project.yml` | `CURRENT_PROJECT_VERSION` — the only load-bearing claim |
-| `clients/apple/README.md` | the anchored `> Status:` line |
-| `docs/clients/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
-| `docs/STATUS.html` | the viewers tile and the `👤 Paul` TestFlight upload item |
-
-Per-build narrative is **not** one of them. It lives in `docs/apple-builds/`,
-one file per change, named after the issue rather than the build. Before issue
-#509 that narrative sat at a shared insertion point in the two `> Status:`
-blockquotes and in a growing parenthetical on the `👤 Paul` item, so any two
-concurrent Apple branches conflicted on all three and re-conflicted every time
-`main` moved — while the number itself merged clean, because both branches
-wrote the same next value, into a tree where that value was already taken.
+Per-build narrative lives in `docs/apple-builds/`, one file per change, named
+after the issue. Before issue #509 that narrative sat at a shared insertion
+point in the two `> Status:` blockquotes and in a growing parenthetical on the
+`👤 Paul` item, so any two concurrent Apple branches conflicted on all three.
 Builds through 78 are archived verbatim in
-`docs/apple-builds/history-through-build-78.md`.
+`docs/apple-builds/history-through-build-78.md`. A fragment carries an
+`Issue:` line and no `Build:` line (`tests/operations/test_apple_build_claims.py`).
 
 The relocation is enforced, not merely documented: neither anchored `> Status`
 blockquote may contain a `Build <n> …` sentence. The ban stops at the
@@ -1177,16 +1150,6 @@ explains under its own headings how a behaviour came to be — because those
 sentences never accumulate at a shared offset, and banning them would push
 authors to reword true prose, which is the same failure `data-build-history`
 exists to prevent on `STATUS.html`.
-
-Nothing above is relaxed. `validation/mobile_versions.py` still requires the
-counter to increase past the **merge target** whenever Apple release inputs
-change, and the claim still has to agree across all four documents. What changed
-is that re-claiming after the base moves is `git merge origin/main` followed by
-`make apple-build-bump` — a sync Git resolves by itself plus one mechanical
-commit — instead of three prose merges and six hand-edited mentions that had
-already merged clean and wrong. The order matters: claiming before the sync
-leaves the branch two above the base while `main` holds one above it, on the
-same line.
 
 The four `👤 device` acceptance items in `STATUS.html` deliberately no longer
 name a build. They are forward-looking instructions rather than evidence, so

@@ -1,6 +1,5 @@
 # Live TV claims the audio route's channel count
 
-Build: 182
 Issue: #492
 
 The Live TV start envelope now tells the server how many channels the active
