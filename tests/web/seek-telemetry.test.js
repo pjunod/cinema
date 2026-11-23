@@ -538,3 +538,23 @@ test('expired-session Play reopens at the saved destination and its later wait e
   h.step({presenting:false,attached:'a2'});h.video.paused=true;h.p.wantsPlayback=false;
   h.wait();assert.equal(h.surface().kind,'none','a later pause has no surviving buffering overlay');
 });
+
+// Stall beacons carry the buffered ranges. Past 10 000 s, eight ranges no
+// longer fit the server's cap, which drops a longer value whole; the client
+// keeps the ranges nearest the playhead within it, in time order.
+test('stall beacons keep the buffered ranges nearest the playhead within the server cap',()=>{
+  const context=vm.createContext({});
+  vm.runInContext(html.match(/const BUFFERED_RANGES_MAX=\d+;/)[0]+'\n'+source('bufferedRanges')
+    +'\nthis.bufferedRanges=bufferedRanges;this.cap=BUFFERED_RANGES_MAX;',context);
+  const spans=Array.from({length:12},(_,i)=>[10000+i*100,10050+i*100]);
+  const video={currentTime:10620,buffered:{length:spans.length,
+    start:i=>spans[i][0],end:i=>spans[i][1]}};
+  const text=context.bufferedRanges(video);
+  assert.ok(text.length<=context.cap,text);
+  const kept=text.split(',');
+  assert.ok(kept.includes('10600.00-10650.00'),'the range holding the playhead survives');
+  assert.ok(!kept.includes('10000.00-10050.00')&&!kept.includes('11100.00-11150.00'),'the farthest go first');
+  const starts=kept.map(range=>Number(range.split('-')[0]));
+  assert.deepEqual(starts,[...starts].sort((a,b)=>a-b),'listed in time order');
+  assert.equal(context.bufferedRanges({currentTime:1,buffered:{length:1,start:()=>0,end:()=>20.4}}),'0.00-20.40');
+});
