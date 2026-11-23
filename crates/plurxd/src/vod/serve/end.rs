@@ -252,6 +252,8 @@ impl VodServe {
             drop(_finite_cleanup_slot);
             #[cfg(target_os = "linux")]
             if let Some((key, original)) = stopped_finite {
+                tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                    "operator stop retiring its finite rendition");
                 serve.shared.retire_stopped_finite(&key, original).await;
             }
             drop(serve);

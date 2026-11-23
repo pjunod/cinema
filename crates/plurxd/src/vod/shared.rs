@@ -2461,6 +2461,8 @@ impl Shared {
             .is_some_and(|current| Arc::ptr_eq(current, &rendition));
         let closing = self.finite_closing.lock().await.contains_key(key);
         if !registered || closing {
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, registered,
+                cleanup = closing, "operator stop handed its finite rendition to cleanup");
             return;
         }
         let build_gate_held = !self
@@ -3256,6 +3258,7 @@ impl Shared {
 
     #[cfg(target_os = "linux")]
     async fn drive_finite_closing(self: &Arc<Shared>, key: &str, closing: &FiniteClosingRef) {
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "started", "finite cleanup stage");
         let rich = closing.rich.lock().await.as_ref().cloned();
         if let Some(rendition) = rich {
             let producer = closing.producer.lock().await.as_ref().cloned();
@@ -3304,6 +3307,7 @@ impl Shared {
             closing.rich.lock().await.take();
             drop(rendition);
             drop(producer);
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "driver_joined", "finite cleanup stage");
         }
 
         if !closing.known_closed.load(Acquire) {
@@ -3357,6 +3361,7 @@ impl Shared {
                     }
                 }
                 *closing.ticket.lock().await = Some(ticket);
+                tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "ticket_prepared", "finite cleanup stage");
                 drop(producer);
                 drop(output);
                 closing.producer.lock().await.take();
@@ -3374,6 +3379,7 @@ impl Shared {
                     return;
                 }
             }
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "applications_released", "finite cleanup stage");
         }
 
         // The rich metadata and every application selector have drained. The
@@ -3395,6 +3401,8 @@ impl Shared {
                     %error, "finite terminal close remains charged for retry");
                 return;
             }
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "retired", "finite cleanup stage");
+
             if let Some(compatibility) = closing
                 .compatibility
                 .lock()
