@@ -1435,6 +1435,20 @@ impl VodServe {
                 "split soundtracks require the video-only copy",
             ));
         }
+        if split
+            && !super::vod_serve_split::split_family_shares_source(
+                rendition.recipe.source_object_version.as_deref(),
+                prepared
+                    .split_soundtracks
+                    .iter()
+                    .map(|(_, soundtrack)| soundtrack.source_object_version.as_str()),
+            )
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "split video and soundtracks do not share one source revision",
+            ));
+        }
         let mut media = vec![Arc::clone(&rendition)];
         if let Some(audio) = audio_rendition.as_ref() {
             media.push(Arc::clone(audio));
