@@ -47,6 +47,7 @@ fn landing_failure_code(verified: bool, error: String) -> String {
                 | "copy_clock_unknown"
                 | "copy_range_cancelled"
                 | "copy_range_input_limit"
+                | "copy_observation_skew"
         )
     {
         "copy_sync_unverified".to_owned()
@@ -68,6 +69,10 @@ mod landing_failure_tests {
         assert_eq!(
             landing_failure_code(false, "copy_range_input_limit".into()),
             "copy_range_input_limit"
+        );
+        assert_eq!(
+            landing_failure_code(false, "copy_observation_skew".into()),
+            "copy_observation_skew"
         );
         assert_eq!(
             landing_failure_code(false, "copy_output_readers_lost".into()),
@@ -159,8 +164,16 @@ pub(crate) struct CopyRangeProduction {
     stall: ProductionStall,
     seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     wanted_ms: i64,
+    /// This copy's memory charge, as its mux and drive loop resize it.
+    memory: Arc<crate::admission::CopyMemoryPermit>,
 }
 impl CopyRangeProduction {
+    /// The copy's memory charge now and its peak, for a test of the drive
+    /// loop's fit and settle.
+    #[cfg(test)]
+    pub(crate) fn memory_for_test(&self) -> (u64, u64) {
+        (self.memory.bytes(), self.memory.peak())
+    }
     /// Must be retained by the actual serving actor until wait_stopped joins
     /// every physical operation. HTTP waiter cancellation does not own it.
     #[allow(clippy::too_many_arguments)]
@@ -176,7 +189,9 @@ impl CopyRangeProduction {
         seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     ) -> Arc<Self> {
         let publisher = files.publisher();
+        let memory = mux.memory();
         let production = Arc::new(Self {
+            memory,
             files: AsyncMutex::new(files),
             changed: Notify::new(),
             publisher,
@@ -512,9 +527,11 @@ impl CopyRangeProduction {
                 // A live copy's growth is granted at once: it never waits here.
                 mux.fit(&event,&self.stop).await?;
                 let events=mux.feed(event)?;
-                mux.settle(&events).await;
+                let cut=super::observed::cuts(&events);
                 meter.convert(converting.elapsed());
                 self.apply(events,&census,canonical_title_start,&mut meter).await?;
+                // Only once the cut's segment is committed and dropped.
+                if cut{mux.settle().await;}
                 if eof{break;}
             }
             running.slot.request_registered_completion(&running.registration).await.map_err(|_|"copy_reap_unavailable".to_owned())?;

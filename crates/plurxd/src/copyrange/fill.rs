@@ -71,7 +71,10 @@ fn failure(reason: String) -> CopyGapFillError {
         // The muxer wrote a second init: the decoder contract changed.
         | "copy_init_contract_changed"
         // The source's fragments outgrow the copy's in-memory pairing hold.
-        | "copy_range_input_limit" => CopyGapFillError::Refused(reason),
+        | "copy_range_input_limit"
+        // The child's output pipes fell out of step: its protocol, not this
+        // attempt.
+        | "copy_observation_skew" => CopyGapFillError::Refused(reason),
         // The held object changed after the phase resolved it.
         "source changed after cluster index resolution" => {
             CopyGapFillError::Contradicted(reason)
@@ -235,7 +238,8 @@ where
     // The census Input and its readers are joined. A seeked start may read
     // only the bounded bootstrap allowance until its landing is verified.
     let input = open().await.map_err(failed)?;
-    let seek_bootstrap = match input.seal_seek_bootstrap_limit(super::seek_bootstrap_bytes(charge))
+    let seek_bootstrap = match input
+        .seal_seek_bootstrap_limit(super::seek_bootstrap_bytes(file.size, file.duration_ms))
     {
         Ok(handle) => handle,
         Err(error) => {
@@ -275,8 +279,13 @@ where
             let eof = pipes.all_eof();
             mux.fit(&event, fill.stop).await?;
             let events = mux.feed(event)?;
-            mux.settle(&events).await;
+            let cut = super::observed::cuts(&events);
+            // The batch keeps only rows and inspections (bounded by
+            // max_rows); the segment's media is dropped with `events`.
             batch.apply(events)?;
+            if cut {
+                mux.settle().await;
+            }
             if reached(fill.gap, &batch.rows) {
                 return Ok(FillEnd::NextObservedRow);
             }
@@ -356,6 +365,10 @@ mod failure_tests {
     fn an_input_limit_is_refused_not_retried() {
         assert!(matches!(
             super::failure("copy_range_input_limit".into()),
+            super::CopyGapFillError::Refused(_)
+        ));
+        assert!(matches!(
+            super::failure("copy_observation_skew".into()),
             super::CopyGapFillError::Refused(_)
         ));
         assert!(matches!(

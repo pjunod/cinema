@@ -766,14 +766,15 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        let seek_bootstrap =
-            match input.seal_seek_bootstrap_limit(crate::copyrange::seek_bootstrap_bytes(charge)) {
-                Ok(handle) => handle,
-                Err(_) => {
-                    let _ = input.close_and_wait().await;
-                    return Err(SourceWorkerError::Unavailable);
-                }
-            };
+        let seek_bootstrap = match input.seal_seek_bootstrap_limit(
+            crate::copyrange::seek_bootstrap_bytes(file.size, file.duration_ms),
+        ) {
+            Ok(handle) => handle,
+            Err(_) => {
+                let _ = input.close_and_wait().await;
+                return Err(SourceWorkerError::Unavailable);
+            }
+        };
         *stage = "growing.source_observer";
         let observer = input.observer();
         input

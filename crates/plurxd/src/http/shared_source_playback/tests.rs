@@ -2011,6 +2011,41 @@ async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_n
     fixture.shutdown().await;
 }
 
+/// A real copy's drive loop charges memory as it goes: after its cuts the
+/// charge has come back down from its peak (settle), and the peak covered
+/// the most the copy ever held (fit).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_real_copy_charges_what_it_holds() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let production = owned
+        .actor
+        .growing_backing()
+        .expect("growing copy")
+        .production
+        .clone();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !production.files.lock().await.complete() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the fixture copy finishes");
+    let (charged, peak) = production.memory_for_test();
+    assert!(
+        charged < peak,
+        "the charge settled after its cuts: {charged} of {peak}"
+    );
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
 /// A direct owner answers Status like a growing one: a refusal that passes
 /// (its open bodies full, a ledger the Store cannot answer for) is a retry
 /// and keeps the owner; a refusal that does not (its file replaced) retires
@@ -5841,7 +5876,7 @@ async fn actual_source_unclocked_start() {
 #[test]
 fn every_typed_source_start_refusal_is_relayable() {
     use SourceStartFailure as F;
-    fn every() -> [F; 14] {
+    fn every() -> [F; 15] {
         // Compile-time completeness: adding a variant breaks this match.
         let _ = |failure: F| match failure {
             F::Unavailable
@@ -5852,6 +5887,7 @@ fn every_typed_source_start_refusal_is_relayable() {
             | F::CopyClockUnknown
             | F::CopySyncUnverified
             | F::CopyInputLimit
+            | F::CopyOutputSkew
             | F::Capacity
             | F::Conflict
             | F::Unresolved
@@ -5868,6 +5904,7 @@ fn every_typed_source_start_refusal_is_relayable() {
             F::CopyClockUnknown,
             F::CopySyncUnverified,
             F::CopyInputLimit,
+            F::CopyOutputSkew,
             F::Capacity,
             F::Conflict,
             F::Unresolved,
