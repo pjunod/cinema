@@ -104,7 +104,7 @@ Preflight failures, 117 job logs of the 127 failed preflight jobs:
 | rolling-producer ownership inventory count moved | 17 | 15 | author (reviewed allowlist count) |
 | `validation-lint` exited 1 with nothing in its log | 9 | 9 | not diagnosed |
 | package/toolchain download 5xx or timeout | 6 | 3 | infrastructure |
-| formal smoke: TLC timed out | 5 | 5 | infrastructure |
+| formal smoke: TLC timed out | 5 | 5 | infrastructure: nuc4 host swapping its runner VM (§2b) |
 | other unit/contract tests | 14 | 13 | author |
 | a re-run job attempt refused by receipts | 2 | 2 | by design: dispatch fresh runs |
 
@@ -128,6 +128,47 @@ history-check` and `make check` locally, `ci.yml` (release tags and manual
 dispatch, which is where `main` itself is audited) and `effort-ci.yml`. No
 workflow audits `main` on every push, so the PR lane's report is where a new
 gap on `main` first shows up.
+
+### 2b. The formal smoke times out when nuc4 swaps its runner VM
+
+`durable-jobs smoke.cfg` explores 3,832,692 states (728,228 distinct) on every
+runner. Its fixed 60 s budget (`scripts/check-formal` `SMOKE_CONFIG_TIMEOUTS`)
+is not the problem. The problem is one runner's host. From the
+`formal-model-<run>-1` receipts and TLC logs (2026-11-22/23):
+
+| runner (TLC banner) | cores TLC sees | smoke.cfg elapsed | states at first progress line |
+|---|---|---|---|
+| 16-core runner (Linux 7.0.0-43) | 16 | 8.0–8.8 s | 1.3–1.5 M at 3 s |
+| 22-core (Linux 7.3.0-nativehdr3) | 22 | 11.5 s | 0.89 M at 4 s |
+| gha-nuc4-general-01, normal (Linux 6.8.0-149) | 3 | 31.9–33.7 s | 0.19–0.25 M at 3–4 s |
+| gha-nuc4-general-01, run 9048 | 3 | killed at 60.1 s | **13,005** at 4 s |
+
+- **Why 3 cores:** gha-nuc4-general-01 is a 6-vCPU, 8 GiB Incus VM, and its
+  runner starts each job container with `--cpus 3 --memory 7g`. So a normal
+  run already uses more than half the budget.
+- **Why run 9048 ran about 15× slower:** the nuc4 host was swapping. From
+  2026-11-22 20:15:14 to 20:37:34 a delegated host build (`plurx-build-guard`
+  group `job-1306237-…`, capped at 6 CPUs and 11 GiB in `labbuilds.slice`) ran
+  next to the two 8 GiB runner VMs, plurxd and gluster, on 30 GiB with 8 GiB
+  of swap.
+  - In the sar window ending 20:30, swap went from 77% to 93% used, at about
+    840–1,100 pages/s out and 290–410 pages/s in.
+  - The page cache collapsed from 11.6 GB to 3.1 GB.
+  - Load reached 21 with a run queue of 18 on 16 threads.
+- **How that kills TLC:** QEMU's guest memory is ordinary host memory, so the
+  host swaps it. TLC's fingerprint set and state queue (1.7 GB resident)
+  touch pages at random, so each fault stalls a worker.
+- **Still visible after the build:** on 2026-11-23 the VM held 2.2 GB of its
+  guest memory in host swap. gha-nuc4-general-02 holds 2.3 GB in swap as
+  well, although its runner (66) has been on hold since 10-13.
+
+The fix belongs to the host, not the budget. A longer timeout would only let a
+thrashing runner take longer to pass. The proposal for the CI fleet owner
+(E-921A131878) and Paul: make nuc4's committed memory fit its RAM. That means
+stopping the idle gha-nuc4-general-02 VM, and keeping the runner VMs' guest
+memory out of host swap while host builds run, for example by holding
+`labbuilds.slice` under what the VMs leave free. Today the two VMs (16 GiB),
+the build slice (11 GiB) and plurxd exceed 30 GiB.
 
 ### Proposed, not done here
 
