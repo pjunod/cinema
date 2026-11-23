@@ -1645,6 +1645,7 @@ async fn stage_verified_remote_fel(
             planning_cancellation: Some(pending.cancellation_token()),
             planning_registration: Some(pending.registration()),
             quality_intent: None,
+            platform: None,
         },
         true,
         ids,

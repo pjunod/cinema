@@ -841,7 +841,9 @@ impl VodServe {
             recipe,
             duration_ms,
             incoming_logical: _,
-        } = self.prepare_recipe(prepared, file, settings, None).await?;
+        } = self
+            .prepare_recipe(prepared, file, settings, None, AttachmentPurpose::Playback)
+            .await?;
         if !finite_software::selected_recipe(&recipe, false, false) {
             return Err("adaptive attempt requires selected finite software AVC".into());
         }

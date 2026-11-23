@@ -578,6 +578,7 @@ impl PreparedAttemptRendition {
             .as_ref()
             .ok_or("adaptive rendition lost its planned encoding")?;
         let request = VodRecipeRequest {
+            split_soundtracks: Vec::new(),
             admission_priority: if envelope.request.passive_vod {
                 crate::admission::Priority::Speculative
             } else {

@@ -9504,6 +9504,7 @@ mod funded_origin_response_tests {
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 dv_processing_destination: None,
                 dv_refit_digest: None,
                 source_telemetry: None,

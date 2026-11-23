@@ -177,6 +177,7 @@ fn start_response(v: &StartResponse) -> Option<usize> {
     // Exhaustive inventory: an added field must force accounting review.
     let StartResponse {
         processed_upgrade: _,
+        startup_seek_ready_ms: _,
         delivered_audio: _,
         quality_catalog_status: _,
         display_aware_auto_protocol: _,
@@ -243,6 +244,7 @@ fn start_response(v: &StartResponse) -> Option<usize> {
 fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
     // Exhaustive inventory: an added field must force accounting review.
     let crate::transcode::SessionRequest {
+        split_audio: _,
         continuous_media: _,
         quality_catalog: _,
         candidate_context: _,

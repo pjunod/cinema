@@ -48,6 +48,7 @@ fn fixture() -> (
         item_title: Some("static pure fixture".into()),
     });
     let request = SessionRequest {
+        split_audio: false,
         dv_processing_destination: None,
         retain_output: None,
         dv_refit_digest: None,

@@ -183,6 +183,7 @@ impl Reader {
             stored_key,
             Self {
                 initial_hardware: None,
+                attachment: Arc::new(()),
                 companion_bootstrap: false,
                 control_required: false,
                 quality_required: false,

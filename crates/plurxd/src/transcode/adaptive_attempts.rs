@@ -1860,6 +1860,7 @@ impl super::TranscodeManager {
             envelope.request.audio_offset_ms.clamp(-15_000, 15_000)
         };
         let mut recipe = crate::vodserve::VodRecipeRequest {
+            split_soundtracks: Vec::new(),
             admission_priority: if envelope.request.passive_vod {
                 crate::admission::Priority::Speculative
             } else {

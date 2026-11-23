@@ -180,6 +180,7 @@ impl PreparedProcessedFel {
             permit: root.permit.clone(),
         };
         let prepared = crate::vodserve::VodRecipeRequest {
+            split_soundtracks: Vec::new(),
             admission_priority: crate::admission::Priority::Live,
             root_admission: Some(admission),
             measured_candidate: None,

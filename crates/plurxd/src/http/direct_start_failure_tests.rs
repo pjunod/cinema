@@ -152,10 +152,11 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
     .expect("FAILURE watchdog: actual missing-file open did not return");
     assert!(matches!(
         started,
-        Err(
-            crate::transcode::source_actor::SourceWorkerError::Unresolved
-                | crate::transcode::source_actor::SourceWorkerError::Unavailable
-        )
+        Err(crate::transcode::source_actor::LiveRefusal {
+            error: crate::transcode::source_actor::SourceWorkerError::Unresolved
+                | crate::transcode::source_actor::SourceWorkerError::Unavailable,
+            ..
+        })
     ));
     let retired = tokio::time::timeout(Duration::from_secs(30), actor.retire())
         .await
