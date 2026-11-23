@@ -245,8 +245,17 @@ impl RenditionDir {
             (false, _) => None,
         };
         let tmp = self.dir.join(format!("{name}.tmp"));
-        tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, self.dir.join(name)).await?;
+        let published = async {
+            tokio::fs::write(&tmp, bytes).await?;
+            tokio::fs::rename(&tmp, self.dir.join(name)).await
+        }
+        .await;
+        if let Err(error) = published {
+            // A write that ran out of space mid-file, or a refused rename,
+            // must not leave a temporary holding the very space that ran out.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(error);
+        }
         if let Some(reservation) = reservation {
             reservation.commit(bytes.len() as u64);
         }
@@ -687,6 +696,17 @@ mod tests {
             let name = entry.file_name().to_string_lossy().into_owned();
             assert!(!name.ends_with(".tmp"), "{name} survived");
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_publish_leaves_no_temporary_bytes() {
+        // Disk-full and a refused rename take the same path: the error is
+        // returned and the complete or partial `.tmp` is gone with it.
+        let (_temp, rendition) = dir().await;
+        std::fs::create_dir_all(rendition.path().join(INIT_NAME).join("occupied"))
+            .expect("occupy the init name");
+        assert!(rendition.write_init(b"moov").await.is_err());
+        assert!(!rendition.path().join(format!("{INIT_NAME}.tmp")).exists());
     }
 
     #[tokio::test]
