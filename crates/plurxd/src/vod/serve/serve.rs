@@ -1255,31 +1255,40 @@ impl VodServe {
     /// identify the exact held producer input, even if scanning has not updated
     /// the stored file facts. This cannot queue or rebuild a fragment index.
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
+    /// The held Source input re-proven for one response. Only a failure to
+    /// read the object just now can pass; an absent or changed object, or a
+    /// response that is not a Source one, cannot.
     pub(crate) async fn source_response_physical_fence(
         &self,
         owner: &ResponseOwner,
-    ) -> Result<crate::fragment_index_cluster::SourceFence, String> {
+    ) -> Result<
+        crate::fragment_index_cluster::SourceFence,
+        crate::fragment_index_cluster::SourceFenceError,
+    > {
+        use crate::fragment_index_cluster::SourceFenceError::Changed;
         let rendition = owner
             .rendition
             .as_ref()
-            .ok_or_else(|| "Source rendition is absent".to_owned())?;
+            .ok_or_else(|| Changed("Source rendition is absent".to_owned()))?;
         if !rendition.key.starts_with("source-") {
-            return Err("Source response has no Source rendition".into());
+            return Err(Changed("Source response has no Source rendition".into()));
         }
         let held = rendition
             .source
             .as_ref()
-            .ok_or_else(|| "Source held input is absent".to_owned())?;
+            .ok_or_else(|| Changed("Source held input is absent".to_owned()))?;
         if !held.unchanged() {
-            return Err("Source held input changed".into());
+            return Err(Changed("Source held input changed".into()));
         }
-        let current = crate::fragment_index_cluster::open_source_playback_fence(
+        let current = crate::fragment_index_cluster::open_source_playback_fence_classified(
             &rendition.recipe.file,
             Some(held.object_version()),
         )
         .await?;
         if !held.unchanged() {
-            return Err("Source held input changed during response admission".into());
+            return Err(Changed(
+                "Source held input changed during response admission".into(),
+            ));
         }
         Ok(current)
     }

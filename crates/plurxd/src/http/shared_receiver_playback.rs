@@ -4334,6 +4334,38 @@ pub(crate) mod relay_log {
             );
         }
 
+        /// The receiver's own mapping of a Source answer: unavailable for
+        /// now (a 503 with Retry-After) keeps its session, through both its
+        /// Status owner and its resource relay; a refusal does not.
+        #[test]
+        fn a_source_retry_keeps_the_receiver_session_and_a_refusal_does_not() {
+            use crate::sharing_client::PeerError;
+            assert!(matches!(
+                super::super::peer_failure(crate::sharing_client::peer_status_refusal(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    true
+                )),
+                super::super::ReceiverStartError::PeerUnavailable
+            ));
+            assert!(matches!(
+                super::super::peer_failure(PeerError::Busy {
+                    retry_after_secs: 1
+                }),
+                super::super::ReceiverStartError::PeerUnavailable
+            ));
+            assert!(matches!(
+                super::super::peer_failure(crate::sharing_client::peer_status_refusal(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    false
+                )),
+                super::super::ReceiverStartError::Unresolved
+            ));
+            assert!(matches!(
+                super::super::peer_failure(PeerError::InvalidResponse),
+                super::super::ReceiverStartError::Unresolved
+            ));
+        }
+
         /// The client's Range is bounded, and a retry answer is not news.
         #[test]
         fn relay_refusals_and_ranges_are_bounded_and_leveled() {
