@@ -4203,8 +4203,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # settle the helper and holds no process or source. Four are joined test
 # tasks in the same module. The helper's stage task and its launch moved into
 # the single/run split without changing count.
-# Apple TV startup (#1827) + main 4b5ab2b61 union: main 1204 plus the branch's own 2.
-expected_occurrences = 1206
+# Apple TV startup burst fixture: +1 test-only task in source_custody.rs,
+# SourceObserverPolicyTestOwner::accept_projections, which answers projections
+# until the observer's channel closes and returns its JoinHandle. No production task.
+# Apple TV startup (#1827) + main 4b5ab2b61 union: main 1204 plus the branch's own 3.
+expected_occurrences = 1207
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
