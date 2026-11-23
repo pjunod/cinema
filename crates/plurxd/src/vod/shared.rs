@@ -3105,6 +3105,7 @@ impl Shared {
             // registration observation and any application-release wait.
             let producer = closing.producer.lock().await.as_ref().cloned();
             let rich = closing.rich.lock().await.as_ref().cloned();
+            let rich_weak = rich.as_ref().map(Arc::downgrade);
             if let Some(rendition) = rich.as_ref() {
                 rendition.closed.store(true, Release);
                 rendition.kick();
@@ -3143,6 +3144,19 @@ impl Shared {
                 let Some(output) = output else {
                     return Err("original finite output is missing".into());
                 };
+                let first = (Instant::now() + Duration::from_secs(3)).min(deadline);
+                if output.wait_allocations_release(first).await.is_err() {
+                    let survivor = rich_weak.as_ref().and_then(Weak::upgrade);
+                    tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                        rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1),
+                        readers = match survivor.as_ref() {
+                            Some(r) => Some(r.readers.lock().await.len()),
+                            None => None,
+                        },
+                        producer_strong = producer.as_ref().map(Arc::strong_count),
+                        "collected finite close waits for its allocations");
+                    drop(survivor);
+                }
                 output
                     .wait_allocations_release(deadline)
                     .await
