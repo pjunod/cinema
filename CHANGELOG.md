@@ -105,12 +105,6 @@ before that and are released with the next cut. -->
 
 ### Fixed
 
-- **A shared copy refused for its size now says so.** A high-bitrate source
-  whose keyframe spans outgrow the copy's in-memory pairing hold (4K
-  Dolby Vision remuxes with 70 MB fragments) was refused with
-  `copy_sync_unverified` when it restarted mid-title, as if its seek landing
-  had failed. It now answers `copy_range_input_limit` (422), in the log and to
-  the client. Serving such sources is a separate change.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
