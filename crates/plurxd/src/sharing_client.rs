@@ -103,6 +103,12 @@ pub(crate) enum PeerError {
     },
     /// An authenticated Start refusal, never a physical cleanup receipt.
     DolbyVisionUnsupported,
+    /// A Source's typed 422 refusal of the title itself, one of
+    /// [`crate::http::shared_source_playback::SOURCE_START_REFUSAL_CODES`],
+    /// carried as its code so the viewer is told the cause.
+    SourceRefused {
+        code: &'static str,
+    },
     /// A Source's typed 503 `startup_timeout` to a Start that carried the
     /// viewer's start clock: its owned work goes on, and the same request
     /// rejoins it. Distinct from `Busy` (429: no capacity right now), which
@@ -1682,6 +1688,14 @@ fn source_start_refusal(
             {
                 return PeerError::DolbyVisionUnsupported;
             }
+            if refusal.message.len() <= 4096 {
+                if let Some(code) = crate::http::shared_source_playback::SOURCE_START_REFUSAL_CODES
+                    .iter()
+                    .find(|code| **code == refusal.code)
+                {
+                    return PeerError::SourceRefused { code };
+                }
+            }
         }
     }
     // The receiver's viewer is told only "unresolved" for this answer. Keep
@@ -1838,6 +1852,29 @@ mod source_start_refusal_tests {
                 Some(Some(&oversized_wait)),
             ),
             PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+    }
+
+    /// Avatar 6751 (2026-11-23): a Source refused the title with a typed 422
+    /// and the receiver told its viewer "unresolved". A listed code is carried
+    /// as itself; an unlisted one, or the same code on another status, is not.
+    #[test]
+    fn a_typed_source_refusal_of_the_title_is_carried_as_its_code() {
+        let body = br#"{"code":"copy_range_input_limit","message":"Shared start is unavailable"}"#;
+        assert!(matches!(
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body, None),
+            PeerError::SourceRefused {
+                code: "copy_range_input_limit"
+            }
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, None),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+        let unknown = br#"{"code":"some_future_code","message":"x"}"#;
+        assert!(matches!(
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, unknown, None),
+            PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
         ));
     }
 

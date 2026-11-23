@@ -69,7 +69,9 @@ fn failure(reason: String) -> CopyGapFillError {
         | "copy_sync_unverified"
         | "copy_fill_landed_late"
         // The muxer wrote a second init: the decoder contract changed.
-        | "copy_init_contract_changed" => CopyGapFillError::Refused(reason),
+        | "copy_init_contract_changed"
+        // The source's fragments outgrow the copy's in-memory pairing hold.
+        | "copy_range_input_limit" => CopyGapFillError::Refused(reason),
         // The held object changed after the phase resolved it.
         "source changed after cluster index resolution" => {
             CopyGapFillError::Contradicted(reason)
@@ -335,4 +337,21 @@ where
         row_inspections,
         promotion: contract.promotion().clone(),
     })
+}
+
+#[cfg(test)]
+mod failure_tests {
+    /// A source whose fragments outgrow the pairing hold refuses every
+    /// repeat of the same generation: a gap fill must not retry it each phase.
+    #[test]
+    fn an_input_limit_is_refused_not_retried() {
+        assert!(matches!(
+            super::failure("copy_range_input_limit".into()),
+            super::CopyGapFillError::Refused(_)
+        ));
+        assert!(matches!(
+            super::failure("copy_output_readers_lost".into()),
+            super::CopyGapFillError::Failed(_)
+        ));
+    }
 }

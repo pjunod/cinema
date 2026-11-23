@@ -30,18 +30,53 @@ pub(super) fn landing_failure(
     seek_bootstrap: &crate::source_input::SourceSeekBootstrap,
     error: String,
 ) -> String {
-    if !seek_bootstrap.is_verified()
+    landing_failure_code(seek_bootstrap.is_verified(), error)
+}
+/// [`landing_failure`]'s decision. `copy_range_input_limit` names its own
+/// cause: the observed mux's in-memory hold for pairing whole canonical and
+/// AV fragments ran out. That is a fact about the copy's output, read from
+/// the child, not a symptom of the bootstrap allowance on source reads, so a
+/// high-bitrate source refused by it is never reported as an unverified
+/// landing.
+fn landing_failure_code(verified: bool, error: String) -> String {
+    if !verified
         && !matches!(
             error.as_str(),
             "copy_target_exceeded"
                 | "copy_init_contract_changed"
                 | "copy_clock_unknown"
                 | "copy_range_cancelled"
+                | "copy_range_input_limit"
         )
     {
         "copy_sync_unverified".to_owned()
     } else {
         error
+    }
+}
+
+#[cfg(test)]
+mod landing_failure_tests {
+    use super::landing_failure_code;
+
+    /// Avatar 6751 (2026-11-23): a restart's range ran out of the mux's
+    /// input hold on 70 MB 4K fragments and was reported to the viewer as
+    /// an unverified landing. A failure that names its own cause keeps it
+    /// before the landing is verified; any other is the unverified landing.
+    #[test]
+    fn an_input_limit_is_never_reported_as_an_unverified_landing() {
+        assert_eq!(
+            landing_failure_code(false, "copy_range_input_limit".into()),
+            "copy_range_input_limit"
+        );
+        assert_eq!(
+            landing_failure_code(false, "copy_output_readers_lost".into()),
+            "copy_sync_unverified"
+        );
+        assert_eq!(
+            landing_failure_code(true, "copy_output_readers_lost".into()),
+            "copy_output_readers_lost"
+        );
     }
 }
 

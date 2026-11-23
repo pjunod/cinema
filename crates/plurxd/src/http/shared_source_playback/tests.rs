@@ -5833,3 +5833,83 @@ async fn actual_source_unclocked_start() {
         .expect("server drained");
     fixture.shutdown().await;
 }
+
+/// The receiver relays exactly the codes in `SOURCE_START_REFUSAL_CODES`: the
+/// list is every typed 422 a Source Start answers and nothing else. The match
+/// is exhaustive, so a new failure must be placed; a stale entry fails the
+/// set equality.
+#[test]
+fn every_typed_source_start_refusal_is_relayable() {
+    use SourceStartFailure as F;
+    fn every() -> [F; 14] {
+        // Compile-time completeness: adding a variant breaks this match.
+        let _ = |failure: F| match failure {
+            F::Unavailable
+            | F::NotYet
+            | F::RescanRequired
+            | F::CopyTargetExceeded
+            | F::CopyInitContractChanged
+            | F::CopyClockUnknown
+            | F::CopySyncUnverified
+            | F::CopyInputLimit
+            | F::Capacity
+            | F::Conflict
+            | F::Unresolved
+            | F::Unsupported
+            | F::Deadline
+            | F::RetargetUnassigned => (),
+        };
+        [
+            F::Unavailable,
+            F::NotYet,
+            F::RescanRequired,
+            F::CopyTargetExceeded,
+            F::CopyInitContractChanged,
+            F::CopyClockUnknown,
+            F::CopySyncUnverified,
+            F::CopyInputLimit,
+            F::Capacity,
+            F::Conflict,
+            F::Unresolved,
+            F::Unsupported,
+            F::Deadline,
+            F::RetargetUnassigned,
+        ]
+    }
+    let answered: std::collections::BTreeSet<&str> = every()
+        .into_iter()
+        .filter_map(|failure| match failure.response() {
+            ApiError::Typed {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                ..
+            } => Some(code),
+            _ => None,
+        })
+        .collect();
+    let listed: std::collections::BTreeSet<&str> =
+        super::SOURCE_START_REFUSAL_CODES.iter().copied().collect();
+    assert_eq!(answered, listed);
+    assert_eq!(listed.len(), super::SOURCE_START_REFUSAL_CODES.len());
+}
+
+/// Avatar 6751 (2026-11-23): the viewer was told `copy_sync_unverified` for a
+/// copy whose fragments outgrew the copy's input hold. The receiver relays a
+/// Source Start refusal's code as it is, so the code must be the cause.
+#[test]
+fn a_copy_input_limit_reaches_the_receiver_as_its_own_code() {
+    let answer =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::CopyInputLimit)
+            .response();
+    assert!(
+        matches!(
+            answer,
+            ApiError::Typed {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "copy_range_input_limit",
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
+}
