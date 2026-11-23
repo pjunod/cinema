@@ -133,6 +133,27 @@
         "shared-video"
       ],
       "opt_in": true
+    },
+    {
+      "id": "copy-h264-aac-dts-1080",
+      "filename": "copy-h264-aac-dts-1080-clock-v1.mkv",
+      "builder": "h264_dual_aac_mkv_clocked",
+      "french_codec": "dts",
+      "frame_clock_version": 1,
+      "duration_seconds": 150,
+      "description": "1080p H.264 MKV with English AAC (440 Hz) and French DTS (660 Hz) sharing a 1 kHz sync tick; encoded frame clock v1. The server converts French to AAC for the split copy presentation (P49 AC-5)",
+      "tags": [
+        "remux",
+        "h264",
+        "aac",
+        "dts",
+        "mkv",
+        "1080p",
+        "sdr",
+        "audio-switch",
+        "shared-video"
+      ],
+      "opt_in": true
     }
   ],
   "suites": {
@@ -240,6 +261,15 @@
           "quality": "original",
           "operation": "steady",
           "require_vod": true
+        },
+        {
+          "fixture": "copy-h264-aac-dts-1080",
+          "quality": "original",
+          "operation": "audio-alternation",
+          "require_vod": true,
+          "switches": 20,
+          "switch_spacing_ms": 3000,
+          "calibration_ms": 4000
         },
         {
           "fixture": "copy-h264-dual-aac-1080",

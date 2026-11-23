@@ -2480,7 +2480,10 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # fixture cannot drift away from the window it is meant to represent.
 # 5 -> 6 with the control plane's owner-loss answer: its publication-fence test
 # builds the same fixture from the same constant rather than a literal.
-expected_occurrences = 8
+# Final cluster/main union: 8 -> 7 in media_sessions.rs. The production
+# terminal window now aliases timing::media; its old domain-constant use is
+# removed while the cfg(test) import remains. The safety boundary is unchanged.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
@@ -2542,7 +2545,9 @@ expected_occurrences = 62
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
 pattern = "TERMINAL_PROJECTION_SAFETY_WINDOW"
-expected_occurrences = 13
+# Final cluster/main union: +1 RHS name in the shared timing::media alias;
+# the existing terminal projection owner and safety-window value are unchanged.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-cluster-make-before-break"
@@ -2599,7 +2604,9 @@ pattern = "(?:MAX_ADMITTED_MEDIA_BODY_LIFETIME|MEDIA_BODY_NO_PROGRESS_TIMEOUT)"
 # Promotion union: separate Local and Source preparation/commit wrappers retain
 # the same admitted response-owner lifetimes. Four extra references expose
 # those existing guards without creating another body or settlement owner.
-expected_occurrences = 21
+# Final cluster/main union: +2 RHS names for the body-lifetime and no-progress
+# timing::media aliases. These preserve the existing response-body bounds.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-bounded-prepared-body-owner"
@@ -2747,7 +2754,9 @@ expected_occurrences = 9
 [[module_symbols]]
 id = "m4-release-terminal-store-deadlines"
 pattern = "(?:REMOTE_ABORT_WAIT|ABORT_DEADLINE|TERMINAL_COMMIT_RETRY_(?:BUDGET|MIN|MAX)|REMOTE_RELEASE_(?:ATTEMPTS|RETRY_DELAY))"
-expected_occurrences = 17
+# Final cluster/main union: +1 RHS ABORT_DEADLINE name in its shared alias.
+# The same release/abort owner retains the unchanged Store deadline.
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-release-proof-relative-projection-deadline"
@@ -2800,7 +2809,9 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-takeover-bootstrap-lease"
 pattern = "TAKEOVER_CLAIM_LEASE_TTL_MS"
-expected_occurrences = 6
+# Final cluster/main union: +1 RHS name in the shared takeover lease alias;
+# neither lease authority nor its lifetime changes.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-stale-end-lease-boundary"
@@ -2822,7 +2833,10 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-takeover-reconciliation-bounds"
 pattern = "TAKEOVER_RECONCILIATION_"
-expected_occurrences = 7
+# Final cluster/main union: two shared reconciliation aliases add two names;
+# the shared publication-runway expression removes one local reference: net +1.
+# The existing reconciliation owner and deadline/backoff values remain.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-takeover-fixed-lease-retention"
@@ -2885,7 +2899,9 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-bounded-session-release-reconciliation"
 pattern = "RELEASE_RECONCILIATION_(?:FANOUT|RETRY_BACKOFF|MAX_BACKOFF)"
-expected_occurrences = 10
+# Final cluster/main union: +2 RHS names in the shared retry/max-backoff
+# aliases. Fanout and the existing release reconciliation owner are unchanged.
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-remote-abort-settlement-capacity"
@@ -4205,11 +4221,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Receiver-consume fixture: +1 test-only serve_http listener in
 # sharing_receiver_consumes_the_range_copy_start_the_source_published, stopped
 # and joined before the fixture shuts down. No production task.
+# Cluster remainder + Main 7df74ec6d union: Main's count plus the remainder's
+# unchanged delta over Main 4bb5e1862; matcher unchanged.
 # DV window runs (#1862): +5. One production task in dv_segment/window_run.rs
 # is a run's idle-expiry timer; it only signals the run's owner to kill and
 # settle the helper and holds no process or source. Four are joined test
 # tasks in the same module. The helper's stage task and its launch moved into
 # the single/run split without changing count.
+# Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
+# unchanged delta over Main b6e8efe17; matcher unchanged.
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only serve_http listener, stopped
 # and joined before the fixture shuts down. No production task.
 # Source refusal review and stuck producer: +2 test-only tasks, both joined:
@@ -4220,6 +4240,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # SourceObserverPolicyTestOwner::accept_projections, which answers projections
 # until the observer's channel closes and returns its JoinHandle. No production task.
 # Apple TV startup (#1827) + main 0cca1660a union: main 1207 plus the branch's own 3.
+# Cluster remainder + Main 5bf2f81d2 union: Main's count plus the remainder's
+# unchanged delta over Main 3d17c7d5a; matcher unchanged.
+# Shared status busy wire test: +1 `tokio::spawn` of the HTTP fixture server in
+# sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
+# no production task, timer or process.
 # DV run window pre-start: +2. Production: the pre-start task in
 # dv_segment/window_run.rs waits for the helper to begin the run's next
 # window, spawns that window's encoder on its FIFO and owns the child until a
@@ -4228,8 +4253,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # reads the output to the capture bounds. Whoever ends the run waits for its
 # settlement, and a window's capture joins it after the encoder's reap. Test:
 # the run fixture's sleeping helper stand-in, retired and reaped by its slot.
-# Main 5bf2f81d2 merge: main 1210, branch +2; 1212.
-expected_occurrences = 1212
+# Main e674a1419 merge: main 1213, branch +2; 1215.
+expected_occurrences = 1215
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -4247,6 +4272,14 @@ expected_occurrences = 1212
 # held by discovery::Owner (shared cancellation and joined shutdown), plus one
 # test-only already-stopped advertiser owner. Net +2; no media producer.
 # Merged effort and main: 1166 base + 2 (learner discovery) + 15 (main) = 1183.
+# Final cluster/main union: +2 test-only spawns retained from the effort:
+# cluster.rs starts its stalled-response TCP fixture and aborts it after the
+# bounded request; serving_fence.rs stops and joins its monitor fixture.
+# Neither site adds a production owner or supplies settlement authority.
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
+# Main f771 integration: measured combined task count 1185 + 1 = 1186.
+# The same fixture adds one bounded cleanup timeout: 2290 + 1 = 2291.
+# Patterns, roots, exclusions and physical ownership requirements are unchanged.
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
 # Selected and predicted copy preparation each move a borrowed read-preparation
 # slot into the task. Planning and production honor shutdown and deadlines.
@@ -6241,6 +6274,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Three test-only timer shapes: two await artwork identity and one observes probe startup.
 # The offline fixture waits on the durable state with one timeout and one poll.
 # The owned voter fixture process is joined before a collision can retry.
+# Final cluster/main union over parent d1ccc110: +4, measured unchanged roots.
+# cluster.rs adds the production holder-race absolute deadline plus two test
+# timeouts (+3); publication reconciliation factors its existing bounds into
+# one absolute phase deadline (media_sessions.rs, net -2). The paused-clock
+# lease inventory regression adds two simulated work sleeps and one canceled
+# candidate sleep (+3). Timeout never proves publication or physical settlement.
+# Current-main integration (PR #1802): 2291 - 4 + 2 = 2289.
+# Developer removes one retired display-aware readiness timeout; the
+# always-on network-priors fixture removes two timeouts and one poll sleep.
+# The retained-copy reuse test adds one timeout and one poll sleep. Existing
+# tasks own these waits; no new production timer or cleanup owner is added.
+# PR #1810 current-main union: 2289 + 1 = 2290. The native FEL
+# publication loop in transcode/manager/publication.rs observes cancellation,
+# inventory changes or one second of lifecycle silence on its existing owned
+# task. Expiry wakes observation; it never proves child or permit settlement.
 # Developer tab cleanup (2026-11-18): -4 test timers. Network priors are
 # always on, so the priors-off client-log barriers and their timeouts in
 # link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
@@ -6285,17 +6333,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Receiver-consume fixture: +1 test-only tokio::time::sleep for the typed
 # Retry-After between the receiver's Start re-posts, bounded by its 120 s
 # viewer clock; it supplies no readiness or settlement evidence.
+# Cluster remainder + Main 7df74ec6d union: Main's count plus the remainder's
+# unchanged delta over Main 4bb5e1862; matcher unchanged.
 # Main 7df74ec6d merge: base 2306, branch +0, main +4; 2310.
 # Cinema fixes + main 32f30addc union: main 2305 plus the branch's own 1 over base 5a5e6c97a.
 # DV window runs (#1862): +9. Four production waits in dv_segment/window_run.rs:
 # the idle-rest bound, the run backstop deadline, and two 20 ms polls (FIFO
 # readiness, next-window marker), each inside a select! with the window's own
 # deadline and cancellation. Five are test sleeps under paused time.
+# Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
+# unchanged delta over Main b6e8efe17; matcher unchanged.
 # Main 794ee0fd7 merge: base 2310, branch +0, main +9; 2319.
 # Source copy production meter: +2 tokio::time constructors in the growing
 # copy's production loop (a tokio::time::sleep bounding the one stall report in
 # copyrange::meter::await_reporting_stall, and the observation Instants). They
 # only time and report; no wait, deadline or retry changes. No new task.
+# Cluster remainder + Main c516dd678 union: Main's count plus the remainder's
+# unchanged delta over Main 794ee0fd7; matcher unchanged.
 # Main af9f44277 merge: base 2319, branch +0, main +2; 2321.
 # Source copy production meter: +5 tokio::time::sleep shapes in
 # copyrange::meter. One is production: the sleep that bounds the single stall
@@ -6304,6 +6358,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # a_wait_past_the_target_duration_is_reported_once_and_not_cut_short and the
 # 5 s + 5 s + 30 s wait in a_hold_during_the_wait_makes_the_stall_back_pressure
 # _not_a_warning. No wait, deadline or retry changes; no new task.
+# Main 4b5ab2b61 merge: base 2321, branch +0, main +3; 2324.
+# Cluster remainder + Main 3d17c7d5a union: Main's count plus the remainder's
+# unchanged delta over Main c516dd678; matcher unchanged.
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only tokio::time::timeout (20 s)
 # around a dead copy's actor settling; the test awaits settlement, it does not
 # poll. No production timer.
@@ -6314,12 +6371,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # direct Status tests (one 11 s sleep spanning a renewal tick, bounded settles
 # and a bounded retirement wait). No production timer.
 # Apple TV startup (#1827) + main 0cca1660a union: main 2331 plus the branch's own 13.
+# Cluster remainder + Main 5bf2f81d2 union: Main's count plus the remainder's
+# unchanged delta over Main 3d17c7d5a; matcher unchanged.
+# Shared status busy wire test: +1 `Duration::from_secs` join timeout in
+# sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
+# no production task, timer or process.
 # DV run window pre-start: +3. Production: the requesting window's own deadline
 # while it waits for the pre-started encoder's spawn (in a select! with its
 # cancellation). Test: a 5 s bound on a dropped pre-start's reap and a 30 s
 # bound showing an over-limit drain fails at once.
-# Main 5bf2f81d2 merge: main 2344, branch +3; 2347.
-expected_occurrences = 2347
+# Main e674a1419 merge: main 2349, branch +3; 2352.
+expected_occurrences = 2352
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -6872,7 +6934,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Indexed HEVC census sampling uses the cancellable, bounded FFmpeg collector.
 # The indexed-resume fixture synchronously reaps its finite FFmpeg remux.
 # Apple TV startup (#1827) + main 4b5ab2b61 union: main 381 plus the branch's own 2.
-expected_occurrences = 383
+# P49 AC-5: +1 test-only FFmpeg Command in
+# split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_copy;
+# it builds the two-language source and waits for the child to exit.
+# P49 AC-5 merge: main 383 plus the branch's +1; 384.
+expected_occurrences = 384
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7638,6 +7704,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merged effort and learner discovery: 927 + 5 (learner discovery, above) = 932.
 # Merged effort and main: 937 base - 5 (facade and discovery) + 8 (main) = 940.
 # The owned voter fixture process is joined before a collision can retry.
+# Final cluster/main union: +5 cluster.rs HTTP Response.status() observations
+# for the bounded refusal adapter, call receipts and its response assertion.
+# These read HTTP status; they launch no child. Keep the broad matcher unchanged.
+# Current-main integration: 946 + 2 - 1 + 7 + 2 = 956.
+# Retain-output relay reads two HTTP statuses; its HLS route tests add seven
+# status assertions and the body/auth route test adds two. Removing the
+# retired parser-floor refusal test drops one status read. No process starts.
+# Main pins 955; the facade peer-auth router regression retained from this
+# effort adds one HTTP status assertion, explaining the combined count 956.
 # Developer tab cleanup (2026-11-18): +3 net lexical `.status(` matches in
 # the retain-output route tests (HTTP response status reads); no process.
 # Main 945 + 3 = 948.
@@ -7650,6 +7725,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The title scanner regression awaits the isolated test process with output().
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
+# Cinema fixes + main 32f30addc union: main 964 plus the branch's own 1 over base 5a5e6c97a.
+# Cluster remainder + Main d01e9a303 union: the combined source measures 970
+# broad launch-shaped occurrences with the matcher unchanged. Counts here and in
+# the task, timer and lifecycle rows are lexical inventory, not process execution.
 # The combined source still awaits the focused process guards and prepared-master HTTP status.
 # Main 32f merge: base 951, branch +2, main +13; 951 + 2 + 13 = 966.
 # Cinema fixes + main 32f30addc union: main 964 plus the branch's own 1 over base 5a5e6c97a.
@@ -7663,6 +7742,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # mux child. No production launch, kill or wait.
 # Source range init check: +1 response.status() assertion on the fixture's
 # HTTP resource reply in actual_range_resource. No process launch, kill or wait.
+# Cluster remainder + Main 7df74ec6d union: Main's count plus the remainder's
+# unchanged delta over Main 4bb5e1862; matcher unchanged.
+# Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
+# the forwarded native-readiness fixture case and one in the typed-refusal
+# test. No process launch.
+# Cluster remainder + Main b6e8efe17 union: Main's count plus the remainder's
+# unchanged delta over Main 46619fabd; matcher unchanged.
+# Shared private history guard: +1 `response.status()` read of an HTTP reply
+# in sharing_private_history_answers_pass_the_receiver_content_guard. No
+# process launch.
+# Cluster remainder + Main c516dd678 union: Main's count plus the remainder's
+# unchanged delta over Main 794ee0fd7; matcher unchanged.
 # Main 7df74ec6d merge: base 965, branch +2, main +14; 981.
 # Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
 # the forwarded native-readiness fixture case and one in the typed-refusal
@@ -7676,11 +7767,20 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Source refusal review: +12 response.status() reads on the fixture's HTTP
 # answers in the LiveSourceSession tests. No process launch, kill or wait.
 # Main c516dd678 merge: base 981, branch +2, main +1; 984.
+# Cluster remainder + Main 3d17c7d5a union: Main's count plus the remainder's
+# unchanged delta over Main c516dd678; matcher unchanged.
 # Main 3d17c7d5a merge: base 982, branch +19, main +2; 1003.
+# Cluster remainder + Main 5bf2f81d2 union: Main's count plus the remainder's
+# unchanged delta over Main 3d17c7d5a; matcher unchanged.
+# Shared status busy wire test: +1 `Response::builder().status(...)` fixture reply in
+# sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
+# no production task, timer or process.
+# P49 AC-5 merge: main 1009 plus the branch's +1 test-only output() in the
+# split admission test, which synchronously joins the FFmpeg fixture child; 1010.
 # DV run window pre-start: +1 spawn_streaming_encoder call; the window encoder
 # now also starts from the pre-start task, owned as described for its task.
-# Main 5c15e79b8 merge: main 1003, branch +1; 1004.
-expected_occurrences = 1004
+# Main e674a1419 merge: main 1010, branch +1; 1011.
+expected_occurrences = 1011
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -8004,21 +8104,34 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Recovery fixture union: +1 retained Source factory entry.wait() observer.
 # It observes the actual factory owner, not a new OS-child reaper.
 # The owned voter fixture process is joined before a collision can retry.
+# Final cluster/main union: +1 cluster.rs Barrier.wait() in the concurrent
+# refusal-isolation regression. Both requests are joined; this is not a process
+# wait, reap acknowledgement or new production lifecycle owner.
+# DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
+# owner whose kill cancels the helper's existing stage owner and waits for its
+# reap and the run's source/lane/reservation settlement. No new process launch.
+# Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
+# unchanged delta over Main b6e8efe17; matcher unchanged.
 # Main d01e9a303 merge: the stored-marker fallback pause left with main's test; main 403.
 # DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
 # owner whose kill cancels the helper's existing stage owner and waits for its
 # reap and the run's source/lane/reservation settlement. No new process launch.
+# Main 794ee0fd7 merge: base 403, branch +0, main +5; 408.
+# Cluster remainder + Main 3d17c7d5a union: Main's count plus the remainder's
+# unchanged delta over Main c516dd678; matcher unchanged.
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +1 test-only entry.wait(...) for the
 # fixture's Source owner, bounded by its 1 s deadline. No production lifecycle
 # call.
 # Source refusal review: +1 test-only entry.wait(...) in live_source_owner,
 # bounded by its 1 s deadline. No production lifecycle call.
+# Cluster remainder + Main 5bf2f81d2 union: Main's count plus the remainder's
+# unchanged delta over Main 3d17c7d5a; matcher unchanged.
 # DV run window pre-start: +6. kill_and_reap's start_kill and wait (the
 # pre-start task's own reap of a child no window took), the settlement waits
 # of a killed run (pre-start, then helper), and the run kills in claim_for and
 # the handover unit tests.
-# Main 5c15e79b8 merge: main 410, branch +6; 416.
-expected_occurrences = 416
+# Main e674a1419 merge: main 411, branch +6; 417.
+expected_occurrences = 417
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

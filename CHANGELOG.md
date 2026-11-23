@@ -10,6 +10,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
 - A shared title's Source copy now says where its time goes. Each published
   segment logs one `Source copy segment published` line (incarnation, range,
   segment, media start and end, bytes, wall time, media-per-wall-second rate,
@@ -99,6 +100,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Repeated quality discovery reuses complete peer catalogue descriptions for
+  the same source, client request, endpoint and fresh peer advertisement.
+  Refusals and partial answers remain uncached; selected-owner recipe and
+  admission checks still run before execution.
 - A Dolby Vision FEL upgrade staged for a session that the viewer then closed no longer keeps
   rendering for nobody until its deadline. Releasing the session retires its staged successor,
   which frees the worker's reconstruction slot for the viewer's next session. An upgrade that

@@ -89,7 +89,10 @@ BUILD_SPECS = {
     # P49 adds only `node --test tests/playback/audio-alternation.test.js` to
     # the web-unit-check recipe (a Node playback-lab observer test); no native
     # recipe changes.
-    'Makefile': 'b67747c8937a551fa2a80ef71435b97cd9893f0b214c2258effe9240035b5185',
+    # #1866 changes only cluster-wal-check's exact `snapshot_metrics` hiqlite
+    # test count from 13 to 17 (four landed snapshot recovery contracts); no
+    # native recipe changes.
+    'Makefile': '9088e3ed9a502671d5d78b2d41a0db169ff30158e00827c915c8b613a95147cd',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag

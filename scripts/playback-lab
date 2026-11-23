@@ -728,7 +728,12 @@ function fixtureCommand(fixture, output, directory, fixtures) {
         "-map", "[clocked_video]", "-map", "1:a:0", "-map", "2:a:0",
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
         "-g", "48", "-keyint_min", "48", "-sc_threshold", "0", "-b:v", "8M",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        // French may be DTS: the motivating source the server converts to AAC.
+        "-c:a:0", "aac", "-b:a:0", "128k",
+        ...(fixture.french_codec === "dts"
+          ? ["-c:a:1", "dca", "-strict", "-2", "-b:a:1", "768k"]
+          : ["-c:a:1", "aac", "-b:a:1", "128k"]),
+        "-ar", "48000", "-ac", "2",
         "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=English",
         "-metadata:s:a:1", "language=fre", "-metadata:s:a:1", "title=French",
         "-disposition:a:0", "default", "-disposition:a:1", "0", "-shortest", output,
@@ -863,6 +868,7 @@ function verifyFixture(fixture, file) {
   }
   for (const codec of want.audio) if (!audio.some((stream) => stream.codec_name === codec)) failures.push(`missing ${codec} audio`);
   if (want.audioCount && audio.length !== want.audioCount) failures.push(`audio streams ${audio.length}, want ${want.audioCount}`);
+  if (fixture.french_codec && !audio.some((stream) => stream.codec_name === fixture.french_codec)) failures.push(`missing ${fixture.french_codec} French audio`);
   if (want.subtitles && subtitles.length < want.subtitles) failures.push(`subtitle streams ${subtitles.length}, want ${want.subtitles}`);
   if (want.hdr && video && video.color_transfer !== "smpte2084") failures.push(`transfer ${video.color_transfer || "none"}, want smpte2084`);
   const bitrate = Number(probe.format.bit_rate || video?.bit_rate || 0);

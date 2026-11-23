@@ -651,6 +651,7 @@ paths = [
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/counted_client.rs",
+  "crates/plurx-core/tests/store_contract/token_proofs.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/file_grants.rs",
   "crates/plurx-core/src/store/playback_handoffs.rs",
@@ -804,6 +805,7 @@ paths = [
   "crates/plurxd/src/http/tests.rs",
   "crates/plurxd/src/http/tests/activity_routes.rs",
   "crates/plurx-core/src/cluster/membership.rs",
+  "crates/plurx-core/src/cluster/timing.rs",
   "crates/plurx-core/src/cluster/membership/**",
   "crates/plurxd/src/cluster.rs",
   "crates/plurxd/src/cluster/**",
@@ -851,6 +853,9 @@ id = "cluster.operations"
 title = "Cluster operations status, guarded restart, and offline WAL evidence"
 contract = "The admin status surface starts from committed membership and directly authenticates one bounded local observation from every committed member under a shared deadline — learners answer that read and originate it, and only membership mutation is voter-scoped — distinguishes a node that answered and refused the proof or returned another error status from one that could not be reached at all, rejects identity mismatches and stale or incomplete evidence, reports live serving, Raft, WAL, snapshot, media, protocol, and build facts, and authorizes at most one drained non-leader restart candidate only when every conservative quorum and durability invariant holds. Restart preparation is bound to the exact responding backend, linearizes new mutable-media admission against one expiring process-local drain, leaves existing work serving, never changes membership or invokes a supervisor, and emits commands only after owned sessions and in-flight admissions reach zero. Support bundles are size-bounded, create-only, credential/path redacted, and checksummed. Offline WAL status and verification prove the real advisory lock and bounded physical invariants without opening the store; backup is additive, private, checksummed, size/space bounded, and outside the source; recovery plans bind a named action to stable node/Raft identity and source fingerprints, while no CLI, API, or web route applies a plan, deletes a lock, truncates a WAL, restores a peer, or forces membership. Portable cluster backup is the admin-only POST route and the scheduled publisher beside it on a running voter: it refuses a node that has no activated replicated store or is behind its observed Raft log, holds the cluster-wide `backup:cluster` job lease so exactly one voter and never a learner publishes a UTC day's artefact, triggers a database snapshot and waits for that applied index to publish, reads a size-bounded single-component snapshot pointer and opens that generation before any other work, builds the archive off the runtime on a blocking thread, and advances its UTC-day fence only on publication, so a failed attempt stays retriable within its own minute while retention pruning and its setting read are post-publication maintenance that may warn but can never retry a published artefact. Backup metrics are fixed-label outcome totals plus last-success time and last artefact size. The archive format itself, its verification, and the stopped-daemon restore that consumes it are persistence.upgrades; no surface here restores anything. The replicated-write capture tooling is read-only: its sampler only issues unauthenticated GET /metrics to the voters and its evaluator only reads a samples file or a copied WAL, applying the sampler's own idle-window rules at the 12-hour gate."
 paths = [
+  "scripts/collect-voter-timing.py",
+  "scripts/collect-voter-timing.example.json",
+  "tests/operations/test_voter_timing_collector.py",
   "crates/plurxd/src/http/cluster_operations/tests.rs",
   "crates/plurxd/src/backup.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
