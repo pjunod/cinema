@@ -1692,7 +1692,12 @@ impl TranscodeManager {
                 crate::store_result::Operation::MergeProbeHevcScan,
                 crate::store_result::Discard::BestEffort,
                 self.store
-                    .merge_file_probe_hevc_scan(file.id, file.size, file.mtime, &evidence.to_string())
+                    .merge_file_probe_hevc_scan(
+                        file.id,
+                        file.size,
+                        file.mtime,
+                        &evidence.to_string(),
+                    )
                     .await,
             );
         }

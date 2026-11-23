@@ -604,8 +604,12 @@ mod tests {
             .expect("held index source")
             .expect("index census");
         let playback = measure(&file).await.expect("playback census");
+        // Recipes read the verdict for the measured revision. The sample count
+        // is how far each run got inside its wall-clock budget: the index
+        // census samples serially, so a loaded host stops it sooner.
         assert_eq!(index.verdict, hevc_census::Verdict::Varying);
-        assert_eq!(index.to_json(), playback.to_json());
+        assert_eq!(index.verdict, playback.verdict);
+        assert_eq!((index.size, index.mtime), (playback.size, playback.mtime));
     }
 
     #[tokio::test]
