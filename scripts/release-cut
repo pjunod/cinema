@@ -40,6 +40,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 # validation/apple_build.py owns the Apple build surfaces; the cut reuses it.
 sys.path.insert(0, str(ROOT))
+from validation import changelog_field  # noqa: E402
 ANDROID = "clients/android/app/build.gradle.kts"
 APPLE = "clients/apple/project.yml"
 SPIKE_MANIFEST = "spikes/hiqlite-m0/Cargo.toml"
@@ -108,8 +109,70 @@ def set_workspace_version(cargo: str, version: str) -> str:
     return cargo[: section.start(1)] + body + cargo[section.end(1) :]
 
 
-def roll_changelog(changelog: str, version: str, date: str) -> str:
-    """`[Unreleased]` becomes `[version] — date`, with the link definitions."""
+UNRELEASED_NOTE = (
+    "<!-- Do not edit this section. Each pull request's entries live in its description's\n"
+    "`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them\n"
+    "from the landing commits into the dated section below. -->"
+)
+
+
+def _has_content(body: str) -> bool:
+    """Whether a section body says anything: headings and HTML comments do not count."""
+
+    text = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    return any(line.strip() and not line.lstrip().startswith("#") for line in text.splitlines())
+
+
+def _merge_sections(body: str, generated: dict[str, list[str]]) -> str:
+    """Hand-written `[Unreleased]` text with the collected entries added to its `###` lists."""
+
+    preface, sections, order = [], {}, []
+    current = None
+    for line in re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL).strip("\n").split("\n"):
+        heading = re.match(r"^### (.+?)\s*$", line)
+        if heading:
+            current = heading.group(1)
+            if current not in sections:
+                sections[current], _ = [], order.append(current)
+        elif current is None and not line.strip():
+            continue
+        elif current is None:
+            preface.append(line)
+        else:
+            sections[current].append(line)
+    for name, bullets in generated.items():
+        if name not in sections:
+            sections[name], _ = [], order.append(name)
+        lines = sections[name]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.extend(bullets)
+    parts = ["\n".join(preface).strip()] if any(line.strip() for line in preface) else []
+    for name in order:
+        lines = sections[name]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if any(line.strip() for line in lines):
+            parts.append(f"### {name}\n" + "\n".join(lines).strip("\n"))
+    return "\n\n".join(parts)
+
+
+def roll_changelog(
+    changelog: str,
+    version: str,
+    date: str,
+    generated: dict[str, list[str]] | None = None,
+    through: str | None = None,
+) -> str:
+    """`[Unreleased]` becomes `[version] — date`, with the link definitions.
+
+    `generated` is the entries collected from landing commits
+    (validation/changelog_field.py), grouped by section; they join any
+    hand-written `[Unreleased]` text from before the cutover. `through` is the
+    last landing commit the collection read: the dated section records it, so
+    the next cut starts after it and a landing that merged while this release's
+    pull request was open is neither lost nor counted twice.
+    """
 
     if changelog.count(UNRELEASED + "\n") != 1:
         raise CutError("CHANGELOG.md must carry exactly one '## [Unreleased]' heading")
@@ -119,10 +182,11 @@ def roll_changelog(changelog: str, version: str, date: str) -> str:
     following = re.search(r"(?m)^## \[", changelog[start:])
     end = start + following.start() if following else len(changelog)
     body = changelog[start:end]
-    if not any(
-        line.strip() and not line.lstrip().startswith("#") for line in body.splitlines()
-    ):
-        raise CutError("CHANGELOG.md's [Unreleased] section is empty — nothing to release")
+    if not _has_content(body) and not generated:
+        raise CutError(
+            "nothing to release: CHANGELOG.md's [Unreleased] section is empty and no landing "
+            "commit since the last cut carries a `Changelog:` entry"
+        )
 
     link = re.search(
         r"(?m)^\[Unreleased\]: (?P<base>\S+)/compare/v(?P<previous>[^.\s]+\.[^.\s]+\.[^.\s]+)\.\.\.HEAD$",
@@ -133,11 +197,15 @@ def roll_changelog(changelog: str, version: str, date: str) -> str:
             "CHANGELOG.md has no '[Unreleased]: <repo>/compare/v<previous>...HEAD' link"
         )
     base, previous = link.group("base"), link.group("previous")
+    dated = f"## [{version}] — {date}\n" + (changelog_field.marker(through) + "\n" if through else "")
     rolled = (
         changelog[:start]
-        + f"\n## [{version}] — {date}\n"
-        + ("" if body.startswith("\n") else "\n")
-        + changelog[start:]
+        + f"\n{UNRELEASED_NOTE}\n\n"
+        + dated
+        + "\n"
+        + _merge_sections(body, generated or {})
+        + "\n\n"
+        + changelog[end:]
     )
     return rolled.replace(
         link.group(0),
@@ -239,9 +307,7 @@ def _unreleased_is_empty(changelog: str) -> bool:
     start += len(UNRELEASED) + 1
     following = re.search(r"(?m)^## \[", changelog[start:])
     body = changelog[start : start + following.start() if following else None]
-    return not any(
-        line.strip() and not line.lstrip().startswith("#") for line in body.splitlines()
-    )
+    return not _has_content(body)
 
 
 def release_commit(root: Path, version: str) -> str:
@@ -337,6 +403,30 @@ def pending(root: Path) -> dict[str, str]:
     }
 
 
+def collect_and_roll(root: Path, version: str, date: str) -> str:
+    """CHANGELOG.md with `version` dated from the landing commits since the last cut."""
+
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    head = _git(root, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+    if head.returncode != 0:
+        # A tree with no history (a fixture, an export) has no landings to read.
+        return roll_changelog(text, version, date)
+    try:
+        since = changelog_field.since_for(root, text)
+        through = head.stdout.strip()
+        entries, lacking = changelog_field.collect(root, since)
+    except changelog_field.ChangelogError as exc:
+        raise CutError(str(exc)) from exc
+    for landing in (item for item in lacking if changelog_field.after_cutover(root, item)):
+        print(
+            f"release-cut: #{landing.pull} ({landing.sha[:9]}) landed without a valid "
+            f"`Changelog:` field{': ' + landing.problem if landing.problem else ''}; "
+            "if it changed something users notice, add its entry to CHANGELOG.md on this branch",
+            file=sys.stderr,
+        )
+    return roll_changelog(text, version, date, changelog_field.render(entries), through)
+
+
 def cut(root: Path, version: str, date: str) -> list[str]:
     """Rewrite the release files in place and return the paths it changed."""
 
@@ -348,9 +438,7 @@ def cut(root: Path, version: str, date: str) -> list[str]:
         raise CutError(f"{version} is not newer than the workspace version {current}")
     if _git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}").returncode == 0:
         raise CutError(f"tag v{version} already exists")
-    changelog = roll_changelog(
-        (root / "CHANGELOG.md").read_text(encoding="utf-8"), version, date
-    )
+    changelog = collect_and_roll(root, version, date)
     cargo = set_workspace_version(cargo_path.read_text(encoding="utf-8"), version)
     android, apple = set_mobile_versions(
         (root / ANDROID).read_text(encoding="utf-8"),
@@ -384,6 +472,11 @@ def main(argv: list[str] | None = None) -> int:
         help="print key=value lines saying whether HEAD is an untagged, dated release",
     )
     parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="print the changelog section a cut would write now, and change nothing",
+    )
+    parser.add_argument(
         "--no-lockfiles",
         action="store_true",
         help="do not run cargo to rewrite Cargo.lock and the spike lockfile",
@@ -398,6 +491,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         current = workspace_version((root / "Cargo.toml").read_text(encoding="utf-8"))
         version = args.version or next_version(current, args.part)
+        if args.preview:
+            rolled = collect_and_roll(root, version, args.date or "YYYY-MM-DD")
+            print(_section(rolled, version) if args.date else
+                  rolled.partition(f"## [{version}] — YYYY-MM-DD\n")[2].partition("\n## [")[0])
+            return 0
         if not SEMVER.fullmatch(version):
             raise CutError(f"{version!r} is not MAJOR.MINOR.PATCH")
         date = args.date or dt.datetime.now(dt.timezone.utc).date().isoformat()

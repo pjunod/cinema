@@ -143,14 +143,71 @@ class ReleaseCutCase(unittest.TestCase):
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
+    def land(self, root: Path, number: int, message: str, path: str | None = None) -> str:
+        """A pull request landing the way main receives one: a merge commit carrying its description."""
+
+        main = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        git(root, "checkout", "-q", "-b", f"pr-{number}")
+        target = root / (path or f"change-{number}.txt")
+        target.write_text(f"{number}\n", encoding="utf-8")
+        topic = self.commit(root, f"change {number}")
+        git(root, "checkout", "-q", main)
+        subject = f"Merge pull request 'change {number}' (#{number}) from pr-{number} into main"
+        git(root, "merge", "-q", "--no-ff", "-m", subject, "-m", message, topic)
+        return git(root, "rev-parse", "HEAD")
+
+    def test_a_cut_collects_each_landing_entry_exactly_once(self):
+        """Entries come from landing commits; the marker keeps the next cut from repeating them."""
+
+        root = self.tree()
+        # The field exists from here on, so a landing without one is named.
+        (root / "validation").mkdir()
+        (root / "validation/changelog_field.py").write_text("# the field\n", encoding="utf-8")
+        self.commit(root, "add the field")
+        self.land(root, 7, "Changelog: Fixed — **Landed fix.** It works now,\n  across two lines.")
+        self.land(root, 9, "No field at all.")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("#9", result.stderr)
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        first = release_cut._section(changelog, "0.3.1")
+        self.assertIn("- **Something a server operator will notice.**", first)
+        self.assertIn("- **Landed fix.** It works now,\n  across two lines.", first)
+        self.assertEqual(first.count("### Fixed"), 1)
+
+        git(root, "checkout", "-q", "-b", "release/v0.3.1")
+        cut = self.commit(root, "release: v0.3.1")
+        git(root, "checkout", "-q", "-")
+        git(root, "merge", "-q", "--no-ff", "-m",
+            "Merge pull request 'release: v0.3.1' (#8) from release/v0.3.1 into main",
+            "-m", "Changelog: none — the release itself", cut)
+        self.land(root, 10, "Changelog: Added — A later feature.")
+        result = self.run_cut(root, "--date", "2026-10-05")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        second = release_cut._section(changelog, "0.3.2")
+        self.assertIn("### Added\n- A later feature.", second)
+        self.assertNotIn("Landed fix", second)
+        self.assertEqual(changelog.count("Landed fix"), 1)
+
+    def test_a_cut_with_nothing_to_release_is_refused(self):
+        root = self.tree(CHANGELOG.replace(
+            "### Fixed\n\n- **Something a server operator will notice.**\n", ""))
+        self.land(root, 7, "Changelog: none")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nothing to release", result.stderr)
+
     def test_a_patch_cut_rolls_the_changelog_and_every_version(self):
         root = self.tree()
         result = self.run_cut(root, "--date", "2026-09-28")
         self.assertEqual(result.returncode, 0, result.stderr)
         changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn(
-            "## [Unreleased]\n\n## [0.3.1] — 2026-09-28\n\n### Fixed\n", changelog
-        )
+        unreleased, _, rest = changelog.partition("## [0.3.1] — 2026-09-28\n")
+        self.assertTrue(rest, changelog)
+        # [Unreleased] keeps only the note saying where entries come from.
+        self.assertFalse(release_cut._has_content(unreleased.partition("## [Unreleased]\n")[2]))
+        self.assertRegex(rest, r"^<!-- changelog-through: [0-9a-f]{40} -->\n\n### Fixed\n")
         self.assertIn(
             "[Unreleased]: https://github.com/pjunod/plurx/compare/v0.3.1...HEAD\n"
             "[0.3.1]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.3.1\n"

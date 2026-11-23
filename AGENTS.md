@@ -37,10 +37,14 @@ decides what a session costs. Every agent working here, Claude or GPT:
   waits quietly for running jobs and prints only the final state.
 - **Append without reading.** `STATUS.md` and the project backlog carry an
   `<!-- … insert … -->` anchor line; add new entries just below it with an
-  edit instead of reading the whole file first. In `CHANGELOG.md` read only the
-  `## [Unreleased]` section (`sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p'`)
-  and add to its matching `###` list — an entry outside that section is never
-  released.
+  edit instead of reading the whole file first.
+- **Never edit `CHANGELOG.md`.** A pull request into `main` carries its entries
+  in its description, one `Changelog: <Section> — <entry>` line each (or
+  `Changelog: none`); paperwork refuses a description without the field and a
+  change to `CHANGELOG.md` outside a release cut. The description becomes the
+  landing commit's message and `scripts/release-cut` collects the entries from
+  there (`scripts/release-cut --preview` shows what is pending);
+  `validation/changelog_field.py` is the reference.
 - **Delegate exploration** that spans many files to a sub-agent that returns a
   conclusion, and start a fresh session per pull request rather than carrying
   one long context through several. Claude sessions run exploration and

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -246,6 +247,57 @@ def check_regression_fields(base: str, body: str | None, title: str) -> Result:
     return Result(name, code == 0, time.monotonic() - start, "" if code == 0 else tail(out), hint)
 
 
+def _workspace_version(text: str) -> str | None:
+    section = re.search(r"(?ms)^\[workspace\.package\]$(.*?)(?=^\[|\Z)", text)
+    version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', section.group(1)) if section else None
+    return version.group(1) if version else None
+
+
+def check_changelog(base: str, body: str | None, merge_target: str, paths: list[str]) -> Result:
+    """The pull request carries its changelog entry in its description, not in CHANGELOG.md.
+
+    validation/changelog_field.py is the field's reference. Only a pull request
+    into `main` is asked for it: a task pull request into an effort branch
+    never lands on `main`'s first-parent line, so the effort's own pull request
+    carries the entries for all of its tasks.
+    """
+
+    start = time.monotonic()
+    sys.path.insert(0, str(ROOT))
+    from validation.changelog_field import HINT, ChangelogError, require  # noqa: PLC0415
+
+    name = "Changelog field in the description, never an edit to CHANGELOG.md"
+    problems = []
+    if "CHANGELOG.md" in paths:
+        def at(revision: str | None, path: str) -> str:
+            if revision is None:
+                return (ROOT / path).read_text(encoding="utf-8") if (ROOT / path).exists() else ""
+            proc = subprocess.run(["git", "show", f"{revision}:{path}"], cwd=ROOT,
+                                  capture_output=True, text=True)
+            return proc.stdout if proc.returncode == 0 else ""
+
+        cutover = not at(base, "validation/changelog_field.py")
+        release = _workspace_version(at(base, "Cargo.toml")) != _workspace_version(at(None, "Cargo.toml"))
+        if not (cutover or release):
+            problems.append(
+                "CHANGELOG.md changed, and this is not a release cut (the workspace version did not "
+                "move). Move the entry into the description's `Changelog:` field."
+            )
+    targets_main = merge_target.rsplit("/", 1)[-1] == "main"
+    if targets_main and body is None:
+        return Result(
+            name, not problems, time.monotonic() - start,
+            "\n".join(problems + ["(pass --body-file <description> to check the Changelog field now)"]),
+            HINT, warn=not problems,
+        )
+    if targets_main:
+        try:
+            require(body or "")
+        except ChangelogError as error:
+            problems.append(str(error))
+    return Result(name, not problems, time.monotonic() - start, "\n".join(problems), HINT)
+
+
 def check_mobile_versions(base: str, merge_target: str) -> Result:
     start = time.monotonic()
     code, out = run(
@@ -326,6 +378,7 @@ def print_list() -> None:
     print("paperwork checks — what each guards, and the fix:\n")
     print("  catalog            every governed file maps to a functionality point")
     print("  Regression-Test    fix(/perf( commits need `Regression-Test:` lines in the PR description")
+    print("  Changelog          PRs into main carry `Changelog:` lines in the description; CHANGELOG.md is release-only")
     print("  mobile counters    Apple/Android build numbers rise when client code changes")
     for module, guard, hint in TEST_RULES:
         print(f"  {module:<26} {guard}\n  {'':<26} fix: {hint}")
@@ -392,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     web = check_web(paths)
     if web is not None:
         results.append(web)
+    results.append(check_changelog(base, body, args.merge_target, paths))
 
     failed = [r for r in results if not r.ok]
     for result in results:

@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+<!-- New entries no longer go here. Each pull request's entries live in its description's
+`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
+from the landing commits into the dated section. The entries below were written by hand
+before that and are released with the next cut. -->
+
 ### Added
 
 - A shared title's Source copy now says where its time goes. Each published
