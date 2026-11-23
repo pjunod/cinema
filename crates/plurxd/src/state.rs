@@ -6574,19 +6574,31 @@ impl JobManager {
     pub async fn reanalyze_files(
         &self,
         files: &[plurx_core::domain::MediaFile],
-    ) -> Result<plurx_core::scan::ReprobeReport, StoreError> {
-        let Some(lease) = self.acquire_job("repair:probe".to_owned()).await? else {
-            return Err(StoreError::Task(
-                "probe repair pass is active on another cluster node".to_owned(),
-            ));
+    ) -> Result<plurx_core::scan::ReprobeReport, ReprobeError> {
+        let lease = match crate::job_lease::claim_cluster_job(
+            &self.coordinator,
+            self.job_authority.as_ref(),
+            "repair:probe".to_owned(),
+            crate::job_lease::JOB_LEASE_TTL,
+            crate::job_lease::JOB_LEASE_HEARTBEAT,
+        )
+        .await?
+        {
+            crate::job_lease::ClusterJobClaim::Acquired(lease) => lease,
+            crate::job_lease::ClusterJobClaim::NotEligible => {
+                return Err(ReprobeError::NotEligible)
+            }
+            crate::job_lease::ClusterJobClaim::Held { owner_node_id } => {
+                return Err(ReprobeError::Busy { owner_node_id })
+            }
         };
         let lost = lease.loss_token();
         let publisher = lease.publisher(self.store.as_ref());
         let result = tokio::select! {
-            result = scan::reprobe_files_with_publication(&publisher, files) => result,
-            () = lost.cancelled() => Err(StoreError::Task(
-                "cluster probe-repair lease was lost".to_owned(),
-            )),
+            result = scan::reprobe_files_with_publication(&publisher, files) => {
+                result.map_err(ReprobeError::Store)
+            }
+            () = lost.cancelled() => Err(ReprobeError::LeaseLost),
         };
         drop(publisher);
         let _ = lease.release().await;
@@ -14328,3 +14340,27 @@ mod tests;
 #[cfg(test)]
 #[path = "state/backfill_tests.rs"]
 mod backfill_tests;
+
+/// Why an admin probe repair (`POST /items/{id}/reanalyze`) produced no
+/// report. The first three are the cluster's ordinary rules, not faults, so
+/// the HTTP layer answers each with a typed refusal rather than a 500.
+#[derive(Debug)]
+pub enum ReprobeError {
+    /// This node may not take the cluster-wide probe-repair lease: it is not a
+    /// committed voter.
+    NotEligible,
+    /// Another node holds the cluster-wide probe-repair lease.
+    Busy {
+        owner_node_id: String,
+    },
+    /// This node lost the lease before the pass finished. Files already
+    /// re-probed stay published; the report for the rest was not produced.
+    LeaseLost,
+    Store(StoreError),
+}
+
+impl From<StoreError> for ReprobeError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}

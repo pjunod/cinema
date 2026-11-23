@@ -168,7 +168,11 @@ pub async fn reanalyze(
             "this item has no files to analyze".into(),
         ));
     }
-    let report = state.jobs.reanalyze_files(&files).await?;
+    let report = state
+        .jobs
+        .reanalyze_files(&files)
+        .await
+        .map_err(reprobe_refusal)?;
     tracing::info!(
         item = id,
         repaired = report.repaired,
@@ -177,6 +181,39 @@ pub async fn reanalyze(
         "reanalyze requested"
     );
     Ok(Json(report))
+}
+
+/// A probe repair the cluster's rules refused is not a server fault: answer it
+/// with a code the caller can act on. Only one node runs the pass at a time,
+/// and only a committed voter may run it.
+fn reprobe_refusal(error: crate::state::ReprobeError) -> ApiError {
+    use crate::state::ReprobeError;
+    use axum::http::StatusCode;
+    match error {
+        ReprobeError::Busy { owner_node_id } => ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "probe_repair_busy",
+            message: format!(
+                "a probe repair pass is running on cluster node {owner_node_id}; retry when it finishes"
+            ),
+            retry_after_seconds: 30,
+        },
+        ReprobeError::LeaseLost => ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "probe_repair_interrupted",
+            message: "this node lost the cluster probe-repair lease before the pass finished; \
+                      files already re-probed stay published, so re-read the item before retrying"
+                .to_owned(),
+            retry_after_seconds: 5,
+        },
+        ReprobeError::NotEligible => ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "probe_repair_not_eligible",
+            "this node is not a committed cluster voter and cannot run a probe repair; \
+             send the request to a voter",
+        ),
+        ReprobeError::Store(error) => error.into(),
+    }
 }
 
 /// What a per-item artwork refresh did.
@@ -246,5 +283,62 @@ mod tests {
         assert!(!valid_date("2019-06-14 18:22:03"));
         assert!(!valid_date("last summer"));
         assert!(!valid_date(""));
+    }
+}
+
+#[cfg(test)]
+mod reprobe_refusal_tests {
+    use super::reprobe_refusal;
+    use crate::state::ReprobeError;
+    use axum::{http::StatusCode, response::IntoResponse};
+
+    async fn render(error: ReprobeError) -> (StatusCode, Option<String>, serde_json::Value) {
+        let response = reprobe_refusal(error).into_response();
+        let status = response.status();
+        let retry = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (
+            status,
+            retry,
+            serde_json::from_slice(&body).expect("json body"),
+        )
+    }
+
+    /// The cluster's own rules answer with a code and a retry hint, not the
+    /// 500 a storage failure gets.
+    #[tokio::test]
+    async fn reanalyze_lease_refusals_are_typed_503s_not_internal_errors() {
+        let (status, retry, body) = render(ReprobeError::Busy {
+            owner_node_id: "node-b".to_owned(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry.as_deref(), Some("30"));
+        assert_eq!(body["code"], "probe_repair_busy");
+        assert!(body["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("node-b")));
+
+        let (status, retry, body) = render(ReprobeError::LeaseLost).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry.as_deref(), Some("5"));
+        assert_eq!(body["code"], "probe_repair_interrupted");
+
+        let (status, retry, body) = render(ReprobeError::NotEligible).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry, None, "retrying the same node cannot succeed");
+        assert_eq!(body["code"], "probe_repair_not_eligible");
+
+        let (status, _, _) = render(ReprobeError::Store(
+            plurx_core::error::StoreError::Database("disk".to_owned()),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
