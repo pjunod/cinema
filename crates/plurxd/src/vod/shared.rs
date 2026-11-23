@@ -3147,13 +3147,14 @@ impl Shared {
                 let first = (Instant::now() + Duration::from_secs(3)).min(deadline);
                 if output.wait_allocations_release(first).await.is_err() {
                     let survivor = rich_weak.as_ref().and_then(Weak::upgrade);
+                    let readers = match survivor.as_ref() {
+                        Some(r) => Some(r.readers.lock().await.len()),
+                        None => None,
+                    };
+                    let rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1);
+                    let producer_strong = producer.as_ref().map(Arc::strong_count);
                     tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                        rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1),
-                        readers = match survivor.as_ref() {
-                            Some(r) => Some(r.readers.lock().await.len()),
-                            None => None,
-                        },
-                        producer_strong = producer.as_ref().map(Arc::strong_count),
+                        ?rich_strong, ?readers, ?producer_strong,
                         "collected finite close waits for its allocations");
                     drop(survivor);
                 }
