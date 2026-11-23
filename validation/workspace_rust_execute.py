@@ -150,6 +150,10 @@ def main():
         run_target(sys.argv[2])
         return
     proof = json.loads(SELECTION.read_text())
+    if proof.get('provider') == 'workspace-nextest-shards-v1':
+        from validation import nextest_shard_continuation as nextest
+        nextest.execute(proof)
+        return
     require(os.geteuid() == 0 and sys.platform == 'linux' and os.uname().machine == 'x86_64'
             and os.environ.get('RUST_TEST_THREADS') == '2' and os.environ.get('CARGO_BUILD_JOBS') == '1'
             and not os.environ.get('RUST_MIN_STACK') and not os.environ.get(RUNNER_VARIABLE)

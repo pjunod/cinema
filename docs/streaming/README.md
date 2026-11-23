@@ -32,6 +32,8 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [FEL splice](FEL-SERVER-SPLICE-BUILD.md) | Native HLS cutover and rollout. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | built |
+| [F+ acceptance](FEL-RPU-REFIT-GRADUATION-AND-M7.md) | Physical playback and NP1 trials. | open |
+| [M7 trial](FEL-RPU-REFIT-M7-2026-11-19.json) | Frozen NP1 rejection against served F+. | done |
 | [M6 Q12 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) · [Q23 history](FEL-RPU-REFIT-M6-2026-11-16.json) | Native evidence. | done |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG seek failure: subtitle cancellation, Auto repair and qualification. | open |
@@ -66,16 +68,16 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [MACOS-VIDEO-PROCESSING-STATUS.md](MACOS-VIDEO-PROCESSING-STATUS.md) | Completed supported implementation and hardware qualification; final QSV closeout PR, exact evidence, decisions and separate broader acceptance. | done |
 | [MACOS-VIDEO-PROCESSING-EVIDENCE.md](MACOS-VIDEO-PROCESSING-EVIDENCE.md) | Processing, subtitle/font, Linux SDK and AMD evidence, dependency identities and retained failures. | open |
 | [Active-font release and API evidence](evidence/macos-video-20261008/font-active-e9fd-evidence.tar.gz) | Matched release/symbols and actual native subtitle delivery while inactive font configuration changes; performance remains separate. | open |
-| [Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz) | Hash-bound SDK generation, exact-source Linux compilation and isolated runtime dependency evidence; shipping and hardware acceptance remain open. | open |
-| [Linux producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz) | Full-featured Bookworm producer and matching static AC-4 parser build receipts; package and hardware/API acceptance remain open. | open |
-| [Linux package audit evidence](evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz) | Preserved producer/parser identities, exact runtime-base package additions and complete ELF closure; hardware and daemon API qualification remain open. | open |
+| [Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz) | Source-bound SDK, Linux compilation and runtime dependencies; acceptance open. | open |
+| [Linux producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz) | Bookworm producer and static AC-4 parser builds; acceptance open. | open |
+| [Linux package audit evidence](evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz) | Producer/parser identities, runtime packages and ELF closure; acceptance open. | open |
 | [Merged-source compiler evidence](evidence/macos-video-20261008/merged-c10-compile-evidence.tar.gz) | Exact current-main integration checks on Mac and Linux, with the bounded hook continuation retained; no unit or runtime qualification claim. | open |
 | [Merged Mac release and API evidence](evidence/macos-video-20261008/final-c10-release-api-evidence.tar.gz) | Exact merged release/symbols and focused subtitle/caption API delivery; interrupted timing results remain unqualified. | open |
 | [Complete subtitle performance evidence](evidence/macos-video-20261008/final-c10-subtitle-performance-evidence.tar.gz) | Eight uninterrupted CPU/GPU complete-graph comparisons with frame/timestamp validation, exact timing/child-CPU medians and measurement limits. | open |
 | [Intel strict-P5 evidence](evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz) | Intel strict-P5 and 64×64 QSV findings; NVIDIA/deployment remain unqualified. | open |
 | [QSV shipping dependency evidence](evidence/macos-video-20261008/qsv-shipping-dependency-evidence.tar.gz) | Exact installer and both shipping-stage builds preserve audited providers while removing the competing Debian Media SDK; paired Intel hardware acceptance is retained below. | done |
 | [Intel QSV shipping qualification](evidence/macos-video-20261008/intel-qsv-shipping-qualification-evidence.tar.gz) | Shipping image passes all 32 raw controls and forced-QSV ordinary-API delivery; daemon control, runtime identities and cleanup retained. | done |
-| [MACOS-VIDEO-PROCESSING-REVIEW.md](MACOS-VIDEO-PROCESSING-REVIEW.md) | Original proposal review and active continuation implementation review: independent coverage, concrete findings, owner repairs and re-review disposition. | open |
+| [MACOS-VIDEO-PROCESSING-REVIEW.md](MACOS-VIDEO-PROCESSING-REVIEW.md) | Proposal and implementation review, findings and dispositions. | open |
 | [CODEC-AND-GPU-QUALIFICATION.md](CODEC-AND-GPU-QUALIFICATION.md) | Codec/GPU corpus, typed output contract, VUI/scoring, rolling-output census and separate graph/device acceptance. | open |
 | [S11-INTERNAL-ROLLING-CELLS-2026-10-02.md](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md) | Sanitized source/digest ledger for 16 internal rolling cells, failed attempts and public/film/device qualification limits. | done |
 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | DV Profile 5 refusal and dead media-origin probe; `output_job_owned` repair, caller audit and bounded library scan probe. | built |
