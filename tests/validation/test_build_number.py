@@ -175,6 +175,13 @@ class BuildNumberCase(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "-m", "c", cwd=other)
         self.assertEqual(self.number(GIT_DIR=str(other / ".git")), 3)
 
+    def test_every_release_signed_android_variant_derives_strictly(self) -> None:
+        """ProfileCapture is release-signed, so it gets --release like assembleRelease."""
+
+        gradle = (ROOT / "clients/android/app/build.gradle.kts").read_text(encoding="utf-8")
+        self.assertIn("val release = releaseTaskRequested ||", gradle)
+        self.assertIn('it.contains("ProfileCapture")', gradle)
+
     def test_this_repository_is_numbered_above_the_last_stored_counter(self) -> None:
         if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                           capture_output=True, text=True).stdout.strip() != "false":
