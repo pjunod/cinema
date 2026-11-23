@@ -633,9 +633,11 @@ bump may break compatibility and a **patch** bump never does.
   cannot run there. Another node holding the probe-repair lease is a typed
   503 `probe_repair_busy` naming that node, with `Retry-After: 30`. Losing
   the lease mid-pass is `probe_repair_interrupted`, with `Retry-After: 5`.
-  A node that is not a committed voter is `probe_repair_not_eligible`.
-  That case used to claim the pass was running on another node even when
-  nothing was running anywhere.
+  A node that cannot take cluster-wide leases at that moment (entering
+  maintenance, or unable to read committed membership) is
+  `probe_repair_not_eligible`, with `Retry-After: 5`. That case used to
+  claim the pass was running on another node even when nothing was running
+  anywhere.
 
 ### Added
 

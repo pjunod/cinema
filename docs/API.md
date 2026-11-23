@@ -1378,14 +1378,15 @@ overwritten by the next refresh. Its fields are doubly optional — absent means
 `POST /items/{id}/reanalyze` re-runs ffprobe over **every** file on the item,
 not only the failed ones, synchronously, and returns
 `{attempted, repaired, still_failing, gone, problems}`. One node at a time
-holds the cluster's probe-repair lease, and only a committed voter may take
-it. Each refusal is a typed 503 with a `{code, message}` body:
+holds the cluster's probe-repair lease, and only a node that may take
+cluster-wide leases can run the pass. Each refusal is a typed 503 with a
+`{code, message}` body:
 
 | `code` | `Retry-After` | Meaning |
 |---|---|---|
-| `probe_repair_busy` | 30 | Another node, named in `message`, is running a probe repair. |
+| `probe_repair_busy` | 30 | A probe repair is running, on another node named in `message` or on this one. |
 | `probe_repair_interrupted` | 5 | This node lost the lease mid-pass. Files already re-probed stay published, so re-read the item before retrying. |
-| `probe_repair_not_eligible` | none | This node is not a committed voter; send the request to a voter. |
+| `probe_repair_not_eligible` | 5 | This node cannot take cluster-wide leases right now: it is entering maintenance, cannot read committed membership, or has just been demoted. Retry, or send the request to another voter. A learner is refused earlier with `learner_route_ineligible`. |
 
 ### 6.7 Images
 

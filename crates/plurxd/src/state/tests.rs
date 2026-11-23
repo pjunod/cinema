@@ -7596,7 +7596,13 @@ async fn reanalyze_reports_a_held_or_ineligible_probe_repair_as_typed_refusals()
         .expect("the holder takes the probe-repair lease");
 
     match caller.reanalyze_files(&[]).await {
-        Err(ReprobeError::Busy { owner_node_id }) => assert_eq!(owner_node_id, "holder"),
+        Err(ReprobeError::Busy {
+            owner_node_id,
+            held_here,
+        }) => {
+            assert_eq!(owner_node_id, "holder");
+            assert!(!held_here, "another node holds it");
+        }
         Err(other) => panic!("a held lease must be Busy, got {other:?}"),
         Ok(_) => panic!("a held lease must not run a second probe repair"),
     }

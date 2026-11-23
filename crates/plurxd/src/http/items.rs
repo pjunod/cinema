@@ -184,18 +184,26 @@ pub async fn reanalyze(
 }
 
 /// A probe repair the cluster's rules refused is not a server fault: answer it
-/// with a code the caller can act on. Only one node runs the pass at a time,
-/// and only a committed voter may run it.
+/// with a code the caller can act on. One node at a time runs the pass, and
+/// only a node that may take cluster-wide leases can run it.
 fn reprobe_refusal(error: crate::state::ReprobeError) -> ApiError {
     use crate::state::ReprobeError;
     use axum::http::StatusCode;
     match error {
-        ReprobeError::Busy { owner_node_id } => ApiError::TypedRetry {
+        ReprobeError::Busy {
+            owner_node_id,
+            held_here,
+        } => ApiError::TypedRetry {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "probe_repair_busy",
-            message: format!(
-                "a probe repair pass is running on cluster node {owner_node_id}; retry when it finishes"
-            ),
+            message: if held_here {
+                "a probe repair pass is already running on this node; retry when it finishes"
+                    .to_owned()
+            } else {
+                format!(
+                    "a probe repair pass is running on cluster node {owner_node_id}; retry when it finishes"
+                )
+            },
             retry_after_seconds: 30,
         },
         ReprobeError::LeaseLost => ApiError::TypedRetry {
@@ -206,12 +214,15 @@ fn reprobe_refusal(error: crate::state::ReprobeError) -> ApiError {
                 .to_owned(),
             retry_after_seconds: 5,
         },
-        ReprobeError::NotEligible => ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "probe_repair_not_eligible",
-            "this node is not a committed cluster voter and cannot run a probe repair; \
-             send the request to a voter",
-        ),
+        ReprobeError::NotEligible => ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "probe_repair_not_eligible",
+            message: "this node cannot run cluster-wide jobs right now (not a committed voter, \
+                      entering maintenance, or cluster membership unreadable); retry, or send \
+                      the request to another voter"
+                .to_owned(),
+            retry_after_seconds: 5,
+        },
         ReprobeError::Store(error) => error.into(),
     }
 }
@@ -316,6 +327,7 @@ mod reprobe_refusal_tests {
     async fn reanalyze_lease_refusals_are_typed_503s_not_internal_errors() {
         let (status, retry, body) = render(ReprobeError::Busy {
             owner_node_id: "node-b".to_owned(),
+            held_here: false,
         })
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -325,6 +337,16 @@ mod reprobe_refusal_tests {
             .as_str()
             .is_some_and(|m| m.contains("node-b")));
 
+        let (_, _, body) = render(ReprobeError::Busy {
+            owner_node_id: "self".to_owned(),
+            held_here: true,
+        })
+        .await;
+        assert_eq!(body["code"], "probe_repair_busy");
+        assert!(body["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("on this node")));
+
         let (status, retry, body) = render(ReprobeError::LeaseLost).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(retry.as_deref(), Some("5"));
@@ -332,7 +354,11 @@ mod reprobe_refusal_tests {
 
         let (status, retry, body) = render(ReprobeError::NotEligible).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(retry, None, "retrying the same node cannot succeed");
+        assert_eq!(
+            retry.as_deref(),
+            Some("5"),
+            "membership can be briefly unreadable on a voter, so retry is advised"
+        );
         assert_eq!(body["code"], "probe_repair_not_eligible");
 
         let (status, _, _) = render(ReprobeError::Store(
