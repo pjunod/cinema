@@ -737,6 +737,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_title_readiness",
     "dv_title_demands",
     "dv_title_demands_through",
+    "dv_title_demand_for_file",
     "bind_dv_title_demand",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
@@ -21832,11 +21833,15 @@ fn contract_inventory_matches_every_store_method() {
     // published with chapter evidence (`timeline_annotation_set` is now a
     // provided method over it). Named in `MEDIA_METHODS` and
     // `TIMELINE_ANNOTATION_METHODS`; no new trait or supertrait of `Store`.
-    // 634 -> 635 for the Apple TV startup fix: `MediaStore`'s
+    // 634 -> 635: `dv_title_demand_for_file` reads one recent native FEL
+    // title's maintenance demand without moving the title worker's cursor.
+    // Named in BACKGROUND_JOB_METHODS and exercised on both backends by
+    // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
+    // 635 -> 636 for the Apple TV startup fix: `MediaStore`'s
     // `merge_file_probe_hevc_scan` grafts a probed HEVC scan verdict onto the
     // measured probe revision, exercised on both backends by
     // media_contract_runs_through_dyn_store. Named in `MEDIA_METHODS`.
-    assert_eq!(declared.len(), 635, "review the Store method count");
+    assert_eq!(declared.len(), 636, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

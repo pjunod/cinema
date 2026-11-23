@@ -159,6 +159,12 @@ fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
                 encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
             }
             Step::Stop | Step::Terminate { .. } => {
+                // A held or ended rendition asks for no next window: release
+                // the helper run's GPU, lane and source reader now.
+                #[cfg(target_os = "linux")]
+                if let Some(runtime) = encoding.dv_runtime.as_ref() {
+                    runtime.end_window_run();
+                }
                 encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false)
             }
             _ => {}

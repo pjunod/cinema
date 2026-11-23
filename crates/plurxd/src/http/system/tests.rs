@@ -1080,6 +1080,8 @@ fn beacon(event: &str, ms: i64) -> ClientLog {
         attempt: None,
         reason: None,
         runway: None,
+        position: None,
+        buffered: None,
         ms: Some(ms),
         bandwidth: None,
         height: None,
@@ -1817,6 +1819,32 @@ fn client_stall_snapshot_survives_a_superseded_session() {
     let line = client_log_line(&event, 0);
     assert!(line.contains("runway=0.4s"), "{line}");
     assert!(line.contains("bw=12345kbps"), "{line}");
+}
+
+/// A stall line says where the playhead stood and what was buffered, so a
+/// presentation stall with media ahead reads differently from a hole.
+#[test]
+fn stall_line_carries_the_playhead_and_bounded_buffered_ranges() {
+    let mut event = beacon("stall", 8_067);
+    event.runway = Some(20.4);
+    event.position = Some(18.493);
+    event.buffered = Some("0.04-38.91".into());
+    let line = client_log_line(&event, 0);
+    for field in [
+        "stall_ms=8067",
+        "runway=20.4s",
+        "position=18.49s",
+        "buffered=0.04-38.91",
+    ] {
+        assert!(line.contains(field), "{field} in {line}");
+    }
+    event.buffered = Some("0-1 <script>".into());
+    event.position = Some(f64::NAN);
+    let line = client_log_line(&event, 0);
+    assert!(
+        !line.contains("buffered=") && !line.contains("position="),
+        "{line}"
+    );
 }
 
 #[test]

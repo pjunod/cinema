@@ -110,6 +110,9 @@ pub(crate) struct WindowStageClock {
     marks: std::sync::Mutex<[Option<Duration>; STAGES]>,
     budget: std::sync::Mutex<Option<Duration>>,
     helper: std::sync::Mutex<Option<HelperStages>>,
+    /// The window's place in a window run, `(index, windows)`. A later run
+    /// window reuses the run's lane and helper, so it marks neither.
+    run: std::sync::Mutex<Option<(u8, u8)>>,
 }
 
 impl WindowStageClock {
@@ -119,6 +122,7 @@ impl WindowStageClock {
             marks: std::sync::Mutex::new([None; STAGES]),
             budget: std::sync::Mutex::new(None),
             helper: std::sync::Mutex::new(None),
+            run: std::sync::Mutex::new(None),
         })
     }
     /// Record that `stage` ended now. The first mark of a stage stands.
@@ -142,6 +146,13 @@ impl WindowStageClock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_or_insert(deadline.saturating_duration_since(self.started));
+    }
+    /// Record that this window is window `index` of a `windows`-window run.
+    pub(crate) fn run_window(&self, index: u8, windows: u8) {
+        self.run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert((index, windows));
     }
     pub(crate) fn helper_reported(&self, stages: Option<HelperStages>) {
         if let Some(stages) = stages {
@@ -199,6 +210,10 @@ impl WindowStageClock {
             helper_exited: self.at(WindowStage::HelperExited),
             encoder_tail: between(WindowStage::HelperExited, WindowStage::EncoderExited),
             verify: between(WindowStage::Captured, WindowStage::Verified),
+            run: *self
+                .run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             total: self.started.elapsed(),
         }
     }
@@ -236,6 +251,8 @@ pub(crate) struct WindowStageReport {
     pub(crate) encoder_tail: Option<Duration>,
     /// Observation, finalize, completed plan and receipt.
     pub(crate) verify: Option<Duration>,
+    /// `(index, windows)` within a window run; `None` for a single window.
+    pub(crate) run: Option<(u8, u8)>,
     pub(crate) total: Duration,
 }
 
@@ -245,6 +262,16 @@ impl std::fmt::Display for Ms {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             Some(duration) => write!(f, "{:.1}", duration.as_secs_f64() * 1000.0),
+            None => f.write_str("-"),
+        }
+    }
+}
+/// `index/windows` for a run window, `-` for a single window.
+struct RunAt(Option<(u8, u8)>);
+impl std::fmt::Display for RunAt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some((index, windows)) => write!(f, "{index}/{windows}"),
             None => f.write_str("-"),
         }
     }
@@ -271,6 +298,7 @@ impl WindowStageReport {
     ) {
         tracing::info!(target: "plurxd::dv",
             entry, mode = ?mode, outcome, cause = cause.unwrap_or("-"),
+            run_window = %RunAt(self.run),
             budget_ms = %Ms(self.budget),
             source_open_ms = %Ms(self.source_open),
             lane_wait_ms = %Ms(self.lane_wait),

@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -209,6 +210,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2882,6 +2884,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
 /// A create body with nothing set, to be spread over.
 fn bare_create() -> CreateSession {
     CreateSession {
+        split_audio: None,
         processed_upgrade: None,
         source_telemetry: None,
         intent: None,

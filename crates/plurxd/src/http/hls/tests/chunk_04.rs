@@ -2276,6 +2276,7 @@ fn staged_source_file() -> plurx_core::domain::MediaFile {
 
 fn staged_candidate_request() -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -3196,4 +3197,39 @@ async fn continuous_family_quality_does_not_stage_a_legacy_successor() {
         &recipe,
         &request.selection
     ));
+}
+
+/// A planned successor of a split copy keeps the negotiated soundtrack
+/// alternates, so a language change never re-plans into a muxed recipe that
+/// would cross the audio axis and stage a replacement session.
+#[test]
+fn a_split_copy_successor_keeps_its_soundtrack_alternates() {
+    let mut source = staged_source_file();
+    source.audio_streams = (0..2)
+        .map(|index| plurx_core::domain::AudioStream {
+            index,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        })
+        .collect();
+    let copy = crate::transcode::SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    let mut predecessor = staged_candidate_request();
+    predecessor.kind = copy;
+    predecessor.audio_index = Some(0);
+    predecessor.split_audio = true;
+    let mut candidate = predecessor.clone();
+    candidate.split_audio = false; // a re-planned successor has no negotiation of its own
+    candidate.audio_index = Some(1);
+    let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
+    assert!(candidate.split_audio);
+    candidate.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+    let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
+    assert!(!candidate.split_audio, "an encoded successor is not a split copy");
 }

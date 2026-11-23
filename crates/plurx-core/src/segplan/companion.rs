@@ -27,9 +27,10 @@ pub struct CopyCompanionVerifier {
 
 impl CopyCompanionVerifier {
     pub fn new(canonical_init: Init, av_init: Init) -> Result<Self, CompanionError> {
-        let canonical = fmp4::copy_video_init_contract_sha256(&canonical_init)
+        // The companion form: the AV output's audio may add file-type brands.
+        let canonical = fmp4::copy_video_companion_init_sha256(&canonical_init)
             .map_err(|_| CompanionError::InitContract)?;
-        let av = fmp4::copy_video_init_contract_sha256(&av_init)
+        let av = fmp4::copy_video_companion_init_sha256(&av_init)
             .map_err(|_| CompanionError::InitContract)?;
         if canonical != av || canonical_init.tracks.len() != 1 {
             return Err(CompanionError::InitContract);
@@ -161,6 +162,7 @@ mod tests {
             canonical_dts: 37,
             duration,
             next_packet_sequence: 1,
+            last_muxed_dts: 0,
         };
         let row = verifier
             .verify(&fragment, first_clock, &fragment)
@@ -174,6 +176,7 @@ mod tests {
             canonical_dts: 37 + duration,
             duration,
             next_packet_sequence: 2,
+            last_muxed_dts: 0,
         };
         assert_eq!(
             verifier.verify(&fragment, later_clock, &fragment),
@@ -195,6 +198,7 @@ mod tests {
             canonical_dts: 0,
             duration: fragment.video_duration(&init),
             next_packet_sequence: 1,
+            last_muxed_dts: 0,
         };
         let mut verifier =
             CopyCompanionVerifier::new(init.clone(), init).expect("matching decoder contracts");

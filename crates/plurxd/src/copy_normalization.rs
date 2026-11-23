@@ -77,8 +77,13 @@ impl CopyNormalizationContract {
         canonical_init: Init,
         av_init: Init,
     ) -> Result<CopyNormalizers, CopyNormalizationError> {
-        let canonical = self.pipe(canonical_init)?;
-        let av = self.pipe(av_init)?;
+        let canonical = self.pipe(canonical_init, None)?;
+        // The AV output carries audio too, and its audio may add file-type
+        // brands the video-only head and canonical outputs lack. It must name
+        // the canonical output's video, not repeat the persisted bytes.
+        let companion = fmp4::copy_video_companion_init_sha256(&canonical.served_init)
+            .map_err(|error| CopyNormalizationError::Init(error.to_string()))?;
+        let av = self.pipe(av_init, Some(&companion))?;
         Ok(CopyNormalizers {
             canonical,
             av,
@@ -87,12 +92,28 @@ impl CopyNormalizationContract {
         })
     }
 
-    fn pipe(&self, raw_init: Init) -> Result<PipeNormalizer, CopyNormalizationError> {
+    /// `companion` is `None` for the canonical output, which must carry the
+    /// head's exact contract, and the canonical output's companion digest for
+    /// the AV output.
+    fn pipe(
+        &self,
+        raw_init: Init,
+        companion: Option<&str>,
+    ) -> Result<PipeNormalizer, CopyNormalizationError> {
         let mut served_init = raw_init.clone();
         normalize_init(&mut served_init, &self.promotion)?;
-        let digest = fmp4::copy_video_init_contract_sha256(&served_init)
-            .map_err(|error| CopyNormalizationError::Init(error.to_string()))?;
-        if digest != self.init_contract_sha256 {
+        let (digest, expected) = match companion {
+            None => (
+                fmp4::copy_video_init_contract_sha256(&served_init),
+                self.init_contract_sha256.as_str(),
+            ),
+            Some(companion) => (
+                fmp4::copy_video_companion_init_sha256(&served_init),
+                companion,
+            ),
+        };
+        let digest = digest.map_err(|error| CopyNormalizationError::Init(error.to_string()))?;
+        if digest != expected {
             return Err(CopyNormalizationError::ContractChanged);
         }
         // The live copy engine has no candidate index row for its rebased

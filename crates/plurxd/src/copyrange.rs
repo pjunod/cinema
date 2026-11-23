@@ -27,6 +27,8 @@ mod fill;
 #[cfg(unix)]
 pub(crate) use fill::{fill_copy_gap, CopyGapFill, CopyGapFillError};
 #[cfg(unix)]
+mod meter;
+#[cfg(unix)]
 mod production;
 #[cfg(unix)]
 pub(crate) use production::CopyRangeProduction;

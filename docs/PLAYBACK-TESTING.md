@@ -56,6 +56,10 @@ make playback-smoke-edge
 scripts/playback-lab doctor --browser firefox
 make playback-smoke-firefox
 
+# Shared video across languages: 20 in-place soundtrack switches, scored from
+# decoded pixels (frame clock) and decoded PCM (per-language tone).
+scripts/playback-lab run --suite shared-video --headed
+
 # Tight loop while fixing one path. Matching is case-insensitive substring.
 scripts/playback-lab run --suite smoke --case "2160 :: original" --observe 8
 ```

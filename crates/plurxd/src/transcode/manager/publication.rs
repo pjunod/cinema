@@ -2050,7 +2050,24 @@ impl TranscodeManager {
         deadline: Instant,
     ) -> Option<crate::copyseg::NativeSplitInitIds> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        let split = session.native_split.as_ref()?;
+        let Some(split) = session.native_split.as_ref() else {
+            if matches!(
+                session.kind,
+                SessionKind::Copy {
+                    convert_dolby_vision: true,
+                    ..
+                }
+            ) {
+                tracing::info!(
+                    target: "plurxd::http::hls",
+                    session = %session_log_id(session_id),
+                    file_id = session.file_id,
+                    layout = "muxed",
+                    "native HLS split inventory unavailable"
+                );
+            }
+            return None;
+        };
         if session.publication.lock().await.served.is_none() {
             self.playlist_with_owner_before(session_id, deadline)
                 .await
@@ -2069,7 +2086,17 @@ impl TranscodeManager {
                     u64::try_from(snapshot.last_segment).ok()?,
                 ))
             });
-        split.choose(range)
+        let chosen = split.choose(range);
+        tracing::info!(
+            target: "plurxd::http::hls",
+            session = %session_log_id(session_id),
+            file_id = session.file_id,
+            layout = if chosen.is_some() { "split" } else { "muxed" },
+            first_segment = range.map(|(first, _)| first),
+            last_segment = range.map(|(_, last)| last),
+            "selected native HLS layout"
+        );
+        chosen
     }
 
     pub(crate) async fn native_split_child_playlist(
