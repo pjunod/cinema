@@ -311,7 +311,9 @@ pub(super) async fn evaluate(
     if stats.el_kind != TitleConstant::Consistent(TitleElKind::Fel) {
         return Ok(());
     }
-    measure_new_title(context, title, &root, stats).await
+    // The new-title measurement is a ~110 KB future in debug builds; nested by
+    // value under title work it overflowed a 2 MiB runtime worker stack.
+    Box::pin(measure_new_title(context, title, &root, stats)).await
 }
 
 #[derive(Deserialize)]
@@ -439,7 +441,7 @@ async fn measure_new_title(
         .tempdir_in(&context.state.runtime_cache_dir)
         .map_err(string)?;
     let expected_version = title.source.object_version().to_owned();
-    let prepared = super::run_source_admitted_probe(
+    let prepared = Box::pin(super::run_source_admitted_probe(
         &context.state.transcode,
         context.admission,
         context.cancel,
@@ -578,9 +580,9 @@ async fn measure_new_title(
                 title, frozen, windows: prepared_windows, scratch_bytes: reserve_bytes,
             }, reservation))
         },
-    ).await?;
+    )).await?;
     let (directory, input, _reservation) = prepared;
-    let (result, held) = m7_comparison::execute(context, input)
+    let (result, held) = Box::pin(m7_comparison::execute(context, input))
         .await
         .map_err(comparison_error)?;
     match result {
