@@ -141,11 +141,7 @@ pub(super) async fn spawn_generation(
                     .as_ref()
                     .and_then(|encoding| encoding.dv_runtime.as_ref())
                 {
-                    // Boxed: the claim may kill and settle a run, and every
-                    // generation future, DV or not, would otherwise carry
-                    // that state inline and overflow small test stacks.
-                    Some(runtime) => match Box::pin(runtime.window_run.claim_for(at, &bound)).await
-                    {
+                    Some(runtime) => match runtime.window_run.claim_for(at, &bound).await {
                         Some(claim) => {
                             if let Some(encoding) = recipe.encoding.as_ref() {
                                 encoding.begin_processed_window(
