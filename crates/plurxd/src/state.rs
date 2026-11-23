@@ -7191,6 +7191,7 @@ impl JobManager {
                             renew_every: policy.renew_every(),
                             retry_ms: policy.backoff_base_ms,
                             metrics: Arc::clone(&jobs.analysis_metrics),
+                            copy_memory: transcode.admissions().copy_memory(),
                         };
                         crate::copy_analysis::work_copy_observations(
                             &jobs.copy_analysis,

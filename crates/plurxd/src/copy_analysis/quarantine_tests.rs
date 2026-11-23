@@ -215,6 +215,7 @@ async fn store_fixture() -> Fixture {
         renew_every: std::time::Duration::from_secs(60),
         retry_ms: 1_000,
         metrics: Default::default(),
+        copy_memory: crate::admission::CopyMemoryPool::new(1 << 30),
     };
     Fixture {
         _dir: dir,
@@ -1111,6 +1112,7 @@ impl Fixture {
             renew_every: self.context.renew_every,
             retry_ms: self.context.retry_ms,
             metrics: Default::default(),
+            copy_memory: crate::admission::CopyMemoryPool::new(1 << 30),
         })
     }
 

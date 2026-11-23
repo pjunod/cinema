@@ -3444,6 +3444,7 @@ membership addresses and token-file paths are intentionally file-only:
 | — | `cluster.artwork_url` | `http://<advertise_host>:<server port>` | Node-specific public plurxd base peers use to recover local artwork. Set an explicit per-node URL when `join_url` names a shared proxy or load balancer |
 | — | `cluster.join_token_file` | empty | Owner-only file containing one token on a fresh joining node. Empty bootstraps or reopens; a successful join deletes it |
 | `PLURX_CONFIG` | — | — | Explicit config-file path (must exist if set) |
+| `PLURX_COPY_MEMORY_BUDGET` | — | ⅛ of node memory | Bytes this node's verified copies (shared growing copies and Analysis gap fills) may hold in plurxd's heap at once. Node memory is the container's cgroup limit where one is set, `hw.memsize` on macOS, else 1 GiB. Each copy charges its bound before its FFmpeg child starts; a copy that does not fit waits in arrival order and is answered busy at its start deadline, and a lone copy larger than the whole budget still runs on an idle node. Counts plurxd's own heap only, **not** FFmpeg children. Per node, never replicated. Used / total is on Activity → node |
 | `PLURX_FFMPEG` | — | `ffmpeg` | ffmpeg binary — point at jellyfin-ffmpeg for best hwaccel |
 | `PLURX_FFPROBE` | — | `ffprobe` | ffprobe binary (inspection + chapter markers) |
 | `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |

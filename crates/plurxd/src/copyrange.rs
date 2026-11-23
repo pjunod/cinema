@@ -31,6 +31,8 @@ mod meter;
 #[cfg(unix)]
 mod production;
 #[cfg(unix)]
+pub(crate) use observed::COPY_HOLD_BYTES;
+#[cfg(unix)]
 pub(crate) use production::{CommitWaiter, CopyRangeProduction, DeadlineEnd};
 
 #[cfg(unix)]

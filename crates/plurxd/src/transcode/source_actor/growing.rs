@@ -548,6 +548,21 @@ impl TranscodeManager {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        // The copy's memory is admitted first, before it takes a copy slot or
+        // reads its head: a start waiting for memory holds nothing another
+        // copy needs and discards no work. A node whose copies hold their
+        // budget answers busy, which the receiver retries.
+        *stage = "growing.copy_memory";
+        let memory = self
+            .admissions
+            .copy_memory()
+            .acquire(
+                crate::copyrange::COPY_HOLD_BYTES,
+                crate::admission::CopyPriority::Live,
+                tokio::time::Instant::from_std(deadline),
+            )
+            .await
+            .ok_or(SourceWorkerError::Capacity)?;
         *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
         *stage = "growing.rendition_owner";
@@ -714,6 +729,7 @@ impl TranscodeManager {
             recipe.tracks(&file),
             video.retains_hevc_parameter_sets(),
             file.video_codec.as_deref() == Some("hevc"),
+            memory,
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.copy_args";

@@ -460,6 +460,8 @@ impl CopyRangeProduction {
         let target = std::time::Duration::from_secs(u64::from(
             plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
         ));
+        let peak_held = mux.peak_held();
+        let charged = mux.charged_bytes();
         let observed=async{
             loop {
                 let pipes=running.pipes.as_mut().ok_or("copy_output_readers_missing")?;
@@ -510,7 +512,12 @@ impl CopyRangeProduction {
             (Ok(()), Ok(receipt)) if !receipt.exit_success() => Err("copy_child_failed".into()),
             (Ok(()), Ok(_)) => Ok(()),
         };
-        meter.finished(tokio::time::Instant::now(), &result);
+        meter.finished(
+            tokio::time::Instant::now(),
+            &result,
+            peak_held.load(std::sync::atomic::Ordering::Relaxed),
+            charged,
+        );
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();
     }

@@ -880,6 +880,7 @@ paths = [
   "crates/plurxd/src/state/analysis_rate_tests.rs",
   "crates/plurxd/src/state/tests.rs",
   "crates/plurxd/src/admission.rs",
+  "crates/plurxd/src/node_memory.rs",
   "crates/plurxd/src/http/internal_activity.rs",
   "crates/plurxd/src/http/internal_media.rs",
   "crates/plurxd/src/http/transcode_copies.rs",

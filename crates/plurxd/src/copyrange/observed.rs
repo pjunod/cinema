@@ -21,6 +21,17 @@ use std::{
     sync::Arc,
 };
 pub(super) const MAX_HELD: usize = 96 * 1024 * 1024;
+/// What one copy charges against the node's copy memory budget: the most its
+/// observed mux may hold. Five disjoint holds are each capped at
+/// [`MAX_HELD`] independently, so the bound is their sum:
+///
+/// 1. `queued_bytes`: pipe bytes not yet framed, and whole canonical and AV
+///    fragments waiting for their pair;
+/// 2. the AV reader's buffer of its in-progress fragment;
+/// 3. the observed-range assembler's in-progress canonical fragment;
+/// 4. the verified copy kernel's pending AV fragments before a cut;
+/// 5. the kernel's split clone when it emits a segment.
+pub(crate) const COPY_HOLD_BYTES: u64 = 5 * MAX_HELD as u64;
 const MAX_FRAGMENTS: usize = 8;
 const MAX_PACKETS: usize = 131072;
 
@@ -71,6 +82,11 @@ pub(crate) struct ObservedCopyMux {
     media_marked: bool,
     clock_marked: bool,
     failed: bool,
+    /// The most this mux has held at once, for the production meter.
+    peak_held: Arc<std::sync::atomic::AtomicUsize>,
+    /// This copy's charge against the node's copy memory budget, returned
+    /// when the mux is dropped, however the copy ends.
+    _memory: crate::admission::CopyMemoryPermit,
 }
 impl ObservedCopyMux {
     pub(crate) fn new(
@@ -80,6 +96,7 @@ impl ObservedCopyMux {
         tracks: TrackDurations,
         retain_parameter_sets: bool,
         inspect_hevc: bool,
+        memory: crate::admission::CopyMemoryPermit,
     ) -> Result<Self, String> {
         let mut av_reader = FragmentReader::new();
         av_reader.reject_reinitialization();
@@ -118,7 +135,25 @@ impl ObservedCopyMux {
             media_marked: false,
             clock_marked: false,
             failed: false,
+            peak_held: Arc::default(),
+            _memory: memory,
         })
+    }
+    /// What this copy charged against the node's copy memory budget.
+    pub(crate) fn charged_bytes(&self) -> u64 {
+        self._memory.bytes()
+    }
+    /// The most this mux has held at once, readable after it is consumed.
+    pub(crate) fn peak_held(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.peak_held)
+    }
+    /// Peak of the holds the mux itself sees (1 and 2 of
+    /// [`COPY_HOLD_BYTES`]); the kernel's and assembler's are bounded by
+    /// their own caps.
+    fn note_held(&self) {
+        let held = self.queued_bytes.saturating_add(self.av_reader.buffered());
+        self.peak_held
+            .fetch_max(held, std::sync::atomic::Ordering::Relaxed);
     }
     /// Errors latch. A returned segment was checked in full; an earlier good
     /// prefix never gives credit to a later fragment or another seek.
@@ -143,6 +178,7 @@ impl ObservedCopyMux {
                         return Err("copy_range_input_limit".into());
                     }
                     self.av_reader.push(&bytes);
+                    self.note_held();
                     while let Some(unit) =
                         self.av_reader.next_unit().map_err(av_observation_error)?
                     {
@@ -234,6 +270,7 @@ impl ObservedCopyMux {
         if self.queued_bytes > MAX_HELD {
             return Err("copy_range_input_limit".into());
         }
+        self.note_held();
         Ok(())
     }
     fn hold_fragment(&mut self, bytes: usize) -> Result<(), String> {
