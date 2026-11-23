@@ -3,7 +3,7 @@
 use super::m7_comparison::{HeldTitle, TitleContext};
 use crate::fragment_index_cluster::{open_source_fence, SourceFence};
 use plurx_core::{
-    process::{bounded, source_lifetime},
+    process::bounded,
     store::dv_m7_attempts::{M7CandidateAnchor, M7CandidatePlan, M7CandidateScope},
     transcode::dv_m7_receipt::M7SourceProbe,
 };
@@ -234,9 +234,12 @@ async fn held_title(context: &TitleContext<'_>) -> Result<HeldTitle, String> {
 async fn raw_sha256(context: &TitleContext<'_>, source: &SourceFence) -> Result<[u8; 32], String> {
     // Historical experiment identities are raw complete-file SHA-256. The
     // fragment-index attestation intentionally uses a different hash domain.
+    // An in-process read of library media under the source fence, which
+    // already proved the reopened handle is the catalogued file. No child
+    // receives it, so it is not a daemon-owned asset: registering it as one
+    // is refused whenever reader roots are configured (library media never
+    // sits under the daemon's owned roots) and deferred every M7 title.
     let reopened = source.reopen(context.file).await?;
-    let _file = source_lifetime::register_daemon_file(&reopened.handle, &context.file.path)
-        .map_err(|error| error.to_string())?;
     let mut reader = tokio::fs::File::from_std(reopened.handle);
     let budget = context.fence.source_budget();
     let mut remaining = u64::try_from(context.file.size).map_err(|e| e.to_string())?;
