@@ -2,7 +2,6 @@
 
 **Status:** built; physical candidate acceptance open
 
-Build: 216
 Issue: #888
 
 Video dimensions no longer count as a displayed picture. First-video reporting

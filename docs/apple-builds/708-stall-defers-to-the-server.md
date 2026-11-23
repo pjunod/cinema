@@ -1,6 +1,5 @@
 # Ask the server before deciding a stall
 
-Build: 98
 Issue: #708
 
 Every stall owner on this platform funnels into one function, and it decided

@@ -1,6 +1,5 @@
 # Wait for the prepared offer with the picture still up
 
-Build: 166
 Issue: #912
 
 A quality change on a live session used to publish the viewer's intent and

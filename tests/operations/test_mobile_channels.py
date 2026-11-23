@@ -209,6 +209,32 @@ class MobileChannelsCase(unittest.TestCase):
             release(head, only_apple)
         self.assertFalse((self.root / "command.json").exists())
 
+    def test_a_tree_that_derives_build_numbers_selects_by_changed_paths_alone(self) -> None:
+        # Once scripts/build-number is in the tree, every main commit has its
+        # own derived number, so no platform can be "changed after its last
+        # bump"; the stored-counter skip is a legacy-tree rule only.
+        self.bump("apple", 2)
+        self.bump("android", 2)
+        derived = self.commit("scripts/build-number", "#!/usr/bin/env python3\n")
+        head = self.commit("clients/apple/Sources/Shared/Player.swift")
+        self.assertEqual(self.scope(derived, head), (["ios", "tvos"], ""))
+        both = self.commit("clients/android/app/src/main/AndroidManifest.xml")
+        self.assertEqual(self.scope(derived, both), (["ios", "tvos", "android"], ""))
+        self.assertEqual(self.scope(both, self.commit("docs/PUBLISHING.md"))[0], [])
+        release(head, both)
+        command = json.loads((self.root / "command.json").read_text())
+        self.assertEqual(json.loads(command[-1])["mobile_release_channels_platforms"], ["android"])
+
+    def test_the_derived_rule_reads_the_head_tree_not_the_checkout(self) -> None:
+        # A legacy head keeps the stored-counter guard even when the checkout
+        # running this job already derives its numbers.
+        bumped = self.bump("apple", 2)
+        legacy = self.commit("clients/apple/Sources/Shared/Player.swift")
+        self.commit("scripts/build-number", "#!/usr/bin/env python3\n")
+        platforms, warning = self.scope(bumped, legacy)
+        self.assertEqual(platforms, [])
+        self.assertIn("skipping Cinema apple", warning)
+
     def test_merged_bump_counts_even_when_older_than_the_branch_sources(self) -> None:
         # The controller guard took the last non-merge bump commit, so a
         # branch that bumped early and edited sources afterwards was refused
