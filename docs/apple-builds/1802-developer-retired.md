@@ -2,7 +2,6 @@
 
 **Status:** built — compiles on the fast lane; no physical-device check claimed.
 
-Build: 307
 Issue: #1802
 
 Settings no longer has a Developer category on iPhone, iPad or Apple TV.

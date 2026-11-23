@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Print the store build number for this checkout, derived from Git history.
+
+Both native apps carry one build number (Apple CFBundleVersion, Android
+versionCode) and neither is stored in source: a stored counter that every
+client pull request had to raise made any two client pull requests conflict.
+The number is computed at build time instead:
+
+    B = git merge-base HEAD <main>     (<main> = origin/main, else main)
+    build number = git rev-list --count --first-parent B
+
+A build of a main commit is numbered by its own first-parent position, which
+is unique and strictly increasing along main. A branch build gets the number
+of the main commit it is based on, so it can never claim a number above a
+later main build. With no main ref at all, B is HEAD.
+
+    scripts/build-number            # the number; degrades to 1 with a warning
+    scripts/build-number --release  # the number, or exit non-zero
+    scripts/build-number --explain  # how the number was computed
+
+A shallow clone or a checkout without Git history cannot count commits. A
+development or CI compile build then gets 1 and a warning on stderr; a release
+build (`--release`) refuses, because a wrong store number is either rejected
+or, worse, accepted below a build that already shipped. `PLURX_BUILD_NUMBER`
+overrides the computation with an explicit positive integer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+MAIN_REFS = ("origin/main", "main")
+# The last stored counters before the number was derived: Apple
+# CURRENT_PROJECT_VERSION 310 and Android versionCode 210. Main already had
+# 1955 first-parent commits when the switch landed, so a correct count is
+# always above both; one that is not means the history was truncated (a
+# grafted or partially fetched clone) and a release build must not ship it.
+STORED_FLOOR = 310
+DEVELOPMENT_NUMBER = 1
+OVERRIDE = "PLURX_BUILD_NUMBER"
+# Repository-local variables Git exports to hooks. This may run from a hook of
+# another repository, and an inherited GIT_DIR would count the wrong history.
+GIT_LOCAL_VARIABLES = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+)
+
+
+class Unavailable(RuntimeError):
+    """The number cannot be derived from this checkout."""
+
+
+def git(repo: Path, *args: str) -> str:
+    env = {key: value for key, value in os.environ.items() if key not in GIT_LOCAL_VARIABLES}
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Unavailable(f"git is unavailable: {exc}") from exc
+    if result.returncode != 0:
+        raise Unavailable(f"git {' '.join(args)} failed: {result.stderr.strip() or result.returncode}")
+    return result.stdout.strip()
+
+
+def has_commit(repo: Path, ref: str) -> bool:
+    try:
+        git(repo, "rev-parse", "-q", "--verify", f"{ref}^{{commit}}")
+    except Unavailable:
+        return False
+    return True
+
+
+def derive(repo: Path) -> tuple[int, list[str]]:
+    """The build number and the lines that explain it."""
+    if git(repo, "rev-parse", "--is-shallow-repository") != "false":
+        raise Unavailable("the repository is a shallow clone; fetch full history (`git fetch --unshallow`)")
+    head = git(repo, "rev-parse", "--verify", "HEAD^{commit}")
+    main = next((ref for ref in MAIN_REFS if has_commit(repo, ref)), None)
+    explain = [f"HEAD {head}"]
+    if main is None:
+        base = head
+        explain.append(f"no {' or '.join(MAIN_REFS)} ref; counting from HEAD")
+    else:
+        base = git(repo, "merge-base", "HEAD", main)
+        explain.append(f"merge-base of HEAD and {main}: {base}" + (" (HEAD is on main)" if base == head else ""))
+    count = git(repo, "rev-list", "--count", "--first-parent", base)
+    if not re.fullmatch(r"[1-9]\d*", count):
+        raise Unavailable(f"git rev-list --count returned {count!r}")
+    explain.append(f"first-parent commits up to and including {base[:12]}: {count}")
+    return int(count), explain
+
+
+def resolve(repo: Path, *, release: bool) -> tuple[int, list[str], list[str]]:
+    """(number, explanation, warnings), or raise Unavailable for a release build."""
+    warnings: list[str] = []
+    override = os.environ.get(OVERRIDE)
+    if override is not None and override != "":
+        if not re.fullmatch(r"[1-9]\d*", override):
+            raise Unavailable(f"{OVERRIDE}={override!r} is not a positive integer")
+        number, explain = int(override), [f"{OVERRIDE} override: {override}"]
+    else:
+        try:
+            number, explain = derive(repo)
+        except Unavailable as exc:
+            if release:
+                raise
+            warnings.append(f"{exc}; using development build number {DEVELOPMENT_NUMBER}")
+            return DEVELOPMENT_NUMBER, [f"unavailable: {exc}", f"development build number {DEVELOPMENT_NUMBER}"], warnings
+    if number <= STORED_FLOOR:
+        message = (f"build number {number} is not above {STORED_FLOOR}, the last stored counter; "
+                   "the history looks truncated")
+        if release:
+            raise Unavailable(message)
+        warnings.append(message)
+    return number, explain, warnings
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser.add_argument("--release", action="store_true",
+                        help="fail instead of degrading when the number cannot be derived")
+    parser.add_argument("--explain", action="store_true", help="print how the number was computed")
+    parser.add_argument("--repo", type=Path, default=ROOT, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    try:
+        number, explain, warnings = resolve(args.repo, release=args.release)
+    except Unavailable as exc:
+        print(f"build-number: cannot derive a release build number: {exc}", file=sys.stderr)
+        return 1
+    for warning in warnings:
+        print(f"build-number: warning: {warning}", file=sys.stderr)
+    if args.explain:
+        for line in explain:
+            print(line)
+        print(f"build number: {number}")
+    else:
+        print(number)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

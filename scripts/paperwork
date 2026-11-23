@@ -3,7 +3,7 @@
 
 Every rule here is one an agent or contributor meets by failing CI half an
 hour after pushing: a corrective commit without its `Regression-Test:` line,
-a client change without a release-counter bump, a doc missing from its index,
+a mobile version that drifted from the workspace, a doc missing from its index,
 a real host name, a route missing from docs/API.md. Each check below runs the
 same validator or test the CI lane runs, and prints the fix beside the
 failure, so the rule is learned at push time instead of after a fan-out.
@@ -53,15 +53,14 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "test_apple_build_claims",
-        "the Apple build number has one owner and generated copies",
-        "run `make apple-build-bump` (never hand-edit the generated surfaces); a user-visible "
-        "change also gets a docs/apple-builds/ fragment",
+        "Apple per-change notes name their issue and no build; status blockquotes carry no ledger",
+        "a user-visible Apple change gets a docs/apple-builds/<issue>-<slug>.md fragment with an "
+        "`Issue:` line and no `Build:` line",
     ),
     (
         "test_mobile_build_claims",
-        "the Apple and Android README/status build claims match the build files",
-        "run `make apple-build-bump`; for Android edit versionCode in "
-        "clients/android/app/build.gradle.kts and the status line in clients/android/README.md",
+        "README/parity/STATUS.html status lines quote no build number (they are derived)",
+        "remove the number; the status line names scripts/build-number instead",
     ),
     (
         "test_status_page_shape",
@@ -246,23 +245,19 @@ def check_regression_fields(base: str, body: str | None, title: str) -> Result:
     return Result(name, code == 0, time.monotonic() - start, "" if code == 0 else tail(out), hint)
 
 
-def check_mobile_versions(base: str, merge_target: str) -> Result:
+def check_mobile_versions() -> Result:
     start = time.monotonic()
     code, out = run(
         [sys.executable, "-m", "validation.mobile_versions"],
-        env={
-            "PLURX_VALIDATION_MODE": "changed-from",
-            "PLURX_VALIDATION_BASE": base,
-            "PLURX_VALIDATION_MERGE_TARGET": merge_target,
-        },
+        env={"PLURX_VALIDATION_MODE": "changed-from"},
     )
     return Result(
-        "mobile release counters rise with client changes",
+        "mobile versions match the workspace; build numbers are derived",
         code == 0,
         time.monotonic() - start,
         "" if code == 0 else tail(out),
-        "Apple: `make apple-build-bump`; Android: raise versionCode in "
-        "clients/android/app/build.gradle.kts and the clients/android/README.md status line",
+        "keep both marketing versions at the workspace version; never store a build number "
+        "(project.yml keeps the placeholder, build.gradle.kts uses scripts/build-number)",
     )
 
 
@@ -326,7 +321,7 @@ def print_list() -> None:
     print("paperwork checks — what each guards, and the fix:\n")
     print("  catalog            every governed file maps to a functionality point")
     print("  Regression-Test    fix(/perf( commits need `Regression-Test:` lines in the PR description")
-    print("  mobile counters    Apple/Android build numbers rise when client code changes")
+    print("  mobile versions    marketing versions match; build numbers derived, never stored")
     for module, guard, hint in TEST_RULES:
         print(f"  {module:<26} {guard}\n  {'':<26} fix: {hint}")
     print(f"  web (node)                 {WEB_HINT}")
@@ -336,10 +331,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--base", help="base revision (default: merge base with --merge-target)")
     parser.add_argument("--merge-target", default="origin/main", help="branch the work merges into")
-    parser.add_argument(
-        "--counter-target",
-        help="branch whose release counters a client change must exceed (default: --merge-target)",
-    )
     parser.add_argument("--body-file", type=Path, help="pull request description to check")
     parser.add_argument(
         "--body-env",
@@ -386,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     results: list[Result] = [
         check_catalog(),
         check_regression_fields(base, body, title),
-        check_mobile_versions(base, args.counter_target or args.merge_target),
+        check_mobile_versions(),
         *check_tests(base, args.merge_target),
     ]
     web = check_web(paths)

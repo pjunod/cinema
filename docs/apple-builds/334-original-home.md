@@ -1,6 +1,5 @@
 # Original Home screens on Apple devices
 
-Build: 164
 Issue: #334
 
 Restore the original featured Home on iPhone and iPad and the original media

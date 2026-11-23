@@ -986,9 +986,9 @@ test_anchor = "testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults"
 id = "apple.a04-release-counter-after-proxy-fix"
 commits = ["ac51adb13"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "Set :CFBundleVersion ${number}"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 id = "apple.home-hero-foreground-clipping"
@@ -1514,7 +1514,7 @@ test_anchor = "testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded"
 id = "apple.build-64-release-claims"
 commits = ["e2e59a0c"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
+source_anchor = "Set :CFBundleVersion ${number}"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -1530,7 +1530,7 @@ test_anchor = "testDeliveryStarvationNeverFiresOnAHealthyBufferedPlayer"
 id = "apple.build-65-release-claims"
 commits = ["9989092"]
 source = "docs/clients/APPLE-CLIENT-PARITY.md"
-source_anchor = ", Apple build"
+source_anchor = "the Apple build number is derived at"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -1538,7 +1538,7 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "apple.build-67-release-claims"
 commits = ["08752be"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
+source_anchor = "Set :CFBundleVersion ${number}"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -1650,7 +1650,7 @@ test_anchor = "resetForUserActionResetsBudgetAndAdvancesSequence"
 id = "android.merge-resolution-fix"
 commits = ["4c9d964"]
 source = "clients/android/README.md"
-source_anchor = "**, build `"
+source_anchor = "> Status: **v"
 test = "tests/validation/test_history.py"
 test_anchor = "test_client_anchor_survives_a_non_corrective_squash_title"
 
@@ -1824,7 +1824,7 @@ test_anchor = "testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision"
 id = "apple.build-98-m5b-release-claim"
 commits = ["203cf7cf"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
+source_anchor = "Set :CFBundleVersion ${number}"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -1832,7 +1832,7 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "apple.build-102-m5b-release-claim"
 commits = ["d651deed"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
+source_anchor = "Set :CFBundleVersion ${number}"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -1840,7 +1840,7 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "apple.build-103-m5b-release-claim"
 commits = ["fae1edbc"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
+source_anchor = "Set :CFBundleVersion ${number}"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -2179,9 +2179,9 @@ test_anchor = "testTheHintStoreRoundTripsAndTreatsAMissingFileAsNoHint"
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "versionCode = plurxVersionCode"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 # The Live TV client changes require fresh store build counters for both mobile
@@ -2189,9 +2189,9 @@ test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_t
 id = "live-tv.mobile-release-build-counters"
 commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
+source_anchor = "versionCode = plurxVersionCode"
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
+test_anchor = "test_the_repository_derives_both_build_numbers"
 
 [[fixes]]
 # tvOS 26 rendered default tinted actions as empty red capsules, stretched
@@ -2265,9 +2265,9 @@ test_anchor = "live_tv_session_never_revives_an_expired_lineup_observation"
 id = "apple.live-tv-promotion-build-counter"
 commits = ["bc4a6208"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "Set :CFBundleVersion ${number}"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 # The first navigation correction routes every directional press through one
@@ -2945,9 +2945,9 @@ test_anchor = "aSeekWindowIsTheClientPreparingRow"
 id = "clients.build-counters-claimed-by-their-generators"
 commits = ["0f68b0a1"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
-test = "tests/operations/test_apple_build_claims.py"
-test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
+source_anchor = "Set :CFBundleVersion ${number}"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "def test_a_status_line_that_quotes_a_build_number_is_rejected"
 
 [[fixes]]
 # The first Android compile this branch has ever had found exactly one error,
@@ -3059,9 +3059,9 @@ test_anchor = "a failed Saved refresh keeps the last successful page and marks i
 id = "clients.dvr-promotion-clears-current-mobile-builds"
 commits = ["b914464b"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "versionCode = plurxVersionCode"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 # The review correction spans web and Apple. This retained regression covers
@@ -7755,9 +7755,9 @@ test_anchor = "attached cached output reports its frozen frame and Metal rendere
 id = "clients.hdr-promotion-clears-current-mobile-builds"
 commits = ["e9d9e510dcfd7bc3c45188c77803dd5872767976"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "versionCode = plurxVersionCode"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 id = "android.transport-options-keep-shared-focus-order"
@@ -7963,18 +7963,18 @@ test_anchor = "fun transportOptionsFollowTheSharedContractOrder()"
 id = "mobile.hdr-qualification-release-counters"
 commits = ["740d6ac4bed63b0e5c0d5986a4e4eb87463ec983"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION:"
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "Set :CFBundleVersion ${number}"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 id = "android.hdr-qualification-release-counter"
 commits = []
 supplements = "mobile.hdr-qualification-release-counters"
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
-test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
+source_anchor = "versionCode = plurxVersionCode"
+test = "tests/validation/test_build_number.py"
+test_anchor = "test_a_branch_build_takes_its_main_base_and_never_passes_later_main"
 
 [[fixes]]
 id = "apple.tv-guide-lazy-row-focus-destination"

@@ -1,6 +1,5 @@
 # The Live TV cover stops swallowing the remote, on Apple TV
 
-Build: 155
 Issue: #306
 
 The Live TV playback overlay drew and nothing on it could be reached: moving

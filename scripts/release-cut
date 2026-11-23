@@ -10,12 +10,10 @@ wrong at 1 a.m.:
 2. move `[Unreleased]` under a dated `## [X.Y.Z] — YYYY-MM-DD` heading and
    rewrite the link definitions at the bottom of CHANGELOG.md;
 3. set the one workspace version in Cargo.toml, keep both native apps'
-   marketing versions equal to it and advance both native build counters
-   (validation/mobile_versions.py requires all of that of any branch that
-   moves the workspace version), rewrite every status document that quotes
-   the version or a build counter (the Apple ones through
-   validation/apple_build.py's generator), then let Cargo relock both
-   lockfiles.
+   marketing versions equal to it (validation/mobile_versions.py requires
+   that), rewrite every status document that quotes the version, then let
+   Cargo relock both lockfiles. Build numbers are not touched: they are
+   derived at build time by scripts/build-number, never stored.
 
 It never tags. Under the weekly cadence (docs/RELEASING.md "The weekly
 release tag") the tag is cut by the scheduled release-readiness run, and only
@@ -38,8 +36,6 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-# validation/apple_build.py owns the Apple build surfaces; the cut reuses it.
-sys.path.insert(0, str(ROOT))
 ANDROID = "clients/android/app/build.gradle.kts"
 APPLE = "clients/apple/project.yml"
 SPIKE_MANIFEST = "spikes/hiqlite-m0/Cargo.toml"
@@ -48,30 +44,19 @@ UNRELEASED = "## [Unreleased]"
 APPLE_README = "clients/apple/README.md"
 APPLE_PARITY = "docs/clients/APPLE-CLIENT-PARITY.md"
 ANDROID_README = "clients/android/README.md"
-STATUS_PAGE = "docs/STATUS.html"
 
-# Every place a status document quotes the current workspace version or the
-# Android build counter, beside the Apple build surfaces that
-# validation/apple_build.py generates. Group 1 is the quoted value, and each
-# pattern must match exactly once, so a reworded line fails the cut instead
-# of being skipped. `{version}` is the version the line quotes now.
+# Every place a status document quotes the current workspace version. Group 1
+# is the quoted value, and each pattern must match exactly once, so a reworded
+# line fails the cut instead of being skipped. `{version}` is the version the
+# line quotes now.
 VERSION_CLAIMS = (
-    (APPLE_README, r"^> Status: \*\*v({version})\*\*, build `", "Apple README status version"),
+    (APPLE_README, r"^> Status: \*\*v({version})\*\*;", "Apple README status version"),
     (
         APPLE_PARITY,
-        r"^> Status \(\d{{4}}-\d{{2}}-\d{{2}}\): source is v({version}), Apple build ",
+        r"^> Status \(\d{{4}}-\d{{2}}-\d{{2}}\): source is v({version});",
         "Apple parity status version",
     ),
-    (ANDROID_README, r"^> Status: \*\*v({version})\*\*, build `", "Android README status version"),
-)
-ANDROID_BUILD_CLAIMS = (
-    (ANDROID_README, r"^> Status: \*\*v[^*\n]+\*\*, build `(\d+)`", "Android README status build"),
-    (STATUS_PAGE, r"· Android versionCode (\d+) source ·", "STATUS.html viewers tile"),
-    (
-        STATUS_PAGE,
-        r"Install Apple build \d+ and Android versionCode (\d+) on the physical devices",
-        "STATUS.html physical install item",
-    ),
+    (ANDROID_README, r"^> Status: \*\*v({version})\*\*;", "Android README status version"),
 )
 
 
@@ -148,7 +133,7 @@ def roll_changelog(changelog: str, version: str, date: str) -> str:
 
 
 def set_mobile_versions(android: str, apple: str, version: str) -> tuple[str, str]:
-    """Both apps' marketing versions follow the workspace; both counters advance."""
+    """Both apps' marketing versions follow the workspace version."""
 
     def one(pattern: str, text: str, label: str) -> re.Match[str]:
         found = list(re.finditer(pattern, text, re.MULTILINE))
@@ -161,14 +146,8 @@ def set_mobile_versions(android: str, apple: str, version: str) -> tuple[str, st
 
     name = one(r'^\s*versionName\s*=\s*"([^"]+)"\s*$', android, "Android versionName")
     android = put(android, name, version)
-    code = one(r"^\s*versionCode\s*=\s*(\d+)\s*$", android, "Android versionCode")
-    android = put(android, code, str(int(code.group(1)) + 1))
     marketing = one(r'^\s*MARKETING_VERSION:\s*"([^"]+)"\s*$', apple, "Apple MARKETING_VERSION")
     apple = put(apple, marketing, version)
-    build = one(
-        r'^\s*CURRENT_PROJECT_VERSION:\s*"(\d+)"\s*$', apple, "Apple CURRENT_PROJECT_VERSION"
-    )
-    apple = put(apple, build, str(int(build.group(1)) + 1))
     return android, apple
 
 
@@ -183,18 +162,12 @@ def _replace_one(text: str, pattern: str, value: str, where: str, label: str) ->
     return text[: match.start(1)] + value + text[match.end(1) :]
 
 
-def set_build_claims(
-    read, previous: str, version: str, apple_build: int, android_build: int
-) -> dict[str, str]:
-    """Every status document's quote of the version and both build counters.
+def set_version_claims(read, previous: str, version: str) -> dict[str, str]:
+    """Every status document's quote of the workspace version.
 
-    `read` serves the tree as the cut leaves it (Cargo.toml and both native
-    manifests already moved). Returns the documents whose contents change. The
-    Apple build surfaces come from validation/apple_build.py's own generator,
-    so the cut and `make apple-build-bump` can never disagree about them.
+    `read` serves the tree as the cut leaves it. Returns the documents whose
+    contents change.
     """
-
-    from validation.apple_build import AppleBuildError, render
 
     documents: dict[str, str] = {}
 
@@ -205,12 +178,6 @@ def set_build_claims(
         documents[path] = _replace_one(
             current(path), pattern.format(version=re.escape(previous)), version, path, label
         )
-    for path, pattern, label in ANDROID_BUILD_CLAIMS:
-        documents[path] = _replace_one(current(path), pattern, str(android_build), path, label)
-    try:
-        documents.update(render(current, apple_build))
-    except AppleBuildError as exc:
-        raise CutError(str(exc)) from exc
     return {path: text for path, text in documents.items() if text != read(path)}
 
 
@@ -358,12 +325,10 @@ def cut(root: Path, version: str, date: str) -> list[str]:
         version,
     )
     moved = {"CHANGELOG.md": changelog, "Cargo.toml": cargo, ANDROID: android, APPLE: apple}
-    claims = set_build_claims(
+    claims = set_version_claims(
         lambda path: moved[path] if path in moved else (root / path).read_text(encoding="utf-8"),
         current,
         version,
-        int(re.search(r'CURRENT_PROJECT_VERSION:\s*"(\d+)"', apple).group(1)),
-        int(re.search(r"(?m)^\s*versionCode\s*=\s*(\d+)\s*$", android).group(1)),
     )
     # Every refusal above happens before any file is written.
     for path, contents in {**moved, **claims}.items():

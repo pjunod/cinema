@@ -97,6 +97,33 @@ fun requiredSigningValue(name: String): String =
                 "Use `make android` for a local debug build instead."
         )
 
+/**
+ * The store build number, derived from Git history by scripts/build-number
+ * and never stored here: a stored versionCode that every client pull request
+ * had to raise made any two of them conflict. A main build is numbered by its
+ * first-parent position on main; a branch build by the main commit it is
+ * based on. A release task passes `--release`, which refuses a shallow or
+ * truncated history instead of shipping a wrong number; other builds degrade
+ * to 1 with a warning. `-PplurxVersionCode=N` overrides it explicitly.
+ */
+val plurxVersionCode: Int = providers.gradleProperty("plurxVersionCode").orNull?.let { value ->
+    value.toIntOrNull()?.takeIf { it > 0 } ?: error("plurxVersionCode must be a positive integer; found '$value'")
+} ?: run {
+    val script = rootDir.resolve("../../scripts/build-number")
+    val release = requestedTaskNames.any { it.contains("Release") || it.contains("release") }
+    val derived = providers.exec {
+        commandLine(listOfNotNull(script.absolutePath, "--release".takeIf { release }))
+        workingDir = rootDir
+        isIgnoreExitValue = true
+    }
+    val diagnostics = derived.standardError.asText.get().trim()
+    if (derived.result.get().exitValue != 0) {
+        error("scripts/build-number failed: $diagnostics")
+    }
+    if (diagnostics.isNotEmpty()) logger.warn(diagnostics)
+    derived.standardOutput.asText.get().trim().toInt()
+}
+
 android {
     namespace = "tv.plurx.app"
     compileSdk = 37
@@ -108,7 +135,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 210
+        versionCode = plurxVersionCode
         versionName = "0.8.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
