@@ -468,22 +468,26 @@ pub async fn scoped_subtitles_vtt(
 /// POST /api/v1/files/{id}/hls/sessions
 pub async fn scoped_hls_create(
     principal: PlaybackPrincipal,
-    state: State<AppState>,
+    State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     headers: HeaderMap,
-    remote: RemoteAddress,
-    body: Json<super::hls::CreateSession>,
+    RemoteAddress(remote): RemoteAddress,
+    Json(body): Json<super::hls::CreateSession>,
 ) -> Result<Json<super::hls::StartResponse>, ApiError> {
     principal.require_file(id)?;
-    super::hls::create(
-        AuthUser(principal.user),
-        state,
-        AxPath(id),
-        headers,
-        remote,
-        body,
-    )
-    .await
+    if principal.handoff.is_some() {
+        super::hls::create_native(principal.user, state, id, headers, remote, body).await
+    } else {
+        super::hls::create(
+            AuthUser(principal.user),
+            State(state),
+            AxPath(id),
+            headers,
+            RemoteAddress(remote),
+            Json(body),
+        )
+        .await
+    }
 }
 
 /// POST /api/v1/items/{id}/progress — the handed-off file's item only.

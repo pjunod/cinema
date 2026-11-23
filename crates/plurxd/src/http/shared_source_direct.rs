@@ -389,6 +389,22 @@ fn observe_direct_published(
 
 /// The published direct envelope for Start and live status, held by the
 /// owner's response guard. Status renews the lease, never viewer activity.
+/// A refused published reply: the answer to send, and whether it passes
+/// (then the answer is the typed retry the receiver keeps its session
+/// through).
+pub(super) struct PublishedRefusal {
+    pub(super) answer: ApiError,
+    pub(super) transient: bool,
+}
+impl From<ApiError> for PublishedRefusal {
+    fn from(answer: ApiError) -> Self {
+        Self {
+            answer,
+            transient: false,
+        }
+    }
+}
+
 pub(super) async fn published_reply(
     state: &crate::state::AppState,
     headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
@@ -397,17 +413,32 @@ pub(super) async fn published_reply(
     target: &SourcePlaybackTarget,
     grant: Uuid,
     deadline: std::time::Instant,
-) -> Result<axum::response::Response, ApiError> {
-    super::ingress::publication_allowed(state, &owned.assignment).await?;
+) -> Result<axum::response::Response, PublishedRefusal> {
+    super::ingress::publication_allowed(state, &owned.assignment)
+        .await
+        .map_err(|refusal| PublishedRefusal {
+            transient: refusal.is_transient(),
+            answer: refusal.into(),
+        })?;
     let (start, guard) = owned
         .actor
         .open_direct_start(deadline)
         .await
-        .map_err(|e| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_actor", error_class = ?e, "Source direct status refused"); SourceStartFailure::from(e).response() })?;
+        .map_err(|refusal| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_actor", error_class = ?refusal.error, transient = refusal.is_transient(), "Source direct status refused");
+            PublishedRefusal {
+                transient: refusal.is_transient(),
+                answer: if refusal.is_transient() {
+                    super::live_refusal_retry()
+                } else {
+                    SourceStartFailure::from(refusal.error).response()
+                },
+            }
+        })?;
     let (_, current_grant) = current_reference(state, headers, target).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_reference", error_class = "refused", "Source admission refused"); })?;
     if current_grant != grant || entry.grant != grant {
         tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_grant", error_class = "mismatch", "Source admission refused");
-        return Err(unavailable());
+        return Err(unavailable().into());
     }
     observe_direct_published(entry, owned, &start).inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_observed", error_class = "refused", "Source admission refused"); }).map_err(SourceStartFailure::response)?;
     let response = super::super::shared_library::source_file_json(

@@ -567,12 +567,19 @@ pub(super) fn take_active_preparation(
 }
 
 fn take_active_preparations_for_playback(playback_id: &str) -> Vec<ActivePreparedSuccessor> {
+    take_active_preparations_where(|successor| successor.preparation.playback_id == playback_id)
+}
+
+/// Remove, under one registry lock, every staged successor `matches` names.
+fn take_active_preparations_where(
+    matches: impl Fn(&ActivePreparedSuccessor) -> bool,
+) -> Vec<ActivePreparedSuccessor> {
     let mut active = active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let incarnation_ids = active
         .iter()
-        .filter(|(_, preparation)| preparation.preparation.playback_id == playback_id)
+        .filter(|(_, successor)| matches(successor))
         .map(|(incarnation_id, _)| incarnation_id.clone())
         .collect::<Vec<_>>();
     incarnation_ids
@@ -645,6 +652,25 @@ pub(super) async fn settle_cancelled_preparation(
                     .await,
             );
         }
+    }
+}
+
+/// The incumbent a staged successor was prepared to replace has ended. That
+/// successor can never commit, so free its worker, reconstruction slot and
+/// durable row now rather than at its deadline. A committed successor already
+/// left the registry when it committed, so it is never found here; the same
+/// registry transfer keeps an in-flight commit or abort the owner of its entry.
+pub(super) fn cancel_preparations_for_released_incumbent(incumbent_incarnation_id: &str) {
+    let orphaned = take_active_preparations_where(|successor| {
+        successor.preparation.expected_predecessor_incarnation_id == incumbent_incarnation_id
+    });
+    for successor in orphaned {
+        tracing::info!(
+            target: "plurxd::http::hls",
+            successor = %crate::transcode::session_log_id(&successor.preparation.session_id),
+            "prepared successor retired: the session it was staged to replace was released"
+        );
+        spawn_cancelled_preparation(successor, "incumbent released before commit");
     }
 }
 
@@ -3114,6 +3140,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
         .to_owned(),
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),

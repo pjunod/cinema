@@ -196,7 +196,7 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct CreateSession {
     /// Receiver-affirmed shared upgrade: false is ordinary support, true requests the prepared successor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1970,6 +1970,7 @@ struct PlanScope<'a> {
     // The passive compatibility facade offers its own fixed media contract
     // and applies the client's finite bitrate ceiling to that native recipe.
     passive_compatibility: bool,
+    stored_catalogue_only: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -2081,7 +2082,11 @@ async fn resolve_plan_for_principal_with_local_evidence(
         auto_bootstrap_ceiling,
         processed_selectable,
         passive_compatibility,
+        stored_catalogue_only,
     } = scope;
+    // A detail preview owns no incumbent. In particular, a replayed link
+    // receipt must not take this stored-only plan into measured qualification.
+    let incumbent_receipt = incumbent_receipt.filter(|_| !stored_catalogue_only);
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
             && (body.quality_auto != Some(true)
@@ -2224,10 +2229,17 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .await
             };
             let catalog_request = body.selection_catalog_request(source, caps, original_copy_scope);
-            let catalogue_result = state
-                .media_pool
-                .quality_catalog(state, catalog_request.clone())
-                .await;
+            let catalogue_result = if stored_catalogue_only {
+                state
+                    .media_pool
+                    .stored_quality_catalog(state, &catalog_request)
+                    .await
+            } else {
+                state
+                    .media_pool
+                    .quality_catalog(state, catalog_request.clone())
+                    .await
+            };
             tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
             if let Some(crate::media_pool::CatalogCause::RequestInvalid(error)) =
@@ -2793,6 +2805,23 @@ pub async fn create(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    let user_id = user.id;
+    let transcode = Arc::clone(&state.transcode);
+    let created = create_native(user, state, id, headers, remote, req).await?;
+    if created.vod {
+        transcode.remember_resume_candidate(user_id, id, &created.session_id);
+    }
+    Ok(created)
+}
+
+pub(in crate::http) async fn create_native(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+) -> Result<Json<StartResponse>, ApiError> {
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
     let created = create_with_purpose(
         user,
@@ -2970,8 +2999,167 @@ pub(crate) fn bind_compatibility_vod_policy(
         "plurx/jellyfin/vod-only/passive/v1:{fingerprint}"
     )))
 }
-/// Resolve compatibility negotiation through the same native plan and prerequisites as create.
-/// This does not claim a session, attach a reader, or reserve a producer.
+/// Warm the ordinary native recipe without creating or admitting a viewer session.
+pub async fn prepare_startup(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(file_id): AxPath<i64>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
+    Json(body): Json<CreateSession>,
+) -> Result<StatusCode, ApiError> {
+    let Some(caps) = body.caps.as_ref() else {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires capabilities".into(),
+        ));
+    };
+    super::super::stream::validate_device_caps(caps)?;
+    let caps = caps.clone();
+    if !valid_playback_id(&body.playback_id)
+        || body.previous_session_id.is_some()
+        || body.reopen_reason.is_some()
+        || body.control_sequence.is_some()
+        || body
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires a fresh VOD request".into(),
+        ));
+    }
+    if let Some(intent) = body.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+    }
+    let position_ms = body.start.unwrap_or_default() * 1_000.0;
+    if !position_ms.is_finite() || position_ms < 0.0 || position_ms >= i64::MAX as f64 {
+        return Err(ApiError::BadRequest("invalid startup position".into()));
+    }
+    let position_ms = position_ms.round() as i64;
+    let Some(slot) = state
+        .subtitle_models
+        .translation
+        .try_borrow_read_preparation_slot()
+    else {
+        return Ok(StatusCode::ACCEPTED);
+    };
+    tokio::spawn(async move {
+        let budget = crate::media_pool::CreateStartupBudget::new(2_000);
+        let plan = budget.scope(async {
+            let authority = state.cluster.authority();
+            let serving_generation = authority.admit()?;
+            let start_plan = super::start_plan::ingress_plan(&state.applied, file_id)
+                .await
+                .ok()??;
+            let _captured_plan = crate::media_pool::capture_create_plan(&start_plan);
+            let snapshot = &start_plan.snapshot;
+            let file = &snapshot.file;
+            let client_build = client_build_label(body.caps.as_ref(), &headers);
+            let review =
+                native_create_review(&state, &body, file, Some(snapshot), user.id, &client_build)
+                    .await;
+            let identity = native_create_network_identity(&user, &headers, remote);
+            let network_prior =
+                super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+                    .await
+                    .ok()?;
+            let resolved = resolve_plan_with_scope(
+                PlanInputs {
+                    snapshot: Some(snapshot),
+                    state: &state,
+                    user_id: user.id,
+                    file_id,
+                    source: Some(file),
+                    network_prior: network_prior.as_ref(),
+                    network_identity: identity.as_ref(),
+                    incumbent_receipt: link_receipts::requested_receipt(&headers),
+                },
+                review,
+                body,
+                PlanScope {
+                    stored_catalogue_only: true,
+                    ..PlanScope::default()
+                },
+            )
+            .await
+            .ok()?;
+            validate_hevc_copy_transport_from_probe(
+                file,
+                &caps,
+                &resolved.request,
+                snapshot.probe_json.as_deref(),
+            )
+            .ok()?;
+            authority
+                .is_current(serving_generation)
+                .then(|| (resolved.request, file.clone()))
+        });
+        let Some((request, file)) = (tokio::select! {
+            _ = state.shutdown.cancelled() => None,
+            result = tokio::time::timeout(std::time::Duration::from_secs(2), plan) => result.ok().flatten(),
+        }) else {
+            return;
+        };
+        state
+            .transcode
+            .prepare_selected_copy(
+                &request,
+                file,
+                user.id,
+                position_ms,
+                state.shutdown.clone(),
+                slot,
+            )
+            .await;
+    });
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn native_create_review(
+    state: &AppState,
+    body: &CreateSession,
+    file: &MediaFile,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    user_id: i64,
+    client_build: &str,
+) -> Option<PlanReview> {
+    let render_caps = match snapshot {
+        Some(snapshot) => super::super::stream::render_caps_from_snapshot(state, snapshot),
+        None => super::super::stream::render_caps(state).await,
+    };
+    plan_review_for(
+        body.caps.as_ref(),
+        body.overrides.as_ref(),
+        file,
+        &render_caps,
+        body.preserve_dolby_vision == Some(true),
+        body.hdr10 == Some(true),
+        unix_ms(),
+        &ReviewContext {
+            file_id: file.id,
+            user_id,
+            client_build,
+        },
+    )
+}
+
+fn native_create_network_identity(
+    user: &plurx_core::domain::User,
+    headers: &HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+) -> Option<crate::telemetry::NetworkIdentity> {
+    let mut identity = super::super::network::identity(headers, remote)?;
+    identity.user_id = Some(user.id);
+    identity.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+        user.id,
+        user.created_at,
+        &user.password_hash,
+    ));
+    Some(identity)
+}
+
 pub(crate) async fn preview_for_compatibility(
     state: &AppState,
     user_id: i64,
@@ -3546,23 +3734,17 @@ async fn create_with_purpose_attempt(
         // This is the one arm that stays here, because it is the only one that
         // must not ask the node what it can render.
         None => None,
-        Some(file) => plan_review_for(
-            req.caps.as_ref(),
-            req.overrides.as_ref(),
-            file,
-            &match planning_snapshot {
-                Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
-                None => super::super::stream::render_caps(&state).await,
-            },
-            req.preserve_dolby_vision == Some(true),
-            req.hdr10 == Some(true),
-            unix_ms(),
-            &ReviewContext {
-                file_id: id,
-                user_id: user.id,
-                client_build: &client_build,
-            },
-        ),
+        Some(file) => {
+            native_create_review(
+                &state,
+                &req,
+                file,
+                planning_snapshot,
+                user.id,
+                &client_build,
+            )
+            .await
+        }
     };
     let hdr10_requested = review
         .as_ref()
@@ -3589,15 +3771,7 @@ async fn create_with_purpose_attempt(
                 .await
         }
     };
-    let mut identity = super::super::network::identity(&headers, remote);
-    if let Some(ref mut id) = identity {
-        id.user_id = Some(user.id);
-        id.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
-            user.id,
-            user.created_at,
-            &user.password_hash,
-        ));
-    }
+    let identity = native_create_network_identity(&user, &headers, remote);
     let network_prior =
         super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
             .await
@@ -4898,6 +5072,14 @@ async fn create_with_purpose_attempt(
         height: info.target_height,
         encoder: info.encoder.clone(),
         vod: info.vod,
+        startup_seek_ready_ms: if owner_node_id == state.node_id && info.vod {
+            state.transcode.vod_startup_seek_ready_ms(
+                &info.session_id,
+                (request.start_seconds * 1_000.0).round() as i64,
+            )
+        } else {
+            None
+        },
         // Capped at what this node can actually serve for this file, not just
         // at the source height: an advertised rung is a promise, and the web
         // ABR controller upgrades into any rung the ladder lists. See
@@ -6797,6 +6979,7 @@ impl PreparedSourcePlayback {
             height: info.target_height,
             encoder: info.encoder.to_owned(),
             vod: info.vod,
+            startup_seek_ready_ms: None,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
             delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),

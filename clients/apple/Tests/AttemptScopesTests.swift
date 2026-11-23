@@ -12,9 +12,9 @@ final class AttemptScopesTests: XCTestCase {
     /// A snapshot whose nine counters are all different, so a case that reads
     /// the wrong field cannot accidentally read the right value. Passing a
     /// scope advances that one counter and leaves the other eight alone.
-    private static func attempt(bumping moved: Attempt.Scope?) -> Attempt {
+    private static func attempt(bumping moved: Attempt.Scope?, also other: Attempt.Scope? = nil) -> Attempt {
         func value(_ scope: Attempt.Scope, _ base: Int) -> Int {
-            scope == moved ? base + 1 : base
+            scope == moved || scope == other ? base + 1 : base
         }
         return Attempt(
             lifecycle: value(.lifecycle, 11),
@@ -82,6 +82,7 @@ final class AttemptScopesTests: XCTestCase {
         .seekPresentationDeadline: [.open, .viewerAction, .seek],
         // A seek beacon survives Pause/reopen and ends only with its destination.
         .seekTelemetrySupersession: [.seek],
+        .seekPreparationDestination: [.viewerAction, .seek],
         // `self.isCurrentLifecycle(lifecycle)`,
         // `self.viewerActionEpoch == actionEpoch`
         .blackFrameDecodeFailure: [.lifecycle, .viewerAction],
@@ -147,6 +148,14 @@ final class AttemptScopesTests: XCTestCase {
         }
     }
 
+    func testSeekPreparationDestinationSurvivesEitherAuthorityButNotLosingBoth() {
+        let fence = AttemptFence.seekPreparationDestination
+        let captured = Self.attempt(bumping: nil)
+        XCTAssertTrue(fence.isCurrent(captured, now: Self.attempt(bumping: .viewerAction)))
+        XCTAssertTrue(fence.isCurrent(captured, now: Self.attempt(bumping: .seek)))
+        XCTAssertFalse(fence.isCurrent(captured, now: Self.attempt(bumping: .viewerAction, also: .seek)))
+    }
+
     @MainActor
     private func start(_ controller: PlayerController, model: AppModel, file: Int = 1) {
         controller.start(model: model, itemId: file, fileId: file, startMs: 0,
@@ -174,7 +183,8 @@ final class AttemptScopesTests: XCTestCase {
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
             if fence == .recoveryEvidencePoll || fence == .recoveryEvidenceAfterStagedPoll
-                || fence == .seekTelemetrySupersession || fence == .autoInitialLayout
+                || fence == .seekTelemetrySupersession || fence == .seekPreparationDestination
+                || fence == .autoInitialLayout
                 || fence == .preparedPipelineRollback {
                 XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
                               "status sampling, seek telemetry and prepared rollback must survive a viewer Pause")
@@ -202,6 +212,7 @@ final class AttemptScopesTests: XCTestCase {
         let attachScope: [AttemptFence: Attempt.Scope] = [
             .seekPresentationDeadline: .open,
             .seekTelemetrySupersession: .seek,
+            .seekPreparationDestination: .seek,
             .blackFrameDecodeFailure: .lifecycle,
             .stallRecovery: .open,
             .itemFailureLadder: .open,
