@@ -100,6 +100,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **A slow shared copy is no longer mistaken for a stuck one.** A copy whose
+  producer takes longer than one 25 s segment wait to commit a segment (a
+  source read slower than about two thirds of real time) was retired as stuck.
+  Output the producer's child keeps delivering now counts as progress; only a
+  child that delivers nothing in a whole wait is stuck. A segment request whose
+  own read hangs (an unresponsive share) also answers at its deadline again,
+  instead of waiting behind that read.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and

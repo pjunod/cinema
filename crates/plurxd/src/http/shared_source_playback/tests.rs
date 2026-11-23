@@ -2011,6 +2011,41 @@ async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_n
     fixture.shutdown().await;
 }
 
+/// A segment request whose own deadline passes, its read parked, is judged
+/// by production progress on the real owner. A copy that finished producing
+/// committed nothing during the wait, and is still not stuck: the refusal
+/// passes and the session stays live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_finished_copys_segment_deadline_is_not_a_stall() {
+    use std::time::{Duration, Instant};
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let init = plurx_core::sharing_resources::SharingHlsResource::parse("init.mp4")
+        .expect("the copy's init");
+    let refused = owned
+        .actor
+        .open_resource_past_deadline_for_test(&init, Instant::now() + Duration::from_secs(2))
+        .await
+        .err()
+        .expect("the parked read misses its deadline");
+    assert_eq!(
+        refused.error,
+        crate::transcode::source_actor::SourceWorkerError::Deadline
+    );
+    assert!(refused.is_transient(), "a finished copy is not stuck");
+    assert!(!owned.actor.retirement_requested_for_test());
+    session
+        .assert_live(&fixture, "the session outlives the missed deadline")
+        .await;
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
 /// A direct owner answers Status like a growing one: a refusal that passes
 /// (its open bodies full, a ledger the Store cannot answer for) is a retry
 /// and keeps the owner; a refusal that does not (its file replaced) retires

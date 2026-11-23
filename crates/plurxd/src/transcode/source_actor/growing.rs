@@ -273,11 +273,7 @@ impl SourceViewerActor {
                         if end == crate::copyrange::DeadlineEnd::Slow
                             && backing.production.is_holding()
                         {
-                            if let Err(error) = backing.production.reanchor_at_head().await {
-                                // The renewal tick's own read-bank refresh
-                                // ends a copy whose observer fails.
-                                tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.reanchor", %error, "Source growing copy could not re-anchor its read bank");
-                            }
+                            backing.production.reanchor_at_head();
                         }
                         return Err(
                             self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
