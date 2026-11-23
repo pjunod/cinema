@@ -721,6 +721,42 @@ async fn source_input_drop_and_cleanup_revoke_their_publication() {
 /// in full source windows before the five-second epoch grant paces it. With
 /// a 1 KiB epoch, a paced read can issue at most 1 KiB (or the control window
 /// before its first grant), so two full 4 MiB windows prove the burst served
+/// A seek-bootstrapped Copy range start proves its landing inside a small
+/// bounded allowance. The startup burst must not spend that allowance on a
+/// full window the seek then discards; it starts once the landing is verified.
+#[tokio::test]
+async fn transfer_startup_burst_waits_for_a_verified_seek_landing() {
+    let window = SOURCE_WINDOW_MAX;
+    let bytes = (0..3 * window)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (observer, owner) = SourceObserver::transfer_fixture(2 * window as u64);
+    let (input, _file, _budget) = input_with_observer(&bytes, window, None, Some(observer)).await;
+    let bootstrap = input
+        .seal_seek_bootstrap_limit(2 * window as u64)
+        .expect("fresh primary operation");
+    let projections = owner.accept_projections();
+    read_source(&input.state, 0, bytes.len() as u64)
+        .await
+        .expect("landing read");
+    assert_eq!(
+        input.observation().source_bytes,
+        SOURCE_WINDOW_CONTROL as u64,
+        "an unverified landing reads a control window, not a burst window"
+    );
+    bootstrap.verified_landing();
+    read_source(&input.state, window as u64, (bytes.len() - window) as u64)
+        .await
+        .expect("burst read after the verified landing");
+    assert_eq!(
+        input.observation().source_bytes,
+        SOURCE_WINDOW_CONTROL as u64 + window as u64,
+        "the burst issues a full window once the landing is verified"
+    );
+    input.close_and_wait().await.expect("close source");
+    projections.abort();
+}
+
 /// them and the capped third read proves pacing resumed after it.
 #[tokio::test]
 async fn transfer_startup_burst_reads_full_windows_before_epoch_pacing() {

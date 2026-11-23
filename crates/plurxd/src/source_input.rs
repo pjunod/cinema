@@ -1007,7 +1007,11 @@ async fn read_source(
     let mut paced_to_grant_expiry = false;
     // A new transfer input reads its startup burst at source speed before the
     // epoch grant paces it, the same burst-then-hold shape as rolling input.
+    // An unverified seek landing keeps its small control windows: a burst
+    // window is discarded by the seek and would spend the bounded bootstrap
+    // allowance before the landing is proven.
     let startup_burst_left = observer
+        .filter(|_| seek_ceiling == u64::MAX)
         .filter(|observer| !observer.rolling_policy())
         .map_or(0, |observer| {
             observer
