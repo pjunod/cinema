@@ -124,9 +124,40 @@ impl ProductionStall {
     /// A viewer waited at the head while the bank held: from now until
     /// production commits again a hold excuses nothing, and the next
     /// read-bank refresh re-anchors the bank to the produced end.
-    pub(super) fn request_reanchor(&self) {
+    /// Whether a re-anchor was requested: not before the range has an
+    /// origin, when there is no produced end to move the bank to and a hold
+    /// must keep excusing a wait.
+    pub(super) fn request_reanchor(&self) -> bool {
+        if self.produced_end_ms.load(Ordering::SeqCst) == i64::MIN {
+            return false;
+        }
         self.reanchored(self.committed());
         self.reanchor.store(true, Ordering::SeqCst);
+        true
+    }
+    #[cfg(test)]
+    pub(super) fn mirrors_for_test(&self) -> (usize, bool, u64) {
+        (
+            self.committed(),
+            self.complete(),
+            self.outputs.load(Ordering::SeqCst),
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn produced_end_for_test(&self) -> Option<i64> {
+        let end = self.produced_end_ms.load(Ordering::SeqCst);
+        (end != i64::MIN).then_some(end)
+    }
+    /// The range committed its end.
+    pub(super) fn complete_now(&self) {
+        self.complete.store(true, Ordering::SeqCst);
+    }
+    /// The viewer's own demand superseded a requested re-anchor.
+    pub(super) fn cancel_reanchor(&self) {
+        self.reanchor.store(false, Ordering::SeqCst);
+    }
+    pub(super) fn reanchor_pending(&self) -> bool {
+        self.reanchor.load(Ordering::SeqCst)
     }
     /// The produced end a requested re-anchor moves the bank to, once.
     pub(super) fn take_reanchor(&self) -> Option<i64> {

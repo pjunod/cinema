@@ -45,6 +45,18 @@ pub(super) fn landing_failure(
     }
 }
 
+/// Whether a pipe event is the producer's progress: media its child
+/// delivered on the AV or canonical pipe. The clock pipe follows the media,
+/// stderr (the diagnostic pipe) carries warnings a stuck child can loop on,
+/// and an end is no new output.
+fn advances(event: &super::pipes::CopyPipeEvent) -> bool {
+    use super::pipes::{CopyPipeEvent, CopyPipeKind};
+    matches!(
+        event,
+        CopyPipeEvent::Data(CopyPipeKind::Av | CopyPipeKind::Canonical, bytes) if !bytes.is_empty()
+    )
+}
+
 /// A producer a resource wait can watch: what it has committed, and whether
 /// it advanced since.
 pub(crate) trait CommitProgress {
@@ -173,6 +185,9 @@ impl CopyRangeProduction {
     ) -> Result<(), String> {
         {
             let mut bank = self.bank.lock().await;
+            // The viewer's own demand is fresher than any re-anchor a waiting
+            // request asked for.
+            self.stall.cancel_reanchor();
             bank.anchor_ms = demand.buffer_anchor_ms();
             bank.snapshot = Some(demand);
             bank.observed_at = Instant::now();
@@ -300,7 +315,36 @@ impl CopyRangeProduction {
     /// renewal tick) re-anchors the bank to the produced end and decides the
     /// hold again. The request itself takes no lock.
     pub(crate) fn reanchor_at_head(&self) {
-        self.stall.request_reanchor();
+        if self.stall.request_reanchor() {
+            // The owner loop wakes on this and applies the re-anchor now,
+            // rather than at its next renewal tick.
+            self.changed.notify_waiters();
+        }
+    }
+    /// The lock-free mirrors the stall judgement reads, and the same facts
+    /// read from the range itself: (committed, complete, outputs) each.
+    #[cfg(test)]
+    pub(crate) async fn stall_mirrors_for_test(&self) -> ((usize, bool, u64), (usize, bool)) {
+        let files = self.files.lock().await;
+        let real = (
+            files.segments().len() + usize::from(files.canonical_init().is_some()),
+            files.complete(),
+        );
+        (self.stall.mirrors_for_test(), real)
+    }
+    /// The read bank's anchor, for a test of the re-anchor's application.
+    #[cfg(test)]
+    pub(crate) async fn bank_anchor_for_test(&self) -> i64 {
+        self.bank.lock().await.anchor_ms
+    }
+    /// The produced end the stall mirror holds.
+    #[cfg(test)]
+    pub(crate) fn produced_end_for_test(&self) -> Option<i64> {
+        self.stall.produced_end_for_test()
+    }
+    /// Whether a requested re-anchor waits for the next read-bank refresh.
+    pub(crate) fn reanchor_pending(&self) -> bool {
+        self.stall.reanchor_pending()
     }
     pub(crate) fn retire(&self) {
         self.publisher.retire();
@@ -472,8 +516,9 @@ impl CopyRangeProduction {
                 meter.child(waiting.elapsed());
                 let eof=pipes.all_eof();
                 let converting=tokio::time::Instant::now();
+                let advances=advances(&event);
                 let events=mux.feed(event)?;
-                self.stall.output();
+                if advances{self.stall.output();}
                 meter.convert(converting.elapsed());
                 self.apply(events,&census,canonical_title_start,&mut meter).await?;
                 if eof{break;}
@@ -487,7 +532,10 @@ impl CopyRangeProduction {
             // The child is successful and every output task/parser is joined
             // before EOF publication. The registered writer remains retained
             // until after this final atomic commit acknowledges below.
-            {let mut files=self.files.lock().await; files.finish(inspection,&self.stop).await?; self.record(&files);}
+            // The end commits no segment: every count was recorded at its own
+            // commit, so only the end itself is recorded here.
+            self.files.lock().await.finish(inspection,&self.stop).await?;
+            self.stall.complete_now();
             self.changed.notify_waiters();
             Ok::<(),String>(())
         }.await;
@@ -514,6 +562,34 @@ impl CopyRangeProduction {
         meter.finished(tokio::time::Instant::now(), &result);
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::super::pipes::{CopyPipeEvent, CopyPipeKind};
+
+    /// Only media the child delivered is progress. A child looping on stderr
+    /// warnings, or only closing its pipes, has produced nothing.
+    #[test]
+    fn only_delivered_media_is_progress() {
+        assert!(super::advances(&CopyPipeEvent::Data(
+            CopyPipeKind::Av,
+            vec![0]
+        )));
+        assert!(super::advances(&CopyPipeEvent::Data(
+            CopyPipeKind::Canonical,
+            vec![0]
+        )));
+        for event in [
+            CopyPipeEvent::Data(CopyPipeKind::Diagnostic, b"warning".to_vec()),
+            CopyPipeEvent::Data(CopyPipeKind::Clock, b"1 2 3".to_vec()),
+            CopyPipeEvent::Data(CopyPipeKind::Av, Vec::new()),
+            CopyPipeEvent::Eof(CopyPipeKind::Av),
+            CopyPipeEvent::Failed(CopyPipeKind::Canonical, "x".into()),
+        ] {
+            assert!(!super::advances(&event));
+        }
     }
 }
 

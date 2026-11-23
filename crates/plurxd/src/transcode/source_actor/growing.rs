@@ -245,14 +245,15 @@ impl SourceViewerActor {
                                 .round()
                                 .clamp(0.0, u32::MAX as f64) as u32
                         });
+                        // The published segment is immutable. Open it with the
+                        // range released: the renewal tick and the read bank
+                        // need this lock, and an open on a slow or hung share
+                        // must not hold them.
+                        let payload = files.payload.clone();
+                        let path = files.payload_path.join(name);
+                        drop(files);
                         let mut ready = custody
-                            .open_ready_child(
-                                &files.payload,
-                                &files.payload_path.join(name),
-                                name,
-                                &etag,
-                                &backing.delivery,
-                            )
+                            .open_ready_child(&payload, &path, name, &etag, &backing.delivery)
                             .await
                             .map_err(|_| pending)?;
                         ready.observed_media_duration_ms = duration;
@@ -1116,7 +1117,10 @@ impl TranscodeManager {
                 tokio::select! {
                     ()=state.shutdown.cancelled()=>break,
                     ()=retirement=>{},
-                    ()=physical=>{},
+                    // A viewer waited at a held head: apply its re-anchor now.
+                    ()=physical=>{
+                        if backing.production.reanchor_pending() && backing.production.refresh_read_bank().await.is_err() {break;}
+                    },
                     _=renewal.tick()=>{
                         #[cfg(test)]
                         owner.gate.ticked();
