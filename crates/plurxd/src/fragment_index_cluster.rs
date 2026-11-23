@@ -366,6 +366,49 @@ impl SourceFenceError {
         }
     }
 }
+/// The I/O error the next fence open of a path meets, for a test that needs
+/// an object the fence cannot read just now. A mode change cannot stand in:
+/// it moves the file's ctime, and a privileged test runner reads through it.
+#[cfg(test)]
+static OPEN_FAULTS: std::sync::Mutex<Vec<(PathBuf, i32)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) struct OpenFaultForTest(PathBuf);
+#[cfg(test)]
+impl OpenFaultForTest {
+    /// Every fence open of `path` fails with OS error `errno` until dropped.
+    pub(crate) fn new(path: &Path, errno: i32) -> Self {
+        OPEN_FAULTS
+            .lock()
+            .expect("open faults")
+            .push((path.to_path_buf(), errno));
+        Self(path.to_path_buf())
+    }
+}
+#[cfg(test)]
+impl Drop for OpenFaultForTest {
+    fn drop(&mut self) {
+        OPEN_FAULTS
+            .lock()
+            .expect("open faults")
+            .retain(|(path, _)| path != &self.0);
+    }
+}
+/// A fence open's own result, or the fault a test injected for its path.
+fn opened<T>(path: &Path, result: std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(test)]
+    if let Some((_, errno)) = OPEN_FAULTS
+        .lock()
+        .expect("open faults")
+        .iter()
+        .find(|(faulted, _)| faulted == path)
+    {
+        return Err(std::io::Error::from_raw_os_error(*errno));
+    }
+    #[cfg(not(test))]
+    let _ = path;
+    result
+}
+
 impl std::fmt::Display for SourceFenceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -395,9 +438,13 @@ pub(crate) async fn open_source_fence_classified(
 ) -> Result<SourceFence, SourceFenceError> {
     #[cfg(unix)]
     {
-        let source = tokio::fs::File::open(&file.path).await.map_err(|error| {
-            SourceFenceError::from_open(format!("opening {}: {error}", file.path.display()), &error)
-        })?;
+        let source =
+            opened(&file.path, tokio::fs::File::open(&file.path).await).map_err(|error| {
+                SourceFenceError::from_open(
+                    format!("opening {}: {error}", file.path.display()),
+                    &error,
+                )
+            })?;
         let metadata = source.metadata().await.map_err(|error| {
             SourceFenceError::Unreachable(format!("fstat {}: {error}", file.path.display()))
         })?;
@@ -465,7 +512,10 @@ pub(crate) async fn open_source_playback_fence_classified(
 ) -> Result<SourceFence, SourceFenceError> {
     let path = file.path.clone();
     let source = tokio::task::spawn_blocking(move || {
-        plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        opened(
+            &path,
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path),
+        )
     })
     .await
     .map_err(|_| SourceFenceError::Unreachable("Source file open task failed".to_owned()))?
@@ -1913,15 +1963,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_fence_failure_passes_only_when_the_object_could_not_be_read() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("fence directory");
-        // The source sits in its own directory, so that directory can be
-        // made unsearchable without touching the file: a mode change on the
-        // file itself moves its ctime, which the held version rightly reads
-        // as a change.
-        let parent = dir.path().join("library");
-        std::fs::create_dir(&parent).expect("library");
-        let path = parent.join("source.mkv");
+        let path = dir.path().join("source.mkv");
         std::fs::write(&path, filler(4096)).expect("source");
         let file = sampled_file(path.clone());
         let held = open_source_playback_fence_classified(&file, None)
@@ -1960,10 +2003,9 @@ mod tests {
         ));
         assert!(changed(held.reopen_classified(&missing).await));
 
-        // The same object, unreadable just now: a retry may succeed, and
-        // does once it is readable again.
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000))
-            .expect("unreadable");
+        // The same object, unreadable just now (the I/O error an offline
+        // share answers): a retry may succeed, and does once it reads again.
+        let offline = OpenFaultForTest::new(&path, libc::EIO);
         let playback = open_source_playback_fence_classified(&file, Some(held.object_version()))
             .await
             .err()
@@ -1973,8 +2015,7 @@ mod tests {
             .await
             .err()
             .expect("not reopened");
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
-            .expect("readable");
+        drop(offline);
         assert!(playback.is_transient(), "{playback}");
         assert!(reopened.is_transient(), "{reopened}");
         assert!(

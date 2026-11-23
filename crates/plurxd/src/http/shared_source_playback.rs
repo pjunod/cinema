@@ -1890,12 +1890,16 @@ async fn start(
     clock
         .answer(owned.actor.wait_ready(deadline))
         .await?
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+        .map_err(|e| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.wait_ready", error_class = ?e, "Source start refused");
+            SourceStartFailure::from(e).response()
+        })?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
         .await
         .map_err(|refusal| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.open_response", error_class = ?refusal.error, transient = refusal.is_transient(), "Source start refused");
             if refusal.is_transient() {
                 live_refusal_retry()
             } else {
@@ -2901,6 +2905,12 @@ async fn build_real_source_start_fixture(
     advertised_http: Option<tokio::net::TcpListener>,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
+    // Every refusal names its step in a warning; a fixture test that fails
+    // must show them, or a refusal under load is a code with no cause.
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("warn,hiqlite=error")
+        .try_init();
     use plurx_core::{
         cluster::migration::select_daemon_store_observing,
         config::Config,
