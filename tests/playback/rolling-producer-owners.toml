@@ -4245,7 +4245,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Shared status busy wire test: +1 `tokio::spawn` of the HTTP fixture server in
 # sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
 # no production task, timer or process.
-expected_occurrences = 1213
+# Shared busy review follow-up: +1 test-only `tokio::spawn` of the HTTP
+# fixture in sharing_catalogue_request_http_429_with_retry_after_is_busy.
+expected_occurrences = 1214
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6372,7 +6374,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Retry-After, or the receiver's own catalogue admission) and only while the
 # wake still fits before the read's existing deadline; it adds no deadline,
 # poll, task or retry outside that budget.
-expected_occurrences = 2350
+# Shared busy review follow-up: honour_peer_wait now bounds each attempt with
+# tokio::time::timeout_at on the read's own deadline, replacing the outer
+# tokio::time::timeout in read_file_decision (production net 0). +3 test-only
+# paused sleeps in a_read_cut_off_after_a_wait_reports_the_wait_not_a_timeout
+# and +1 test-only Duration::from_secs join timeout in the wire test.
+expected_occurrences = 2354
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7770,7 +7777,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # split admission test, which synchronously joins the FFmpeg fixture child; 1010.
 # Shared busy decision test: +2 `.status()` reads of HTTP responses in
 # a_busy_decision_upstream_is_a_typed_wait_not_a_verdict. No process launch.
-expected_occurrences = 1012
+# Shared busy review follow-up: +1 `Response::builder().status(...)` fixture
+# reply in sharing_catalogue_request_http_429_with_retry_after_is_busy.
+expected_occurrences = 1013
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -2108,21 +2108,18 @@ impl SharingManager {
         crate::sharing_client::PeerError,
     > {
         use crate::sharing_client::PeerError;
-        let budget = Duration::from_secs(15);
-        let deadline = tokio::time::Instant::now() + budget;
-        tokio::time::timeout(
-            budget,
-            honour_peer_wait(deadline, || async {
-                let _permit = self.catalogue_admission.acquire(reference.item.import_id)?;
-                let (summary, credentials, mut peer) =
-                    self.assigned_file_peer(state, user, reference).await?;
-                let reply = peer.file_decision(&credentials.credential, request).await?;
-                self.ensure_current(state, &summary).await?;
-                Ok((summary, reply))
-            }),
-        )
+        // The decision's 15 s budget, owned by the wait so a late cut-off
+        // after a typed wait still answers "busy", not "unavailable".
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        honour_peer_wait(deadline, || async {
+            let _permit = self.catalogue_admission.acquire(reference.item.import_id)?;
+            let (summary, credentials, mut peer) =
+                self.assigned_file_peer(state, user, reference).await?;
+            let reply = peer.file_decision(&credentials.credential, request).await?;
+            self.ensure_current(state, &summary).await?;
+            Ok::<_, PeerError>((summary, reply))
+        })
         .await
-        .map_err(|_| PeerError::Unavailable)?
     }
 
     /// A fresh pinned read of one closed pre-session file asset (subtitle
@@ -2787,6 +2784,48 @@ mod peer_wait_tests {
             Err(PeerError::Rejected(axum::http::StatusCode::NOT_FOUND))
         ));
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Review follow-up: a read the deadline cuts off after a typed wait is
+    /// that wait, so the viewer is still told "retry shortly".
+    #[tokio::test(start_paused = true)]
+    async fn a_read_cut_off_after_a_wait_reports_the_wait_not_a_timeout() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let start = tokio::time::Instant::now();
+        let answer = honour_peer_wait(start + Duration::from_secs(15), || async {
+            match attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => {
+                    tokio::time::sleep(Duration::from_secs(12)).await;
+                    Err::<(), _>(PeerError::Busy {
+                        retry_after_secs: 1,
+                    })
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(
+                answer,
+                Err(PeerError::Busy {
+                    retry_after_secs: 1
+                })
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(15));
+        let never = honour_peer_wait(start + Duration::from_secs(20), || async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok::<(), PeerError>(())
+        })
+        .await;
+        assert!(
+            matches!(never, Err(PeerError::Unavailable)),
+            "a plain timeout stays one"
+        );
     }
 
     /// The receiver's own one-read-per-import admission is a typed wait too.
@@ -3513,11 +3552,13 @@ mod loop_pacing_tests {
     }
 }
 
-/// Honour a typed peer wait inside a read's own deadline: a `Busy` answer
-/// (the Source's or ingress's 429 with Retry-After, or this receiver's own
-/// catalogue admission) is waited out and the same read asked again, for as
-/// long as the wait still fits before `deadline`. Every other answer, and a
-/// wait that no longer fits, is returned as it came.
+/// Honour a typed peer wait inside a read's own deadline, which this owns: a
+/// `Busy` answer (the Source's or ingress's 429 with Retry-After, or this
+/// receiver's own catalogue admission) is waited out and the same read asked
+/// again while the wake still fits before `deadline`; each attempt is bounded
+/// by the same deadline. A read the deadline cuts off after a wait reports
+/// that wait, never a bare timeout, so the caller can still answer the viewer
+/// "retry shortly". Every other answer comes back as it came.
 pub(crate) async fn honour_peer_wait<T, Read, Reading>(
     deadline: tokio::time::Instant,
     mut read: Read,
@@ -3526,14 +3567,22 @@ where
     Read: FnMut() -> Reading,
     Reading: std::future::Future<Output = Result<T, crate::sharing_client::PeerError>>,
 {
+    use crate::sharing_client::PeerError;
+    let mut waited = None;
     loop {
-        match read().await {
-            Err(crate::sharing_client::PeerError::Busy { retry_after_secs }) => {
+        let answer = match tokio::time::timeout_at(deadline, read()).await {
+            Ok(answer) => answer,
+            Err(_) => return Err(waited.unwrap_or(PeerError::Unavailable)),
+        };
+        match answer {
+            Err(PeerError::Busy { retry_after_secs }) => {
+                let busy = PeerError::Busy { retry_after_secs };
                 let wake =
                     tokio::time::Instant::now() + Duration::from_secs(retry_after_secs.max(1));
                 if wake >= deadline {
-                    return Err(crate::sharing_client::PeerError::Busy { retry_after_secs });
+                    return Err(busy);
                 }
+                waited = Some(busy);
                 tokio::time::sleep_until(wake).await;
             }
             answer => return answer,
