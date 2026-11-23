@@ -105,10 +105,6 @@ before that and are released with the next cut. -->
 
 ### Fixed
 
-- A Dolby Vision FEL playback in Profile 8.1 keeps its FEL, RPU and DYN badges once the server's
-  processing report arrives. Before, the panel dropped RPU and DYN and showed a false "Tone mapping"
-  badge: the server never tone maps a Dolby Vision picture, and its reports always name the
-  reconstruction's own target mapping.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
