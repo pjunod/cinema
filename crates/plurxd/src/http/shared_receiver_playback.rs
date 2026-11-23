@@ -4343,7 +4343,7 @@ pub(crate) mod relay_log {
             assert!(matches!(
                 super::super::peer_failure(crate::sharing_client::peer_status_refusal(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    true
+                    Some(&axum::http::HeaderValue::from_static("1"))
                 )),
                 super::super::ReceiverStartError::PeerUnavailable
             ));
@@ -4356,7 +4356,7 @@ pub(crate) mod relay_log {
             assert!(matches!(
                 super::super::peer_failure(crate::sharing_client::peer_status_refusal(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    false
+                    None
                 )),
                 super::super::ReceiverStartError::Unresolved
             ));
