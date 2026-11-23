@@ -200,6 +200,9 @@ pub(crate) struct RunHelper {
     settled: watch::Receiver<bool>,
     /// When the run must be killed if no window has claimed it by then.
     idle: watch::Sender<Option<Instant>>,
+    /// Pre-started encoders that may still read the source and are not yet a
+    /// window's registered encoder ([`LiveReader`]).
+    prestarts: Arc<watch::Sender<usize>>,
 }
 
 impl RunHelper {
@@ -215,16 +218,37 @@ impl RunHelper {
 /// Own the run's helper: wait for its reap (or kill it when the run sits idle
 /// or its owner drops), publish the result, then close the run's source reader
 /// (which waits for the current window encoder's use) and its directories.
+///
+/// `staged` stops the helper when `stage_stop` is cancelled. Ending the run
+/// (`cancel`) cancels it only once every pre-started encoder that is not yet
+/// a window's has been killed and reaped, so the helper's reap, which a
+/// detaching source owner waits for, means no run process reads the source.
 pub(crate) fn spawn_helper(
     staged: impl std::future::Future<Output = Result<Vec<u8>, String>> + Send + 'static,
     cancel: CancellationToken,
+    stage_stop: CancellationToken,
     input: Arc<SourceInputLease>,
     directories: Vec<Arc<tempfile::TempDir>>,
 ) -> RunHelper {
     let (exit_sender, exit) = watch::channel(None);
     let (settled_sender, settled) = watch::channel(false);
     let (idle, idle_receiver) = watch::channel(None);
+    let prestarts = Arc::new(watch::channel(0_usize).0);
+    let mut live = prestarts.subscribe();
+    let stopper_cancel = cancel.clone();
     tokio::spawn(async move {
+        let stopper = async move {
+            stopper_cancel.cancelled().await;
+            let _ = live.wait_for(|count| *count == 0).await;
+            stage_stop.cancel();
+            std::future::pending::<std::convert::Infallible>().await
+        };
+        let staged = async move {
+            tokio::select! {
+                result = staged => result,
+                never = stopper => match never {},
+            }
+        };
         tokio::pin!(staged);
         let result = tokio::select! {
             result = &mut staged => result,
@@ -250,6 +274,7 @@ pub(crate) fn spawn_helper(
         exit,
         settled,
         idle,
+        prestarts,
     }
 }
 
@@ -269,6 +294,12 @@ pub(crate) async fn idle_expiry(mut idle: watch::Receiver<Option<Instant>>) -> &
     }
 }
 
+/// Has the helper begun the window whose directory this is? It creates the
+/// window's `renderer.jsonl` only after the previous window is complete.
+fn begun(directory: &std::fs::File) -> bool {
+    SegmentEvidence::open(directory, c"renderer.jsonl", libc::O_RDONLY).is_ok()
+}
+
 /// A run window's helper completion: the next window's `renderer.jsonl`
 /// exists (the helper creates it only after this window's observations are
 /// flushed and its NUT output is closed), or the helper exited successfully.
@@ -277,11 +308,7 @@ pub(crate) async fn window_complete(
     mut exit: watch::Receiver<Option<Result<(), String>>>,
     source: Arc<SourceFence>,
 ) -> Result<(), String> {
-    let advanced = |next: &Option<Arc<std::fs::File>>| {
-        next.as_deref().is_some_and(|directory| {
-            SegmentEvidence::open(directory, c"renderer.jsonl", libc::O_RDONLY).is_ok()
-        })
-    };
+    let advanced = |next: &Option<Arc<std::fs::File>>| next.as_deref().is_some_and(begun);
     loop {
         if advanced(&next) {
             break;
@@ -362,6 +389,288 @@ pub(crate) fn set_blocking(file: &std::fs::File) -> Result<(), String> {
     Ok(())
 }
 
+/// What a pre-started encoder needs that the run does not already hold.
+pub(crate) struct PreStartRequest {
+    /// The plan entry of the window the encoder is for.
+    pub(crate) at: u32,
+    /// That window's encoder argv, computed with its own start and end.
+    pub(crate) encoder_args: Vec<String>,
+    pub(crate) encoder: std::path::PathBuf,
+    pub(crate) runtime_cache: std::path::PathBuf,
+    pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    pub(crate) decode: RendererDecode,
+    /// How long the encoder may wait for the helper to begin its window.
+    pub(crate) wait: Duration,
+}
+
+/// Asks a pre-start task for its encoder: the run sends where to hand it over.
+type HandoverRequest = tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<Handover>>;
+/// What [`spawn_prestart`] returns: the spawn outcome, the handover request
+/// and the settled signal.
+type SpawnedPreStart = (
+    watch::Receiver<Option<Result<(), String>>>,
+    HandoverRequest,
+    watch::Receiver<bool>,
+);
+/// What a window that attaches a pre-started encoder takes over from the
+/// pre-start task: the child (unreaped, perhaps already exited), its share of
+/// the worker claim, its use of the run's source reader, its private
+/// directory and its bounded output.
+struct Handover {
+    child: tokio::process::Child,
+    child_job: crate::process_control::ChildJob,
+    spawned: Instant,
+    claim: Arc<crate::vodencode::EncodeWorkerPermit>,
+    source_input: SourceInputUse,
+    directory: Arc<tempfile::TempDir>,
+    held: Arc<std::fs::File>,
+    output: DrainedOutput,
+}
+
+/// One pre-started encoder counted in [`RunHelper::prestarts`] until it is
+/// a window's (attached and registered) encoder or has been reaped.
+struct LiveReader(Arc<watch::Sender<usize>>);
+impl LiveReader {
+    fn new(count: &Arc<watch::Sender<usize>>) -> Self {
+        count.send_modify(|count| *count += 1);
+        Self(Arc::clone(count))
+    }
+}
+impl Drop for LiveReader {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+
+/// Kill and reap a child this owner holds.
+async fn kill_and_reap(
+    mut child: tokio::process::Child,
+    child_job: crate::process_control::ChildJob,
+) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    drop(child_job);
+}
+
+/// A window encoder's stdout and stderr, each read to its bound plus one
+/// byte. Exceeding either fails at once: the reader stops and drops its pipe,
+/// so the encoder cannot finish, instead of waiting for the window deadline.
+async fn drain_bounded_output(
+    stdout: impl tokio::io::AsyncRead + Unpin,
+    stderr: impl tokio::io::AsyncRead + Unpin,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let output = async {
+        let mut bytes = Vec::new();
+        stdout
+            .take(ENCODER_OUTPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > ENCODER_OUTPUT_LIMIT {
+            return Err("DV encoder private-output bound exceeded".to_owned());
+        }
+        Ok(bytes)
+    };
+    let diagnostic = async {
+        let mut bytes = Vec::new();
+        stderr
+            .take(ENCODER_DIAGNOSTIC_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > ENCODER_DIAGNOSTIC_LIMIT {
+            return Err("DV encoder diagnostic bound exceeded".to_owned());
+        }
+        Ok(bytes)
+    };
+    tokio::try_join!(output, diagnostic)
+}
+
+/// The run's next window's encoder, started as soon as the previous window's
+/// encoder was reaped instead of after that window's verification,
+/// publication and the next generation's spawn.
+///
+/// The pre-start task owns the encoder, the worker claim, a use of the run's
+/// source reader and the window's directory until a window takes them
+/// ([`Self::take`]). Cancelling it (the run's end, idle expiry, or dropping
+/// this handle) makes the task kill and reap the encoder and only then
+/// release the claim, reader and directory; [`Self::settled`] reports that.
+/// The run itself holds the claim only weakly, so nothing it keeps can hold
+/// the claim past that reap.
+struct PreStart {
+    at: u32,
+    encoder_args: Vec<String>,
+    bounds: Bounds,
+    claim: std::sync::Weak<crate::vodencode::EncodeWorkerPermit>,
+    /// `Some(Ok)` once the encoder is spawned, `Some(Err)` if it could not be.
+    spawned: watch::Receiver<Option<Result<(), String>>>,
+    take: Option<HandoverRequest>,
+    cancel: CancellationToken,
+    /// Set when the task has ended: the encoder handed over, or killed and
+    /// reaped with everything it held released.
+    settled: watch::Receiver<bool>,
+}
+
+impl PreStart {
+    fn failed(&self) -> bool {
+        matches!(&*self.spawned.borrow(), Some(Err(_)))
+    }
+    /// Wait for the spawn outcome. Cancel-safe: nothing is consumed.
+    async fn spawned(&mut self) -> bool {
+        matches!(
+            self.spawned.wait_for(Option::is_some).await.as_deref(),
+            Ok(Some(Ok(())))
+        )
+    }
+    /// Take the encoder for the window attaching it. `None` if the task ended
+    /// first; if this future is dropped before the handover completes, the
+    /// task kills and reaps the encoder itself.
+    async fn take(&mut self) -> Option<Handover> {
+        let take = self.take.take()?;
+        let (reply, handed) = tokio::sync::oneshot::channel();
+        take.send(reply).ok()?;
+        handed.await.ok()
+    }
+}
+
+impl Drop for PreStart {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// The pre-start task. Waits until the helper has begun the window, spawns
+/// its encoder on the FIFO and reads its output; until a window takes the
+/// encoder, cancellation kills and reaps it here.
+#[allow(clippy::too_many_arguments)]
+fn spawn_prestart(
+    request: PreStartRequest,
+    fifo: std::fs::File,
+    url: String,
+    mut exit: watch::Receiver<Option<Result<(), String>>>,
+    cancel: CancellationToken,
+    claim: Arc<crate::vodencode::EncodeWorkerPermit>,
+    source_input: SourceInputUse,
+    directory: Arc<tempfile::TempDir>,
+    held: Arc<std::fs::File>,
+    reader: LiveReader,
+) -> SpawnedPreStart {
+    let (spawned_sender, spawned) = watch::channel(None);
+    let (take, mut taken) =
+        tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<Handover>>();
+    let (settled_sender, settled) = watch::channel(false);
+    let task_settled = settled.clone();
+    tokio::spawn(async move {
+        let deadline = Instant::now() + request.wait;
+        let started = async {
+            wait_for_output(&fifo, &mut exit, &cancel, deadline).await?;
+            set_blocking(&fifo)?;
+            spawn_streaming_encoder(
+                &request.encoder,
+                &request.encoder_args,
+                &request.runtime_cache,
+                false,
+                &fifo,
+                None,
+                Some(url.as_str()),
+            )
+        }
+        .await;
+        drop(fifo); // The encoder is this window's only reader.
+        let Spawned {
+            child,
+            child_job,
+            stdout,
+            stderr,
+        } = match started {
+            Ok(spawned) => spawned,
+            Err(cause) => {
+                let _ = spawned_sender.send_replace(Some(Err(cause)));
+                drop((reader, claim, source_input, directory, held));
+                let _ = settled_sender.send_replace(true);
+                return;
+            }
+        };
+        let spawned_at = Instant::now();
+        let _ = spawned_sender.send_replace(Some(Ok(())));
+        let (output_sender, output) = tokio::sync::oneshot::channel();
+        let mut output_sender = Some(output_sender);
+        let drain = drain_bounded_output(stdout, stderr);
+        tokio::pin!(drain);
+        let reply = loop {
+            tokio::select! {
+                reply = &mut taken => break reply.ok(),
+                () = cancel.cancelled() => break None,
+                result = &mut drain, if output_sender.is_some() => {
+                    // Finished, or over its bound, before a window took it.
+                    if let Some(sender) = output_sender.take() {
+                        let _ = sender.send(result);
+                    }
+                }
+            }
+        };
+        match reply {
+            Some(reply) => {
+                let handover = Handover {
+                    child,
+                    child_job,
+                    spawned: spawned_at,
+                    claim,
+                    source_input,
+                    directory,
+                    held,
+                    output: DrainedOutput {
+                        output,
+                        settled: task_settled,
+                    },
+                };
+                match reply.send(handover) {
+                    Ok(()) => {
+                        // The window registers its encoder from here on.
+                        drop(reader);
+                        if let Some(sender) = output_sender.take() {
+                            let _ = sender.send(drain.await);
+                        }
+                    }
+                    Err(returned) => {
+                        // The window gave up while taking it.
+                        let Handover {
+                            child, child_job, ..
+                        } = returned;
+                        kill_and_reap(child, child_job).await;
+                        drop(reader);
+                    }
+                }
+            }
+            None => {
+                kill_and_reap(child, child_job).await;
+                drop((claim, source_input, directory, held));
+                drop(reader);
+            }
+        }
+        let _ = settled_sender.send_replace(true);
+    });
+    (spawned, take, settled)
+}
+
+/// What a killed run still has to release: its pre-start's reap and the
+/// helper's settlement. Ending a run is synchronous; whoever claims next
+/// waits for this first.
+pub(crate) struct RunSettlement {
+    helper: watch::Receiver<bool>,
+    prestart: Option<watch::Receiver<bool>>,
+}
+
+impl RunSettlement {
+    pub(crate) async fn wait(self) {
+        if let Some(mut prestart) = self.prestart {
+            let _ = prestart.wait_for(|settled| *settled).await;
+        }
+        let mut helper = self.helper;
+        let _ = helper.wait_for(|settled| *settled).await;
+    }
+}
+
 /// A live run, owned by its recipe between windows. Dropping it kills the
 /// helper; [`Self::kill`] also waits until its resources are released.
 pub(crate) struct WindowRun {
@@ -378,6 +687,8 @@ pub(crate) struct WindowRun {
     /// the rendition's source owners ahead of its encoder, so a detaching
     /// viewer settles only after the helper reading its source is reaped.
     registration: ProducerRegistration,
+    /// The next window's encoder, when it was started ahead of its request.
+    prestart: Option<PreStart>,
 }
 
 /// The recipe's slot for its window run. Ending is sticky: a request to end
@@ -387,6 +698,10 @@ pub(crate) struct WindowRun {
 pub(crate) struct WindowRunSlot {
     run: tokio::sync::Mutex<Option<(u64, WindowRun)>>,
     ends: std::sync::atomic::AtomicU64,
+    /// Runs [`Self::end`] dropped without waiting. Taking or claiming waits
+    /// for them first, so a claim they held is released before anyone
+    /// claims the reservation again.
+    pending: std::sync::Mutex<Vec<RunSettlement>>,
 }
 
 impl WindowRunSlot {
@@ -394,8 +709,20 @@ impl WindowRunSlot {
     /// continued or stored again.
     pub(crate) fn end(&self) {
         self.ends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        if let Ok(mut run) = self.run.try_lock() {
-            run.take();
+        if let Ok(mut held) = self.run.try_lock() {
+            if let Some((_, run)) = held.take() {
+                self.pending
+                    .lock()
+                    .expect("DV window run settlements")
+                    .push(run.settlement());
+            }
+        }
+    }
+    /// Wait until every run ended without waiting has released what it held.
+    async fn settle_pending(&self) {
+        let pending = std::mem::take(&mut *self.pending.lock().expect("DV window run settlements"));
+        for settlement in pending {
+            settlement.wait().await;
         }
     }
     /// The current end count; a run stored under an older count is ended.
@@ -410,6 +737,7 @@ impl WindowRunSlot {
         tokio::sync::MutexGuard<'_, Option<(u64, WindowRun)>>,
         Option<WindowRun>,
     ) {
+        self.settle_pending().await;
         let mut held = self.run.lock().await;
         let run = match held.take() {
             Some((stored, run)) if stored == self.ends() => Some(run),
@@ -433,6 +761,34 @@ impl WindowRunSlot {
         } else {
             run.kill().await;
         }
+    }
+    /// The worker claim a generation for plan entry `at` shares with the
+    /// stored run's pre-started encoder for exactly that window and
+    /// reservation. A run whose pre-start holds the claim for anything else
+    /// (or that was ended) is killed and settled, which releases the claim,
+    /// so the caller can claim the reservation itself; a run without a
+    /// pre-start holds no claim and is left alone.
+    pub(crate) async fn claim_for(
+        &self,
+        at: u32,
+        reservation: &crate::vodencode::EncodePermit,
+    ) -> Option<Arc<crate::vodencode::EncodeWorkerPermit>> {
+        self.settle_pending().await;
+        let mut held = self.run.lock().await;
+        let (claim, kill) = match held.as_ref() {
+            Some((stored, _)) if *stored != self.ends() => (None, true),
+            Some((_, run)) => match run.prestarted_claim(at, reservation) {
+                Some(claim) => (Some(claim), false),
+                None => (None, run.holds_claim()),
+            },
+            None => (None, false),
+        };
+        if kill {
+            if let Some((_, run)) = held.take() {
+                run.kill().await;
+            }
+        }
+        claim
     }
     /// Is `input` the stored run's source reader?
     pub(crate) async fn owns_input(&self, input: &Arc<SourceInputLease>) -> bool {
@@ -467,6 +823,7 @@ impl WindowRun {
             reservation: launch.reservation,
             source,
             registration,
+            prestart: None,
         }
     }
     pub(crate) fn windows(&self) -> u8 {
@@ -478,6 +835,111 @@ impl WindowRun {
     }
     pub(crate) fn has_more(&self) -> bool {
         !self.outputs.is_empty() && !self.ended()
+    }
+    /// May the pre-started window still be rendered by this run? Not after
+    /// the run's end, a failed spawn, or a helper that failed before it
+    /// finished that window (the next window not begun).
+    fn prestart_viable(&self, prestart: &PreStart) -> bool {
+        !self.cancel.is_cancelled()
+            && !prestart.failed()
+            && match &*self.helper.exit.borrow() {
+                Some(Err(_)) => self.outputs.front().is_some_and(|next| begun(&next.held)),
+                _ => true,
+            }
+    }
+    /// Does a pre-start of this run still hold the family's worker claim?
+    fn holds_claim(&self) -> bool {
+        self.prestart
+            .as_ref()
+            .is_some_and(|prestart| prestart.claim.strong_count() > 0)
+    }
+    fn prestarted_claim(
+        &self,
+        at: u32,
+        reservation: &crate::vodencode::EncodePermit,
+    ) -> Option<Arc<crate::vodencode::EncodeWorkerPermit>> {
+        let prestart = self.prestart.as_ref()?;
+        if prestart.at != at || !self.prestart_viable(prestart) {
+            return None;
+        }
+        prestart
+            .claim
+            .upgrade()
+            .filter(|claim| claim.reservation().same_reservation(reservation))
+    }
+    /// What killing this run must wait for.
+    pub(crate) fn settlement(&self) -> RunSettlement {
+        RunSettlement {
+            helper: self.helper.settled.clone(),
+            prestart: self
+                .prestart
+                .as_ref()
+                .map(|prestart| prestart.settled.clone()),
+        }
+    }
+    /// Start the next window's encoder now. Called right after the previous
+    /// window's encoder was reaped, which released its worker claim: the run
+    /// takes the family's one claim for this encoder (never a second one) and
+    /// does nothing when the claim, the budget or the recipe does not allow it.
+    pub(crate) fn prestart(&mut self, request: PreStartRequest) {
+        if self.prestart.is_some() || self.ended() {
+            return;
+        }
+        let Some(claim) = self.reservation.clone().try_claim_worker() else {
+            return;
+        };
+        let Some(cpu) = claim.retained_resources().software.map(|cpu| cpu.threads()) else {
+            return;
+        };
+        if check_streaming_budget(request.mode, request.decode, &request.encoder_args, cpu)
+            .and_then(|()| check_streaming_clock(&request.encoder_args, true))
+            .is_err()
+        {
+            return;
+        }
+        self.start_prestart(request, claim);
+    }
+    /// [`Self::prestart`] once its claim and checks are settled.
+    fn start_prestart(
+        &mut self,
+        request: PreStartRequest,
+        claim: crate::vodencode::EncodeWorkerPermit,
+    ) {
+        let Some(RunOutput {
+            bounds,
+            directory,
+            held,
+            fifo,
+        }) = self.outputs.pop_front()
+        else {
+            return;
+        };
+        let claim = Arc::new(claim);
+        let cancel = self.cancel.child_token();
+        let at = request.at;
+        let encoder_args = request.encoder_args.clone();
+        let (spawned, take, settled) = spawn_prestart(
+            request,
+            fifo,
+            self.input.url.clone(),
+            self.helper.exit(),
+            cancel.clone(),
+            Arc::clone(&claim),
+            self.input.physical_owner(),
+            directory,
+            held,
+            LiveReader::new(&self.helper.prestarts),
+        );
+        self.prestart = Some(PreStart {
+            at,
+            encoder_args,
+            bounds,
+            claim: Arc::downgrade(&claim),
+            spawned,
+            take: Some(take),
+            cancel,
+            settled,
+        });
     }
     /// Is this the run's source reader? The run, not the window that opened
     /// it, closes it.
@@ -491,16 +953,26 @@ impl WindowRun {
         frames: u8,
         key: &[String],
         admission: &SegmentAdmission,
+        encoder_args: &[String],
     ) -> bool {
-        let same_admission = match admission {
-            SegmentAdmission::Retained(worker) => {
-                worker.reservation().same_reservation(&self.reservation)
-            }
-            SegmentAdmission::Owned(_) => false,
+        let same_admission = admission
+            .reservation()
+            .is_some_and(|reservation| reservation.same_reservation(&self.reservation));
+        // A pre-started window needs only its encoder, already reading the
+        // helper's output: the helper may have finished the run since.
+        let (next, ended) = match &self.prestart {
+            Some(prestart) => (
+                (prestart.encoder_args == encoder_args).then_some(prestart.bounds),
+                !self.prestart_viable(prestart),
+            ),
+            None => (
+                self.outputs.front().map(|output| output.bounds),
+                self.ended(),
+            ),
         };
         run_continues(
-            self.outputs.front().map(|output| output.bounds),
-            self.ended(),
+            next,
+            ended,
             (window.start, window.end),
             frames,
             self.frame_cap,
@@ -523,6 +995,20 @@ impl WindowRun {
         deadline: Instant,
     ) -> Result<bool, String> {
         let _ = self.helper.idle.send_replace(None);
+        if let Some(prestart) = self.prestart.as_mut() {
+            let spawned = tokio::select! {
+                spawned = prestart.spawned() => spawned,
+                _ = cancel.cancelled() => return Err("DV window run window cancelled".into()),
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err("DV window run window deadline expired".into());
+                }
+            };
+            return Ok(spawned
+                && self
+                    .prestart
+                    .as_ref()
+                    .is_some_and(|prestart| self.prestart_viable(prestart)));
+        }
         let Some(output) = self.outputs.front().filter(|_| !self.ended()) else {
             return Ok(false);
         };
@@ -536,8 +1022,9 @@ impl WindowRun {
     /// Kill the helper and wait until its lane, offset, reservation, source
     /// reader and directories are released.
     pub(crate) async fn kill(self) {
-        self.cancel.cancel();
-        self.helper.settled().await;
+        let settlement = self.settlement();
+        drop(self);
+        settlement.wait().await;
     }
 
     /// The producer for the run's next window: the same graph a single window
@@ -564,6 +1051,9 @@ impl WindowRun {
         let window = stream
             .window
             .ok_or("a DV window run requires a bounded window")?;
+        if let Some(prestart) = self.prestart.take() {
+            return self.attach_prestarted(stream, window, prestart).await;
+        }
         let output = self
             .outputs
             .pop_front()
@@ -611,6 +1101,7 @@ impl WindowRun {
             Box::new(WindowResources {
                 _source_input: self.input.physical_owner(),
                 _admission: request.admission,
+                _run_claim: None,
                 _directory: Arc::clone(&output.directory),
             }),
         );
@@ -639,12 +1130,111 @@ impl WindowRun {
                 held: output.held,
             }),
             run_helper: Some(self.registration.clone()),
+            drained: None,
+        })
+    }
+}
+
+impl WindowRun {
+    /// [`Self::attach`] for the window whose encoder already runs: the same
+    /// registration, resources, completion and evidence, with the encoder's
+    /// output taken from its reader instead of live pipes.
+    async fn attach_prestarted(
+        &mut self,
+        stream: StreamingSegmentRequest,
+        window: SegmentWindow,
+        mut prestart: PreStart,
+    ) -> Result<SegmentProducer, String> {
+        /// A pre-start this window does not attach is killed and reaped, and
+        /// its claim released, before the window reports its failure.
+        async fn abandon(prestart: PreStart, cause: String) -> Result<SegmentProducer, String> {
+            let mut settled = prestart.settled.clone();
+            drop(prestart);
+            let _ = settled.wait_for(|settled| *settled).await;
+            Err(cause)
+        }
+        if (window.start, window.end) != prestart.bounds
+            || stream.request.encoder_args != prestart.encoder_args
+        {
+            return abandon(
+                prestart,
+                "the requested window is not the run's pre-started window".into(),
+            )
+            .await;
+        }
+        let index = self.windows - 1 - u8::try_from(self.outputs.len()).unwrap_or(0);
+        stream.stages.run_window(index, self.windows);
+        let stages = Arc::clone(&stream.stages);
+        let request = stream.request;
+        let cancel = request.cancel.child_token();
+        let reservation = match request.producer.try_reserve_empty() {
+            Ok(reservation) => reservation,
+            Err(error) => return abandon(prestart, error.to_string()).await,
+        };
+        let Some(Handover {
+            child,
+            child_job,
+            spawned,
+            claim,
+            source_input,
+            directory,
+            held,
+            output,
+        }) = prestart.take().await
+        else {
+            return abandon(
+                prestart,
+                "DV pre-started window encoder did not start".into(),
+            )
+            .await;
+        };
+        if let Err(cause) = check_source(&request.source) {
+            kill_and_reap(child, child_job).await;
+            return Err(cause);
+        }
+        // The encoder started before this window was asked for.
+        stages.mark_at(WindowStage::EncoderSpawned, spawned);
+        let (registration, writers) = reservation.attach_registered_job_owned(
+            child,
+            child_job,
+            request.at,
+            Box::new(WindowResources {
+                _source_input: source_input,
+                _admission: request.admission,
+                _run_claim: Some(claim),
+                _directory: Arc::clone(&directory),
+            }),
+        );
+        let completed = window_complete(
+            self.outputs.front().map(RunOutput::held),
+            self.helper.exit(),
+            Arc::clone(&self.source),
+        );
+        let completion = supervise_streaming_helper(
+            completed,
+            self.cancel.clone(),
+            cancel.clone(),
+            Arc::downgrade(&request.producer),
+            registration.clone(),
+        );
+        Ok(SegmentProducer {
+            source_settlement: None,
+            registration,
+            writers: Some(writers),
+            stdout: None,
+            stderr: None,
+            unaccepted_cancel: Some(cancel),
+            helper_completion: Some(completion),
+            evidence: Some(SegmentEvidence { directory, held }),
+            run_helper: Some(self.registration.clone()),
+            drained: Some(output),
         })
     }
 }
 
 impl Drop for WindowRun {
     fn drop(&mut self) {
+        // The pre-start (a child token) kills and reaps its own encoder.
         self.cancel.cancel();
     }
 }
@@ -855,5 +1445,328 @@ mod tests {
             window_complete(Some(held), exit, fence()).await,
             Err("renderer failed: exit 9".into())
         );
+    }
+
+    fn reservation() -> crate::vodencode::EncodePermit {
+        crate::admission::Admissions::new()
+            .try_admit_bundle(
+                2,
+                4,
+                &crate::admission::TranscodeResourceEstimate {
+                    hardware_slot: true,
+                    cpu_threads: 2,
+                    decoder_threads: None,
+                },
+                crate::admission::Priority::Live,
+            )
+            .expect("window graph reservation")
+            .into()
+    }
+
+    /// The pre-started encoder and the generation that later asks for its
+    /// window share one worker claim. The family's next claim is possible only
+    /// once both have let it go, i.e. after the encoder's reap and the
+    /// window's end, never while either still holds it.
+    #[test]
+    fn a_run_shared_claim_is_released_only_by_its_last_holder() {
+        let family = reservation();
+        let claim = Arc::new(family.clone().try_claim_worker().expect("one claim"));
+        assert!(
+            family.clone().try_claim_worker().is_none(),
+            "never a second"
+        );
+        let window = SegmentAdmission::RunShared(Arc::clone(&claim));
+        assert!(window
+            .reservation()
+            .is_some_and(|shared| shared.same_reservation(&family)));
+        drop(claim); // The encoder was reaped.
+        assert!(
+            family.clone().try_claim_worker().is_none(),
+            "the window holds it"
+        );
+        drop(window); // The window ended.
+        assert!(family.clone().try_claim_worker().is_some());
+    }
+
+    fn prestart_request(cache: &std::path::Path, at: u32) -> PreStartRequest {
+        PreStartRequest {
+            at,
+            // A stand-in encoder that copies its NUT input to its output.
+            encoder_args: vec!["/proc/self/fd/3".into()],
+            encoder: "/bin/cat".into(),
+            runtime_cache: cache.to_owned(),
+            mode: plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu,
+            decode: RendererDecode::Software,
+            wait: Duration::from_secs(5),
+        }
+    }
+
+    /// A run over windows 0-2 whose helper the test plays: its exit is the
+    /// test's, it is already settled (so killing the run waits only for its
+    /// pre-start), its source reader is a loopback fixture and its
+    /// registration a real sleeping child's.
+    struct Fixture {
+        cache: tempfile::TempDir,
+        family: crate::vodencode::EncodePermit,
+        run: Option<WindowRun>,
+        /// `--window-run 3 END1 DIR1 NUT1 END2 DIR2 NUT2`.
+        tail: Vec<String>,
+        exit: watch::Sender<Option<Result<(), String>>>,
+        _settled: watch::Sender<bool>,
+        slot: ProducerSlot,
+        registration: ProducerRegistration,
+        _source: std::fs::File,
+    }
+
+    impl Fixture {
+        async fn finish(self) {
+            let _ = self
+                .slot
+                .request_registered_retirement(&self.registration)
+                .await;
+            let _ = self.registration.wait_confirmed_reap().await;
+        }
+    }
+
+    async fn fixture() -> Fixture {
+        let cache = tempfile::tempdir().expect("cache");
+        let family = reservation();
+        let (created, tail) = outputs(
+            cache.path(),
+            &window(0, 48048),
+            &[window(48048, 96096), window(96096, 144144)],
+        )
+        .expect("outputs");
+        let (exit, exit_receiver) = watch::channel(None);
+        let (settled, settled_receiver) = watch::channel(true);
+        let (idle, _) = watch::channel(None);
+        let helper = RunHelper {
+            exit: exit_receiver,
+            settled: settled_receiver,
+            idle,
+            prestarts: Arc::new(watch::channel(0_usize).0),
+        };
+        let (input, source) =
+            crate::source_input::SourceInput::qualification_fixture(b"source").await;
+        let sleeper = producer_spawn::spawn(
+            std::path::Path::new("/bin/sleep"),
+            &["30".to_owned()],
+            SpawnOptions {
+                runtime_cache: cache.path(),
+                progress: Progress::None,
+                descriptors: Descriptors::default(),
+                env: &[],
+                work: crate::process_control::ChildWork::realtime("DV run fixture helper"),
+            },
+        )
+        .expect("helper stand-in");
+        let slot = ProducerSlot::new();
+        let (registration, writers) = slot
+            .attach_registered_job_owned(sleeper.child, sleeper.child_job, 0, None)
+            .await;
+        writers.settled();
+        let run = WindowRun::new(
+            RunLaunch {
+                later: Vec::new(),
+                reservation: family.clone(),
+                deadline: Instant::now() + Duration::from_secs(60),
+                key: Vec::new(),
+            },
+            48,
+            created,
+            helper,
+            CancellationToken::new(),
+            SourceInputLease::new(input),
+            fence(),
+            registration.clone(),
+        );
+        Fixture {
+            cache,
+            family,
+            run: Some(run),
+            tail,
+            exit,
+            _settled: settled,
+            slot,
+            registration,
+            _source: source,
+        }
+    }
+
+    fn helper_writer(fixture: &Fixture) -> std::fs::File {
+        use std::io::Write;
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fixture.tail[4])
+            .expect("helper writer");
+        writer.write_all(b"first picture").expect("write");
+        writer
+    }
+
+    /// The generation asking for window 1 shares the claim of the encoder
+    /// pre-started for it; a run without a pre-start holds no claim and is
+    /// left alone; a run whose pre-start holds the claim for another window
+    /// is killed and settled, releasing it.
+    #[tokio::test]
+    async fn claim_for_shares_only_a_prestart_claim_for_its_own_window() {
+        let mut f = fixture().await;
+        let slot = WindowRunSlot::default();
+        let unreaped = f
+            .family
+            .clone()
+            .try_claim_worker()
+            .expect("the previous window's encoder, not yet reaped");
+        *slot.run.lock().await = Some((slot.ends(), f.run.take().expect("run")));
+        assert!(slot.claim_for(1, &f.family).await.is_none());
+        assert!(
+            slot.run.lock().await.is_some(),
+            "a run without a pre-start is not killed for another holder's claim"
+        );
+        drop(unreaped);
+        {
+            let mut held = slot.run.lock().await;
+            let (_, run) = held.as_mut().expect("run");
+            let claim = f
+                .family
+                .clone()
+                .try_claim_worker()
+                .expect("the run's claim");
+            run.start_prestart(prestart_request(f.cache.path(), 1), claim);
+        }
+        let shared = slot
+            .claim_for(1, &f.family)
+            .await
+            .expect("shared with its own window");
+        assert!(
+            f.family.clone().try_claim_worker().is_none(),
+            "never a second"
+        );
+        drop(shared);
+        assert!(
+            slot.run.lock().await.is_some(),
+            "its window continues the run"
+        );
+        assert!(slot.claim_for(2, &f.family).await.is_none());
+        assert!(slot.run.lock().await.is_none(), "killed for another window");
+        assert!(
+            f.family.clone().try_claim_worker().is_some(),
+            "its pre-start was reaped and the claim released"
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_prestarted_window_continues_only_while_its_helper_can_finish_it() {
+        let mut f = fixture().await;
+        let mut run = f.run.take().expect("run");
+        let claim = f.family.clone().try_claim_worker().expect("claim");
+        run.start_prestart(prestart_request(f.cache.path(), 1), claim);
+        let args = vec!["/proc/self/fd/3".to_owned()];
+        let shared = SegmentAdmission::RunShared(
+            run.prestarted_claim(1, &f.family)
+                .expect("pre-started claim"),
+        );
+        let next = window(48048, 96096);
+        assert!(run.continues(&next, 48, &[], &shared, &args));
+        assert!(
+            !run.continues(&next, 48, &[], &shared, &["another".to_owned()]),
+            "another encoder recipe is not this encoder"
+        );
+        let writer = helper_writer(&f);
+        let cancel = CancellationToken::new();
+        let soon = || Instant::now() + Duration::from_secs(5);
+        assert_eq!(run.ready(&cancel, soon()).await, Ok(true));
+        // The helper failed before finishing the window: not this run's.
+        let _ = f
+            .exit
+            .send_replace(Some(Err("streaming renderer failed: exit 9".into())));
+        assert!(!run.continues(&next, 48, &[], &shared, &args));
+        assert_eq!(run.ready(&cancel, soon()).await, Ok(false));
+        assert!(run.prestarted_claim(1, &f.family).is_none());
+        // Unless it had begun the next window: this one is complete.
+        std::fs::write(std::path::Path::new(&f.tail[6]).join("renderer.jsonl"), b"")
+            .expect("next window begun");
+        assert!(run.continues(&next, 48, &[], &shared, &args));
+        drop(writer);
+        drop(shared);
+        run.kill().await;
+        assert!(
+            f.family.clone().try_claim_worker().is_some(),
+            "killed, reaped and released"
+        );
+        f.finish().await;
+    }
+
+    /// A window that gives up on a pre-started encoder (its wait lost to its
+    /// deadline) drops the handle: the task kills and reaps the encoder, and
+    /// only then releases the claim, reader and directory.
+    #[tokio::test]
+    async fn a_dropped_prestart_reaps_its_encoder_before_releasing_the_claim() {
+        let mut f = fixture().await;
+        let mut run = f.run.take().expect("run");
+        let claim = f.family.clone().try_claim_worker().expect("claim");
+        run.start_prestart(prestart_request(f.cache.path(), 1), claim);
+        let writer = helper_writer(&f);
+        let mut prestart = run.prestart.take().expect("pre-start");
+        assert!(prestart.spawned().await, "the encoder runs");
+        let directory = std::path::PathBuf::from(&f.tail[3]);
+        let mut settled = prestart.settled.clone();
+        drop(prestart);
+        tokio::time::timeout(Duration::from_secs(5), settled.wait_for(|settled| *settled))
+            .await
+            .expect("reaped while its writer is still open")
+            .expect("settlement reported");
+        assert!(!directory.exists(), "its private directory is removed");
+        assert!(f.family.clone().try_claim_worker().is_some());
+        drop(writer);
+        drop(run);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn drained_output_over_its_bound_fails_at_once() {
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            drain_bounded_output(tokio::io::repeat(0), tokio::io::empty()),
+        )
+        .await
+        .expect("fails when the bound is passed, not at a deadline");
+        assert_eq!(
+            output,
+            Err("DV encoder private-output bound exceeded".to_owned())
+        );
+        assert_eq!(
+            drain_bounded_output(tokio::io::empty(), tokio::io::repeat(1)).await,
+            Err("DV encoder diagnostic bound exceeded".to_owned())
+        );
+    }
+
+    /// A failed window, Stop or refused episode ends the run synchronously.
+    /// The retried generation whose claim fails asks the slot, which waits for
+    /// the pre-start's reap; the claim then succeeds, never a launch failure.
+    #[tokio::test]
+    async fn ending_a_run_settles_its_prestart_before_the_next_claim() {
+        let mut f = fixture().await;
+        let slot = WindowRunSlot::default();
+        let mut run = f.run.take().expect("run");
+        let claim = f.family.clone().try_claim_worker().expect("claim");
+        run.start_prestart(prestart_request(f.cache.path(), 1), claim);
+        let writer = helper_writer(&f);
+        *slot.run.lock().await = Some((slot.ends(), run));
+        slot.end();
+        assert!(slot.run.lock().await.is_none());
+        let claimed = match f.family.clone().try_claim_worker() {
+            Some(claim) => claim,
+            None => {
+                assert!(slot.claim_for(1, &f.family).await.is_none());
+                f.family
+                    .clone()
+                    .try_claim_worker()
+                    .expect("released once the pre-start was reaped")
+            }
+        };
+        drop(claimed);
+        drop(writer);
+        f.finish().await;
     }
 }
