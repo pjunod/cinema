@@ -300,6 +300,7 @@ fn failure_reason(error: PeerTransportError) -> &'static str {
         PeerTransportError::Unreachable => "unreachable",
         PeerTransportError::LocalUnavailable => "local_unavailable",
         PeerTransportError::AuthenticationRefused(_) => "refused",
+        PeerTransportError::UnauthenticatedStatus(_) => "http_error",
     }
 }
 
