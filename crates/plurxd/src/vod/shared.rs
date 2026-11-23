@@ -2446,8 +2446,50 @@ impl Shared {
         key: &str,
         original: Weak<Rendition>,
     ) {
-        self.purge_dormant_inner(key, Duration::ZERO, false, Some(original))
+        self.purge_dormant_inner(key, Duration::ZERO, false, Some(original.clone()))
             .await;
+        // Say why an operator Stop left its finite rendition registered, so a
+        // retained output is explained rather than silently kept.
+        let Some(rendition) = original.upgrade() else {
+            return;
+        };
+        let registered = self
+            .renditions
+            .lock()
+            .await
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, &rendition));
+        let closing = self.finite_closing.lock().await.contains_key(key);
+        if !registered || closing {
+            return;
+        }
+        let build_gate_held = !self
+            .rendition_build_gate(key)
+            .is_ok_and(|gate| gate.try_lock_owned().is_ok());
+        let readers = rendition.readers.lock().await.len();
+        let dormant = rendition
+            .dormant_since
+            .lock()
+            .expect("dormant lock")
+            .is_some();
+        let (admitted, materialized) = {
+            let manifest = rendition.manifest.lock().await;
+            (manifest.is_admitted(), manifest.materialized_count())
+        };
+        tracing::debug!(
+            target: "plurxd::vodserve",
+            rendition = %key,
+            build_gate_held,
+            readers,
+            dormant,
+            admitted,
+            materialized,
+            plan = rendition.plan.len(),
+            preparation = rendition.preparation().is_some(),
+            private_storage = rendition.private_storage.is_some(),
+            finite_producer = rendition.dir.finite_producer().is_some(),
+            "operator stop left its finite rendition registered"
+        );
     }
 
     async fn purge_dormant_inner(
