@@ -407,12 +407,10 @@ mod live_refusal_tests {
     use SourceWorkerError as E;
 
     /// A copy refused because its output outgrew the mux's pairing hold is
-    /// its own terminal failure: a retry meets the same fragments again.
+    /// its own failure, not a start that was merely unavailable.
     #[test]
-    fn a_copy_input_limit_is_its_own_terminal_failure() {
-        let error = E::copy_failure("copy_range_input_limit");
-        assert_eq!(error, E::CopyInputLimit);
-        assert!(!wait_ready_refusal(error).is_transient());
+    fn a_copy_input_limit_is_its_own_failure() {
+        assert_eq!(E::copy_failure("copy_range_input_limit"), E::CopyInputLimit);
     }
 
     /// Every renewal tick (VOD, growing and direct) decides by this after

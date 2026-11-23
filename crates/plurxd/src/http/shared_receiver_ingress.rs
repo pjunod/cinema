@@ -63,6 +63,8 @@ fn actor_error(error: ReceiverStartError) -> ApiError {
             StatusCode::UNPROCESSABLE_ENTITY,
             super::shared_source_playback::SHARING_START_DOLBY_VISION_UNSUPPORTED,
         ),
+        // The Source's own refusal of the title, relayed as it is.
+        ReceiverStartError::SourceRefused(code) => (StatusCode::UNPROCESSABLE_ENTITY, code),
         ReceiverStartError::Conflict => (StatusCode::CONFLICT, "sharing_start_conflict"),
         ReceiverStartError::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
         ReceiverStartError::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
@@ -314,6 +316,24 @@ async fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The viewer is answered with the Source's own refusal of the title, not
+    /// this receiver's "unresolved".
+    #[test]
+    fn a_source_refusal_of_the_title_reaches_the_viewer_as_its_code() {
+        let answer = actor_error(ReceiverStartError::SourceRefused("copy_range_input_limit"));
+        assert!(
+            matches!(
+                answer,
+                ApiError::Typed {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: "copy_range_input_limit",
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+    }
     use plurx_core::{
         sharing::SourceId, sharing_catalogue::SharedReference,
         sharing_catalogue_details::FileRevision, store::sharing_catalogue::ReceiverCatalogueScope,

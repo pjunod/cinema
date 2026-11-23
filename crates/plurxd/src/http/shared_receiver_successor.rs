@@ -119,7 +119,9 @@ impl SuccessorSlot {
                     "Source has not prepared the optional processed upgrade."
                 }
             },
-            ReceiverStartError::DolbyVisionUnsupported | ReceiverStartError::Unsupported => {
+            ReceiverStartError::DolbyVisionUnsupported
+            | ReceiverStartError::Unsupported
+            | ReceiverStartError::SourceRefused(_) => {
                 "Source declined the optional processed upgrade."
             }
             _ => "Optional processed upgrade could not be completed.",

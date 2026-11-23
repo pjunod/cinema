@@ -137,9 +137,12 @@ impl ObservedCopyMux {
             CopyPipeEvent::Failed(kind, error) => return Err(format!("{error}: {kind:?}")),
             CopyPipeEvent::Data(kind, bytes) => match kind {
                 CopyPipeKind::Av => {
-                    if self.av_eof
-                        || self.av_reader.buffered().saturating_add(bytes.len()) > MAX_HELD
-                    {
+                    // Data after its own end is a pipe protocol fault, not a
+                    // fact about the source's size.
+                    if self.av_eof {
+                        return Err("copy_observation_closed".into());
+                    }
+                    if self.av_reader.buffered().saturating_add(bytes.len()) > MAX_HELD {
                         return Err("copy_range_input_limit".into());
                     }
                     self.av_reader.push(&bytes);

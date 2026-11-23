@@ -5834,6 +5834,42 @@ async fn actual_source_unclocked_start() {
     fixture.shutdown().await;
 }
 
+/// The receiver relays exactly the codes in `SOURCE_START_REFUSAL_CODES`:
+/// every typed 422 a Source Start answers must be listed there, or a new
+/// refusal reaches the viewer as "unresolved" again.
+#[test]
+fn every_typed_source_start_refusal_is_relayable() {
+    use SourceStartFailure as F;
+    for failure in [
+        F::Unavailable,
+        F::NotYet,
+        F::RescanRequired,
+        F::CopyTargetExceeded,
+        F::CopyInitContractChanged,
+        F::CopyClockUnknown,
+        F::CopySyncUnverified,
+        F::CopyInputLimit,
+        F::Capacity,
+        F::Conflict,
+        F::Unresolved,
+        F::Unsupported,
+        F::Deadline,
+        F::RetargetUnassigned,
+    ] {
+        if let ApiError::Typed {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code,
+            ..
+        } = failure.response()
+        {
+            assert!(
+                super::SOURCE_START_REFUSAL_CODES.contains(&code),
+                "{code} is not relayable"
+            );
+        }
+    }
+}
+
 /// Avatar 6751 (2026-11-23): the viewer was told `copy_sync_unverified` for a
 /// copy whose fragments outgrew the copy's input hold. The receiver relays a
 /// Source Start refusal's code as it is, so the code must be the cause.
