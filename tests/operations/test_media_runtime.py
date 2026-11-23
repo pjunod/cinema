@@ -372,9 +372,9 @@ class MediaRuntimeTests(unittest.TestCase):
 
     def test_bundle_builder_and_plurxd_digest_the_same_renderer_inputs(self):
         inputs = bundle_manifest().INPUTS
-        runtime = (ROOT / "crates/plurxd/src/dv_runtime.rs").read_text()
+        runtime = (ROOT / "crates/plurxd/src/dv_tools.rs").read_text()
         body = runtime.split("fn renderer_source_identity()", 1)[1].split("\n}\n", 1)[0]
-        names = re.findall(r'\(\s*"([^"]+)",\s*include_bytes!\("\.\./\.\./\.\./tools/dv_processing/([^"]+)"\)', body)
+        names = re.findall(r'\(\s*"([^"]+)",\s*include_bytes!\("\.\./\.\./\.\./tools/dv_processing/([^"]+)"\),?\s*\)', body)
         self.assertEqual([name for name, _ in names], sorted(inputs))
         self.assertTrue(all(name == path for name, path in names))
         # One implementation of the identity, shared by the installer's build,

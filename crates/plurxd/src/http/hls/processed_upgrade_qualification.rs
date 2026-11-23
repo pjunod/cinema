@@ -91,7 +91,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
     });
 }
 
-// FEL measurement workers and their installed scanner exist only on Linux.
+// Live FEL measurement is scheduled only on Linux.
 #[cfg(not(target_os = "linux"))]
 pub(in crate::http::hls) fn hold_viewer_demand(
     _state: &AppState,

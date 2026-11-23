@@ -1790,7 +1790,8 @@ pattern = "response_publication_deadline_before"
 # request deadline. It neither renews that deadline nor adds a producer owner.
 # The split child playlist uses the existing response admission subdeadline of
 # its original request.
-expected_occurrences = 29
+# The prepared master playlist takes the existing response subdeadline.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
@@ -1996,7 +1997,8 @@ pattern = "DurableRouteResolution"
 # variants it reads a row from and the confirmation arms name `Absent` (+6);
 # route_view_tests.rs's fence guard classifies verdicts by variant (+6,
 # test-only). No new producer.
-expected_occurrences = 125
+# The prepared master playlist matches all five durable route outcomes.
+expected_occurrences = 130
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -6288,6 +6290,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 
 # The merged source inventories 2286 occurrences.
 # Cinema fixes + main 32f30addc union: main 2305 plus the branch's own 1 over base 5a5e6c97a.
+# Main d01e9a303 merge: the stored-marker test now follows main (no live-probe marker
+# fallback), so the branch has no timer delta here; main 2306.
 # Main 2306 plus PR 1846's +3 test-only tokio::time::timeout bounds
 # (120 s) around each Start/Status/playlist/End exchange; expiry is failure.
 # Receiver-consume fixture: +1 test-only tokio::time::sleep for the typed
@@ -6295,6 +6299,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # viewer clock; it supplies no readiness or settlement evidence.
 # Cluster remainder + Main 7df74ec6d union: Main's count plus the remainder's
 # unchanged delta over Main 4bb5e1862; matcher unchanged.
+# Main 7df74ec6d merge: base 2306, branch +0, main +4; 2310.
 # Cinema fixes + main 32f30addc union: main 2305 plus the branch's own 1 over base 5a5e6c97a.
 # DV window runs (#1862): +9. Four production waits in dv_segment/window_run.rs:
 # the idle-rest bound, the run backstop deadline, and two 20 ms polls (FIFO
@@ -6302,13 +6307,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline and cancellation. Five are test sleeps under paused time.
 # Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
 # unchanged delta over Main b6e8efe17; matcher unchanged.
+# Main 794ee0fd7 merge: base 2310, branch +0, main +9; 2319.
 # Source copy production meter: +2 tokio::time constructors in the growing
 # copy's production loop (a tokio::time::sleep bounding the one stall report in
 # copyrange::meter::await_reporting_stall, and the observation Instants). They
 # only time and report; no wait, deadline or retry changes. No new task.
 # Cluster remainder + Main c516dd678 union: Main's count plus the remainder's
 # unchanged delta over Main 794ee0fd7; matcher unchanged.
-expected_occurrences = 2325
+# Main af9f44277 merge: base 2319, branch +0, main +2; 2321.
+# Source copy production meter: +5 tokio::time::sleep shapes in
+# copyrange::meter. One is production: the sleep that bounds the single stall
+# report in await_reporting_stall, raced against the child's next output it
+# never cuts short. Four are test-only paused sleeps: the 40 s wait in
+# a_wait_past_the_target_duration_is_reported_once_and_not_cut_short and the
+# 5 s + 5 s + 30 s wait in a_hold_during_the_wait_makes_the_stall_back_pressure
+# _not_a_warning. No wait, deadline or retry changes; no new task.
+# Main 4b5ab2b61 merge: base 2321, branch +0, main +3; 2324.
+# Cluster remainder + Main 3d17c7d5a union: Main's count plus the remainder's
+# unchanged delta over Main c516dd678; matcher unchanged.
+expected_occurrences = 2328
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7642,14 +7659,17 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The merged source inventories 951 occurrences.
 # The embedded placeholder source removes one test-only encoder setup site.
 # The owned voter fixture process is joined before a collision can retry.
-
-# The merged source inventories 968 occurrences.
+# The title scanner regression awaits the isolated test process with output().
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
 # Cinema fixes + main 32f30addc union: main 964 plus the branch's own 1 over base 5a5e6c97a.
 # Cluster remainder + Main d01e9a303 union: the combined source measures 970
 # broad launch-shaped occurrences with the matcher unchanged. Counts here and in
 # the task, timer and lifecycle rows are lexical inventory, not process execution.
+# The combined source still awaits the focused process guards and prepared-master HTTP status.
+# Main 32f merge: base 951, branch +2, main +13; 951 + 2 + 13 = 966.
+# Cinema fixes + main 32f30addc union: main 964 plus the branch's own 1 over base 5a5e6c97a.
+# Main d01e9a303 merge: base 964, branch +2, main +1; 967.
 # Main 965 plus PR 1846's +11 `.status()` reads of HTTP responses (one in
 # the forwarding refusal trace, the rest in the new Source fixtures). No
 # process launch.
@@ -7671,7 +7691,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process launch.
 # Cluster remainder + Main c516dd678 union: Main's count plus the remainder's
 # unchanged delta over Main 794ee0fd7; matcher unchanged.
-expected_occurrences = 987
+# Main 7df74ec6d merge: base 965, branch +2, main +14; 981.
+# Shared native HLS token: +2 `.status()` reads of HTTP responses, one in
+# the forwarded native-readiness fixture case and one in the typed-refusal
+# test. No process launch.
+# Main eaace1f86 merge: base 979, branch +2, main +2; 983.
+# Shared private history guard: +1 `response.status()` read of an HTTP reply
+# in sharing_private_history_answers_pass_the_receiver_content_guard. No
+# process launch.
+# Main c516dd678 merge: base 981, branch +2, main +1; 984.
+# Cluster remainder + Main 3d17c7d5a union: Main's count plus the remainder's
+# unchanged delta over Main c516dd678; matcher unchanged.
+expected_occurrences = 989
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -8003,6 +8034,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # reap and the run's source/lane/reservation settlement. No new process launch.
 # Cluster remainder + Main 794ee0fd7 union: Main's count plus the remainder's
 # unchanged delta over Main b6e8efe17; matcher unchanged.
+# Main d01e9a303 merge: the stored-marker fallback pause left with main's test; main 403.
+# DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
+# owner whose kill cancels the helper's existing stage owner and waits for its
+# reap and the run's source/lane/reservation settlement. No new process launch.
+# Main 794ee0fd7 merge: base 403, branch +0, main +5; 408.
+# Cluster remainder + Main 3d17c7d5a union: Main's count plus the remainder's
+# unchanged delta over Main c516dd678; matcher unchanged.
 expected_occurrences = 409
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
@@ -8259,7 +8297,8 @@ pattern = "kill_on_drop\\s*\\("
 # The embedded placeholder source removes one test-only encoder setup site.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 132
+# The isolated title scanner fixture retains its kill-on-drop cancellation backstop.
+expected_occurrences = 133
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

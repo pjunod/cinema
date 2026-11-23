@@ -1,12 +1,10 @@
 //! One owned future inside the existing source-probe scheduler. No new daemon.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "title_work_tests.rs"]
 mod tests;
 
 use super::{now_ms, snapshot};
-use crate::{
-    background_jobs::ActiveBackgroundJob, state::AppState, vodencode::dv_runtime::ToolSet,
-};
+use crate::{background_jobs::ActiveBackgroundJob, dv_tools::ToolSet, state::AppState};
 use plurx_core::{
     error::StoreError,
     store::{
@@ -23,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) enum TitleDispatch {
     Playback,
+    /// Dispatched only by the Linux native FEL prewarm.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     NativePrewarm(i64),
     Maintenance,
 }
@@ -33,14 +33,21 @@ pub(super) struct TitleTask {
     job_id: String,
     probe_pipeline: String,
     probe_after: Option<CandidateCursor>,
+    #[cfg(target_os = "linux")]
     scanner: String,
     /// The claimed tools. Live eligibility re-resolves their FEL identity, so
     /// an encoder change still makes owned live work yield.
+    #[cfg(target_os = "linux")]
     tools: Arc<ToolSet>,
+    #[cfg(target_os = "linux")]
     file_id: i64,
+    #[cfg(target_os = "linux")]
     probe_revision: i64,
+    #[cfg(target_os = "linux")]
     playback_requested: bool,
+    #[cfg(target_os = "linux")]
     playback_recipe: Option<String>,
+    #[cfg(target_os = "linux")]
     live_after: i64,
 }
 impl TitleTask {
@@ -50,7 +57,7 @@ impl TitleTask {
         state: &AppState,
         boot: &str,
         maintenance: &mut TitleMaintenanceCursor,
-        live_after: &mut i64,
+        #[cfg(target_os = "linux")] live_after: &mut i64,
         dispatch: TitleDispatch,
     ) -> Result<Option<Self>, StoreError> {
         let playback_only = dispatch == TitleDispatch::Playback;
@@ -70,6 +77,7 @@ impl TitleTask {
         };
         // Empty viewer queues must not hash installed bundles or submit the
         // maintenance outbox's replicated reopen operation on every probe pass.
+        #[cfg(target_os = "linux")]
         let live_demands = if playback_only {
             let demands = state
                 .store
@@ -130,11 +138,20 @@ impl TitleTask {
             pipeline
         };
         let scanner = tools.title_scanner_digest();
+        #[cfg(target_os = "linux")]
         let fel = fel_backend(state, &tools).await;
+        #[cfg(not(target_os = "linux"))]
+        let fel: Option<String> = None;
         #[cfg(target_os = "linux")]
         state.transcode.observe_native_fel_backend(fel.clone());
         let (demands, mut after): (Vec<TitleDemand>, Option<&mut i64>) = match dispatch {
+            #[cfg(target_os = "linux")]
             TitleDispatch::Playback => (live_demands.unwrap_or_default(), Some(live_after)),
+            // Viewer-requested and prewarm work is dispatched only on Linux;
+            // other hosts walk maintenance pages.
+            #[cfg(not(target_os = "linux"))]
+            TitleDispatch::Playback | TitleDispatch::NativePrewarm(_) => (Vec::new(), None),
+            #[cfg(target_os = "linux")]
             TitleDispatch::NativePrewarm(file_id) => {
                 if let Err(error) = state
                     .transcode
@@ -159,6 +176,7 @@ impl TitleTask {
                 (demands, Some(after))
             }
         };
+        #[cfg(target_os = "linux")]
         if demands.is_empty() && dispatch == TitleDispatch::Maintenance {
             requalify_stale_fel_titles(state, &tools, &scanner).await;
         }
@@ -172,7 +190,8 @@ impl TitleTask {
                 }
             } else {
                 // Live work was considered independently above; an ordinary
-                // turn must not acquire its more permissive companion class.
+                // turn must not acquire its more permissive companion class
+                // or claim a retained FEL head assigned to another node.
                 if demand.playback_requested
                     || demand
                         .fel_head_target
@@ -187,6 +206,7 @@ impl TitleTask {
             };
             // The local index pass reads this title next, and reads its RPUs
             // in that same read: do not read the file twice.
+            #[cfg(target_os = "linux")]
             if !demand.playback_requested && state.jobs.title_scan_awaits_index_pass(file.id) {
                 continue;
             }
@@ -379,9 +399,13 @@ impl TitleTask {
             )
             .await?;
             let cancel = CancellationToken::new();
+            #[cfg(target_os = "linux")]
             let file_id = file.id;
+            #[cfg(target_os = "linux")]
             let probe_revision = demand.probe_revision;
+            #[cfg(target_os = "linux")]
             let playback_requested = demand.playback_requested;
+            #[cfg(target_os = "linux")]
             let task_tools = Arc::clone(&tools);
             let work = execute(
                 state.clone(),
@@ -400,12 +424,19 @@ impl TitleTask {
                 job_id: id,
                 probe_pipeline,
                 probe_after: None,
+                #[cfg(target_os = "linux")]
                 scanner,
+                #[cfg(target_os = "linux")]
                 tools: task_tools,
+                #[cfg(target_os = "linux")]
                 file_id,
+                #[cfg(target_os = "linux")]
                 probe_revision,
+                #[cfg(target_os = "linux")]
                 playback_requested,
+                #[cfg(target_os = "linux")]
                 playback_recipe,
+                #[cfg(target_os = "linux")]
                 live_after: 0,
             }));
         }
@@ -415,58 +446,61 @@ impl TitleTask {
     /// Scheduler checks only locally readable, compatible, live ordinary work.
     /// Durable SQL excludes stale coordinators and other resource blockers.
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
-        let now = now_ms();
-        if self.playback_requested {
-            // Owned interest is checked directly, never through a page that
-            // unrelated renewed viewers can push us out of.
-            let own = state
-                .store
-                .dv_title_playback_demands(0, now, Some(self.file_id))
-                .await?;
-            let fel = fel_backend(state, &self.tools).await;
-            for demand in own {
-                if demand.probe_revision == self.probe_revision
-                    && self
-                        .playback_recipe
-                        .as_ref()
-                        .is_some_and(|recipe| demand.playback_recipes.contains(recipe))
-                    && demand.scanner_digest.as_deref() == Some(self.scanner.as_str())
-                    && eligible_file(state, &demand, fel.as_deref())
-                        .await?
-                        .is_some()
-                {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
-        }
-        let demands = state
-            .store
-            .dv_title_playback_demands(self.live_after, now, None)
-            .await?;
-        if demands.is_empty() {
-            self.live_after = 0;
-        }
-        let fel = fel_backend(state, &self.tools).await;
-        for demand in demands {
-            self.live_after = demand.probe_revision;
-            if demand.scanner_digest.as_deref() != Some(self.scanner.as_str())
-                || eligible_file(state, &demand, fel.as_deref())
-                    .await?
-                    .is_none()
-            {
-                continue;
-            }
-            if demand.file_id == self.file_id && demand.probe_revision == self.probe_revision {
-                return Ok(true); // Promote this already-owned maintenance job.
-            }
-            if let Some(candidate) = demand.queued_job_id.as_deref() {
-                if state
+        #[cfg(target_os = "linux")]
+        {
+            let now = now_ms();
+            if self.playback_requested {
+                // Owned interest is checked directly, never through a page that
+                // unrelated renewed viewers can push us out of.
+                let own = state
                     .store
-                    .dv_title_can_preempt(candidate, &self.job_id, &state.node_id, now)
-                    .await?
+                    .dv_title_playback_demands(0, now, Some(self.file_id))
+                    .await?;
+                let fel = fel_backend(state, &self.tools).await;
+                for demand in own {
+                    if demand.probe_revision == self.probe_revision
+                        && self
+                            .playback_recipe
+                            .as_ref()
+                            .is_some_and(|recipe| demand.playback_recipes.contains(recipe))
+                        && demand.scanner_digest.as_deref() == Some(self.scanner.as_str())
+                        && eligible_file(state, &demand, fel.as_deref())
+                            .await?
+                            .is_some()
+                    {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            let demands = state
+                .store
+                .dv_title_playback_demands(self.live_after, now, None)
+                .await?;
+            if demands.is_empty() {
+                self.live_after = 0;
+            }
+            let fel = fel_backend(state, &self.tools).await;
+            for demand in demands {
+                self.live_after = demand.probe_revision;
+                if demand.scanner_digest.as_deref() != Some(self.scanner.as_str())
+                    || eligible_file(state, &demand, fel.as_deref())
+                        .await?
+                        .is_none()
                 {
-                    return Ok(true);
+                    continue;
+                }
+                if demand.file_id == self.file_id && demand.probe_revision == self.probe_revision {
+                    return Ok(true); // Promote this already-owned maintenance job.
+                }
+                if let Some(candidate) = demand.queued_job_id.as_deref() {
+                    if state
+                        .store
+                        .dv_title_can_preempt(candidate, &self.job_id, &state.node_id, now)
+                        .await?
+                    {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -552,13 +586,10 @@ pub(super) async fn probe_preempts(
     Ok(false)
 }
 
-/// Scheduling interest never substitutes for a locally readable current source
-/// or for the backend able to satisfy its exact pending FEL recipe.
-/// FEL verdicts measure the renderer, so its key is read only to form the FEL
-/// identity; title demand itself is keyed by the scanner alone.
 // The catalogue may already have an exact title verdict when the daemon
 // starts. Make the installed backend available to routing before waiting for
 // a new title job or for the ordinary source-probe lane to become idle.
+#[cfg(target_os = "linux")]
 pub(super) async fn initialize_native_fel_backend(state: &AppState) {
     if state.transcode.fel_qualification_capable() {
         let identity = match ToolSet::capture().await {
@@ -569,6 +600,11 @@ pub(super) async fn initialize_native_fel_backend(state: &AppState) {
     }
 }
 
+/// Scheduling interest never substitutes for a locally readable current source
+/// or for the backend able to satisfy its exact pending FEL recipe.
+/// FEL verdicts measure the renderer, so its key is read only to form the FEL
+/// identity; title demand itself is keyed by the scanner alone.
+#[cfg(target_os = "linux")]
 async fn fel_backend(state: &AppState, tools: &ToolSet) -> Option<String> {
     state
         .transcode
@@ -614,7 +650,22 @@ async fn eligible_file(
         }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = fel_backend;
+    {
+        let _ = fel_backend;
+        // Title publication leaves exact FEL requests open in the outbox.
+        // Once an aggregate exists, leave that remaining work to its backend.
+        if plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&demand.probe_json)
+            .is_some_and(|stats| stats.complete)
+            && !plurx_core::transcode::dv_fel_qualification::pending_recipes(
+                &demand.probe_json,
+                file.size,
+                file.mtime,
+            )
+            .is_empty()
+        {
+            return Ok(None);
+        }
+    }
     Ok(Some(file))
 }
 
@@ -700,9 +751,14 @@ async fn execute(
     let source_version = crate::fragment_index_cluster::inspect_source(&file)
         .await
         .ok();
+    // Native FEL prewarm targets exist only where the native backend runs.
+    #[cfg(target_os = "linux")]
+    let prewarm_target = state.transcode.native_fel_head_target_file() == Some(file.id);
+    #[cfg(not(target_os = "linux"))]
+    let prewarm_target = false;
     let mode = if demand.playback_requested {
         TitleAcquisitionMode::Playback
-    } else if state.transcode.native_fel_head_target_file() == Some(file.id) {
+    } else if prewarm_target {
         TitleAcquisitionMode::NativePrewarm
     } else {
         TitleAcquisitionMode::Maintenance
@@ -725,8 +781,14 @@ async fn execute(
                         .ok()
                         == source_version
             },
-            super::dv_title::scan(&file, &demand.probe_json, &tools),
+            super::dv_title::scan(
+                &file,
+                &demand.probe_json,
+                &tools,
+                state.transcode.runtime_cache_dir(),
+            ),
         ),
+        #[cfg(target_os = "linux")]
         qualify_owned(
             &state,
             &file,
@@ -738,6 +800,8 @@ async fn execute(
             &fence,
             &source_version,
         ),
+        #[cfg(not(target_os = "linux"))]
+        std::future::ready(()),
     )
     .await;
     if let Ok(TitleAcquisition::QualificationOnly(reused)) = result {
@@ -801,6 +865,7 @@ async fn execute(
                     scanner_digest: tools.title_scanner_digest(),
                     stats,
                 };
+                #[cfg(target_os = "linux")]
                 let pending_here = match (
                     state.store.get_file_probe_json(file.id).await,
                     state.transcode.fel_identity(&tools.backend_digest()).await,
@@ -814,6 +879,8 @@ async fn execute(
                     }
                     _ => true,
                 };
+                #[cfg(not(target_os = "linux"))]
+                let pending_here = false;
                 if pending_here {
                     Some(JobSettlement::Yield {
                         error_code: Some("fel_recipe_pending".into()),
@@ -869,6 +936,7 @@ async fn execute(
     published
 }
 
+#[cfg(target_os = "linux")]
 #[expect(
     clippy::too_many_arguments,
     reason = "qualification retains the title attempt's source, fence and admission"

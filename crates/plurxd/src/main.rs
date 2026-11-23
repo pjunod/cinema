@@ -45,6 +45,7 @@ mod dv_disk;
 mod dv_refit_serving;
 #[cfg(unix)]
 mod dv_segment;
+mod dv_tools;
 mod dvpipe;
 mod ffmpeg;
 mod ffmpeg_support;
@@ -447,7 +448,7 @@ enum Command {
     /// does and print its identity; exit 1 when this binary would refuse it or
     /// none is installed. The image build runs this, so an image cannot ship a
     /// bundle its own daemon rejects.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
@@ -721,7 +722,7 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
@@ -778,21 +779,16 @@ async fn dispatch(
             );
             Ok(())
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::DvHelperIdentity => {
-            #[cfg(target_os = "linux")]
-            {
-                match crate::vodencode::dv_runtime::installed_helper_identity().await {
-                    Ok(identity) => println!("{identity}"),
-                    Err(error) => {
-                        eprintln!("DV helper bundle refused: {error}");
-                        std::process::exit(1);
-                    }
+            match crate::dv_tools::installed_helper_identity().await {
+                Ok(identity) => println!("{identity}"),
+                Err(error) => {
+                    eprintln!("DV helper bundle refused: {error}");
+                    std::process::exit(1);
                 }
-                Ok(())
             }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("DV helper bundles are supported only on Linux")
+            Ok(())
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {

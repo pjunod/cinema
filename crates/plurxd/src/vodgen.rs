@@ -135,14 +135,7 @@ pub type LandingClock = Box<
         > + Send,
 >;
 
-/// A [`LandingClock`]'s answer: the landing keyframe's time counted from the
-/// film's first video keyframe — the index's own zero — and one frame's
-/// duration, the most the two clocks may disagree by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LandingTime {
-    pub ticks: u64,
-    pub frame_ticks: u64,
-}
+pub use plurx_core::segplan::LandingTime;
 
 /// Why the landing time did not place an ambiguous landing.
 #[derive(Debug, Clone)]
@@ -876,9 +869,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                     let presentation = i128::from(index.rows[row].dts)
                         + i128::from(proofs[row].first_cto())
                         - first_presentation;
-                    let off = presentation.abs_diff(i128::from(time.ticks));
-                    off < u128::from(time.frame_ticks.max(1))
-                        && off * 2 < u128::from(index.rows[row].duration.max(1))
+                    time.admits(time.offset_from(presentation), index.rows[row].duration)
                 }
                 None => row == 0,
             })
@@ -983,14 +974,8 @@ impl<S: Sink> GenerationRun<'_, S> {
                     {
                         let clock = self.landing_clock.take().expect("checked by the guard");
                         let placed = match clock().await {
-                            Ok(time) => match_landing_at(
-                                index,
-                                &self.observed,
-                                target,
-                                time.ticks,
-                                time.frame_ticks,
-                            )
-                            .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
+                            Ok(time) => match_landing_at(index, &self.observed, target, time)
+                                .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
                             Err(why) => Err(TimeRefusal::Unmeasured(why)),
                         };
                         match placed {
@@ -1896,10 +1881,7 @@ mod tests {
         let mut generation = generation(&film, start_entry);
         generation.convert_dolby_vision = true;
         generation.dv_refit = Some(table);
-        generation.landing_clock = clock(Ok(LandingTime {
-            ticks: near_second,
-            frame_ticks: step * 2,
-        }));
+        generation.landing_clock = clock(Ok(LandingTime::from_ticks(near_second, step * 2)));
         let sink = MemSink::default();
         let outcome = run(&film.feed[..], generation, &sink, "fitted-candidates").await;
         assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
@@ -1924,6 +1906,7 @@ mod tests {
             (0..4)
                 .map(|at| plurx_core::segplan::IndexRow {
                     dts: at * 100,
+                    first_cto: None,
                     duration: 100,
                     bytes: 1,
                     video_bytes: 1,
@@ -2993,10 +2976,7 @@ mod tests {
     /// A time between two fragment starts: it names no row.
     fn off_index(film: &Film) -> LandingTime {
         let row = &film.index.rows[1];
-        LandingTime {
-            ticks: row.dts + row.duration / 2,
-            frame_ticks: 1,
-        }
+        LandingTime::from_ticks(row.dts + row.duration / 2, 1)
     }
 
     /// Review of F1: the first ambiguity went straight to the landing time,

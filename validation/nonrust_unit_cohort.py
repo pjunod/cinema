@@ -878,16 +878,22 @@ def require_legacy_chronology(legacy_sequences):
                      'Original JVM negative/clock/Main repair chronology incomplete or reordered')
 
 
-def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest, *, selection=False):
+def require_jvm_build_inputs(candidate, selected_pr=False):
+    from validation.selected_pr_android_capture import BUILD_INPUTS
+    inputs = BUILD_INPUTS if selected_pr is True else CURRENT_JVM_BUILD_INPUTS
+    receipts.require(all(retention.digest(retention.git_bytes(candidate, path) or b'') == digest
+                         for path, digest in inputs.items()),
+                     'Current JVM toolchain, dependency or discovery configuration differs')
+
+
+def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest, *, selection=False, selected_pr=False):
     receipts.require(set(item) == {'name', 'invocation', 'protocol', 'contract', 'inventory', 'records', 'obligations'}
                      and item['protocol'] == 'source-cohort-v1' and item['name'] in KINDS
                      and item['contract'] == CONTRACTS[item['name']] and item['obligations'] == [],
                      'Unknown source-cohort command fields or runtime contract')
     kind = item['name']
     if kind == 'android_jvm':
-        receipts.require(all(retention.digest(retention.git_bytes(candidate, path) or b'') == digest
-                             for path, digest in CURRENT_JVM_BUILD_INPUTS.items()),
-                         'Current JVM toolchain, dependency or discovery configuration differs')
+        require_jvm_build_inputs(candidate, selected_pr)
         receipts.require(set(item['inventory']) == {'metadata'}, 'Unknown JVM inventory fields')
         ids = jvm_metadata(proof, item['inventory']['metadata'], candidate)
     else:
@@ -924,7 +930,14 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         exact_selected_repairs = set()
         source_variant_failure = False
         legacy = execution.get('legacy_capture')
-        if legacy in INCOMING_PYTHON_FULL:
+        if 'selected_pr_local' in execution:
+            from validation import selected_pr_android_capture as selected
+            receipts.require(kind == 'android_jvm', 'Selected JVM capture cannot authorize another kind')
+            if execution['selected_pr_local'].get('version') == selected.MEASURED_POLICY:
+                actual = selected.measured_outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log)
+            else:
+                actual = selected.outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log)
+        elif legacy in INCOMING_PYTHON_FULL:
             receipts.require(legacy not in incoming_full_sequences, 'Incoming full capture enrolled twice')
             incoming_full_sequences.add(legacy)
             receipts.require(kind in {'validation', 'operations'}, 'Opaque Python cannot qualify another command')
@@ -1106,7 +1119,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     require_source_bound_repairs(source_failures, source_repairs)
     receipts.require(all(test_id in passes for test_id in original_jvm_failures),
                      'Original named JVM failure lacks a current-applicable native pass')
-    if kind == 'android_jvm':
+    if kind == 'android_jvm' and (legacy_sequences or not selected_pr):
         require_legacy_chronology(legacy_sequences)
     if selection:
         receipts.require(kind in {'validation', 'operations'}, 'Partial execution is Python-only')
@@ -1136,7 +1149,9 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         metadata = receipts.bounded_json(blob(proof, item['inventory']['metadata']))
         owners = sorted([row['class'], row['source_path'], row['source_sha256']] for row in metadata['classes'])
         source_owners = retention.digest(json.dumps(owners, separators=(',', ':')).encode())
-    return {'mode': 'retained-source-cohort-v1', 'commands': [kind],
+    from validation.jvm_unit_discovery import SELECTED_PR_DISCOVERY
+    return {**({'selected_pr_discovery_contract': SELECTED_PR_DISCOVERY} if kind == 'android_jvm' and selected_pr else {}),
+            'mode': 'retained-source-cohort-v1', 'commands': [kind],
             'jvm_source_owners_sha256': source_owners,
             'ids_sha256': retention.digest(json.dumps(ids, separators=(',', ':')).encode()), 'ids_count': len(ids),
             'opaque_source_cohorts': cohort_summaries,
