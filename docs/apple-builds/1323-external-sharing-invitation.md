@@ -1,6 +1,5 @@
 # Connect an external Cinema through one invitation
 
-Build: 280
 Issue: #1323
 
 Follow-up to the private host setup: a Cinema invitation now carries the

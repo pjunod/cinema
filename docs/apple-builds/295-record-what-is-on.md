@@ -1,6 +1,5 @@
 # The television was the one surface that could not record what was on
 
-Build: 156
 Issue: #295
 
 The DVR shipped Record, Record series and Remind me on every client, and on the

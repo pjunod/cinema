@@ -275,7 +275,7 @@
         "scripts/vendor-audit-lock",
         "validation/hiqlite_upstream_fixture.py"
       ],
-      "reason": "Reads the existing fork manifests and genuine upstream comparison. Optional effort fetch is bound to the helper\u2019s immutable crates.io 0.14.0 size/SHA-256 pins; only this method opts into the external fixture."
+      "reason": "Reads the existing fork manifests and genuine upstream comparison. Optional effort fetch is bound to the helper’s immutable crates.io 0.14.0 size/SHA-256 pins; only this method opts into the external fixture."
     },
     {
       "id_prefix": "operations:test_docker_hardware.DockerHardwareTests.",
@@ -570,6 +570,7 @@
       "inputs": [
         "validation/status_pr_claims.py",
         "STATUS.md",
+        "status.d/**",
         "docs/**"
       ],
       "reason": "Actual status-page subject/history scanner.",
@@ -603,6 +604,17 @@
         "validation/points.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
+    },
+    {
+      "id_prefix": "validation:test_mobile_versions.MobileVersionCase.test_the_repository_derives_both_build_numbers",
+      "inputs": [
+        "Cargo.toml",
+        "clients/android/app/build.gradle.kts",
+        "clients/apple/project.yml",
+        "validation/__init__.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Reads the real release declarations."
     },
     {
       "id_prefix": "validation:test_store_shard.StoreShardCase.test_the_store_binary_runs_its_test_threads_on_8_mib_stacks",
@@ -1137,6 +1149,7 @@
         "validation/rust_modules.py",
         "tests/playback/routing-decisions.toml",
         "tests/client-fixes.toml",
+        "tests/client-fixes.d/**",
         ".github/workflows/ci.yml",
         "clients/android/README.md",
         "clients/android/app/build.gradle.kts",
@@ -3996,7 +4009,7 @@
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
     {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_the_repository_claim_is_whole",
+      "id_prefix": "operations:test_apple_build_claims.RepositoryNotesCase.test_the_repository_notes_are_well_formed",
       "inputs": [
         "Cargo.toml",
         "clients/apple/README.md",
@@ -4015,7 +4028,7 @@
       ]
     },
     {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_the_shared_status_blockquotes_carry_no_per_build_narrative",
+      "id_prefix": "operations:test_apple_build_claims.RepositoryNotesCase.test_the_shared_status_blockquotes_carry_no_per_build_narrative",
       "inputs": [
         "Cargo.toml",
         "clients/apple/README.md",
@@ -4028,7 +4041,7 @@
       "reason": "Reads only the two real narrative-free blockquotes; imported apple_build initializes SURFACES from Cargo.toml."
     },
     {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_reintroduced_narrative_is_rejected",
+      "id_prefix": "operations:test_apple_build_claims.RepositoryNotesCase.test_reintroduced_narrative_is_rejected",
       "inputs": [
         "Cargo.toml",
         "clients/apple/README.md",
@@ -4046,7 +4059,7 @@
       ]
     },
     {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_body_prose_may_still_narrate_a_past_build",
+      "id_prefix": "operations:test_apple_build_claims.RepositoryNotesCase.test_body_prose_may_still_narrate_a_past_build",
       "inputs": [
         "Cargo.toml",
         "clients/apple/README.md",
@@ -4063,50 +4076,6 @@
       "pathsets": [
         "docs/apple-builds/*.md"
       ]
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_a_hand_edited_generated_surface_is_rejected",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "clients/apple/project.yml",
-        "docs/STATUS.html",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "render reader uses actual Cargo/project/generated surfaces, with one in-memory mutation; no note enumeration."
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_a_generated_next_build_satisfies_the_document_claim_sweep",
-      "inputs": [
-        "Cargo.toml",
-        "clients/android/README.md",
-        "clients/android/app/build.gradle.kts",
-        "clients/apple/README.md",
-        "clients/apple/project.yml",
-        "docs/STATUS.html",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "render uses real generated surfaces/Cargo; validate_documented_builds calls mobile_versions.read_versions and reads Android declaration/README plus Apple claims."
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.RepositoryClaimCase.test_a_missing_generated_surface_fails_closed",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/project.yml",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "render reads Cargo and project first, then rejects the changed project anchor before reading later generated surfaces; current_build also reads project. Imported helpers initialize from Cargo."
     },
     {
       "id_prefix": "operations:test_apple_build_claims.FragmentCase.test_a_well_formed_fragment_passes",
@@ -4148,109 +4117,7 @@
       "reason": "Supplied fragment is an in-memory fixture; validate_notes still reads the two actual narrative-free documents. Imported apple_build initializes SURFACES from real Cargo.toml; real notes/project/status are not read."
     },
     {
-      "id_prefix": "operations:test_apple_build_claims.FragmentCase.test_a_fragment_must_carry_exactly_one_build_line",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "Supplied fragment is an in-memory fixture; validate_notes still reads the two actual narrative-free documents. Imported apple_build initializes SURFACES from real Cargo.toml; real notes/project/status are not read."
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.FragmentCase.test_a_fragment_may_not_claim_a_build_project_yml_has_not_reached",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "Supplied fragment is an in-memory fixture; validate_notes still reads the two actual narrative-free documents. Imported apple_build initializes SURFACES from real Cargo.toml; real notes/project/status are not read."
-    },
-    {
       "id_prefix": "operations:test_apple_build_claims.SequentialMergeCase.test_two_branches_from_one_base_merge_in_sequence_without_conflict",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "clients/apple/project.yml",
-        "docs/STATUS.html",
-        "docs/apple-builds/**",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "setUp copies actual generated surfaces/Cargo and the complete actual notes directory into scratch Git repository. bump/Git history consumers operate on that scratch repository, so checkout history is not an input.",
-      "pathsets": [
-        "docs/apple-builds/**"
-      ]
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.SequentialMergeCase.test_the_second_branch_reclaims_the_counter_with_one_generated_diff",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "clients/apple/project.yml",
-        "docs/STATUS.html",
-        "docs/apple-builds/**",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "setUp copies actual generated surfaces/Cargo and the complete actual notes directory into scratch Git repository. bump/Git history consumers operate on that scratch repository, so checkout history is not an input.",
-      "pathsets": [
-        "docs/apple-builds/**"
-      ]
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.SequentialMergeCase.test_claiming_twice_confirms_the_claim_rather_than_inflating_it",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "clients/apple/project.yml",
-        "docs/STATUS.html",
-        "docs/apple-builds/**",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "setUp copies actual generated surfaces/Cargo and the complete actual notes directory into scratch Git repository. bump/Git history consumers operate on that scratch repository, so checkout history is not an input.",
-      "pathsets": [
-        "docs/apple-builds/**"
-      ]
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.SequentialMergeCase.test_an_outer_hook_index_cannot_leak_into_the_claim_repository",
-      "inputs": [
-        "Cargo.toml",
-        "clients/apple/README.md",
-        "clients/apple/project.yml",
-        "docs/STATUS.html",
-        "docs/apple-builds/**",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py"
-      ],
-      "reason": "setUp copies actual generated surfaces/Cargo and the complete actual notes directory into scratch Git repository. bump/Git history consumers operate on that scratch repository, so checkout history is not an input.",
-      "pathsets": [
-        "docs/apple-builds/**"
-      ]
-    },
-    {
-      "id_prefix": "operations:test_apple_build_claims.SequentialMergeCase.test_an_unreadable_merge_target_refuses_rather_than_no_ops",
       "inputs": [
         "Cargo.toml",
         "clients/apple/README.md",
@@ -4288,17 +4155,53 @@
       ]
     },
     {
-      "id_prefix": "operations:test_status_page_shape.StatusPageShapeCase.test_status_md_stays_under_four_hundred_lines",
+      "id_prefix": "operations:test_apple_build_claims.RepositoryNotesCase.test_no_fragment_stores_a_build_number",
       "inputs": [
-        "STATUS.md",
+        "docs/apple-builds/*.md",
+        "validation/__init__.py",
+        "validation/apple_build.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Reads every real per-change fragment."
+    },
+    {
+      "id_prefix": "operations:test_apple_build_claims.FragmentCase.test_a_fragment_must_name_exactly_one_issue",
+      "inputs": [
+        "clients/apple/README.md",
+        "docs/apple-builds/*.md",
+        "docs/clients/APPLE-CLIENT-PARITY.md",
+        "validation/__init__.py",
+        "validation/apple_build.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Synthetic fragment beside the real status blockquotes."
+    },
+    {
+      "id_prefix": "operations:test_apple_build_claims.FragmentCase.test_a_fragment_may_not_carry_a_build_line",
+      "inputs": [
+        "clients/apple/README.md",
+        "docs/apple-builds/*.md",
+        "docs/clients/APPLE-CLIENT-PARITY.md",
+        "validation/__init__.py",
+        "validation/apple_build.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Synthetic fragment beside the real status blockquotes."
+    },
+    {
+      "id_prefix": "operations:test_status_page_shape.StatusPageShapeCase.test_status_md_stays_short",
+      "inputs": [
+        "scripts/fold",
+        "status.d/**",
         "tests/operations/test_status_pr_claims.py"
       ],
-      "reason": "Reads STATUS.md line count; sibling test module import supplies constants only and does not read history."
+      "reason": "Renders STATUS.md from status.d/ with scripts/fold and counts its lines; the sibling import supplies constants only."
     },
     {
       "id_prefix": "operations:test_status_page_shape.StatusPageShapeCase.test_every_document_the_index_rows_link_to_is_a_guarded_status_page",
       "inputs": [
-        "STATUS.md",
+        "scripts/fold",
+        "status.d/INDEX.md",
         "tests/operations/test_status_pr_claims.py",
         "docs/ci/STATUS-HISTORY.md",
         "docs/clients/STATUS-HISTORY.md",
@@ -4307,7 +4210,7 @@
         "docs/playback-control/STATUS-HISTORY.md",
         "docs/streaming/STATUS-HISTORY.md"
       ],
-      "reason": "Reads STATUS.md index and imports STATUS_PAGES from sibling test module; checks linked document file existence, without invoking sibling history methods. Listed targets are actual current linked paths."
+      "reason": "Reads status.d/INDEX.md and imports STATUS_PAGES from sibling test module; checks linked document file existence, without invoking sibling history methods. Listed targets are actual current linked paths."
     },
     {
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_a_patch_cut_rolls_the_changelog_and_every_version",
@@ -4315,8 +4218,8 @@
         "Cargo.toml",
         "scripts/release-cut",
         "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4326,8 +4229,8 @@
         "Cargo.toml",
         "scripts/release-cut",
         "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4347,7 +4250,8 @@
         "validation/__init__.py",
         "validation/apple_build.py",
         "validation/doc_versions.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Copies exactly real changelog/Cargo/mobile manifests/four claim documents and entire apple-build notes into scratch root; imported sweeps exercise apple_build/doc_versions/mobile_versions. All Git/cut reads use scratch history. No checkout history nor unrelated docs/client sources are read.",
       "pathsets": [
@@ -4360,22 +4264,24 @@
         "Cargo.toml",
         "scripts/release-cut",
         "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
     {
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_an_empty_unreleased_section_is_refused_and_nothing_is_written",
       "inputs": [
-        "scripts/release-cut"
+        "scripts/release-cut",
+        "validation/changelog_field.py"
       ],
       "reason": "Loads release-cut and operates on literal-built scratch root/Git history; refusals/pending stop before set_build_claims imports apple_build, so no actual repository document/version data read."
     },
     {
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_an_existing_tag_or_section_is_refused",
       "inputs": [
-        "scripts/release-cut"
+        "scripts/release-cut",
+        "validation/changelog_field.py"
       ],
       "reason": "Loads release-cut and operates on literal-built scratch root/Git history; refusals/pending stop before set_build_claims imports apple_build, so no actual repository document/version data read."
     },
@@ -4385,8 +4291,8 @@
         "Cargo.toml",
         "scripts/release-cut",
         "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4396,15 +4302,16 @@
         "Cargo.toml",
         "scripts/release-cut",
         "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
     {
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_a_dated_section_no_release_commit_explains_is_refused",
       "inputs": [
-        "scripts/release-cut"
+        "scripts/release-cut",
+        "validation/changelog_field.py"
       ],
       "reason": "Loads release-cut and operates on literal-built scratch root/Git history; refusals/pending stop before set_build_claims imports apple_build, so no actual repository document/version data read."
     },
@@ -4414,8 +4321,8 @@
         "Cargo.toml",
         "scripts/release-cut",
         "validation/__init__.py",
-        "validation/apple_build.py",
-        "validation/mobile_versions.py"
+        "validation/mobile_versions.py",
+        "validation/changelog_field.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4623,38 +4530,7 @@
       "reason": "doc_versions.check_repository invokes documented build and documented constant checks: exact declarations/status/ARCHITECTURE/source constants and three WEB_ASSETS prose surfaces. No recursive docs scan."
     },
     {
-      "id_prefix": "operations:test_mobile_build_claims.MobileBuildClaimCase.test_advancing_a_build_counter_without_docs_is_rejected",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py",
-        "Cargo.toml",
-        "clients/android/app/build.gradle.kts",
-        "clients/apple/project.yml",
-        "clients/apple/README.md",
-        "clients/android/README.md",
-        "docs/clients/APPLE-CLIENT-PARITY.md",
-        "docs/STATUS.html"
-      ],
-      "reason": "validate_documented_builds reads actual workspace/mobile declarations and four specific build-claim documents; mutations only alter project reader value."
-    },
-    {
       "id_prefix": "operations:test_mobile_build_claims.StatusHistoricalBuildMentionCase.test_a_marked_historical_mention_does_not_contradict_a_current_claim",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/doc_versions.py",
-        "validation/mobile_versions.py",
-        "Cargo.toml",
-        "clients/android/app/build.gradle.kts",
-        "clients/apple/project.yml",
-        "clients/apple/README.md",
-        "clients/android/README.md",
-        "docs/clients/APPLE-CLIENT-PARITY.md"
-      ],
-      "reason": "STATUS HTML is supplied fixture text, but validator's reader still reads real Cargo/mobile declarations and Apple/Android README/parity. No actual STATUS.html or other docs are read."
-    },
-    {
-      "id_prefix": "operations:test_mobile_build_claims.StatusHistoricalBuildMentionCase.test_a_stale_current_claim_still_fails",
       "inputs": [
         "validation/__init__.py",
         "validation/doc_versions.py",
@@ -4814,6 +4690,45 @@
         "clients/android/Dockerfile"
       ],
       "reason": "Reads only explicitly excluded Android Dockerfile and checks literal AGP mention; no catalog/Markdown sweep."
+    },
+    {
+      "id_prefix": "operations:test_mobile_build_claims.MobileBuildClaimCase.test_a_status_line_that_quotes_a_build_number_is_rejected",
+      "inputs": [
+        "clients/android/README.md",
+        "clients/apple/README.md",
+        "docs/STATUS.html",
+        "docs/clients/APPLE-CLIENT-PARITY.md",
+        "validation/__init__.py",
+        "validation/doc_versions.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Edits the real status lines in memory and sweeps them with the real STATUS.html."
+    },
+    {
+      "id_prefix": "operations:test_mobile_build_claims.MobileBuildClaimCase.test_a_status_line_must_name_the_build_number_script",
+      "inputs": [
+        "clients/android/README.md",
+        "clients/apple/README.md",
+        "docs/STATUS.html",
+        "docs/clients/APPLE-CLIENT-PARITY.md",
+        "validation/__init__.py",
+        "validation/doc_versions.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Edits the real Android status line in memory and sweeps the real documents."
+    },
+    {
+      "id_prefix": "operations:test_mobile_build_claims.StatusHistoricalBuildMentionCase.test_a_current_build_number_claim_fails",
+      "inputs": [
+        "clients/android/README.md",
+        "clients/apple/README.md",
+        "docs/STATUS.html",
+        "docs/clients/APPLE-CLIENT-PARITY.md",
+        "validation/__init__.py",
+        "validation/doc_versions.py",
+        "validation/mobile_versions.py"
+      ],
+      "reason": "Synthetic STATUS.html beside the real status lines."
     },
     {
       "id_prefix": "operations:test_hiqlite_upstream_fixture.",

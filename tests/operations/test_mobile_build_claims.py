@@ -15,53 +15,58 @@ class MobileBuildClaimCase(unittest.TestCase):
     def test_repository_build_claims_match_release_inputs(self) -> None:
         self.assertEqual(check_repository(ROOT), ())
 
-    def test_advancing_a_build_counter_without_docs_is_rejected(self) -> None:
-        project = (ROOT / "clients/apple/project.yml").read_text(encoding="utf-8")
-        current = int(re.search(r'CURRENT_PROJECT_VERSION: "(\d+)"', project).group(1))
+    def test_a_status_line_that_quotes_a_build_number_is_rejected(self) -> None:
+        """Build numbers are derived by scripts/build-number, never mirrored."""
+        for path, before, after in (
+            ("clients/apple/README.md", "**v0.8.0**;", "**v0.8.0**, build `311`;"),
+            ("clients/android/README.md", "**v0.8.0**;", "**v0.8.0**, build `211`;"),
+            ("docs/clients/APPLE-CLIENT-PARITY.md", "source is v0.8.0;",
+             "source is v0.8.0, Apple build 311;"),
+        ):
+            with self.subTest(path):
+                def read(name: str) -> str:
+                    contents = (ROOT / name).read_text(encoding="utf-8")
+                    if name == path:
+                        self.assertIn(before, contents)
+                        return contents.replace(before, after, 1)
+                    return contents
 
-        def read(path: str) -> str:
-            contents = (ROOT / path).read_text(encoding="utf-8")
-            if path == "clients/apple/project.yml":
-                return contents.replace(
-                    f'CURRENT_PROJECT_VERSION: "{current}"',
-                    f'CURRENT_PROJECT_VERSION: "{current + 1}"',
-                )
+                errors = validate_documented_builds(read)
+
+                self.assertTrue(any(path in error and "scripts/build-number" in error
+                                    for error in errors), errors)
+
+    def test_a_status_line_must_name_the_build_number_script(self) -> None:
+        def read(name: str) -> str:
+            contents = (ROOT / name).read_text(encoding="utf-8")
+            if name == "clients/android/README.md":
+                return contents.replace("scripts/build-number", "a script")
             return contents
 
         errors = validate_documented_builds(read)
 
-        self.assertTrue(
-            any(f"claims Apple build {current}" in error for error in errors), errors
-        )
-        self.assertTrue(any("STATUS.html" in error for error in errors), errors)
+        self.assertTrue(any("clients/android/README.md" in error for error in errors), errors)
 
 
 class StatusHistoricalBuildMentionCase(unittest.TestCase):
     """docs/STATUS.html must be able to narrate past builds.
 
     The page carries sentences like "build 52 corrected the iPad mini failure"
-    that are true when written and stay true after the next bump. Tense is
-    invisible to the claim sweep, so a historical mention opts out explicitly
-    with a `data-build-history` span. These cases pin both directions: the
-    exemption works, and it is the only thing that grants it.
+    that are true when written and stay true. Any other `Apple build <n>` is a
+    current claim, and the repository stores none: build numbers are derived by
+    scripts/build-number. Tense is invisible to the claim sweep, so a historical
+    mention opts out explicitly with a `data-build-history` span. These cases
+    pin both directions: the exemption works, and it is the only thing that
+    grants it.
     """
 
-    APPLE_BUILD = 60
+    CURRENT = "<p>The current Apple build, not yet uploaded</p>"
 
     def _read(self, status_html: str):
         def read(path: str) -> str:
             if path == "docs/STATUS.html":
                 return status_html
-            contents = (ROOT / path).read_text(encoding="utf-8")
-            if path == "clients/apple/project.yml":
-                current = re.search(
-                    r'CURRENT_PROJECT_VERSION: "(\d+)"', contents
-                ).group(1)
-                return contents.replace(
-                    f'CURRENT_PROJECT_VERSION: "{current}"',
-                    f'CURRENT_PROJECT_VERSION: "{self.APPLE_BUILD}"',
-                )
-            return contents
+            return (ROOT / path).read_text(encoding="utf-8")
 
         return read
 
@@ -76,25 +81,26 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         self,
     ) -> None:
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            self.CURRENT +
             "<p><span data-build-history>Apple build 52</span> corrected the "
             "reported iPad mini failure.</p>"
         )
 
         self.assertEqual(self._status_errors(status), ())
 
-    def test_a_stale_current_claim_still_fails(self) -> None:
-        status = f"<p>Apple build {self.APPLE_BUILD - 1} source, not yet uploaded</p>"
+    def test_a_current_build_number_claim_fails(self) -> None:
+        status = "<p>Apple build 311 source, not yet uploaded</p>"
 
         errors = self._status_errors(status)
 
-        self.assertTrue(errors, "a status page behind project.yml must be red")
-        self.assertIn(str(self.APPLE_BUILD - 1), errors[0])
+        self.assertTrue(errors, "a stored build number on the status page must be red")
+        self.assertIn("311", errors[0])
+        self.assertIn("scripts/build-number", errors[0])
 
     def test_an_unmarked_historical_mention_is_still_swept(self) -> None:
         """The exemption is opt-in; prose alone never earns it."""
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            self.CURRENT +
             "<p>Apple build 52 corrected the reported iPad mini failure.</p>"
         )
 
@@ -106,7 +112,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
     def test_a_marker_that_drifts_across_a_nested_span_fails_closed(self) -> None:
         """A marker that no longer wraps its sentence must not silently exempt."""
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            self.CURRENT +
             "<p><span data-build-history><span class='t'>Apple build 52</span>"
             " corrected the iPad mini failure.</span></p>"
         )
@@ -151,7 +157,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
     def _page_with(self, opening_tag: str) -> str:
         closing = "</div>" if opening_tag.startswith("<div") else "</span>"
         return (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            self.CURRENT +
             f"<p>{opening_tag}Apple build 52{closing} corrected the reported "
             "iPad mini failure.</p>"
         )
@@ -172,7 +178,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
 
     def test_an_unclosed_marker_span_fails_closed(self) -> None:
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            self.CURRENT +
             "<p><span data-build-history>Apple build 52 corrected the failure.</p>"
         )
 
@@ -225,7 +231,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         for description, fragment in self.NON_ELEMENTS.items():
             with self.subTest(description):
                 status = (
-                    f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+                    self.CURRENT +
                     f"{fragment}"
                 )
 
@@ -242,7 +248,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         closing tag rather than running on into later prose.
         """
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            self.CURRENT +
             "<p><span data-build-history>Apple build 52 <!-- </span> --></span>"
             " corrected the iPad mini failure.</p>"
             "<p>Apple build 51 stale</p>"
@@ -258,28 +264,16 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         """Guards the real page, not just synthetic fixtures.
 
         The shipped `docs/STATUS.html` narrates the build that carried the
-        offline-location fix. Bumping the counter must leave that sentence
-        alone rather than forcing it to be reworded.
+        offline-location fix; that sentence stays exactly as written while the
+        page quotes no current build number.
         """
         shipped = (ROOT / "docs/STATUS.html").read_text(encoding="utf-8")
         marked = re.findall(
             r"<span data-build-history>.*?</span>", shipped, re.DOTALL
         )
         self.assertTrue(marked, "the shipped page must mark its historical build")
-
-        # Bump every *current* claim the way a real build bump would, leaving
-        # the marked historical sentences exactly as written.
-        bumped = shipped
-        for index, span in enumerate(marked):
-            bumped = bumped.replace(span, f"@@history-{index}@@")
-        bumped = re.sub(
-            r"Apple build [1-9]\d*", f"Apple build {self.APPLE_BUILD}", bumped
-        )
-        for index, span in enumerate(marked):
-            bumped = bumped.replace(f"@@history-{index}@@", span)
-
-        self.assertIn("Apple build 52", bumped, "history survived the bump verbatim")
-        self.assertEqual(self._status_errors(bumped), ())
+        self.assertIn("Apple build 52", shipped)
+        self.assertEqual(self._status_errors(shipped), ())
 
 
 if __name__ == "__main__":

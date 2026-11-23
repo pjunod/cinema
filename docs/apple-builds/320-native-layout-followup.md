@@ -1,6 +1,5 @@
 # Native Live TV and shelf layouts
 
-Build: 160
 Issue: #320
 
 Give iPad Live TV a larger player and programme context beside channels,

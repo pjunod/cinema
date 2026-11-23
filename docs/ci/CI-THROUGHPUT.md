@@ -87,7 +87,7 @@ fail several rules):
 
 | Rule | Runs | PRs | Now |
 |---|---|---|---|
-| mobile release counters (mostly: main claimed the same number first) | 23 | 5 | trusted publisher/local fixer |
+| mobile release counters (mostly: main claimed the same number first) | 23 | 5 | gone: build numbers are derived (`scripts/build-number`) |
 | `Regression-Test:` line missing for a `fix(`/`perf(` commit | 19 | 12 | author; message names the commits and the command |
 | real host names in the tree | 9 | 3 | trusted publisher/local fixer in Markdown; code stays author-owned |
 | file without a functionality point | 8 | 3 | author |
@@ -152,11 +152,11 @@ job. What the image holds, what it lacks and which jobs stay on the host:
 
 ## Native build-counter boundary
 
-The Apple project’s generated numeric `CURRENT_PROJECT_VERSION` may advance
-without changing its reviewed input closure. The boundary validates the exact
-reviewed project shape with only that positive integer normalized. Full source
-fingerprints and case-input comparisons still include the actual Git blob;
-no pass transfers between different build numbers. Added resources, scripts,
-paths or other project edits still require a new independent boundary review.
-This avoids stale-pin failures after ordinary mobile counter bumps without
-weakening receipt provenance.
+The Apple project’s `CURRENT_PROJECT_VERSION` is now a fixed placeholder (the
+build number is derived at build time by `scripts/build-number`, which is part
+of the reviewed tv_navigation input closure). The boundary still validates the
+exact reviewed project shape with only that positive integer normalized, so a
+placeholder edit cannot change the reviewed closure. Full source fingerprints
+and case-input comparisons still include the actual Git blob. Added resources,
+scripts, paths or other project edits still require a new independent boundary
+review.
