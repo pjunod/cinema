@@ -1964,6 +1964,25 @@ fn sdr_master_never_declares_codecs_and_hdr_keeps_them() {
 }
 
 #[test]
+fn prepared_single_variant_uses_only_the_attachment_frame_rate() {
+    let file = hls_file(vec![]);
+    let mut context = hls_context("hvc1.2.4.H153.90,ec-3", Some("dvh1.08.10/db1p"));
+    context.bandwidth = Some(plurx_core::transcode::OutputBandwidth {
+        peak_bps: 9_500_000,
+        average_bps: 6_000_000,
+    });
+    assert_eq!(
+        prepared_single_variant_master(&file, &context, Some(24.013)),
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=9500000,\
+         FRAME-RATE=24.013\nindex.m3u8\n",
+    );
+    assert_eq!(
+        prepared_single_variant_master(&file, &context, None),
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=9500000\nindex.m3u8\n",
+    );
+}
+
+#[test]
 fn source_probe_preserves_fractional_video_frame_rate() {
     let probe = r#"{
             "streams": [
@@ -4358,6 +4377,7 @@ async fn a_settlement_delayed_past_its_retry_budget_expires_uncommitted() {
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,

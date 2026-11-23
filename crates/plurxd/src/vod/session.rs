@@ -36,11 +36,15 @@ pub(super) struct Rendition {
     pub(super) working_set_budget: u64,
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
+    /// Seconds a generation's transfer input reads before epoch pacing.
+    pub(super) source_burst_secs: f64,
     pub(super) manifest: Mutex<Manifest>,
     pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     /// Immutable storage domain. Job release cannot turn private bytes ordinary.
     pub(super) private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
+    pub(super) resume_preparation:
+        StdMutex<Option<super::resume_preparation::ResumePreparationDispatch>>,
     pub(super) preparation_epoch: AtomicU64,
     /// Identity of the complete output already handed to retained assembly
     /// (in flight or assembled). Maintenance never re-offers it.
@@ -96,7 +100,7 @@ pub(super) struct Rendition {
     /// index counts from, measured once by the first landing probe that needs
     /// it ([`super::generation::LandingProbe`]). The held source cannot change
     /// under the rendition, so neither can this.
-    pub(super) landing_origin: tokio::sync::OnceCell<f64>,
+    pub(super) landing_origin: tokio::sync::OnceCell<super::generation::LandingPacket>,
     /// The capacity hold this rendition is under, if any, retained across the
     /// producer that was terminated for it.
     ///

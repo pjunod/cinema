@@ -11,7 +11,9 @@
 #include <libavformat/avformat.h>
 #include <libavutil/dovi_meta.h>
 #include <libavutil/hwcontext.h>
+#ifdef __linux__
 #include <libavutil/hwcontext_vaapi.h>
+#endif
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
 #include <libavutil/time.h>
@@ -19,7 +21,9 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <unistd.h>
+#ifdef __linux__
 #include <va/va.h>
+#endif
 
 #define PAIR_WINDOW 16
 static bool base_only;
@@ -27,7 +31,7 @@ static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
-// --refit-stats / --dump-composed (refit_mode.h): CPU-only F+ statistics.
+// CPU-only statistics and diagnostics (refit_mode.h).
 // Decoded pairs go to refit_pairs instead of the renderer.
 static bool refit_mode;
 // Frame workers per layer decoder in --refit-stats (--threads N).
@@ -97,6 +101,10 @@ static struct rational run_ends[RUN_MAX];
 static int run_dirs[RUN_MAX];
 static const char *run_nuts[RUN_MAX], *run_dir_paths[RUN_MAX];
 static uint64_t run_bytes_base;
+// The first window's NUT output is usually an inherited descriptor named by
+// /proc/self/fd/N. Its encoder reads to end of input, so a run must close
+// this inherited copy when the first window ends, not when the helper exits.
+static int run_inherited_nut = -1;
 static struct coded_input coded_sets[RUN_MAX][64];
 static unsigned coded_counts[RUN_MAX], coded_printed[RUN_MAX];
 // Demux reads ahead into later run windows. A coded AU a single-window helper
@@ -685,6 +693,10 @@ static bool run_advance(int64_t boundary) {
   need(avio_closep(&nut_output->pb) >= 0, "NUT output close");
   avformat_free_context(nut_output);
   nut_output = NULL;
+  if (run_inherited_nut >= 0) {
+    need(close(run_inherited_nut) == 0, "first run window NUT descriptor close");
+    run_inherited_nut = -1;
+  }
   run_current++;
   run_bytes_base = movie_io.bytes;
   window_start = window_end;
@@ -902,6 +914,7 @@ static void receive(struct layer *layer) {
 }
 // The device must decode HEVC Main10 itself; otherwise every window would be
 // a single-threaded software decode behind a GPU device that does nothing.
+#ifdef __linux__
 static bool decodes_hevc_main10(AVBufferRef *device) {
   VADisplay display =
       ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)device->data)->hwctx)->display;
@@ -923,6 +936,7 @@ static bool decodes_hevc_main10(AVBufferRef *device) {
   free(entrypoint);
   return main10 && decode;
 }
+#endif
 static enum AVPixelFormat hardware_format(AVCodecContext *context,
                                           const enum AVPixelFormat *offered) {
   (void)context;
@@ -1006,7 +1020,8 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 }
 #include "refit_mode.h"
 int main(int argc, char **argv) {
-  if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed")))
+  if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed") ||
+                    !strcmp(argv[1], "--export-composed-topleft")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};
@@ -1244,12 +1259,22 @@ int main(int argc, char **argv) {
     need(source_reader_start(&movie_reader, &movie_reader_source) == 0,
          "start owned source reader");
   }
-  if (streaming)
+  if (streaming) {
     open_nut(argv[11]);
+    if (run_windows > 1) {
+      int inherited = -1;
+      char tail;
+      if ((sscanf(argv[11], "/proc/self/fd/%d%c", &inherited, &tail) == 1 ||
+           sscanf(argv[11], "/dev/fd/%d%c", &inherited, &tail) == 1) &&
+          inherited > STDERR_FILENO)
+        run_inherited_nut = inherited;
+    }
+  }
   dv_host_pack = pack;
   writer_start();
   const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
   if (decode_device && *decode_device) {
+#ifdef __linux__
     if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
                                decode_device, NULL, 0) < 0) {
       hw_device = NULL;
@@ -1258,6 +1283,11 @@ int main(int argc, char **argv) {
       av_buffer_unref(&hw_device);
       software_reason = "no-hevc-main10-decode";
     }
+#else
+    // VA-API device admission belongs to Linux. CPU refit and software
+    // decode remain available without pretending to use a foreign device.
+    software_reason = "vaapi-unavailable-on-platform";
+#endif
   }
   layers[0] = open_layer(stream, 0);
   if (!base_only)

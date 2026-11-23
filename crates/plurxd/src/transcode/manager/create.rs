@@ -1209,7 +1209,11 @@ impl TranscodeManager {
                             // not include streams nobody ever received.
                             let session =
                                 self.sessions.lock().await.get(&started.session_id).cloned();
-                            if let Some(session) = session {
+                            // A retained reader consumes no source I/O. The
+                            // temporary suspension is restored by its owner.
+                            if let Some(session) =
+                                session.filter(|session| session.rolling_artifact.is_none())
+                            {
                                 fallback_interest.transfer(&session);
                             }
                             record_live_recovery(reason);
@@ -2429,6 +2433,23 @@ impl TranscodeManager {
              that did not yield within {} s",
             QUALIFICATION_SLOT_YIELD.as_secs()
         )
+    }
+
+    /// Whether another live play holds this worker's reconstruction slot. A
+    /// FEL qualification holding it is not counted: a play preempts that one.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reconstruction_slot_held_by_play(&self) -> bool {
+        let qualification = self
+            .reconstruction_qualification
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.processed_reconstruction_slots.available_permits() == 0 && qualification.is_none()
+    }
+
+    /// Whether a refusal is exactly [`Self::reconstruction_slot_busy`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_reconstruction_slot_busy(reason: &str) -> bool {
+        reason == Self::reconstruction_slot_busy()
     }
 
     /// Why a second live FEL reconstruction on this worker was declined.
@@ -4290,7 +4311,10 @@ impl TranscodeManager {
                     // is the qualification's answer, reported with the
                     // ordinary start, not an ordinary recipe nobody asked for.
                     Err(reason) if processed_trial => {
-                        if pending_fel_qualification(&reason).is_some() { return Err(reason); }
+                        // Waiting answers stay recognisable to the upgrade:
+                        // a pending measurement, or another play's slot.
+                        if pending_fel_qualification(&reason).is_some()
+                            || Self::is_reconstruction_slot_busy(&reason) { return Err(reason); }
                         return Err(format!("processed window refused: {reason}"));
                     }
                     Err(reason) => {
@@ -4468,7 +4492,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
         encoding: Option<&Arc<crate::vodencode::Encoding>>,
-    ) -> Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)> {
+    ) -> Result<Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)>, String> {
         if !req.split_audio
             || encoding.is_some()
             // The split master describes an AVC copy; HEVC and Dolby Vision
@@ -4490,7 +4514,7 @@ impl TranscodeManager {
             // admission holds at most three. Larger sets stay muxed for now.
             || file.audio_streams.len() > 3
         {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let height = file.height.unwrap_or(0).max(2);
         let generation = uuid::Uuid::new_v4().to_string();
@@ -4531,18 +4555,23 @@ impl TranscodeManager {
                     soundtracks.push((audio, soundtrack))
                 }
                 outcome => {
+                    let reason = match outcome {
+                        Err(error) => error,
+                        Ok(Some(_)) => "the soundtrack recipe is not shared AAC".to_owned(),
+                        Ok(None) => "no encoded soundtrack recipe was resolved".to_owned(),
+                    };
                     tracing::info!(
                         target: "plurxd::transcode",
                         file_id = file.id,
                         audio_index = ?audio.audio_index,
-                        refused = ?outcome.err(),
+                        %reason,
                         "split copy soundtrack unavailable; serving the muxed copy"
                     );
-                    return Vec::new();
+                    return Err(reason);
                 }
             }
         }
-        soundtracks
+        Ok(soundtracks)
     }
 
     /// Negotiation shares native encoded preparation and the exact copy
@@ -5141,7 +5170,8 @@ impl TranscodeManager {
             .await?;
         let split_soundtracks = self
             .prepare_vod_split_soundtracks(req, &file, encoding.as_ref())
-            .await;
+            .await
+            .unwrap_or_default();
         let split_master = !split_soundtracks.is_empty();
         let companion = self.prepare_vod_companion(req, &file).await?;
         // A continuous family role executes a video-only or shared-AAC split of
@@ -5319,6 +5349,43 @@ impl TranscodeManager {
     /// Read the VOD serving settings. Absence means enabled; an explicit `0`
     /// is a maintenance kill switch that refuses playback rather than routing
     /// it through the removed live presentation.
+    pub(crate) async fn prepare_selected_copy(
+        &self,
+        request: &SessionRequest,
+        mut file: plurx_core::domain::MediaFile,
+        user_id: i64,
+        position_ms: i64,
+        shutdown: tokio_util::sync::CancellationToken,
+        slot: crate::subtitle_translation::ReadPreparationSlot,
+    ) {
+        if !matches!(request.kind, SessionKind::Copy { .. })
+            || request.subtitle_burn.is_some()
+            || request.continuous_media.is_some()
+            || request.passive_vod
+        {
+            return;
+        }
+        let Ok(Some(settings)) = self.vod_settings(request).await else {
+            return;
+        };
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            request.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        self.vod
+            .prepare_selected_copy(
+                request.into(),
+                &file,
+                &settings,
+                user_id,
+                position_ms,
+                shutdown,
+                slot,
+            )
+            .await;
+    }
+
     pub(super) async fn vod_settings(
         &self,
         req: &SessionRequest,
@@ -5472,6 +5539,11 @@ impl TranscodeManager {
                 read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
             )
             .unwrap_or(0),
+            // The same burst seconds rolling input pacing reads.
+            source_burst_secs: read(plurx_core::store::keys::HLS_BURST_SECS)
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                .unwrap_or(crate::transcode::HLS_BURST_SECS_DEFAULT),
         })
     }
 
@@ -5599,6 +5671,14 @@ impl TranscodeManager {
                 result: publication.result,
                 owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
             })
+    }
+
+    pub(crate) fn vod_startup_seek_ready_ms(
+        &self,
+        session_id: &str,
+        requested_ms: i64,
+    ) -> Option<i64> {
+        self.vod.startup_seek_ready_ms(session_id, requested_ms)
     }
 
     /// True for an attached VOD capability or one still in the slow
@@ -6288,7 +6368,8 @@ impl TranscodeManager {
             // A resurrected split copy keeps its soundtrack alternates.
             let split_soundtracks = self
                 .prepare_vod_split_soundtracks(&req, &file, encoding.as_ref())
-                .await;
+                .await
+                .unwrap_or_default();
             let measured_candidate = if first_capture && root_admission.is_none() {
                 match self
                     .resolved_retained_candidate_binding(&req, &file, &encoding)

@@ -320,11 +320,13 @@ impl CopyRangeFiles {
     pub(crate) fn media_origin_ms(&self) -> Option<i64> {
         self.origin
     }
-    /// The Source incarnation and range this production belongs to, for its
-    /// log lines.
+    /// The Source incarnation (hashed, as every log line carries it: the id
+    /// is a capability) and range this production belongs to.
     pub(crate) fn log_identity(&self) -> (String, uuid::Uuid) {
         (
-            self.assignment.binding().incarnation_id().to_string(),
+            crate::transcode::session_log_id(
+                &self.assignment.binding().incarnation_id().to_string(),
+            ),
             self.range_id,
         )
     }

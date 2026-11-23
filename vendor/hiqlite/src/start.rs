@@ -228,6 +228,8 @@ where
     let (tx_client_control, rx_client_control) = flume::bounded(1);
 
     let state = Arc::new(AppState {
+        #[cfg(feature = "sqlite")]
+        append_timing_epoch: crate::append_timing::new_source_epoch(),
         app_start: Utc::now(),
         is_shutting_down: AtomicBool::new(false),
         #[cfg(feature = "backup")]

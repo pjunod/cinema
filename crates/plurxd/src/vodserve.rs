@@ -397,6 +397,10 @@ pub struct VodSettings {
     /// the 50 GB the settings page shows. Distinct from
     /// `completed_cache_bytes`, whose unset value keeps admission closed.
     pub output_budget_bytes: u64,
+    /// `playback.hls_burst_secs`: seconds of media a producer generation's
+    /// transfer input reads at source speed before epoch pacing engages, the
+    /// burst half of the same burst-then-hold shape rolling input uses.
+    pub source_burst_secs: f64,
 }
 
 /// The Developer switch for complete-output preparation queued by a VOD
@@ -661,6 +665,25 @@ impl ChildMediaRequest {
 }
 
 impl ResponseOwner {
+    pub(crate) fn is_scalar_playlist(&self) -> bool {
+        self.scalar_playlist
+    }
+
+    pub(crate) fn prepared_frame_rate(&self) -> Option<f64> {
+        if !self.scalar_playlist || self.tombstone.is_some() {
+            return None;
+        }
+        let rendition = self.rendition.as_ref()?;
+        // A nominal encode grid does not prove the shortest quantized MP4
+        // sample. Keep this unknown until that output has measured cadence.
+        if rendition.recipe.encoding.is_some() {
+            return None;
+        }
+        let index = rendition.index.as_ref()?;
+        let cadence = index.verified_refit_cadence()?;
+        crate::transcode::prepared_frame_rate_bound(index.timescale, cadence.minimum_interval_ticks)
+    }
+
     pub(crate) fn retained_output_facts(&self) -> Option<crate::transcode::RetainedOutputFacts> {
         let artifact = self.retained_output.as_ref()?;
         Some(artifact.facts())
@@ -1382,6 +1405,7 @@ struct Shared {
     /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority
     /// hint, and a refused start asks again.
     local_index_demand: StdMutex<VecDeque<i64>>,
+    resume_predictions: vod_startup_prediction::ResumePredictions,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
     /// failure remains rediscoverable after either a later tick or restart.
@@ -1718,6 +1742,8 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
+#[path = "vod/startup_prediction.rs"]
+mod vod_startup_prediction;
 #[cfg(test)]
 pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
@@ -1765,6 +1791,8 @@ use output_measurement::PublishedOutputMeasurement;
 mod copy_preparation;
 #[path = "vod/preparation_storage.rs"]
 pub(crate) mod preparation_storage;
+#[path = "vod/resume_preparation.rs"]
+mod resume_preparation;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]

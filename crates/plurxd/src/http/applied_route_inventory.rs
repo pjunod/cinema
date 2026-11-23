@@ -135,6 +135,12 @@ const VIEW_READS: &[(&str, &str, &str, usize)] = &[
 /// `(file, function, method, count)`.
 const CACHED_LOOKUP_CALLERS: &[(&str, &str, &str, usize)] = &[
     (
+        "http/hls/playlist.rs",
+        "prepared_master_playlist_response_local_before",
+        "media_route_resolution_before",
+        1,
+    ),
+    (
         "http/hls/relay.rs",
         "relay_if_remote",
         "media_route_resolution_before",

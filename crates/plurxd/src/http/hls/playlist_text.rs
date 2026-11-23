@@ -53,6 +53,25 @@ pub(super) fn master_playlist(
     )
 }
 
+/// The prepared attachment supplies the frame rate bound and the child
+/// keeps the scalar media playlist's absolute VOD timeline.
+pub(super) fn prepared_single_variant_master(
+    file: &MediaFile,
+    context: &crate::transcode::HlsContext,
+    prepared_frame_rate: Option<f64>,
+) -> String {
+    let peak = context
+        .bandwidth
+        .map(|budget| budget.peak_bps)
+        .unwrap_or_else(|| file.bitrate.unwrap_or(25_000_000).max(128_000) as u64);
+    let mut playlist = format!("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH={peak}");
+    if let Some(rate) = prepared_frame_rate.filter(|rate| rate.is_finite() && *rate > 0.0) {
+        playlist.push_str(&format!(",FRAME-RATE={rate:.3}"));
+    }
+    playlist.push_str("\nindex.m3u8\n");
+    playlist
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MasterShape {
     subtitles: bool,

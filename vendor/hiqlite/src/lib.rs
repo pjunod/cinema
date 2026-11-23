@@ -55,8 +55,8 @@ pub const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(14);
 
 #[cfg(feature = "sqlite")]
 pub use crate::client::{
-    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
-    LocalDbCoreStop, LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
+    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbCoreStop, LocalDbMembershipSnapshot,
+    LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
 };
 /// The database Raft metrics [`Client::metrics_db`] returns (Raft ids are `u64`), named so a
 /// caller can forward them without depending on `openraft` itself (Plurx).
@@ -290,3 +290,10 @@ where
 {
     start::start_node_inner::<C>(Box::new(node_config), None, start::StartupPhase::Normal).await
 }
+
+#[cfg(feature = "sqlite")]
+mod append_timing;
+#[cfg(feature = "sqlite")]
+pub use append_timing::{
+    AppendTimingObservation, AppendTimingSnapshot, AppendTimingStage, append_timing_observations,
+};

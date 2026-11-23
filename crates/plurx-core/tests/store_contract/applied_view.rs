@@ -413,6 +413,98 @@ async fn sharing_watch_wakes_on_its_own_table_only() {
         .expect("the libraries write wakes its watch");
 }
 
+/// Reset uses real replicated deletes: clearing work must invalidate both
+/// watches even when SQLite could otherwise truncate the whole table.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn validation_reset_wakes_both_offline_work_watches() {
+    let node = EmbeddedSingleton::start().await;
+    let authority: Arc<dyn Store> = node.store.clone();
+    let (user_id, file_id) = seed_file(&authority, "reset-work-watch").await;
+    let package = offline_request("reset-work-package", "reset-work-request", user_id, file_id);
+    assert!(matches!(
+        authority
+            .create_offline_package(&package, 10, 100_000, 100_000)
+            .await
+            .expect("seed package"),
+        OfflineCreateOutcome::Created(_)
+    ));
+    assert_eq!(
+        authority
+            .request_offline_source_probes(
+                std::slice::from_ref(&package.id),
+                std::slice::from_ref(&package.node_id),
+                20
+            )
+            .await
+            .expect("seed source probe"),
+        1
+    );
+    let tables = [
+        (
+            "offline_source_probes",
+            "SELECT CAST(COUNT(*) AS TEXT) AS value FROM offline_source_probes",
+        ),
+        (
+            "offline_packages",
+            "SELECT CAST(COUNT(*) AS TEXT) AS value FROM offline_packages",
+        ),
+    ];
+    for (table, sql) in tables {
+        let rows = node
+            .client
+            .query_map::<SettingValue, _>(sql, hiqlite::params!())
+            .await
+            .expect("read seeded work rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value, "1",
+            "{table} must contain a real row before reset"
+        );
+    }
+    let mark = node
+        .client
+        .local_db_applied_mark()
+        .expect("embedded client owns its mark");
+    let probes = mark
+        .slot("offline_source_probes")
+        .expect("source probes registered");
+    let packages = mark.slot("offline_packages").expect("packages registered");
+    let probe_revision = mark.revision(probes);
+    let package_revision = mark.revision(packages);
+    let probe_watch = mark.watch(&[probes]);
+    let package_watch = mark.watch(&[packages]);
+
+    node.store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset actual replicated store");
+
+    for (table, sql) in tables {
+        let rows = node
+            .client
+            .query_map::<SettingValue, _>(sql, hiqlite::params!())
+            .await
+            .expect("read work rows after reset");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, "0", "{table} must actually be emptied");
+    }
+    assert!(
+        mark.revision(probes) > probe_revision,
+        "reset must advance the source-probe revision"
+    );
+    assert!(
+        mark.revision(packages) > package_revision,
+        "reset must advance the package revision"
+    );
+    tokio::time::timeout(Duration::from_secs(5), probe_watch.changed())
+        .await
+        .expect("reset wakes the source-probe watch");
+    tokio::time::timeout(Duration::from_secs(5), package_watch.changed())
+        .await
+        .expect("reset wakes the package watch");
+}
+
 /// A6 M3 coverage proofs for the two revocations that reach a sharing
 /// monitor only through a trigger or a cascade (no backstop re-look covers
 /// them): deleting a user deletes its tokens through `ON DELETE CASCADE`,
