@@ -253,13 +253,21 @@ impl ProductionMeter {
     /// The one line production ends with: how far it got and how long it
     /// ran. A failure's producer cause is warned where it is relabelled; this
     /// line carries the outcome code beside the totals.
-    pub(super) fn finished(&self, now: Instant, outcome: &Result<(), String>) {
+    pub(super) fn finished(
+        &self,
+        now: Instant,
+        outcome: &Result<(), String>,
+        peak_held_bytes: usize,
+        charged_bytes: u64,
+    ) {
         tracing::info!(
             target: "plurxd::transcode",
             incarnation = %self.incarnation,
             range = %self.range_id,
             outcome = outcome.as_ref().err().map_or("complete", String::as_str),
             segments = self.segments,
+            peak_held_bytes,
+            charged_bytes,
             media_end_ms = self.media_end_ms.map_or(-1, |end| end.round() as i64),
             elapsed_ms = now.saturating_duration_since(self.started).as_millis() as u64,
             "Source copy production ended"
@@ -396,8 +404,10 @@ mod tests {
         meter.finished(
             start + Duration::from_secs(9),
             &Err("copy_sync_unverified".into()),
+            0,
+            0,
         );
-        meter.finished(start + Duration::from_secs(9), &Ok(()));
+        meter.finished(start + Duration::from_secs(9), &Ok(()), 0, 0);
         let lines = lines(&logs);
         let failed = &lines[1];
         assert!(

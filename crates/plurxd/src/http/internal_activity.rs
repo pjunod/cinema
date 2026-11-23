@@ -192,6 +192,12 @@ pub struct ActivityWorkers {
     pub hardware_limit: usize,
     pub software_used: usize,
     pub software_limit: usize,
+    /// Bytes this node's verified copies hold; absent on peers predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_memory_used: Option<u64>,
+    /// This node's copy memory budget; absent on peers predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_memory_limit: Option<u64>,
     pub children: Vec<String>,
     pub child_count: usize,
 }
@@ -261,6 +267,8 @@ async fn local_workers_with_details(state: &AppState, detailed: bool) -> Activit
         hardware_limit: runtime.hardware_slots_max,
         software_used: runtime.software_threads_used,
         software_limit: runtime.software_threads_max,
+        copy_memory_used: Some(runtime.copy_memory_used),
+        copy_memory_limit: Some(runtime.copy_memory_max),
         child_count: children.len(),
         children: if detailed {
             children
@@ -1927,6 +1935,8 @@ mod tests {
                 hardware_limit: 1,
                 software_used: 0,
                 software_limit: 1,
+                copy_memory_used: None,
+                copy_memory_limit: None,
                 children: vec!["\0".repeat(256); 32],
                 child_count: 32,
             },

@@ -135,6 +135,9 @@ pub(crate) struct MediaNodeRuntime {
     pub(crate) hardware_slots_max: usize,
     pub(crate) software_threads_used: usize,
     pub(crate) software_threads_max: usize,
+    /// Bytes verified copies hold now, and the node's copy memory budget.
+    pub(crate) copy_memory_used: u64,
+    pub(crate) copy_memory_max: u64,
     pub(crate) live_waiting: bool,
     pub(crate) background_active: bool,
 }

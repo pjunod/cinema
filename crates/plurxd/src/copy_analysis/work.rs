@@ -451,6 +451,8 @@ pub(crate) struct CopyAnalysisContext {
     pub(crate) renew_every: Duration,
     pub(crate) retry_ms: i64,
     pub(crate) metrics: Arc<crate::state::AnalysisRuntimeMetrics>,
+    /// The node's copy memory pool, which gap fills charge.
+    pub(crate) copy_memory: Arc<crate::admission::CopyMemoryPool>,
 }
 
 #[derive(Debug)]
@@ -1394,6 +1396,7 @@ async fn fill_gaps(
                 max_rows: plurx_core::store::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES / 28,
                 runtime_cache: &context.cache_dir,
                 stop: &active.cancel,
+                copy_memory: &context.copy_memory,
             },
             || {
                 let file = Arc::clone(&pending.file);

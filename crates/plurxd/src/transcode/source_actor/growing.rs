@@ -706,6 +706,19 @@ impl TranscodeManager {
             transcode_audio: aac,
             audio_delivery: prepared.request().audio_delivery.clone(),
         };
+        // The copy's memory is admitted before its child runs; a node whose
+        // copies already hold their budget answers busy, which the receiver
+        // retries.
+        *stage = "growing.copy_memory";
+        let memory = self
+            .admissions
+            .copy_memory()
+            .acquire(
+                crate::copyrange::COPY_HOLD_BYTES,
+                tokio::time::Instant::from_std(deadline),
+            )
+            .await
+            .ok_or(SourceWorkerError::Capacity)?;
         *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
@@ -714,6 +727,7 @@ impl TranscodeManager {
             recipe.tracks(&file),
             video.retains_hevc_parameter_sets(),
             file.video_codec.as_deref() == Some("hevc"),
+            memory,
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.copy_args";

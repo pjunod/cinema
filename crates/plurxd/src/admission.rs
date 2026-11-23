@@ -690,6 +690,8 @@ pub struct Admissions {
     /// sessions rather than configured, because the answer depends on the box
     /// and no default could be right for both a NUC and a Xeon.
     measured: Arc<Mutex<HashMap<String, f64>>>,
+    /// What this node's verified copies may hold in memory.
+    copy_memory: Arc<CopyMemoryPool>,
 }
 
 impl Default for Admissions {
@@ -711,7 +713,13 @@ impl Admissions {
             },
             permits,
             measured: Arc::new(Mutex::new(HashMap::new())),
+            copy_memory: CopyMemoryPool::new(copy_memory_budget()),
         }
+    }
+
+    /// The node's copy memory pool — see [`CopyMemoryPool`].
+    pub fn copy_memory(&self) -> Arc<CopyMemoryPool> {
+        Arc::clone(&self.copy_memory)
     }
 
     pub fn in_use(&self) -> usize {
@@ -1564,6 +1572,164 @@ pub fn software_budget() -> usize {
         .unwrap_or(4)
         .saturating_sub(1)
         .max(2)
+}
+
+/// The memory a node's verified copies may hold, as one more dimension of
+/// admission.
+///
+/// A verified copy holds its FFmpeg child's output in plurxd's heap until
+/// each canonical fragment pairs with its companion and the pair is
+/// verified, so a copy's peak heap is a property of the source: its keyframe
+/// spans, its bitrate. Each copy (a viewer's range or an Analysis gap fill)
+/// charges its own bound here before its child starts and returns it when
+/// its observed mux is dropped, however the copy ends. FFmpeg children's own
+/// memory is not counted.
+///
+/// Waiters are served in arrival order, so a stream of small copies cannot
+/// starve a large one. An empty pool always grants, whatever the charge: a
+/// copy whose bound exceeds the whole budget runs alone on an idle node, and
+/// the budget never becomes a ban on a source.
+#[derive(Debug)]
+pub struct CopyMemoryPool {
+    state: Mutex<CopyMemoryState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
+struct CopyMemoryState {
+    budget: u64,
+    used: u64,
+    next_ticket: u64,
+    waiting: std::collections::VecDeque<u64>,
+}
+
+/// One copy's charge against [`CopyMemoryPool`]; returned when dropped.
+#[derive(Debug)]
+pub struct CopyMemoryPermit {
+    pool: Arc<CopyMemoryPool>,
+    bytes: u64,
+}
+
+impl CopyMemoryPermit {
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl Drop for CopyMemoryPermit {
+    fn drop(&mut self) {
+        {
+            let mut state = self.pool.lock();
+            state.used = state.used.saturating_sub(self.bytes);
+        }
+        self.pool.changed.notify_waiters();
+    }
+}
+
+/// A waiter's place in line, given up if its wait is abandoned.
+struct CopyMemoryTicket<'a> {
+    pool: &'a CopyMemoryPool,
+    ticket: u64,
+    granted: bool,
+}
+
+impl Drop for CopyMemoryTicket<'_> {
+    fn drop(&mut self) {
+        if self.granted {
+            return;
+        }
+        self.pool
+            .lock()
+            .waiting
+            .retain(|waiting| *waiting != self.ticket);
+        self.pool.changed.notify_waiters();
+    }
+}
+
+/// The copy memory budget when nothing is known about the node.
+pub const DEFAULT_COPY_MEMORY_BUDGET: u64 = 1 << 30;
+
+/// This node's copy memory budget: `PLURX_COPY_MEMORY_BUDGET` (bytes), a
+/// local per-node setting, or an eighth of the node's memory (its container
+/// limit where it has one).
+pub fn copy_memory_budget() -> u64 {
+    std::env::var("PLURX_COPY_MEMORY_BUDGET")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|bytes| *bytes > 0)
+        .or_else(|| crate::node_memory::node_memory_bytes().map(|bytes| bytes / 8))
+        .unwrap_or(DEFAULT_COPY_MEMORY_BUDGET)
+}
+
+impl CopyMemoryPool {
+    pub fn new(budget: u64) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(CopyMemoryState {
+                budget,
+                used: 0,
+                next_ticket: 0,
+                waiting: std::collections::VecDeque::new(),
+            }),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CopyMemoryState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Bytes charged now and the budget, for the operator surface.
+    pub fn usage(&self) -> (u64, u64) {
+        let state = self.lock();
+        (state.used, state.budget)
+    }
+
+    /// Charge `bytes`, waiting in arrival order until they fit or
+    /// `deadline` passes. `None` is the copy-capacity answer: the node is
+    /// busy, and the copy may be asked for again.
+    pub async fn acquire(
+        self: &Arc<Self>,
+        bytes: u64,
+        deadline: tokio::time::Instant,
+    ) -> Option<CopyMemoryPermit> {
+        let mut ticket = {
+            let mut state = self.lock();
+            let ticket = state.next_ticket;
+            state.next_ticket += 1;
+            state.waiting.push_back(ticket);
+            CopyMemoryTicket {
+                pool: self,
+                ticket,
+                granted: false,
+            }
+        };
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.lock();
+                let first = state.waiting.front() == Some(&ticket.ticket);
+                if first && (state.used == 0 || state.used.saturating_add(bytes) <= state.budget) {
+                    state.waiting.pop_front();
+                    state.used = state.used.saturating_add(bytes);
+                    ticket.granted = true;
+                    drop(state);
+                    // The next in line may fit too.
+                    self.changed.notify_waiters();
+                    return Some(CopyMemoryPermit {
+                        pool: Arc::clone(self),
+                        bytes,
+                    });
+                }
+            }
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3130,5 +3296,107 @@ mod tests {
             "the decode and tone-map happen at source resolution"
         );
         assert!(software_budget() >= 2, "the floor holds on any machine");
+    }
+}
+
+#[cfg(test)]
+mod copy_memory_tests {
+    use super::CopyMemoryPool;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    const MIB: u64 = 1 << 20;
+
+    /// A lone copy whose bound exceeds the whole budget runs on an idle
+    /// node; a second large copy queues behind it, is answered busy at its
+    /// deadline, and runs once the first copy's memory comes back.
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_copy_runs_alone_and_the_next_one_waits_for_it() {
+        let pool = CopyMemoryPool::new(100 * MIB);
+        let alone = pool
+            .acquire(150 * MIB, Instant::now())
+            .await
+            .expect("an idle node grants any copy");
+        assert_eq!(pool.usage(), (150 * MIB, 100 * MIB));
+        let began = Instant::now();
+        assert!(pool
+            .acquire(80 * MIB, began + Duration::from_secs(5))
+            .await
+            .is_none());
+        assert_eq!(
+            began.elapsed(),
+            Duration::from_secs(5),
+            "it queued, then was busy"
+        );
+        let waiting = {
+            let pool = std::sync::Arc::clone(&pool);
+            tokio::spawn(async move {
+                pool.acquire(80 * MIB, Instant::now() + Duration::from_secs(60))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!waiting.is_finished());
+        drop(alone);
+        let next = waiting.await.expect("waiter").expect("granted once freed");
+        assert_eq!(pool.usage(), (80 * MIB, 100 * MIB));
+        drop(next);
+        assert_eq!(pool.usage(), (0, 100 * MIB));
+    }
+
+    /// Waiters are served in arrival order: a small copy that would fit
+    /// does not pass a large one that arrived first.
+    #[tokio::test(start_paused = true)]
+    async fn a_small_copy_does_not_pass_a_large_one_waiting_first() {
+        let pool = CopyMemoryPool::new(100 * MIB);
+        let held = pool.acquire(60 * MIB, Instant::now()).await.expect("held");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let large = {
+            let pool = std::sync::Arc::clone(&pool);
+            tokio::spawn(async move { pool.acquire(60 * MIB, deadline).await })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let small = {
+            let pool = std::sync::Arc::clone(&pool);
+            tokio::spawn(async move { pool.acquire(10 * MIB, deadline).await })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!small.is_finished(), "the small copy waits its turn");
+        assert!(!large.is_finished());
+        drop(held);
+        let large = large.await.expect("large").expect("served first");
+        let small = small.await.expect("small").expect("then served");
+        assert_eq!(pool.usage(), (70 * MIB, 100 * MIB));
+        drop((large, small));
+        assert_eq!(pool.usage(), (0, 100 * MIB));
+    }
+
+    /// Accounting cannot drift: a copy that dies returns its memory, and a
+    /// waiter whose start was abandoned gives up its place in line.
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_copy_and_an_abandoned_wait_leave_nothing_behind() {
+        let pool = CopyMemoryPool::new(100 * MIB);
+        let held = pool.acquire(90 * MIB, Instant::now()).await.expect("held");
+        let abandoned = {
+            let pool = std::sync::Arc::clone(&pool);
+            tokio::spawn(async move {
+                pool.acquire(50 * MIB, Instant::now() + Duration::from_secs(600))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        abandoned.abort();
+        let _ = abandoned.await;
+        // The copy dies: its permit is dropped with its mux.
+        let copy = std::thread::spawn(move || drop(held));
+        copy.join().expect("copy ended");
+        assert_eq!(pool.usage(), (0, 100 * MIB));
+        // Nothing still waits ahead of a new copy.
+        let next = pool
+            .acquire(50 * MIB, Instant::now())
+            .await
+            .expect("the line is empty");
+        assert_eq!(pool.usage(), (50 * MIB, 100 * MIB));
+        drop(next);
     }
 }

@@ -40,6 +40,8 @@ pub(crate) struct CopyGapFill<'a> {
     pub(crate) runtime_cache: &'a Path,
     /// The phase's loss token. There is no deadline: a paused budget waits.
     pub(crate) stop: &'a CancellationToken,
+    /// The node's copy memory pool; a gap fill is a copy, and counts.
+    pub(crate) copy_memory: &'a Arc<crate::admission::CopyMemoryPool>,
 }
 
 #[derive(Debug)]
@@ -198,6 +200,15 @@ where
         fill.timescale,
     )
     .map_err(Failed)?;
+    // As the rest of this fill, the copy memory wait has no deadline of its
+    // own: it ends when the memory is free or the phase is lost.
+    let memory = tokio::select! {
+        memory = fill.copy_memory.acquire(
+            crate::copyrange::COPY_HOLD_BYTES,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600),
+        ) => memory.ok_or_else(|| failed("copy_memory_unavailable".into()))?,
+        () = fill.stop.cancelled() => return Err(failed("copy_range_cancelled".into())),
+    };
     let mut mux = ObservedCopyMux::new(
         Arc::clone(&contract),
         census.first_dts,
@@ -205,6 +216,7 @@ where
         fill.recipe.tracks(file),
         video.retains_hevc_parameter_sets(),
         file.video_codec.as_deref() == Some("hevc"),
+        memory,
     )
     .map_err(Failed)?;
     let args = fill

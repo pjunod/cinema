@@ -100,6 +100,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Shared copies are admitted against the node's memory.** Each verified
+  copy (a shared growing copy or an Analysis gap fill) now charges the memory
+  its pairing hold may use against a per-node copy memory budget before its
+  FFmpeg child starts, and returns it when the copy ends, however it ends.
+  The budget is an eighth of the node's memory (its container limit on Linux,
+  `hw.memsize` on macOS), or `PLURX_COPY_MEMORY_BUDGET`. A copy that does
+  not fit waits in arrival order and is answered busy, which receivers retry;
+  a lone copy larger than the whole budget still runs on an idle node. The
+  budget counts plurxd's heap only, not FFmpeg children. Activity shows used
+  and total per node, and the copy's end-of-production line its peak.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
