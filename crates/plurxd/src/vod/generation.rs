@@ -361,6 +361,12 @@ pub(super) async fn spawn_generation(
             // this original interval new report authority.
             report_revision = 0;
             drop(permit);
+            // The window is already prepared: a run's encoder pre-started for
+            // it is not needed. Ending the run kills and reaps it; the next
+            // claim waits for that.
+            if run_claim.is_some() {
+                runtime.end_window_run();
+            }
             drop(run_claim);
             rendition
                 .source_owners
