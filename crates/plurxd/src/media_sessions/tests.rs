@@ -315,6 +315,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         typeless_playlist: true,
         library_channel: None,
         request: SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -1337,6 +1338,7 @@ fn terminal_relay_response(
             owner_epoch: 1,
         },
         effective_selection: crate::playback_control::EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 1080,

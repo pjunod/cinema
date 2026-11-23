@@ -4,6 +4,8 @@
 
 // Four-byte hvcC access-unit identity used by the renderer and the scanner's
 // planned M7 census. The caller owns transport bounds and selects the PTS.
+// With a NULL refusal a malformed AU is fatal; otherwise its first reason is
+// returned there (a window run's read-ahead AU refuses only its own window).
 struct coded_picture {
   unsigned bl, el, rpus;
   const uint8_t *rpu;
@@ -29,22 +31,31 @@ static inline void finish_coded_vcl(struct AVSHA *sha, char hex[65]) {
 }
 
 static inline struct coded_picture inspect_coded_picture(
-    const AVPacket *packet, struct AVSHA *base_sha, bool forbid_el) {
+    const AVPacket *packet, struct AVSHA *base_sha, bool forbid_el,
+    const char **refusal) {
   struct coded_picture picture = {0};
+#define CODED_AU_NEED(ok, reason)                                              \
+  do {                                                                         \
+    if (!(ok)) {                                                               \
+      need(refusal != NULL, reason);                                           \
+      *refusal = reason;                                                       \
+      return picture;                                                          \
+    }                                                                          \
+  } while (0)
   size_t at = 0;
   while (at < (size_t)packet->size) {
-    need((size_t)packet->size - at >= 4, "coded NAL length prefix");
+    CODED_AU_NEED((size_t)packet->size - at >= 4, "coded NAL length prefix");
     const uint8_t *p = packet->data + at;
     uint32_t n = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
                  (uint32_t)p[2] << 8 | p[3];
     at += 4;
-    need(n >= 2 && n <= (size_t)packet->size - at, "coded NAL bounds");
+    CODED_AU_NEED(n >= 2 && n <= (size_t)packet->size - at, "coded NAL bounds");
     p = packet->data + at;
     int type = (p[0] >> 1) & 63;
-    need(((p[0] & 1) << 5 | (p[1] >> 3)) == 0 && (p[1] & 7) != 0,
+    CODED_AU_NEED(((p[0] & 1) << 5 | (p[1] >> 3)) == 0 && (p[1] & 7) != 0,
          "coded layer/temporal header");
     if (type < 32) {
-      need(n >= 3, "base slice header");
+      CODED_AU_NEED(n >= 3, "base slice header");
       picture.bl += (p[2] & 128) != 0;
       // The live P8 copy preserves these base-layer VCL units verbatim.
       // Include each original four-byte length so boundaries are unambiguous.
@@ -52,13 +63,13 @@ static inline struct coded_picture inspect_coded_picture(
         av_sha_update(base_sha, p - 4, (size_t)n + 4);
     }
     if (type == 63) {
-      need(!forbid_el, "M7 candidate has no enhancement-layer NAL units");
-      need(n >= 4, "enhancement wrapper");
+      CODED_AU_NEED(!forbid_el, "M7 candidate has no enhancement-layer NAL units");
+      CODED_AU_NEED(n >= 4, "enhancement wrapper");
       int inner = (p[2] >> 1) & 63;
-      need(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
+      CODED_AU_NEED(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
            "enhancement layer/temporal header");
       if (inner < 32) {
-        need(n >= 5, "enhancement slice header");
+        CODED_AU_NEED(n >= 5, "enhancement slice header");
         picture.el += (p[4] & 128) != 0;
       }
     }
@@ -70,6 +81,7 @@ static inline struct coded_picture inspect_coded_picture(
     at += n;
   }
   return picture;
+#undef CODED_AU_NEED
 }
 
 #endif

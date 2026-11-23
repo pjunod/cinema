@@ -10,6 +10,20 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- A shared title's Source copy now says where its time goes. Each published
+  segment logs one `Source copy segment published` line (incarnation, range,
+  segment, media start and end, bytes, wall time, media-per-wall-second rate,
+  and the split between waiting on FFmpeg's output, plurx's conversion and the
+  segment commit). A wait past one advertised target duration logs one
+  warning naming what it waited on, and production logs how far it got
+  when it ends. Each
+  refused Source start response names the check that refused it. The
+  receiving server logs every HLS resource it relays (status, bytes against
+  the declared length, duration, `Range`, whether it completed): at debug
+  normally, at info when it fell short or took longer than a target duration.
+  Web player beacons now carry the playhead and buffered ranges.
+- **Language changes keep the picture playing on copied titles.** A copy-VOD title with two or three soundtracks now plays in the web player as one shared video with each language as an alternate audio track, so choosing another language switches in place on the same player and session instead of reopening the stream. The video is packaged and stored once for every language and viewer. Other clients, native HLS and titles with more soundtracks keep the existing combined stream.
+
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
   FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
   conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
@@ -85,6 +99,39 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Shared Matroska titles start from the beginning and restart mid-title.** A shared copy of a Matroska title with reordered frames (B-frames) was refused with `copy_clock_unknown` on its first fragment: from the start for titles like *Countdown*, and on every restart after a seek for titles like *Avatar*. Matroska stores no decode times, so FFmpeg makes them up after every start and rounds each into its own output's time base. A 1/1000 packet clock never matched the 1/16000 MP4 to the tick, and a decode time FFmpeg repeated was kept by the clock but raised by one tick in the MP4. The packet clock is now written in the MP4 track's own timescale. Each sample is checked against the decode time the MP4 muxer actually writes, still exactly.
+- **Shared watch progress is saved and acknowledged.** Every progress beat (and every explicit watched toggle) for a shared title was written on the receiver and then answered `503`, because the receiver's catalogue-body guard refused a success that carried no Source content. The player kept resending the first beat, so only the first position of each session was ever recorded. These answers now carry the receiver's own history, marked as such for the guard.
+- **Shared playback-control refusals name their step.** The receiver logs which step refused a shared control exchange (attachment, peer, transport failure or the Source's own refusal code), and the Source logs why its growing copy refused one, instead of both collapsing into an unlogged `control_unavailable`.
+
+- 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
+  with playback instead of stalling every few seconds. Each 2-second window
+  used to start its own renderer, which re-read and re-decoded the source
+  back to the previous keyframe and restarted the GPU. One renderer now
+  produces up to eight consecutive windows, each still verified and
+  published on its own. That is about 30% less work per window and about
+  60% fewer source reads, with byte-identical output.
+- Shared Dolby Vision Profile 7 titles start again when converted to Profile
+  8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
+  first fragment against the rung its plan resolved instead of the source's own
+  size, and a 4K title, which Auto plans under the node's Dolby Vision encode
+  ceiling, was refused at `growing.copy_head_caps` with
+  `source_rescan_required` although the copy matched the scan. The check
+  compares the copy with the scanned source only. The same fix starts every
+  other shared copy whose planned rung differs from the source: 4K SDR or HDR10
+  copies from a Source whose encode ceiling is below 2160, sources taller than
+  2160 or shorter than 144 lines, and a copy started with a lower rung named,
+  which now gets the full-resolution copy over sharing as it already did
+  locally, instead of a 409.
+- Shared titles that Safari plays through its native HLS player (Dolby
+  Vision, HDR and HEVC copies, including SDR HEVC) play again. That player
+  carries the viewer's sign-in as a `token` in each playlist URL, and the
+  receiver refused every such URL, `master.m3u8` or `index.m3u8`, as an
+  unknown resource with a bare 422 ("HLS readiness returned HTTP 422") after
+  the Source had already started. The receiver now drops that one token,
+  which authorizes nothing on a shared session, and never passes it to the
+  Source. A resource it still will not relay answers a typed
+  `sharing_resource_unsupported` and logs one line naming the step. H.264
+  played through hls.js was unaffected, because hls.js signs in with a header.
 - Shared titles play again in the web player. Every web shared Start runs
   the Source's growing copy, which answered with a 60-second control lease that
   the receiver refused, so the viewer saw "The sharing host could not confirm

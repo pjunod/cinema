@@ -11,6 +11,10 @@ pub(super) struct Recipe {
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
     pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    /// The shared video of a split copy presentation: no audio track at all.
+    /// The audio fields above then describe nothing this rendition carries,
+    /// and `rendition_key` omits them so every soundtrack shares one video.
+    pub(super) audio_excluded: bool,
     pub(super) video: CopyVideoOptions,
     /// Read with the exact pinned curve table when this recipe was resolved.
     /// Status only: `rendition_key` and every media identity omit it.

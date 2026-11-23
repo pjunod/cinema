@@ -477,6 +477,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -783,6 +784,7 @@ async fn insert_control_session(
     serve.shared.sessions.lock().await.insert(
         session_id.to_owned(),
         Session {
+            requested_audio_index: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -916,6 +918,7 @@ async fn insert_terminal_session(
     serve.shared.sessions.lock().await.insert(
         session_id.to_owned(),
         Session {
+            requested_audio_index: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -1001,6 +1004,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            audio_excluded: false,
             dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,

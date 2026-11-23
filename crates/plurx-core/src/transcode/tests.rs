@@ -2600,3 +2600,68 @@ fn a_copy_session_begins_at_the_keyframe_before_the_requested_start() {
         requested - origin
     );
 }
+
+#[test]
+fn split_copy_video_is_the_muxed_copy_video_without_any_audio_input() {
+    let mut media = file(None);
+    media.audio_offset_ms = 250;
+    media.audio_streams = vec![
+        crate::domain::AudioStream {
+            codec: "aac".into(),
+            channels: Some(2),
+            index: 1,
+            ..Default::default()
+        },
+        crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            index: 2,
+            ..Default::default()
+        },
+    ];
+    let video = CopyVideoOptions::new(false, false);
+    let split = copy_video_only_pipe_args(&media, 12.5, Pacing::unpaced(), video);
+    let muxed = copy_pipe_args_with_audio_delivery(
+        &media,
+        12.5,
+        Some(2),
+        true,
+        Pacing::unpaced(),
+        video,
+        None,
+    );
+    // One input: an audio offset never adds the legacy second read.
+    assert_eq!(split.iter().filter(|arg| *arg == "-i").count(), 1);
+    assert!(split.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
+    assert!(split.iter().any(|arg| arg == "-an"));
+    assert!(!split
+        .iter()
+        .any(|arg| arg.contains(":a") || arg == "-c:a" || arg == "-af" || arg == "-itsoffset"));
+    // Seek, video bitstream handling and fMP4 output are the muxed copy's own.
+    let video_only = |args: &[String]| {
+        args.iter()
+            .filter(|arg| !arg.contains(":a") && !["-an", "-sn"].contains(&arg.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(split.last(), muxed.last());
+    for needle in ["-ss", "-c:v", "-movflags"] {
+        let at = |args: &[String]| {
+            args.iter()
+                .position(|arg| arg == needle)
+                .map(|i| args[i + 1].clone())
+        };
+        assert_eq!(at(&split), at(&muxed), "{needle}");
+    }
+    // Language, offset and audio delivery are not inputs of the shared video.
+    media.audio_offset_ms = 0;
+    assert_eq!(
+        video_only(&split),
+        video_only(&copy_video_only_pipe_args(
+            &media,
+            12.5,
+            Pacing::unpaced(),
+            video
+        ))
+    );
+}

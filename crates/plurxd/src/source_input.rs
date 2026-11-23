@@ -761,6 +761,23 @@ impl SourceInput {
         self.observer_publication = Some(publication);
         update.await
     }
+    /// Take over `previous`'s observer publication: publish this input's
+    /// observer for the same rendition and generation epoch, held for this
+    /// input's lifetime. Returns the policy update to await, or `None` when
+    /// either input has no foreground observer or `previous` published none.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt_observer_publication(
+        &mut self,
+        previous: &SourceInput,
+    ) -> Option<impl std::future::Future<Output = Result<(), String>> + Send + 'static> {
+        let observer = self.foreground_observer()?;
+        let (publication, update) = previous
+            .observer_publication
+            .as_ref()?
+            .republish(observer)?;
+        self.observer_publication = Some(publication);
+        Some(update)
+    }
     pub(crate) fn foreground_observer(&self) -> Option<SourceObserver> {
         self.state.observer.clone()
     }

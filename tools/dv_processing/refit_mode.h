@@ -804,7 +804,7 @@ static int refit_main(int argc, char **argv) {
         bool in_window = packet->pts >= refit_resume_pts && packet->pts < refit_m7_sample.end_pts;
         need(!base_only || in_window, "extra coded picture outside declared M7 candidate interval");
         if (in_window)
-          inspect_coded_au(packet, true, false);
+          inspect_coded_au(packet, run_current, true, false);
       }
       send_layer(&layers[0], packet);
       if (!window_done && !base_only)

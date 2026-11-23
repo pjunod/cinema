@@ -1308,6 +1308,10 @@ pub(super) fn preserve_prepared_audio(
     source: &MediaFile,
 ) -> Result<(), ApiError> {
     use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
+    // Soundtrack alternates are the client's negotiated presentation, not a
+    // selection: a successor copy keeps them exactly as its predecessor did.
+    candidate.split_audio = predecessor.split_audio
+        && matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. });
     let same_track_and_route = candidate.audio_index == predecessor.audio_index
         && candidate.audio_claim == predecessor.audio_claim
         && candidate.audio_offset_ms == predecessor.audio_offset_ms;
@@ -1877,6 +1881,7 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
+        split_audio: None,
         processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
@@ -2345,6 +2350,10 @@ pub(super) async fn process_preparation_candidate(
             proposed_height = proposed.height, delivered_height = delivered.height,
             decision = decision_name, "Auto preparation planned");
     }
+    tracing::debug!(target: "plurxd::http::hls", context = "prepare", ?decision,
+        delivered_audio = ?delivered.audio_track, proposed_audio = ?proposed.audio_track,
+        delivered_alternates = delivered.audio_alternates, proposed_alternates = proposed.audio_alternates,
+        "preparation decided");
     crate::playback_control::record_preparation_decision(platform, decision);
     // Keep the counterfactual beside the production decision as advisory
     // rollout telemetry. All three clients may advertise the explicit runtime

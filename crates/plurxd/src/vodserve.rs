@@ -1065,6 +1065,10 @@ pub(crate) struct VodRecipeRequest<'a> {
     pub soundtrack: Option<Arc<crate::vodencode::Encoding>>,
     /// The second video of a two-rung autonomous attachment.
     pub companion: Option<(SessionRequest, Arc<crate::vodencode::Encoding>)>,
+    /// Every soundtrack of an admitted split copy presentation, in source
+    /// order, with the shared-audio request that resolves it. Empty means the
+    /// ordinary muxed copy.
+    pub split_soundtracks: Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)>,
 }
 
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
@@ -1078,6 +1082,7 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
             encoding: None,
             soundtrack: None,
             companion: None,
+            split_soundtracks: Vec::new(),
         }
     }
 }
@@ -1741,6 +1746,8 @@ mod vod_serve_delivery;
 mod vod_serve_end;
 #[path = "vod/serve/serve.rs"]
 mod vod_serve_serve;
+#[path = "vod/serve/split.rs"]
+mod vod_serve_split;
 // split: end vod-serve
 
 // split: begin vod-shared

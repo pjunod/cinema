@@ -37,6 +37,22 @@ struct PublishedSourceObserver {
 pub(crate) struct SourceObserverPublication {
     ledger: Weak<StdMutex<SourceOwnersState>>,
     identity: Arc<()>,
+    epoch: u64,
+}
+impl SourceObserverPublication {
+    /// Publish `observer` for the same rendition and generation epoch as this
+    /// publication. A DV window run's later windows read through the run's
+    /// input, so that input's observer replaces the unused window input's.
+    pub(crate) fn republish(
+        &self,
+        observer: crate::source_custody::SourceObserver,
+    ) -> Option<(
+        SourceObserverPublication,
+        impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+    )> {
+        let ledger = self.ledger.upgrade()?;
+        Some(publish_into(&ledger, self.epoch, observer))
+    }
 }
 impl Drop for SourceObserverPublication {
     fn drop(&mut self) {
@@ -52,6 +68,52 @@ impl Drop for SourceObserverPublication {
             state.source_observer = None;
         }
     }
+}
+
+/// Publish `observer` as the rendition's foreground source observer for
+/// `epoch`, unless a newer generation's is already published.
+fn publish_into(
+    ledger: &Arc<StdMutex<SourceOwnersState>>,
+    epoch: u64,
+    observer: crate::source_custody::SourceObserver,
+) -> (
+    SourceObserverPublication,
+    impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+) {
+    let identity = Arc::new(());
+    let update = {
+        let mut state = ledger.lock().expect("Source rendition owners");
+        let update = state
+            .telemetry_capable
+            .then(|| observer.begin_rolling_policy());
+        // An older input finishing its open cannot replace a newer live
+        // generation. Identity also fences replacement within one epoch.
+        if state
+            .source_observer
+            .as_ref()
+            .is_none_or(|published| published.epoch <= epoch)
+        {
+            state.source_observer = Some(PublishedSourceObserver {
+                epoch,
+                observer,
+                identity: Arc::clone(&identity),
+            });
+        }
+        update
+    };
+    (
+        SourceObserverPublication {
+            ledger: Arc::downgrade(ledger),
+            identity,
+            epoch,
+        },
+        async move {
+            if let Some(update) = update {
+                update.await?;
+            }
+            Ok(())
+        },
+    )
 }
 
 /// No wire constructor. The private deferred-create path associates a closed
@@ -110,39 +172,7 @@ impl SourceRenditionOwners {
         SourceObserverPublication,
         impl std::future::Future<Output = Result<(), String>> + Send + 'static,
     ) {
-        let identity = Arc::new(());
-        let update = {
-            let mut state = self.state.lock().expect("Source rendition owners");
-            let update = state
-                .telemetry_capable
-                .then(|| observer.begin_rolling_policy());
-            // An older input finishing its open cannot replace a newer live
-            // generation. Identity also fences replacement within one epoch.
-            if state
-                .source_observer
-                .as_ref()
-                .is_none_or(|published| published.epoch <= epoch)
-            {
-                state.source_observer = Some(PublishedSourceObserver {
-                    epoch,
-                    observer,
-                    identity: Arc::clone(&identity),
-                });
-            }
-            update
-        };
-        (
-            SourceObserverPublication {
-                ledger: Arc::downgrade(&self.state),
-                identity,
-            },
-            async move {
-                if let Some(update) = update {
-                    update.await?;
-                }
-                Ok(())
-            },
-        )
+        publish_into(&self.state, epoch, observer)
     }
     pub(crate) fn source_observer(
         &self,

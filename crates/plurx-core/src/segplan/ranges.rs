@@ -26,6 +26,14 @@ pub struct SourceTimestamp {
     pub time_base_den: u32,
 }
 
+impl SourceTimestamp {
+    /// The same instant, whatever time base each is written in: a packet
+    /// clock moved from 1/1000 to its MP4 track's 1/16000 still names `0`.
+    pub fn same_instant(self, other: Self) -> bool {
+        matches!((fraction(self), fraction(other)), (Ok(a), Ok(b)) if a == b)
+    }
+}
+
 fn gcd(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         (a, b) = (b, a % b);
@@ -324,7 +332,22 @@ impl SparseIndexRows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::fmp4::CutClass;
+
+    #[test]
+    fn a_source_origin_is_the_same_instant_in_any_time_base() {
+        let at = |dts, time_base_den| SourceTimestamp {
+            dts,
+            time_base_num: 1,
+            time_base_den,
+        };
+        assert!(at(0, 1000).same_instant(at(0, 16000)));
+        assert!(at(-83, 1000).same_instant(at(-1328, 16000)));
+        assert!(!at(-83, 1000).same_instant(at(-1335, 16000)));
+        assert!(!at(83, 1000).same_instant(at(-1328, 16000)));
+        assert!(!at(0, 0).same_instant(at(0, 0)));
+    }
 
     fn binding() -> RangeBinding {
         RangeBinding {

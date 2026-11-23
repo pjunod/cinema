@@ -60,7 +60,7 @@ static bool m7_title_observe_coded(const AVPacket *packet) {
     vcl = av_sha_alloc();
     need(vcl && av_sha_init(vcl, 256) == 0, "M7 source VCL SHA256");
   }
-  const struct coded_picture picture = inspect_coded_picture(packet, vcl, false);
+  const struct coded_picture picture = inspect_coded_picture(packet, vcl, false, NULL);
   need(picture.bl == 1 && picture.el == 1 && picture.rpus == 1 &&
            picture.rpu_size > 2 && picture.rpu_size <= MAX_RPU_BYTES + 1 &&
            picture.rpu[0] == 0x7c && picture.rpu[1] == 1 && rpu.held &&

@@ -4129,6 +4129,7 @@ async fn probe_version(
 
 /// One freshly collected document and the typed facts derived from the same
 /// executable and source. The document is transient; only facts enter cache.
+#[derive(Clone)]
 pub(crate) struct FreshSourceProbe {
     pub(crate) document: String,
     facts: Result<DecodeFacts, DecodeFactError>,

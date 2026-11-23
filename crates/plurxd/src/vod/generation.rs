@@ -360,12 +360,17 @@ pub(super) async fn spawn_generation(
                 return;
             };
             let owners = Arc::clone(rendition);
-            let hook = Box::new(move |registration: &crate::prodrun::ProducerRegistration| {
-                owners
-                    .source_owners
-                    .registered(&source_dispatch, registration);
-                drop(source_dispatch);
-            });
+            let hook = Box::new(
+                move |registrations: &[crate::prodrun::ProducerRegistration]| {
+                    // A window run's helper first, so the encoder stays current.
+                    for registration in registrations {
+                        owners
+                            .source_owners
+                            .registered(&source_dispatch, registration);
+                    }
+                    drop(source_dispatch);
+                },
+            );
             let Some(source_custody) = source_custody else {
                 record_failure(
                     shared,
@@ -375,8 +380,10 @@ pub(super) async fn spawn_generation(
                 );
                 return;
             };
-            runtime
-                .execute_with_source_input(
+            // Boxed so the DV window's large future lives on the heap, not in
+            // every generation future's stack frame.
+            Box::pin(
+                runtime.execute_with_source_input(
                     &recipe.file,
                     &encoding.plan,
                     &encoding.options,
@@ -390,25 +397,34 @@ pub(super) async fn spawn_generation(
                     source_custody,
                     None,
                     source_open,
-                )
-                .await
-                .and_then(|outcome| match outcome {
-                    crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
-                        Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
-                    }
-                    crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
-                        match &encoding.dv_processing {
-                            plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
-                                if actual.semantic_digest() == frozen.semantic_digest() =>
-                            {
-                                Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
-                                    window,
-                                ))
-                            }
-                            _ => Err("completed DV graph differs from frozen rendition".into()),
+                    // The entries a window run may render after this one.
+                    rendition
+                        .plan
+                        .entries
+                        .get(at as usize + 1..)
+                        .map_or(&[][..], |rest| {
+                            &rest[..rest.len().min(crate::dv_segment::RUN_MAX - 1)]
+                        }),
+                ),
+            )
+            .await
+            .and_then(|outcome| match outcome {
+                crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                    Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
+                }
+                crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
+                    match &encoding.dv_processing {
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                            if actual.semantic_digest() == frozen.semantic_digest() =>
+                        {
+                            Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
+                                window,
+                            ))
                         }
+                        _ => Err("completed DV graph differs from frozen rendition".into()),
                     }
-                })
+                }
+            })
         };
         let verified = match verified {
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
@@ -977,15 +993,24 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         }
         args
     } else {
-        let mut args = plurx_core::transcode::copy_pipe_args_with_audio_delivery(
-            &recipe.file,
-            start_seconds,
-            recipe.audio_index,
-            recipe.aac,
-            Pacing::unpaced(),
-            recipe.video,
-            recipe.audio_delivery.as_ref(),
-        );
+        let mut args = if recipe.audio_excluded {
+            plurx_core::transcode::copy_video_only_pipe_args(
+                &recipe.file,
+                start_seconds,
+                Pacing::unpaced(),
+                recipe.video,
+            )
+        } else {
+            plurx_core::transcode::copy_pipe_args_with_audio_delivery(
+                &recipe.file,
+                start_seconds,
+                recipe.audio_index,
+                recipe.aac,
+                Pacing::unpaced(),
+                recipe.video,
+                recipe.audio_delivery.as_ref(),
+            )
+        };
         if attested {
             replace_inputs_with_attested_descriptor(&mut args);
         }

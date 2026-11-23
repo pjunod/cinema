@@ -10,7 +10,9 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-type RegistrationHook = Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>;
+/// Called with a window's registrations, in order: a window run's helper
+/// (which keeps reading the source between windows), then the encoder.
+type RegistrationHook = Box<dyn FnOnce(&[crate::prodrun::ProducerRegistration]) + Send>;
 
 #[cfg(target_os = "linux")]
 fn trace_window_stage(entry: u32, stage: &'static str, since: &mut std::time::Instant) {
@@ -623,6 +625,8 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) runtime_cache: PathBuf,
     pub(crate) shader_cache: Arc<tempfile::TempDir>,
     pub(crate) prepared: std::sync::Mutex<Option<(u32, VerifiedWindow)>>,
+    /// The live window run whose helper renders this session's next windows.
+    pub(crate) window_run: crate::dv_segment::WindowRunSlot,
     pub(crate) failure_episode: DvDigest,
     pub(crate) preparation_budget: std::time::Duration,
     pub(crate) report_revision: std::sync::atomic::AtomicU64,
@@ -689,6 +693,7 @@ impl RuntimeRecipe {
                     input,
                     None,
                     None,
+                    &[],
                 )
                 .await?;
             let WindowOutcome::Completed((window, decision)) = outcome else {
@@ -884,6 +889,7 @@ impl RuntimeRecipe {
     pub(crate) fn refuse_episode(&self) {
         fail_episode(&self.failure_episode);
         self.clear_published_window();
+        self.end_window_run();
     }
     fn window(
         &self,
@@ -924,6 +930,7 @@ impl RuntimeRecipe {
         source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
         source_open: Option<std::time::Duration>,
+        following: &[plurx_core::segplan::PlanEntry],
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -949,15 +956,20 @@ impl RuntimeRecipe {
                 self.display_target,
                 Arc::clone(&source_input),
                 source_open,
+                following,
             )
             .await;
         // Early validation/spawn failures and every terminal graph result use
         // this same join. Physical Resources retain their input use through
         // helper and encoder reap; no caller can release it by returning early.
-        source_input
-            .close_and_wait()
-            .await
-            .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        // A window run that started from this input owns it from here on and
+        // closes it when its helper is reaped.
+        if !self.window_run.owns_input(&source_input).await {
+            source_input
+                .close_and_wait()
+                .await
+                .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        }
         result
     }
 
@@ -1008,6 +1020,7 @@ impl RuntimeRecipe {
                 display_target,
                 Arc::clone(&source_input),
                 None,
+                &[],
             )
             .await;
         source_input
@@ -1034,6 +1047,7 @@ impl RuntimeRecipe {
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
         source_input: Arc<crate::dv_segment::SourceInputLease>,
         source_open: Option<std::time::Duration>,
+        following: &[plurx_core::segplan::PlanEntry],
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1176,7 +1190,17 @@ impl RuntimeRecipe {
                 window: Some(window),
                 stages: Arc::clone(&stages),
             };
-            let private = match run_private_window(request, registration_hook).await? {
+            // Boxed: the window-run state makes this future large, and every
+            // VOD generation future embeds it.
+            let private = match Box::pin(self.render_window(
+                request,
+                registration_hook,
+                entry,
+                following,
+                grid,
+            ))
+            .await?
+            {
                 WindowOutcome::Completed(private) => private,
                 WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
             };
@@ -1394,6 +1418,10 @@ impl RuntimeRecipe {
         stages
             .report(source_open)
             .log(entry.index, self.mode, outcome, cause);
+        // A window that did not verify leaves no run to continue.
+        if outcome != "completed" {
+            self.end_window_run();
+        }
         // Return observations to the owner. Only its current generation or
         // admitted preparation can make a backend failure episode-wide.
         if cancellation.is_cancelled() {
@@ -1412,7 +1440,14 @@ impl RuntimeRecipe {
 async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
-) -> Result<WindowOutcome<PrivateWindow>, String> {
+    launch: window_run::Launch<'_>,
+) -> Result<
+    (
+        WindowOutcome<PrivateWindow>,
+        Option<crate::dv_segment::WindowRun>,
+    ),
+    String,
+> {
     let slot = request.request.producer.clone();
     let cancel = request.request.cancel.child_token();
     let _cancel_on_drop = cancel.clone().drop_guard();
@@ -1421,7 +1456,14 @@ async fn run_private_window(
     let stages = Arc::clone(&request.stages);
     let display_target = request.display_target;
     let master_metadata = request.master_metadata;
-    let mut producer = crate::dv_segment::spawn_streaming(request).await?;
+    let (mut producer, started) = match launch {
+        window_run::Launch::Single => (crate::dv_segment::spawn_streaming(request).await?, None),
+        window_run::Launch::Start(launch) => {
+            let (producer, run) = crate::dv_segment::spawn_streaming_run(request, launch).await?;
+            (producer, Some(run))
+        }
+        window_run::Launch::Continue(run) => (run.attach(request).await?, None),
+    };
     let source_settlement = producer.take_source_settlement();
     let result = async {
         let evidence = producer
@@ -1430,9 +1472,10 @@ async fn run_private_window(
         let helper = producer
             .take_helper_completion()
             .ok_or("missing helper completion")?;
+        let source_registrations = producer.source_registrations();
         let (registration, writers, stdout, stderr) = producer.into_parts();
         if let Some(registered) = registration_hook {
-            registered(&registration);
+            registered(&source_registrations);
         }
         let captured = capture_private_output(
             &slot,
@@ -1463,7 +1506,7 @@ async fn run_private_window(
     if let Some(source) = source_settlement {
         source.settle().await?;
     }
-    result
+    result.map(|outcome| (outcome, started))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2271,6 +2314,9 @@ mod fel_mapping_tests {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "dv_runtime/observe_tests.rs"]
 mod observe_tests;
+
+#[path = "dv_runtime/window_run.rs"]
+mod window_run;
 
 #[cfg(all(test, target_os = "linux"))]
 mod source_origin_tests {
@@ -3085,6 +3131,33 @@ mod hdr10e_export_throughput {
             .split_once("\n}\n")
             .expect("C function end")
             .0
+    }
+
+    /// A window run's first window writes its NUT output to the inherited
+    /// descriptor its encoder reads (`/proc/self/fd/5`). The helper must close
+    /// that inherited copy when the window ends: holding it while the run goes
+    /// on kept the encoder from ever reaching end of input, so every 4K run
+    /// window 0 hit its deadline in production and DV processing was refused.
+    #[test]
+    fn a_run_closes_the_first_window_inherited_nut_descriptor_at_its_boundary() {
+        let main = include_str!("../../../tools/dv_processing/segment_decode_render.c");
+        let advance = c_body(main, "static bool run_advance(");
+        let closed = advance
+            .find("avio_closep(&nut_output->pb)")
+            .expect("the window's NUT output closes");
+        let inherited = advance
+            .find("close(run_inherited_nut)")
+            .expect("the first window's inherited NUT descriptor closes");
+        let next = advance.find("run_current++").expect("the run advances");
+        assert!(closed < inherited && inherited < next, "{advance}");
+        let start = &main[main
+            .find("open_nut(argv[11]);")
+            .expect("first NUT output opens")..];
+        assert!(
+            start.contains("\"/proc/self/fd/%d%c\"")
+                && start.contains("run_inherited_nut = inherited;"),
+            "the first window records the inherited NUT descriptor"
+        );
     }
 
     /// 4K HDR10-E fell behind real time on the GPU export, not the decode:
