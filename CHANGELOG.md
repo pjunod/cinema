@@ -105,10 +105,6 @@ before that and are released with the next cut. -->
 
 ### Fixed
 
-- A resumed native Dolby Vision copy that abandons its split layout now says why. The cause is a
-  missing or late source picture clock, a clock that does not match, or a non-full enhancement
-  layer. Before, the split was dropped silently and the layout line reported only that no split
-  initialization existed.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
