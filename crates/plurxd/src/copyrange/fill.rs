@@ -167,12 +167,17 @@ where
     // Before the head is read, so a wait discards no work. As the rest of
     // this fill, the wait has no deadline of its own: it ends when the memory
     // is free or the phase is lost. Live copies are served first.
+    let charge = crate::copyrange::admission_charge(file.size, file.duration_ms);
     let memory = tokio::select! {
         memory = fill.copy_memory.acquire(
-            crate::copyrange::COPY_HOLD_BYTES,
+            charge,
             crate::admission::CopyPriority::Background,
             tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600),
-        ) => memory.ok_or_else(|| failed("copy_memory_unavailable".into()))?,
+        ) => Arc::new(memory.map_err(|refusal| match refusal {
+            // More than this node can hold even alone: a property of the file.
+            crate::admission::CopyMemoryRefusal::OverCeiling => failed("copy_range_input_limit".into()),
+            crate::admission::CopyMemoryRefusal::Busy => failed("copy_memory_unavailable".into()),
+        })?),
         () = fill.stop.cancelled() => return Err(failed("copy_range_cancelled".into())),
     };
     let census = run_source_census(
@@ -230,7 +235,8 @@ where
     // The census Input and its readers are joined. A seeked start may read
     // only the bounded bootstrap allowance until its landing is verified.
     let input = open().await.map_err(failed)?;
-    let seek_bootstrap = match input.seal_seek_bootstrap_limit(super::SOURCE_SEEK_BOOTSTRAP_BYTES) {
+    let seek_bootstrap = match input.seal_seek_bootstrap_limit(super::seek_bootstrap_bytes(charge))
+    {
         Ok(handle) => handle,
         Err(error) => {
             let _ = input.close_and_wait().await;
@@ -267,7 +273,10 @@ where
                 event=pipes.next()=>event.ok_or("copy_output_readers_lost")?,
             };
             let eof = pipes.all_eof();
-            batch.apply(mux.feed(event)?)?;
+            mux.fit(&event, fill.stop).await?;
+            let events = mux.feed(event)?;
+            mux.settle(&events).await;
+            batch.apply(events)?;
             if reached(fill.gap, &batch.rows) {
                 return Ok(FillEnd::NextObservedRow);
             }

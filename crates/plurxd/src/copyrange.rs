@@ -31,11 +31,15 @@ mod meter;
 #[cfg(unix)]
 mod production;
 #[cfg(unix)]
-pub(crate) use observed::COPY_HOLD_BYTES;
+pub(crate) use observed::admission_charge;
 #[cfg(unix)]
 pub(crate) use production::{CommitWaiter, CopyRangeProduction, DeadlineEnd};
 
+/// What a seeked generation may read before its landing is verified: what
+/// its copy is admitted to hold, one segment more, and the census's own read.
 #[cfg(unix)]
-pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES: u64 = observed::MAX_HELD as u64
-    + plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64
-    + census::MAX_CENSUS_SOURCE_BYTES;
+pub(crate) fn seek_bootstrap_bytes(charge: u64) -> u64 {
+    charge
+        .saturating_add(plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64)
+        .saturating_add(census::MAX_CENSUS_SOURCE_BYTES)
+}

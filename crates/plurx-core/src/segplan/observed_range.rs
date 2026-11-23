@@ -98,6 +98,14 @@ impl ObservedRangeAssembler {
         })
     }
 
+    /// Bytes this assembler holds now: the canonical box being framed and
+    /// the framed fragment waiting for its clock.
+    pub fn held_bytes(&self) -> usize {
+        self.media
+            .buffered()
+            .saturating_add(self.fragment.as_ref().map_or(0, Fragment::len))
+    }
+
     pub fn feed_media(&mut self, bytes: &[u8]) -> Result<FeedProgress, ObservationError> {
         if self.failed {
             return Err(ObservationError::Failed);

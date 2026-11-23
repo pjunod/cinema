@@ -553,16 +553,25 @@ impl TranscodeManager {
         // copy needs and discards no work. A node whose copies hold their
         // budget answers busy, which the receiver retries.
         *stage = "growing.copy_memory";
-        let memory = self
-            .admissions
-            .copy_memory()
-            .acquire(
-                crate::copyrange::COPY_HOLD_BYTES,
-                crate::admission::CopyPriority::Live,
-                tokio::time::Instant::from_std(deadline),
-            )
-            .await
-            .ok_or(SourceWorkerError::Capacity)?;
+        let charge =
+            crate::copyrange::admission_charge(prepared.file().size, prepared.file().duration_ms);
+        let memory = std::sync::Arc::new(
+            self.admissions
+                .copy_memory()
+                .acquire(
+                    charge,
+                    crate::admission::CopyPriority::Live,
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await
+                .map_err(|refusal| match refusal {
+                    crate::admission::CopyMemoryRefusal::Busy => SourceWorkerError::Capacity,
+                    // More than this node can hold even alone.
+                    crate::admission::CopyMemoryRefusal::OverCeiling => {
+                        SourceWorkerError::CopyInputLimit
+                    }
+                })?,
+        );
         *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
         *stage = "growing.rendition_owner";
@@ -758,7 +767,7 @@ impl TranscodeManager {
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
         let seek_bootstrap =
-            match input.seal_seek_bootstrap_limit(crate::copyrange::SOURCE_SEEK_BOOTSTRAP_BYTES) {
+            match input.seal_seek_bootstrap_limit(crate::copyrange::seek_bootstrap_bytes(charge)) {
                 Ok(handle) => handle,
                 Err(_) => {
                     let _ = input.close_and_wait().await;

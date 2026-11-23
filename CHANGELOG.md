@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+<!-- New entries no longer go here. Each pull request's entries live in its description's
+`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
+from the landing commits into the dated section. The entries below were written by hand
+before that and are released with the next cut. -->
+
 ### Added
 
 - Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
@@ -100,22 +105,6 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- **Shared copies are admitted against the node's memory.** Each verified
-  copy (a shared growing copy or an Analysis gap fill) now charges the memory
-  its pairing hold may use against a per-node copy memory budget before its
-  FFmpeg child starts, and returns it when the copy ends, however it ends.
-  The budget is an eighth of the node's memory (its container limit on Linux,
-  `hw.memsize` on macOS), or `PLURX_COPY_MEMORY_BUDGET`. A copy that does
-  not fit waits in arrival order and is answered busy, which receivers retry;
-  a lone copy larger than the whole budget still runs on an idle node. The
-  budget counts plurxd's heap only, not FFmpeg children. Activity shows used
-  and total per node, and the copy's end-of-production line its peak.
-- **A shared copy refused for its size now says so.** A high-bitrate source
-  whose keyframe spans outgrow the copy's in-memory pairing hold (4K
-  Dolby Vision remuxes with 70 MB fragments) was refused with
-  `copy_sync_unverified` when it restarted mid-title, as if its seek landing
-  had failed. It now answers `copy_range_input_limit` (422), in the log and to
-  the client. Serving such sources is a separate change.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and

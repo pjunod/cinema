@@ -496,7 +496,7 @@ impl CopyRangeProduction {
             plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
         ));
         let peak_held = mux.peak_held();
-        let charged = mux.charged_bytes();
+        let memory = mux.memory();
         let observed=async{
             loop {
                 let pipes=running.pipes.as_mut().ok_or("copy_output_readers_missing")?;
@@ -509,7 +509,10 @@ impl CopyRangeProduction {
                 meter.child(waiting.elapsed());
                 let eof=pipes.all_eof();
                 let converting=tokio::time::Instant::now();
+                // A live copy's growth is granted at once: it never waits here.
+                mux.fit(&event,&self.stop).await?;
                 let events=mux.feed(event)?;
+                mux.settle(&events).await;
                 meter.convert(converting.elapsed());
                 self.apply(events,&census,canonical_title_start,&mut meter).await?;
                 if eof{break;}
@@ -551,7 +554,7 @@ impl CopyRangeProduction {
             tokio::time::Instant::now(),
             &result,
             peak_held.load(std::sync::atomic::Ordering::Relaxed),
-            charged,
+            memory.bytes(),
         );
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();
