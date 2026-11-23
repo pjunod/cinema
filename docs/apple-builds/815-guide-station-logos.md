@@ -1,6 +1,5 @@
 # Draw station logos in the Live TV guide
 
-Build: 209
 Issue: #815
 
 The Apple TV and iOS Live TV guides now draw HDHomeRun's station artwork

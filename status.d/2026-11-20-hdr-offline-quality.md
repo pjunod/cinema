@@ -1,0 +1,1 @@
+- **2026-11-20 · HDR offline quality:** shared RGB48 inverse and pinned CPU ColorVideoVDP reviewed; 17 adapter controls and bounded component smoke pass. [One-host CLI/corpus/physical limits](docs/performance/HDR-REFERENCE-SCORING.md). Algorithms parked.

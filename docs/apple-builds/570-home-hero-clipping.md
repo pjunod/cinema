@@ -1,6 +1,5 @@
 # Keep the iPhone Home movie title and controls inside the card
 
-Build: 190
 Issue: #570
 
 Constrain loaded featured artwork to the compact card width before laying out

@@ -2,7 +2,6 @@
 
 **Status:** built.
 
-Build: 270
 Issue: #1205
 
 Movie and show pages show review-site scores (IMDb, Rotten Tomatoes,
