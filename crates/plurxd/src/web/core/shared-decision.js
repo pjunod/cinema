@@ -29,6 +29,9 @@ const SHARED_DECISION=(()=>{
       copy_target_exceeded:"This file's keyframes are too far apart for the sharing host to stream it as it is. Convert it to play.",
       copy_clock_unknown:"The sharing host could not read this file's timing to stream it.",
       copy_sync_unverified:"The sharing host could not line up this file's audio and video at that position.",
+      // A busy host past the decision's wait: stopped with Try again, never a
+      // "still starting" surface, because nothing retries a decision itself.
+      sharing_decision_busy:"The sharing host is busy. Try again shortly.",
       // A local create's retryable "not yet" codes, which B answers only to a
       // Start that sent its start clock.
       startup_timeout:"The sharing host is still preparing this stream.",

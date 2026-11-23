@@ -131,7 +131,7 @@ fn source_failure(error: PeerError) -> ApiError {
             "sharing_asset_unsupported",
             "The Source cannot provide this asset for this track",
         ),
-        PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS) => capacity(),
+        PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS) | PeerError::Busy { .. } => capacity(),
         _ => unavailable(),
     }
 }

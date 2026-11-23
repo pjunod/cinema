@@ -37,8 +37,13 @@ fn free_address() -> std::net::SocketAddr {
 fn member_config(root: &Path) -> Config {
     let mut config = Config::default();
     config.storage.data_dir = root.to_owned();
-    config.cluster.raft_bind = free_address();
-    config.cluster.api_bind = free_address();
+    // The voter serves on these sockets, so no other socket can take either
+    // port between this bind and its start.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft listener");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API listener");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     config.cluster.advertise_host = "localhost".into();
     config
 }
