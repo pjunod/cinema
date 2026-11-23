@@ -6367,7 +6367,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Shared status busy wire test: +1 `Duration::from_secs` join timeout in
 # sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
 # no production task, timer or process.
-expected_occurrences = 2349
+# Shared busy wait: +1 production tokio::time::sleep_until in
+# sharing::honour_peer_wait. It waits out a typed peer wait (429/503 with
+# Retry-After, or the receiver's own catalogue admission) and only while the
+# wake still fits before the read's existing deadline; it adds no deadline,
+# poll, task or retry outside that budget.
+expected_occurrences = 2350
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7763,7 +7768,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # no production task, timer or process.
 # P49 AC-5 merge: main 1009 plus the branch's +1 test-only output() in the
 # split admission test, which synchronously joins the FFmpeg fixture child; 1010.
-expected_occurrences = 1010
+# Shared busy decision test: +2 `.status()` reads of HTTP responses in
+# a_busy_decision_upstream_is_a_typed_wait_not_a_verdict. No process launch.
+expected_occurrences = 1012
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

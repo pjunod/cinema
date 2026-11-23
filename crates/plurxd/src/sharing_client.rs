@@ -536,6 +536,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             // Limit the stream even when Content-Length is absent or false.
             let bytes = axum::body::to_bytes(
                 Body::new(
@@ -560,7 +561,8 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if !status.is_success() {
-                return Err(PeerError::Rejected(status));
+                // A typed wait (429 or 503 with Retry-After) stays a wait.
+                return Err(peer_status_refusal(status, retry_after.as_ref()));
             }
             serde_json::from_slice(&bytes).map_err(|_| PeerError::InvalidResponse)
         })

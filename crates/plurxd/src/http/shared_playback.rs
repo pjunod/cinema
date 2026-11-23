@@ -39,6 +39,13 @@ fn refused() -> ApiError {
         "Shared decision authority is unavailable",
     )
 }
+/// A wait that outlived the decision's budget is still a wait: the viewer
+/// gets the typed retry a busy Start gives, never "could not determine".
+fn decision_upstream_failure(error: crate::sharing_client::PeerError) -> ApiError {
+    crate::sharing_client::StartRetry::from_peer(error)
+        .map(|retry| retry.response("The sharing host is busy. Retrying shortly."))
+        .unwrap_or_else(refused)
+}
 fn invalid() -> ApiError {
     ApiError::typed(
         StatusCode::BAD_REQUEST,
@@ -326,8 +333,8 @@ async fn viewer_decision(
         .read_file_decision(&state, user.id, &reference, &input)
         .await
         .map_err(|error| {
-            tracing::warn!(phase = "upstream", %import_id, file_id = reference.file_id.as_str(), code = super::sharing::peer_error_code(&error), "shared playback decision failed");
-            refused()
+            tracing::warn!(phase = "upstream", %import_id, file_id = reference.file_id.as_str(), code = super::sharing::peer_error_code(&error), ?error, "shared playback decision failed");
+            decision_upstream_failure(error)
         })?;
     let file = reference
         .file_id
@@ -354,4 +361,45 @@ async fn viewer_decision(
         serde_json::to_value(projected).map_err(|_| refused())?,
     )
     .await
+}
+
+#[cfg(test)]
+mod decision_upstream_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    /// Regression (M4 Air, 2026-11-23 16:06:36Z, 'Avatar'): a busy upstream
+    /// decision reached the viewer as `sharing_decision_unavailable`, "could
+    /// not determine how to play this file". It is the typed wait a busy Start
+    /// gives; a real refusal is still the decision verdict.
+    #[test]
+    fn a_busy_decision_upstream_is_a_typed_wait_not_a_verdict() {
+        use crate::sharing_client::PeerError;
+        let busy = decision_upstream_failure(PeerError::Busy {
+            retry_after_secs: 2,
+        })
+        .into_response();
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            busy.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("2")
+        );
+        for refusal in [
+            PeerError::Rejected(StatusCode::NOT_FOUND),
+            PeerError::Unavailable,
+            PeerError::InvalidResponse,
+        ] {
+            let response = decision_upstream_failure(refusal).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .is_none(),
+                "{refusal:?}"
+            );
+        }
+    }
 }

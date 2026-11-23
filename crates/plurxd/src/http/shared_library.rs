@@ -1425,6 +1425,7 @@ fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
     } else if matches!(
         error,
         crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            | crate::sharing_client::PeerError::Busy { .. }
     ) {
         fail(StatusCode::TOO_MANY_REQUESTS, "sharing_metadata_capacity")
     } else {
@@ -1631,7 +1632,10 @@ async fn viewer_continue_import(
             }
             "online"
         }
-        Err(crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)) => "busy",
+        Err(
+            crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            | crate::sharing_client::PeerError::Busy { .. },
+        ) => "busy",
         Err(_) => "unavailable",
         _ => return Err(invalid()),
     };
