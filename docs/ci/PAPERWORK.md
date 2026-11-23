@@ -70,7 +70,9 @@ opening its pull request, before any compiler job is allocated.
 | The tree names no real host, address, home or SSH user | `test_infra_names` | `scripts/scrub-infra-names --write`, or an allow-list row with its reason |
 | `docs/API.md` lists every route | `test_api_doc_routes` | add or delete the route entry |
 | No status line or Apple note quotes a build number | `test_apple_build_claims`, `test_mobile_build_claims` | remove the number (status lines name `scripts/build-number`); a user-visible Apple change gets a `docs/apple-builds/<issue>-<slug>.md` fragment with an `Issue:` line and no `Build:` line |
-| `STATUS.md` stays short and indexes what moved out | `test_status_page_shape` | move the oldest sections per [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) §3.4 |
+| A PR into `main` carries `Changelog: <Section> — <entry>` lines (or `Changelog: none`) in its description, and never edits `CHANGELOG.md` outside a release cut | `validation.changelog_field` via `check_changelog` | add the lines to the description; `scripts/release-cut` writes `CHANGELOG.md` from the landing commits |
+| `STATUS.md` and new `tests/client-fixes.toml` rows change only through their folders | `scripts/fold` via `check_folded_pages` | edit your effort's `status.d/<date>-<slug>.md`; put a new fix row in `tests/client-fixes.d/<id>.toml`. The fold workflow rewrites the pages after merge |
+| `STATUS.md`, as folded from `status.d/`, stays short and indexes what moved out | `test_status_page_shape` | retire the oldest `status.d/` entries per [status.d/README.md](../../status.d/README.md) |
 | No status page calls a merged PR open | `test_status_pr_claims` | update the quoted prose |
 | Doc `**Status:**` headers make possible claims | `test_doc_status_audit` | correct the header |
 | Every Node web test is in a lane | `test_web_test_inventory` | add the file to `make web-unit-check` |

@@ -72,10 +72,14 @@ CI passes the tag name automatically when it publishes an image.
 1. **Decide the number** using the table above.
 
 2. **Run `scripts/release-cut`** (`--part minor` for a minor bump, or
-   `--version X.Y.Z`). It refuses an empty `Unreleased` section, an existing
-   tag and an existing changelog section before it writes anything; then it
-   moves `CHANGELOG.md`'s `Unreleased` section under a dated
-   `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
+   `--version X.Y.Z`). It collects the `Changelog:` entries every landing
+   commit carried since the previous cut's `changelog-through` marker
+   (`validation/changelog_field.py`; `scripts/release-cut --preview` shows
+   them), refuses a release with no entries, an existing tag and an existing
+   changelog section before it writes anything, names any landing that came
+   in without the field, then writes the entries under a dated
+   `## [X.Y.Z] — YYYY-MM-DD` heading with a new marker, folds every fragment
+   folder (`scripts/fold --all`), rewrites the two link definitions at the
    bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
    marketing versions to it (the mobile-version contract requires that),
    rewrites the status lines that quote the version
@@ -348,8 +352,9 @@ curl -s localhost:32400/api/v1/server | jq '{version, build}'
 
 From a node's `build` to the changelog entries it runs: a `build` of
 `v0.3.1` is exactly the `## [0.3.1]` section of `CHANGELOG.md`; a `build` of
-`v0.3.1-12-gabc1234` is that section **plus** whatever of `[Unreleased]` was
-merged by commit `abc1234` (`git log v0.3.1..abc1234`). Across the fleet the
+`v0.3.1-12-gabc1234` is that section **plus** the `Changelog:` entries of
+the landing commits up to `abc1234` (`git log --first-parent v0.3.1..abc1234`;
+`scripts/release-cut --preview` on that commit prints them). Across the fleet the
 same pair is the `plurx_build_info{version,build}` metric, and
 [OPERATIONS.md](OPERATIONS.md) "The fleet registry" says which image a node
 runs.

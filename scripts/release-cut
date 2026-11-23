@@ -419,10 +419,33 @@ def cut(root: Path, version: str, date: str) -> list[str]:
         current,
         version,
     )
+    folded, absorbed = _fold_everything(root)
     # Every refusal above happens before any file is written.
-    for path, contents in {**moved, **claims}.items():
+    for path, contents in {**moved, **claims, **folded}.items():
         (root / path).write_text(contents, encoding="utf-8")
-    return [*moved, *sorted(claims)]
+    for path in absorbed:
+        (root / path).unlink()
+    return [*moved, *sorted(claims), *sorted(folded), *absorbed]
+
+
+def _fold_everything(root: Path) -> tuple[dict[str, str], list[str]]:
+    """Every fragment folder folded completely (scripts/fold --all), so the release commit's
+    pages match their folders. A tree without scripts/fold (a fixture) has nothing to fold."""
+
+    script = root / "scripts" / "fold"
+    if not script.exists():
+        return {}, []
+    import importlib.machinery  # noqa: PLC0415
+    import importlib.util  # noqa: PLC0415
+
+    loader = importlib.machinery.SourceFileLoader("fold_script", str(script))
+    spec = importlib.util.spec_from_loader("fold_script", loader)
+    fold = importlib.util.module_from_spec(spec)
+    loader.exec_module(fold)
+    try:
+        return fold.changes(root, everything=True)
+    except fold.FoldError as exc:
+        raise CutError(f"cannot fold the fragment folders: {exc}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
