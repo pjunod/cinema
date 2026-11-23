@@ -316,7 +316,11 @@ async fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use plurx_core::{
+        sharing::SourceId, sharing_catalogue::SharedReference,
+        sharing_catalogue_details::FileRevision, store::sharing_catalogue::ReceiverCatalogueScope,
+    };
+    use tower::ServiceExt;
     /// The viewer is answered with the Source's own refusal of the title, not
     /// this receiver's "unresolved".
     #[test]
@@ -334,11 +338,7 @@ mod tests {
             "{answer:?}"
         );
     }
-    use plurx_core::{
-        sharing::SourceId, sharing_catalogue::SharedReference,
-        sharing_catalogue_details::FileRevision, store::sharing_catalogue::ReceiverCatalogueScope,
-    };
-    use tower::ServiceExt;
+
     fn request() -> Value {
         serde_json::json!({"playback_id":"actual-client-instance","request_id":Uuid::new_v4(),"start":17,"copy":true,"height":1080,"quality_auto":false,"presentation":"vod","transport":"native","subtitle":null,"audio":1,"audio_offset_ms":250,"block_budget_secs":12,"preserve_dolby_vision":false,"hdr10":false,"native_subtitles":true,"previous_session_id":Uuid::new_v4(),"reopen_reason":"stall","control_sequence":9,"caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})
     }

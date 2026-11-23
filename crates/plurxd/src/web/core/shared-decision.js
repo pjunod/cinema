@@ -25,8 +25,8 @@ const SHARED_DECISION=(()=>{
       sharing_start_dolby_vision_unsupported:"The sharing host cannot prepare this Dolby Vision title yet.",
       sharing_decision_unavailable:"The sharing host could not determine how to play this file.",
       // The sharing host's own refusal of the title, relayed by this server.
-      copy_range_input_limit:"This file's video is too large for the sharing host to stream unconverted.",
-      copy_target_exceeded:"This file's video cannot be streamed unconverted: its keyframes are too far apart.",
+      copy_range_input_limit:"This file's video is too large for the sharing host to stream as it is. Convert it to play.",
+      copy_target_exceeded:"This file's keyframes are too far apart for the sharing host to stream it as it is. Convert it to play.",
       copy_clock_unknown:"The sharing host could not read this file's timing to stream it.",
       copy_sync_unverified:"The sharing host could not line up this file's audio and video at that position.",
       // A local create's retryable "not yet" codes, which B answers only to a
