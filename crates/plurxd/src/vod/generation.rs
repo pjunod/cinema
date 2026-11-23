@@ -8,10 +8,21 @@ pub(super) async fn spawn_generation(
     at: u32,
     permit: Option<crate::vodencode::EncodePermit>,
 ) {
-    let epoch = rendition.gen_epoch.load(Relaxed);
-    let resume_work = rendition.resume_preparation_for_epoch(epoch);
+    // One epoch read for both the generation and its leftover-custody close,
+    // so an epoch move in between cannot strand resume custody unjoined.
+    let generation_epoch = rendition.gen_epoch.load(Relaxed);
+    let resume_work = rendition.resume_preparation_for_epoch(generation_epoch);
     let mut source_custody = None;
-    spawn_generation_with_input(shared, rendition, at, permit, &mut source_custody).await;
+    spawn_generation_with_input(
+        shared,
+        rendition,
+        at,
+        permit,
+        generation_epoch,
+        resume_work.clone(),
+        &mut source_custody,
+    )
+    .await;
     if let (Some(work), Some(input)) = (resume_work, source_custody) {
         work.cancel();
         match input.close_and_wait().await {
@@ -29,6 +40,8 @@ async fn spawn_generation_with_input(
     rendition: &Arc<Rendition>,
     at: u32,
     permit: Option<crate::vodencode::EncodePermit>,
+    generation_epoch: u64,
+    resume_work: Option<Arc<super::resume_preparation::ResumePreparation>>,
     source_custody: &mut Option<crate::source_input::SourceInput>,
 ) {
     let spawn_started = std::time::Instant::now();
@@ -62,8 +75,6 @@ async fn spawn_generation_with_input(
             )
             .with_startup_burst(rendition.source_burst_secs)
         });
-    let generation_epoch = rendition.gen_epoch.load(Relaxed);
-    let resume_work = rendition.resume_preparation_for_epoch(generation_epoch);
     let fail = |decision, cause| {
         if let Some(work) = resume_work.as_ref() {
             work.cancel();
