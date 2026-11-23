@@ -325,7 +325,9 @@ def check_folded_pages(base: str, paths: list[str], title: str) -> Result:
     if not (by_fold or cutover or release):
         for item in fold.FOLDS:
             if item.page in paths:
-                problems.append(f"{item.page} changed; it is generated from {item.source}")
+                problem = item.guard(_at(base, item.page), _at(None, item.page))
+                if problem:
+                    problems.append(problem)
     return Result(name, not problems, time.monotonic() - start, "\n".join(problems), hint)
 
 
@@ -410,7 +412,7 @@ def print_list() -> None:
     print("  catalog            every governed file maps to a functionality point")
     print("  Regression-Test    fix(/perf( commits need `Regression-Test:` lines in the PR description")
     print("  Changelog          PRs into main carry `Changelog:` lines in the description; CHANGELOG.md is release-only")
-    print("  folded pages       STATUS.md (and other folded pages) change only through scripts/fold")
+    print("  folded pages       STATUS.md is generated; new client-fixes rows go in tests/client-fixes.d/")
     print("  mobile counters    Apple/Android build numbers rise when client code changes")
     for module, guard, hint in TEST_RULES:
         print(f"  {module:<26} {guard}\n  {'':<26} fix: {hint}")

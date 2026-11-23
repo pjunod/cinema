@@ -85,17 +85,57 @@ class PaperworkFoldCase(unittest.TestCase):
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def test_a_pull_request_may_not_edit_status_md(self):
+    def test_a_pull_request_may_not_edit_status_md_or_add_ledger_rows(self):
         base = self.head()
         if subprocess.run(["git", "cat-file", "-e", f"{base}:scripts/fold"], cwd=ROOT).returncode:
             self.skipTest("HEAD predates scripts/fold; the cutover pull request writes STATUS.md")
-        refused = self.PAPERWORK.check_folded_pages(base, ["STATUS.md"], "fix: something")
+        row = '[[fixes]]\nid = "x"\n'
+        texts = {
+            "STATUS.md": ("old page\n", "hand-edited page\n"),
+            "tests/client-fixes.toml": ("version = 1\n" + row, "version = 1\n" + row + row),
+            "Cargo.toml": ("", ""),
+        }
+        original = self.PAPERWORK._at
+
+        def at(revision, path):
+            if path in texts:
+                return texts[path][0 if revision is not None else 1]
+            return original(revision, path)
+
+        self.PAPERWORK._at = at
+        self.addCleanup(setattr, self.PAPERWORK, "_at", original)
+        refused = self.PAPERWORK.check_folded_pages(
+            base, ["STATUS.md", "tests/client-fixes.toml"], "fix: something")
         self.assertFalse(refused.ok)
         self.assertIn("generated from status.d/", refused.detail)
+        self.assertIn("gained 1 [[fixes]] row", refused.detail)
         self.assertTrue(self.PAPERWORK.check_folded_pages(
-            base, ["STATUS.md"], "chore(fold): fold fragment folders").ok)
-        self.assertTrue(self.PAPERWORK.check_folded_pages(base, ["status.d/x.md"], "fix: x").ok)
+            base, ["STATUS.md", "tests/client-fixes.toml"], "chore(fold): fold fragment folders").ok)
+        # Editing an existing ledger row (a re-anchor) is allowed.
+        texts["tests/client-fixes.toml"] = ("version = 1\n" + row, "version = 1\n" + row.replace("x", "y"))
+        self.assertTrue(self.PAPERWORK.check_folded_pages(base, ["tests/client-fixes.toml"], "fix: x").ok)
 
+
+class ClientFixesFoldCase(unittest.TestCase):
+    def test_rows_move_into_the_ledger_past_the_bound_or_at_a_release(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "tests/client-fixes.d").mkdir(parents=True)
+        (root / "tests/client-fixes.toml").write_text(
+            'version = 1\nenforce_after = "abcdef1"\n\n[[fixes]]\nid = "old"\n', encoding="utf-8")
+        (root / "tests/client-fixes.d/a.toml").write_text('[[fixes]]\nid = "new"\n', encoding="utf-8")
+        text, absorbed = FOLD.render_client_fixes(root, everything=False)
+        self.assertEqual(absorbed, [])
+        text, absorbed = FOLD.render_client_fixes(root, everything=True)
+        self.assertEqual(absorbed, ["tests/client-fixes.d/a.toml"])
+        self.assertLess(text.index('id = "new"'), text.index('id = "old"'))
+        self.assertTrue(text.startswith('version = 1\nenforce_after = "abcdef1"\n'))
+        for index in range(FOLD.CLIENT_FIXES_BOUND):
+            (root / f"tests/client-fixes.d/b{index:02}.toml").write_text(
+                f'[[fixes]]\nid = "b{index}"\n', encoding="utf-8")
+        _, absorbed = FOLD.render_client_fixes(root, everything=False)
+        self.assertEqual(len(absorbed), FOLD.CLIENT_FIXES_BOUND + 1)
 
 if __name__ == "__main__":
     unittest.main()

@@ -395,6 +395,38 @@ def load_coverage(path: Path = DEFAULT_COVERAGE) -> tuple[CoverageEntry, ...]:
     )
 
 
+def client_fix_fragments(path: Path) -> list[Path]:
+    """The fragment files beside the ledger: `tests/client-fixes.d/*.toml`, in name order.
+
+    A pull request adds its new rows as a file of its own there, so two pull
+    requests adding fixes never edit the same lines; `scripts/fold` moves them
+    into the ledger after merge once the folder passes its bound, and at every
+    release cut.
+    """
+
+    folder = path.with_name(path.stem + ".d")
+    return sorted(folder.glob("*.toml")) if folder.is_dir() else []
+
+
+def _client_fix_rows(path: Path, raw: dict) -> list[tuple[str, object]]:
+    rows: list[tuple[str, object]] = [
+        (f"fixes[{index}]", item) for index, item in enumerate(raw.get("fixes", []))
+    ]
+    for fragment in client_fix_fragments(path):
+        try:
+            with fragment.open("rb") as handle:
+                extra = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise HistoryError(f"cannot read {fragment}: {exc}") from exc
+        if set(extra) != {"fixes"} or not isinstance(extra["fixes"], list) or not extra["fixes"]:
+            raise HistoryError(
+                f"{fragment.name} must hold only one or more [[fixes]] rows "
+                "(version and enforce_after live in the ledger)"
+            )
+        rows.extend((f"{fragment.name} fixes[{index}]", item) for index, item in enumerate(extra["fixes"]))
+    return rows
+
+
 def load_client_fixes(path: Path) -> ClientFixLedger:
     if not path.exists():
         return ClientFixLedger(enforce_after=None, fixes=())
@@ -413,8 +445,7 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
         raise HistoryError("client fix enforce_after must be a Git SHA prefix")
 
     entries: list[ClientFixEntry] = []
-    for index, item in enumerate(raw.get("fixes", [])):
-        where = f"fixes[{index}]"
+    for where, item in _client_fix_rows(path, raw):
         if not isinstance(item, dict):
             raise HistoryError(f"{where} must be a table")
         required = {

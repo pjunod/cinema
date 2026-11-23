@@ -1805,5 +1805,27 @@ class MergeTargetScopeCase(RepositoryFixture):
             audit_history(root, catalog, coverage, merge_ledger_path=ledger, merge_target="no-such-ref")
 
 
+class ClientFixFragmentCase(unittest.TestCase):
+    """tests/client-fixes.d/ rows are read as part of the ledger."""
+
+    def test_fragment_rows_join_the_ledger_and_a_bad_fragment_is_refused(self):
+        from validation.history import HistoryError, load_client_fixes
+
+        row = (
+            '[[fixes]]\nid = "{id}"\ncommits = ["abcdef1"]\nsource = "s"\nsource_anchor = "a"\n'
+            'test = "t"\ntest_anchor = "b"\n'
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "client-fixes.d").mkdir()
+            (root / "client-fixes.toml").write_text("version = 1\n" + row.format(id="ledger"), encoding="utf-8")
+            (root / "client-fixes.d/new.toml").write_text(row.format(id="fragment"), encoding="utf-8")
+            ledger = load_client_fixes(root / "client-fixes.toml")
+            self.assertEqual([fix.id for fix in ledger.fixes], ["ledger", "fragment"])
+            (root / "client-fixes.d/bad.toml").write_text('version = 1\n' + row.format(id="x"), encoding="utf-8")
+            with self.assertRaisesRegex(HistoryError, "bad.toml must hold only"):
+                load_client_fixes(root / "client-fixes.toml")
+
+
 if __name__ == "__main__":
     unittest.main()

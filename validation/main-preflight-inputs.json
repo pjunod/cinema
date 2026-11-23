@@ -1138,6 +1138,7 @@
         "validation/rust_modules.py",
         "tests/playback/routing-decisions.toml",
         "tests/client-fixes.toml",
+        "tests/client-fixes.d/**",
         ".github/workflows/ci.yml",
         "clients/android/README.md",
         "clients/android/app/build.gradle.kts",
