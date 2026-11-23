@@ -2,7 +2,7 @@
 
 `STATUS.md` is generated from this folder by `scripts/fold`; never edit it.
 Every effort owns one file here, so two pull requests never touch the same
-lines, and the page is rebuilt after each merge by the fold workflow
+lines, and the page is rebuilt from `main` every six hours by the fold workflow
 (`.github/workflows/fold.yml`).
 
 - **Name:** `status.d/<YYYY-MM-DD>-<slug>.md`, dated when the effort started.

@@ -519,7 +519,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  changed {path}")
     print(
         "\nNext, per docs/RELEASING.md:\n"
-        f"  1. commit these as `release: v{version}` on a branch and open a pull request;\n"
+        f"  1. commit these as `release: v{version}` on a branch and open a pull request whose\n"
+        "     description says `Changelog: none` (its entries are already in CHANGELOG.md;\n"
+        "     repeating them as fields would list them again in the next release);\n"
         "  2. merge it once its fast lane is green; the commit that lands it on main\n"
         "     is the release commit;\n"
         "  3. the next scheduled release-readiness run (Mondays 06:00 UTC) runs\n"

@@ -127,6 +127,9 @@ class ClientFixEntry:
     test: str
     test_anchor: str
     supplements: str | None = None
+    # The tests/client-fixes.d/ fragment the row lives in; None for a ledger row.
+    # Errors about the row are the pull request's own when it touched this file.
+    file: Path | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -408,9 +411,9 @@ def client_fix_fragments(path: Path) -> list[Path]:
     return sorted(folder.glob("*.toml")) if folder.is_dir() else []
 
 
-def _client_fix_rows(path: Path, raw: dict) -> list[tuple[str, object]]:
-    rows: list[tuple[str, object]] = [
-        (f"fixes[{index}]", item) for index, item in enumerate(raw.get("fixes", []))
+def _client_fix_rows(path: Path, raw: dict) -> list[tuple[str, object, Path | None]]:
+    rows: list[tuple[str, object, Path | None]] = [
+        (f"fixes[{index}]", item, None) for index, item in enumerate(raw.get("fixes", []))
     ]
     for fragment in client_fix_fragments(path):
         try:
@@ -423,7 +426,9 @@ def _client_fix_rows(path: Path, raw: dict) -> list[tuple[str, object]]:
                 f"{fragment.name} must hold only one or more [[fixes]] rows "
                 "(version and enforce_after live in the ledger)"
             )
-        rows.extend((f"{fragment.name} fixes[{index}]", item) for index, item in enumerate(extra["fixes"]))
+        rows.extend(
+            (f"{fragment.name} fixes[{index}]", item, fragment) for index, item in enumerate(extra["fixes"])
+        )
     return rows
 
 
@@ -445,7 +450,7 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
         raise HistoryError("client fix enforce_after must be a Git SHA prefix")
 
     entries: list[ClientFixEntry] = []
-    for where, item in _client_fix_rows(path, raw):
+    for where, item, fragment in _client_fix_rows(path, raw):
         if not isinstance(item, dict):
             raise HistoryError(f"{where} must be a table")
         required = {
@@ -475,6 +480,7 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
                 test=str(item["test"]),
                 test_anchor=str(item["test_anchor"]),
                 supplements=supplements,
+                file=fragment,
             )
         )
     # A supplementary row adds live obligations to exactly one primary; it
@@ -1150,7 +1156,8 @@ def audit_history(
     anchor_ids: set[str] = set()
     anchor_prefixes: set[str] = set()
     for index, entry in enumerate(client_fixes.fixes):
-        with errors.about(named_by(entry.commits), (client_fixes_file, entry.source, entry.test)):
+        row_file = _relative(root, entry.file) if entry.file is not None else client_fixes_file
+        with errors.about(named_by(entry.commits), (row_file, entry.source, entry.test)):
             where = f"fixes[{index}]"
             if not entry.id or entry.id in anchor_ids:
                 errors.append(f"{where} has a missing or duplicate id {entry.id!r}")

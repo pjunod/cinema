@@ -110,7 +110,8 @@ val plurxVersionCode: Int = providers.gradleProperty("plurxVersionCode").orNull?
     value.toIntOrNull()?.takeIf { it > 0 } ?: error("plurxVersionCode must be a positive integer; found '$value'")
 } ?: run {
     val script = rootDir.resolve("../../scripts/build-number")
-    val release = requestedTaskNames.any { it.contains("Release") || it.contains("release") }
+    // Every release-signed variant (ProfileCapture included) gets the strict derivation.
+    val release = releaseTaskRequested || requestedTaskNames.any { it.contains("release") }
     val derived = providers.exec {
         commandLine(listOfNotNull(script.absolutePath, "--release".takeIf { release }))
         workingDir = rootDir

@@ -111,9 +111,32 @@ class PaperworkFoldCase(unittest.TestCase):
         self.assertIn("gained 1 [[fixes]] row", refused.detail)
         self.assertTrue(self.PAPERWORK.check_folded_pages(
             base, ["STATUS.md", "tests/client-fixes.toml"], "chore(fold): fold fragment folders").ok)
+        # The title alone does not exempt a pull request that also changes code.
+        self.assertFalse(self.PAPERWORK.check_folded_pages(
+            base, ["STATUS.md", "crates/plurxd/src/main.rs"], "chore(fold): sneaky").ok)
         # Editing an existing ledger row (a re-anchor) is allowed.
         texts["tests/client-fixes.toml"] = ("version = 1\n" + row, "version = 1\n" + row.replace("x", "y"))
         self.assertTrue(self.PAPERWORK.check_folded_pages(base, ["tests/client-fixes.toml"], "fix: x").ok)
+
+    def test_only_a_raised_workspace_version_in_the_own_diff_is_a_release_cut(self):
+        base = self.head()
+        cargo = '[workspace.package]\nversion = "{}"\n'
+        original = self.PAPERWORK._at
+        versions = {"before": "0.8.0", "after": "0.8.0"}
+
+        def at(revision, path):
+            if path == "Cargo.toml":
+                return cargo.format(versions["after" if revision is None else "before"])
+            return original(revision, path)
+
+        self.PAPERWORK._at = at
+        self.addCleanup(setattr, self.PAPERWORK, "_at", original)
+        self.assertFalse(self.PAPERWORK._is_release_cut(base, ["Cargo.toml"]))
+        versions["after"] = "0.9.0"
+        self.assertTrue(self.PAPERWORK._is_release_cut(base, ["Cargo.toml"]))
+        self.assertFalse(self.PAPERWORK._is_release_cut(base, ["CHANGELOG.md"]))
+        versions["after"] = "0.7.9"
+        self.assertFalse(self.PAPERWORK._is_release_cut(base, ["Cargo.toml"]))
 
 
 class ClientFixesFoldCase(unittest.TestCase):

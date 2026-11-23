@@ -100,6 +100,12 @@ CI passes the tag name automatically when it publishes an image.
    `python3 scripts/check-formal check-mapping --package <package>` for
    `durable-jobs`, `operation-progress`, and `worker-refinement` before pushing.
 
+   The release pull request's description says `Changelog: none`: its
+   entries are already in the dated section, and repeating them as fields
+   would list them again in the next release. A pull request that lands
+   while the release pull request is open is listed under the next
+   release, since the cut read only what had landed when it ran.
+
 3. **Read the changelog it dated.** Entries are for people running the server,
    not for people reading the diff; edit them in the release pull request.
 

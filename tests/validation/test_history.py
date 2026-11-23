@@ -1822,6 +1822,9 @@ class ClientFixFragmentCase(unittest.TestCase):
             (root / "client-fixes.d/new.toml").write_text(row.format(id="fragment"), encoding="utf-8")
             ledger = load_client_fixes(root / "client-fixes.toml")
             self.assertEqual([fix.id for fix in ledger.fixes], ["ledger", "fragment"])
+            # A fragment row's errors belong to the pull request that touched the fragment.
+            self.assertIsNone(ledger.fixes[0].file)
+            self.assertEqual(ledger.fixes[1].file.name, "new.toml")
             (root / "client-fixes.d/bad.toml").write_text('version = 1\n' + row.format(id="x"), encoding="utf-8")
             with self.assertRaisesRegex(HistoryError, "bad.toml must hold only"):
                 load_client_fixes(root / "client-fixes.toml")

@@ -66,8 +66,8 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
     (
         "test_status_page_shape",
         "STATUS.md stays short and indexes the sections moved out of it",
-        "move the oldest STATUS.md sections verbatim into their subject folder's status history "
-        "and leave one index row each (docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.4)",
+        "move the oldest status.d/ entries verbatim into their subject folder's STATUS-HISTORY.md, "
+        "delete their files and add one row each to status.d/INDEX.md (status.d/README.md)",
     ),
     (
         "test_status_pr_claims",
@@ -252,6 +252,27 @@ def _workspace_version(text: str) -> str | None:
     return version.group(1) if version else None
 
 
+def _semver(text: str | None) -> tuple[int, ...] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _is_release_cut(base: str, paths: list[str]) -> bool:
+    """Whether this branch is a release cut: its own diff raises the workspace version.
+
+    Judged from the merge base, not `base` (the lane passes the target's tip):
+    a branch that merely predates a release would otherwise read as one.
+    """
+
+    if "Cargo.toml" not in paths:
+        return False
+    merge_base = subprocess.run(["git", "merge-base", base, "HEAD"], cwd=ROOT,
+                                capture_output=True, text=True).stdout.strip() or base
+    before = _semver(_workspace_version(_at(merge_base, "Cargo.toml")))
+    after = _semver(_workspace_version(_at(None, "Cargo.toml")))
+    return before is not None and after is not None and after > before
+
+
 def check_changelog(base: str, body: str | None, merge_target: str, paths: list[str]) -> Result:
     """The pull request carries its changelog entry in its description, not in CHANGELOG.md.
 
@@ -268,9 +289,10 @@ def check_changelog(base: str, body: str | None, merge_target: str, paths: list[
     name = "Changelog field in the description, never an edit to CHANGELOG.md"
     problems = []
     if "CHANGELOG.md" in paths:
+        # The cutover is judged at the target's tip: once the field is on main,
+        # no branch -- however old -- may edit CHANGELOG.md by hand.
         cutover = not _at(base, "validation/changelog_field.py")
-        release = _workspace_version(_at(base, "Cargo.toml")) != _workspace_version(_at(None, "Cargo.toml"))
-        if not (cutover or release):
+        if not (cutover or _is_release_cut(base, paths)):
             problems.append(
                 "CHANGELOG.md changed, and this is not a release cut (the workspace version did not "
                 "move). Move the entry into the description's `Changelog:` field."
@@ -318,10 +340,15 @@ def check_folded_pages(base: str, paths: list[str], title: str) -> Result:
         fold.changes(ROOT)
     except fold.FoldError as error:
         problems.append(str(error))
-    by_fold = title.startswith("chore(fold):")
+    # The fold's own pull request: its title, and a diff that touches nothing
+    # but folded pages and their fragment folders. The title alone is not enough.
+    owned = {item.page for item in fold.FOLDS}
+    folders = tuple(item.source for item in fold.FOLDS)
+    by_fold = title.startswith("chore(fold):") and bool(paths) and all(
+        path in owned or path.startswith(folders) for path in paths
+    )
     cutover = not _at(base, "scripts/fold")
-    release = _workspace_version(_at(base, "Cargo.toml")) != _workspace_version(_at(None, "Cargo.toml"))
-    if not (by_fold or cutover or release):
+    if not (by_fold or cutover or _is_release_cut(base, paths)):
         for item in fold.FOLDS:
             if item.page in paths:
                 problem = item.guard(_at(base, item.page), _at(None, item.page))

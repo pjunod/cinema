@@ -92,6 +92,17 @@ class BuildNumberCase(unittest.TestCase):
         self.git("checkout", "-q", "main")
         self.assertEqual(self.number(), 5, "the later main build is above every branch build")
 
+    def test_a_release_build_off_main_is_refused(self) -> None:
+        """A stale origin/main must not hand an up-to-date local main an old number."""
+
+        self.history(FLOOR + 5)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD~2")
+        result = self.run_script("--release")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not on origin/main", result.stderr)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(self.run_script("--release").returncode, 0)
+
     def test_origin_main_is_preferred_over_a_local_main(self) -> None:
         self.commit(3)
         self.git("update-ref", "refs/remotes/origin/main", "HEAD~1")
@@ -168,10 +179,13 @@ class BuildNumberCase(unittest.TestCase):
         if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                           capture_output=True, text=True).stdout.strip() != "false":
             self.skipTest("shallow checkout")
-        result = subprocess.run([sys.executable, str(SCRIPT), "--release"], capture_output=True,
+        # Not --release: this checkout is usually a pull request branch, which a
+        # release build refuses; the derived number is the same either way.
+        result = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True,
                                 text=True, env=clean_env(), timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreater(int(result.stdout), FLOOR)
+        self.assertNotIn("not above", result.stderr)
 
 
 if __name__ == "__main__":

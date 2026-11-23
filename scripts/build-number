@@ -84,8 +84,15 @@ def has_commit(repo: Path, ref: str) -> bool:
     return True
 
 
-def derive(repo: Path) -> tuple[int, list[str]]:
-    """The build number and the lines that explain it."""
+def derive(repo: Path, *, release: bool = False) -> tuple[int, list[str]]:
+    """The build number and the lines that explain it.
+
+    A release build must be of a commit on main itself. Off main, the number is
+    the main base's, which a build of that base may already have shipped --
+    and with a stale `origin/main`, an up-to-date local main would quietly
+    reuse an old number. Play and TestFlight refuse a reused number, so a
+    release build refuses it first.
+    """
     if git(repo, "rev-parse", "--is-shallow-repository") != "false":
         raise Unavailable("the repository is a shallow clone; fetch full history (`git fetch --unshallow`)")
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}")
@@ -97,6 +104,12 @@ def derive(repo: Path) -> tuple[int, list[str]]:
     else:
         base = git(repo, "merge-base", "HEAD", main)
         explain.append(f"merge-base of HEAD and {main}: {base}" + (" (HEAD is on main)" if base == head else ""))
+        if release and base != head:
+            raise Unavailable(
+                f"HEAD {head[:12]} is not on {main}, so its number would be its main base's and may "
+                f"already have shipped; build a commit of main (`git fetch origin main` if {main} is "
+                f"stale), or set {OVERRIDE} for a one-off build"
+            )
     count = git(repo, "rev-list", "--count", "--first-parent", base)
     if not re.fullmatch(r"[1-9]\d*", count):
         raise Unavailable(f"git rev-list --count returned {count!r}")
@@ -114,7 +127,7 @@ def resolve(repo: Path, *, release: bool) -> tuple[int, list[str], list[str]]:
         number, explain = int(override), [f"{OVERRIDE} override: {override}"]
     else:
         try:
-            number, explain = derive(repo)
+            number, explain = derive(repo, release=release)
         except Unavailable as exc:
             if release:
                 raise

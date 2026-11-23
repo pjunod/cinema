@@ -64,6 +64,16 @@ class ChangelogFieldCase(unittest.TestCase):
             """)
         self.assertIsNone(parse(body))
 
+    def test_a_fence_closes_only_on_its_own_marker_and_hides_its_comment_sample(self):
+        body = textwrap.dedent("""\
+            ```html
+            <!-- an unclosed sample
+            ~~~
+            ```
+            Changelog: Fixed — after the fence.
+            """)
+        self.assertEqual(parse(body).entries, (Entry("Fixed", "after the fence."),))
+
     def test_malformed_fields_are_refused_with_the_reason(self):
         for body, reason in (
             ("Changelog: Improved — not a section", "does not start with a section"),

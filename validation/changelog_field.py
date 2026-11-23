@@ -89,15 +89,28 @@ class Field:
 
 
 def _visible_lines(body: str) -> list[str]:
-    lines = []
-    fenced = False
-    for line in _COMMENT_RE.sub("", body.replace("\r\n", "\n")).split("\n"):
-        if _FENCE_RE.match(line):
-            fenced = not fenced
-            continue
-        if not fenced:
-            lines.append(line)
-    return lines
+    """The description's lines outside fenced code blocks and HTML comments.
+
+    Fences are removed first, and a fence closes only on its own marker, so a
+    sample inside a code block (an unclosed `<!--` included) cannot hide text
+    after it. An unclosed comment hides nothing: Markdown renders it as text,
+    so the field must still be read past it.
+    """
+
+    kept, fence = [], None
+    for line in body.replace("\r\n", "\n").split("\n"):
+        marker = _FENCE_RE.match(line)
+        if marker:
+            if fence is None:
+                fence = marker.group(1)
+                continue
+            if marker.group(1) == fence:
+                fence = None
+                continue
+        if fence is None:
+            kept.append(line)
+    text = _COMMENT_RE.sub("", "\n".join(kept))
+    return text.split("\n")
 
 
 def parse(body: str) -> Field | None:

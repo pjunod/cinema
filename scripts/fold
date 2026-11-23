@@ -11,8 +11,8 @@ its own file to, and this folds the folder into the page:
 
 A pull request edits only the folder. Two places run this:
 
-* **after merge** -- `.github/workflows/fold.yml` runs `scripts/fold --write`
-  on every push to `main` and lands the result as a `chore(fold):` pull
+* **after merge** -- `.github/workflows/fold.yml` runs `scripts/fold --publish`
+  every six hours on `main` and lands the result as a `chore(fold):` pull
   request of its own. Merges into `main` happen one at a time, so this never
   races an open pull request.
 * **at release** -- `scripts/release-cut` runs it too, so a release commit
@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -202,6 +203,12 @@ FOLD_BODY = (
 )
 
 
+class ForgeStatus(Exception):
+    def __init__(self, status: int, body: str):
+        super().__init__(f"HTTP {status}: {body[:200]}")
+        self.status = status
+
+
 def _api(base: str, token: str, method: str, path: str, payload: dict | None = None):
     request = urllib.request.Request(
         f"{base}/api/v1{path}",
@@ -210,8 +217,11 @@ def _api(base: str, token: str, method: str, path: str, payload: dict | None = N
         headers={"Authorization": f"token {token}", "Content-Type": "application/json",
                  "Accept": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body = response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read()
+    except urllib.error.HTTPError as error:
+        raise ForgeStatus(error.code, error.read().decode("utf-8", "replace")) from None
     return json.loads(body) if body else None
 
 
@@ -248,19 +258,32 @@ def publish(root: Path, paths: list[str]) -> int:
     subprocess.run(["git", "push", "--force", f"{server}/{repo}.git", f"HEAD:refs/heads/{FOLD_BRANCH}"],
                    cwd=root, check=True, env=env)
     owner, name = repo.split("/", 1)
-    open_pulls = _api(server, token, "GET", f"/repos/{owner}/{name}/pulls?state=open&limit=50") or []
-    pull = next((item for item in open_pulls
-                 if (item.get("head") or {}).get("ref") == FOLD_BRANCH), None)
+    # The pull request for exactly this head and base, however many others are open.
+    try:
+        pull = _api(server, token, "GET", f"/repos/{owner}/{name}/pulls/main/{FOLD_BRANCH}")
+        if pull.get("state") != "open":
+            pull = None
+    except ForgeStatus as error:
+        if error.status != 404:
+            raise
+        pull = None
     if pull is None:
         pull = _api(server, token, "POST", f"/repos/{owner}/{name}/pulls",
                     {"base": "main", "head": FOLD_BRANCH, "title": FOLD_TITLE, "body": FOLD_BODY})
     number = pull["number"]
     # Forgejo drops the merge template's body on an API merge, so the message
-    # (and with it the Changelog field) is passed explicitly.
-    _api(server, token, "POST", f"/repos/{owner}/{name}/pulls/{number}/merge",
-         {"Do": "merge", "merge_when_checks_succeed": True,
-          "MergeTitleField": f"Merge pull request '{FOLD_TITLE}' (#{number}) from {FOLD_BRANCH} into main",
-          "MergeMessageField": FOLD_BODY})
+    # (and with it the Changelog field) is passed explicitly. A fold that only
+    # replaced the branch of a pull request already scheduled to merge gets a
+    # refusal here, which means there is nothing more to do.
+    try:
+        _api(server, token, "POST", f"/repos/{owner}/{name}/pulls/{number}/merge",
+             {"Do": "merge", "merge_when_checks_succeed": True,
+              "MergeTitleField": f"Merge pull request '{FOLD_TITLE}' (#{number}) from {FOLD_BRANCH} into main",
+              "MergeMessageField": FOLD_BODY})
+    except ForgeStatus as error:
+        if error.status not in (405, 409):
+            raise
+        print(f"fold: #{number} was already scheduled to merge ({error})")
     print(f"fold: pull request #{number} carries {', '.join(paths)} and merges when its checks pass")
     return 0
 
