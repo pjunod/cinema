@@ -7763,7 +7763,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # no production task, timer or process.
 # P49 AC-5 merge: main 1009 plus the branch's +1 test-only output() in the
 # split admission test, which synchronously joins the FFmpeg fixture child; 1010.
-expected_occurrences = 1010
+# Reanalyze lease refusal: +1 Axum `Response::status()` read in
+# reanalyze_lease_refusals_are_typed_503s_not_internal_errors. Test-only; no
+# production task, timer or process; 1011.
+expected_occurrences = 1011
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
