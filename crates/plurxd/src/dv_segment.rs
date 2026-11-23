@@ -154,12 +154,16 @@ pub(crate) const ENCODER_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 pub(crate) const ENCODER_DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 
+/// A finished encoder's stdout and stderr, or why reading them failed.
+#[cfg(target_os = "linux")]
+type EncoderOutput = Result<(Vec<u8>, Vec<u8>), String>;
+
 /// A pre-started run window encoder's stdout and stderr, read to their
 /// bounds from the moment it started by the run's pre-start task, which fails
 /// at once when either bound is exceeded.
 #[cfg(target_os = "linux")]
 pub(crate) struct DrainedOutput {
-    output: tokio::sync::oneshot::Receiver<Result<(Vec<u8>, Vec<u8>), String>>,
+    output: tokio::sync::oneshot::Receiver<EncoderOutput>,
     /// Set when the reading task has ended; it ends once the encoder's pipes
     /// close, which the encoder's reap guarantees.
     settled: tokio::sync::watch::Receiver<bool>,

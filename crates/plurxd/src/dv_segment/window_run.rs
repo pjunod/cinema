@@ -403,6 +403,15 @@ pub(crate) struct PreStartRequest {
     pub(crate) wait: Duration,
 }
 
+/// Asks a pre-start task for its encoder: the run sends where to hand it over.
+type HandoverRequest = tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<Handover>>;
+/// What [`spawn_prestart`] returns: the spawn outcome, the handover request
+/// and the settled signal.
+type SpawnedPreStart = (
+    watch::Receiver<Option<Result<(), String>>>,
+    HandoverRequest,
+    watch::Receiver<bool>,
+);
 /// What a window that attaches a pre-started encoder takes over from the
 /// pre-start task: the child (unreaped, perhaps already exited), its share of
 /// the worker claim, its use of the run's source reader, its private
@@ -495,7 +504,7 @@ struct PreStart {
     claim: std::sync::Weak<crate::vodencode::EncodeWorkerPermit>,
     /// `Some(Ok)` once the encoder is spawned, `Some(Err)` if it could not be.
     spawned: watch::Receiver<Option<Result<(), String>>>,
-    take: Option<tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<Handover>>>,
+    take: Option<HandoverRequest>,
     cancel: CancellationToken,
     /// Set when the task has ended: the encoder handed over, or killed and
     /// reaped with everything it held released.
@@ -545,11 +554,7 @@ fn spawn_prestart(
     directory: Arc<tempfile::TempDir>,
     held: Arc<std::fs::File>,
     reader: LiveReader,
-) -> (
-    watch::Receiver<Option<Result<(), String>>>,
-    tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<Handover>>,
-    watch::Receiver<bool>,
-) {
+) -> SpawnedPreStart {
     let (spawned_sender, spawned) = watch::channel(None);
     let (take, mut taken) =
         tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<Handover>>();
