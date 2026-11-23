@@ -562,6 +562,68 @@ mod pressure_regressions {
         assert_eq!(serve.shared.completed_cache.load(Relaxed), 0);
     }
 
+    // P49 AC-5: eviction under pressure. One split video serves an English
+    // and a French viewer; closing one leaves the other's video in place.
+    #[tokio::test]
+    async fn pressure_keeps_a_split_video_until_its_last_language_detaches() {
+        let temp = crate::test_tempdir().expect("cache");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = VodServe::new(temp.path().to_path_buf(), store);
+        let owner = VodCacheOwner(Arc::downgrade(&serve.shared));
+        let key = "d".repeat(64);
+        let directory = temp.path().join(&key);
+        let mut rendition = super::super::tests::synthetic_rendition(temp.path()).await;
+        let inner = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        inner.key = key.clone();
+        inner.recipe.audio_excluded = true;
+        inner.dir = RenditionDir::new(&directory);
+        inner.dir.create().await.expect("directory");
+        inner.dir.write_init(b"init").await.expect("init");
+        {
+            let mut manifest = inner.manifest.lock().await;
+            for index in 0..manifest.len() as u32 {
+                inner
+                    .dir
+                    .materialize(&mut manifest, index, b"video", 1)
+                    .await
+                    .expect("video");
+            }
+            let bytes = manifest
+                .complete(&Budgets {
+                    working_set_bytes: 1 << 30,
+                    admission_sizing_bytes: 1 << 30,
+                    admission_share: 1.0,
+                })
+                .expect("admit");
+            serve.shared.completed_cache.store(bytes, Relaxed);
+        }
+        rendition.attach_reader("english", 0).await;
+        rendition.attach_reader("french", 0).await;
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(key.clone(), Arc::clone(&rendition));
+        let candidate = CacheCandidate {
+            path: directory.clone(),
+            last_used: UNIX_EPOCH,
+        };
+        assert!(!owner.evict(&candidate).await.expect("both viewers"));
+        rendition
+            .detach_media_reader(&serve.shared.pool, "english")
+            .await;
+        assert!(!owner.evict(&candidate).await.expect("French still reading"));
+        assert!(directory.join("seg00000.m4s").exists());
+        rendition
+            .detach_media_reader(&serve.shared.pool, "french")
+            .await;
+        drop(rendition);
+        assert!(owner.evict(&candidate).await.expect("idle eviction"));
+        assert!(!directory.exists());
+        assert_eq!(serve.shared.completed_cache.load(Relaxed), 0);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn pressure_refuses_symlinked_media() {

@@ -4684,3 +4684,61 @@ fn owner_base_answers_as_the_media_peers_lookup_did() {
         Err(PeerTransportError::Unreachable)
     );
 }
+
+/// P49 AC-5: cross-node failover of a split copy. A VOD route is reopened,
+/// never taken over; the recipe a worker holds still asks for the split, and
+/// a worker's start answer for it enters through the family master only for
+/// a VOD copy.
+#[test]
+fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() {
+    let base = eligible_route("session-split");
+    let eligible = eligible_recipe(&base);
+    let split = RemoteStartRequest {
+        request: SessionRequest {
+            dv_processing_destination: None,
+            retain_output: None,
+            dv_refit_digest: None,
+            continuous_media: None,
+            quality_catalog: None,
+            candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
+            presentation: crate::transcode::Presentation::Vod,
+            split_audio: true,
+            ..eligible.request.clone()
+        },
+        ..eligible.clone()
+    };
+    let mut route = base.clone();
+    route.recipe_json = serde_json::to_string(&split).expect("serialize split recipe");
+    assert!(
+        matches!(classify_owner_loss(&route, EXPIRED_NOW_MS), OwnerLoss::Unrecoverable(_)),
+        "a lost split owner answers media_owner_lost with its film position"
+    );
+    let held: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("the held recipe parses");
+    assert!(held.request.split_audio, "the reopen on another node asks for the split again");
+    assert!(worker_session_request_is_valid(&held.request));
+
+    let mut answer = valid_start_response();
+    answer.kind = SessionKind::Copy {
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+        aac: false,
+        preserve_dolby_vision: false,
+    };
+    answer.target_height = 0;
+    answer.playlist_url = format!("/api/v1/hls/{}/master.m3u8", answer.session_id);
+    assert!(answer.is_valid(), "a worker's split copy starts at its family master");
+    let mut transcode = answer.clone();
+    transcode.kind = SessionKind::Transcode { height: 720 };
+    transcode.target_height = 720;
+    assert!(!transcode.is_valid(), "only a copy has a family master");
+    let mut recovery = answer.clone();
+    recovery.vod = false;
+    assert!(!recovery.is_valid(), "only a VOD copy has a family master");
+    let mut foreign = answer;
+    foreign.playlist_url = "/api/v1/hls/somebody-else/master.m3u8".to_owned();
+    assert!(!foreign.is_valid());
+}
