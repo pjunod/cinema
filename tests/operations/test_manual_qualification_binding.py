@@ -93,12 +93,12 @@ class ManualQualificationBindingCase(unittest.TestCase):
             env = dict(environment, PLURX_QUALIFICATION_RESULTS=json.dumps(results))
             live = dict(binding, base_sha="d" * 40)
             with patch.dict(os.environ, env, clear=True), \
-                 patch.object(q, "resolve_manual_binding", return_value=live), \
+                 patch.object(q, "_resolve_manual_binding_and_pull", return_value=(live, pr)), \
                  redirect_stderr(io.StringIO()):
                 self.assertEqual(q.main(["--output", str(output)]), 1)
             self.assertFalse(output.exists())
             with patch.dict(os.environ, env, clear=True), \
-                 patch.object(q, "resolve_manual_binding", return_value=binding), \
+                 patch.object(q, "_resolve_manual_binding_and_pull", return_value=(binding, pr)), \
                  patch.object(q, "git_object", side_effect=[head, "c" * 40]), \
                  redirect_stdout(io.StringIO()):
                 self.assertEqual(q.main(["--output", str(output)]), 0)

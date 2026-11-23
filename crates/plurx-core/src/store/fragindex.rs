@@ -295,6 +295,7 @@ fn unpack(_conn: &Connection, blob: &[u8]) -> Result<Vec<IndexRow>, StoreError> 
         })?;
         rows.push(IndexRow {
             dts,
+            first_cto: None,
             duration: u64::from(duration),
             bytes,
             video_bytes,
@@ -346,6 +347,10 @@ struct IndexMetadata {
     dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_cadence: Option<crate::segplan::DvRefitCadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing_composition_offsets: Option<Vec<i64>>,
 }
 
 pub(crate) fn put(
@@ -362,19 +367,31 @@ pub(crate) fn put(
     {
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
+    if index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none() {
+        return Err(StoreError::Task("invalid fitted cadence summary".into()));
+    }
     let metadata = IndexMetadata {
         promotion: index.promotion.clone(),
         dv_refit_origin: index.dv_refit_origin,
         dv_refit_proofs: index.dv_refit_proofs.clone(),
+        dv_refit_cadence: index.dv_refit_cadence,
+        landing_composition_offsets: index
+            .landing_composition_offsets()
+            .map_err(|error| StoreError::Task(error.into()))?,
     };
     let promotion = serde_json::to_string(&metadata)
         .map_err(|error| StoreError::Migration(error.to_string()))?;
     // The metadata-only status projection may trust this marker and nothing
-    // else. Prove exactly the two facts it cannot cheaply derive: the packed
-    // bytes decode to the rows being published, and the promotion payload
-    // round-trips through the type `get` later expects.
+    // else. The packed planning fields and their optional landing clock
+    // round-trip through the representation that `get` later expects.
     let validated = !index.rows.is_empty()
-        && unpack(conn, &packed)? == index.rows
+        && unpack(conn, &packed)?
+            .into_iter()
+            .zip(&index.rows)
+            .all(|(mut decoded, original)| {
+                decoded.first_cto = original.first_cto;
+                decoded == *original
+            })
         && serde_json::from_str::<IndexMetadata>(&promotion)
             .is_ok_and(|decoded| decoded == metadata);
     let validated_revision = if validated {
@@ -544,6 +561,16 @@ pub(crate) fn get(
     index.promotion = metadata.promotion;
     index.dv_refit_origin = metadata.dv_refit_origin;
     index.dv_refit_proofs = metadata.dv_refit_proofs;
+    index.dv_refit_cadence = metadata.dv_refit_cadence;
+    if index
+        .restore_landing_composition_offsets(metadata.landing_composition_offsets)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    if index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none() {
+        return Ok(None);
+    }
     index.parameter_sets_constant = constant != 0;
     Ok(Some(index))
 }
@@ -1135,8 +1162,8 @@ mod tests {
             assert_eq!(validation_marker(&conn, 7, "fingerprint"), revision);
         }
         conn.execute(
-            "UPDATE fragment_indexes SET fragments = 0, rows_packed = x'', validated_revision = 1",
-            [],
+            "UPDATE fragment_indexes SET fragments = 0, rows_packed = x'', validated_revision = ?1",
+            [i64::from(VALIDATION_REVISION)],
         )
         .expect("empty");
         assert_eq!(
@@ -1186,6 +1213,7 @@ mod tests {
             vec![
                 IndexRow {
                     dts: 0,
+                    first_cto: None,
                     duration: 28_016,
                     bytes: 104_452,
                     video_bytes: 103_836,
@@ -1193,6 +1221,7 @@ mod tests {
                 },
                 IndexRow {
                     dts: 28_016,
+                    first_cto: None,
                     duration: 28_032,
                     bytes: 110_038,
                     video_bytes: 109_422,
@@ -1200,6 +1229,7 @@ mod tests {
                 },
                 IndexRow {
                     dts: 56_048,
+                    first_cto: None,
                     duration: 28_032,
                     bytes: 103_547,
                     video_bytes: 102_931,
@@ -1249,6 +1279,8 @@ mod tests {
             promotion: built.promotion.clone(),
             dv_refit_origin: None,
             dv_refit_proofs: None,
+            dv_refit_cadence: None,
+            landing_composition_offsets: None,
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(
@@ -1268,11 +1300,63 @@ mod tests {
         )
         .expect("proof");
         built.dv_refit_proofs = Some(vec![proof; built.rows.len()]);
+        built.dv_refit_cadence = Some(crate::segplan::DvRefitCadence {
+            minimum_interval_ticks: 667,
+            sample_count: 84,
+        });
         put(&conn, 7, &built, 1).expect("publish fitted metadata");
         let loaded = get(&conn, 7, &built.source)
             .expect("read")
             .expect("retained index");
         assert_eq!(loaded, built);
+        built
+            .dv_refit_cadence
+            .as_mut()
+            .expect("fitted cadence fixture")
+            .sample_count = 1;
+        assert!(put(&conn, 7, &built, 2).is_err());
+        assert_eq!(
+            get(&conn, 7, &loaded.source).expect("stored index remains readable"),
+            Some(loaded)
+        );
+    }
+
+    #[test]
+    fn ordinary_copy_composition_offsets_round_trip_and_require_every_row() {
+        let conn = conn();
+        let mut built = index();
+        built.rows[0].first_cto = Some(2_000);
+        assert!(put(&conn, 7, &built, 1).is_err());
+        for row in &mut built.rows[1..] {
+            row.first_cto = Some(-3_328);
+        }
+        put(&conn, 7, &built, 2).expect("publish the complete landing clock");
+        assert_eq!(
+            get(&conn, 7, &built.source).expect("read"),
+            Some(built.clone())
+        );
+        assert_eq!(
+            validation_marker(&conn, 7, "fingerprint"),
+            i64::from(VALIDATION_REVISION)
+        );
+
+        let metadata: String = conn
+            .query_row("SELECT promotion FROM fragment_indexes", [], |row| {
+                row.get(0)
+            })
+            .expect("stored metadata");
+        let mut metadata: IndexMetadata = serde_json::from_str(&metadata).expect("metadata");
+        metadata
+            .landing_composition_offsets
+            .as_mut()
+            .expect("stored offsets")
+            .pop();
+        conn.execute(
+            "UPDATE fragment_indexes SET promotion = ?1",
+            [serde_json::to_string(&metadata).expect("truncated offsets")],
+        )
+        .expect("replace metadata");
+        assert!(get(&conn, 7, &built.source).expect("read").is_none());
     }
 
     fn index_with(fingerprint: &str, size: u64, mtime_ms: i64) -> FragmentIndex {
@@ -1402,7 +1486,11 @@ mod tests {
         let report = validate_page(&conn, 64).expect("backfill");
         assert_eq!(report.refused, 1);
         assert_eq!(report.remaining, 0);
-        assert_eq!(validation_marker(&conn, 7, "fingerprint"), -1);
+        // A refused row records the negative current revision.
+        assert_eq!(
+            validation_marker(&conn, 7, "fingerprint"),
+            -i64::from(VALIDATION_REVISION)
+        );
         assert_eq!(fingerprints(&conn, 7), vec!["fingerprint"]);
     }
 

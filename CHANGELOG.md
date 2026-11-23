@@ -222,6 +222,10 @@ bump may break compatibility and a **patch** bump never does.
 - Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
   Resume. Resume binds the renderer to the actual source pictures observed by
   the rolling copy, and the original AAC rendition continues across the switch.
+- Android prepared F+ copy handoffs retain source-bound frame timing in a
+  single-variant playlist. The fitted index measures a conservative sample
+  interval instead of supplying average probe FPS; the existing decoded-frame
+  alignment check and deadline remain unchanged.
 
 - Safari 27.2 on macOS can select the verified native Dolby Vision HLS splice
   when the browser supports native HLS and PQ Main10 playback.

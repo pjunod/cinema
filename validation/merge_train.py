@@ -114,6 +114,43 @@ def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True,
     return [f"{key}={value}" for key, value in values.items()]
 
 
+
+def authenticated_manual_scope(lines, event, jobs, enabled, tests):
+    """Explicit claims require real completed CI evidence, never a label waiver."""
+    values = scope(lines, jobs, enabled, tests)
+    pull = event.get('pull_request') or {}
+    claims = [line for line in (pull.get('body') or '').splitlines() if line.startswith('Manual-Source-Gate:')]
+    if not claims:
+        return values
+    from validation import python_unit_receipts as receipts
+    receipts.require(len(claims) == 1 and jobs is None and not tests,
+                     'Ambiguous manual source gate or merge-train probe combination')
+    match = re.fullmatch(r'Manual-Source-Gate: ([1-9][0-9]*)', claims[0])
+    receipts.require(match is not None, 'Malformed explicit manual source-gate claim')
+    proof = authenticate_manual_source(event, int(match[1]))
+    output = dict(line.split('=', 1) for line in values)
+    for surface in SURFACES + ('preflight', 'worker_control'):
+        output[surface] = 'false'
+    output.update(run_lane='false', train_selected='false', train_tests='')
+    print(f"Reused actual ci / Main promotion gate run {proof['run']} job {proof['job']}: {proof['url']}", file=sys.stderr)
+    return [key + '=' + value for key, value in output.items()]
+
+
+def authenticate_manual_source(event, run_id):
+    from validation import python_unit_receipts as receipts
+    from validation import promotion_unit_retention as retention
+    from validation import source_gate_landing
+    pull = event['pull_request']
+    number, head = receipts.positive(event['number']), receipts.sha(os.environ['GITHUB_SHA'])
+    receipts.require(pull['number'] == number and pull['head']['sha'] == head
+                     and event['repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+                     and pull['head']['repo']['full_name'] == os.environ['GITHUB_REPOSITORY']
+                     and pull['base']['ref'] == 'main', 'Manual source-gate event identity differs')
+    api = retention.runner_api(os.environ)
+    main_tip = api.get('/branches/main')['commit']['id']
+    return source_gate_landing.verify(api, number, head, main_tip, Path.cwd(), run_id)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv != ["scope"]:
@@ -128,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"merge-train probe: running only {', '.join(jobs) or '(nothing)'}", file=sys.stderr)
     if tests:
         print(f"merge-train probe: running only {len(tests)} named Rust unit test(s)", file=sys.stderr)
-    print("\n".join(scope(sys.stdin.read().splitlines(), jobs, enabled, tests)))
+    print("\n".join(authenticated_manual_scope(sys.stdin.read().splitlines(), event, jobs, enabled, tests)))
     return 0
 
 

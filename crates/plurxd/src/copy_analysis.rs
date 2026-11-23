@@ -299,6 +299,11 @@ impl CopyIndexDemand {
         source: AnalysisCoordinationSource,
         recipe: CopyRecipe,
     ) -> Result<Self, &'static str> {
+        // The ordinary Analysis seal has no fitted pre-conversion proofs.
+        // The dedicated fitted index builder owns this recipe.
+        if recipe.video.dolby_vision_refit().is_some() {
+            return Err("fitted copy requires its dedicated index builder");
+        }
         Ok(Self {
             file,
             catalog_namespace,
