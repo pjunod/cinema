@@ -906,7 +906,7 @@ async fn drive_resume_preparation(shared: &Arc<Shared>, rendition: &Arc<Renditio
                 .compare_exchange(epoch, epoch.saturating_add(1), AcqRel, Acquire);
         drop(manifest);
         if let Err(error) = rendition.slot.retire_storage().await {
-            tracing::warn!(%error, rendition = %rendition.key, "resume preparation still owns its producer");
+            tracing::warn!(target: "plurxd::vodserve", %error, rendition = %rendition.key, "resume preparation still owns its producer");
             tokio::time::sleep(Duration::from_millis(100)).await;
             return true;
         }

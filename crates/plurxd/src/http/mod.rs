@@ -591,6 +591,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/hls/continuous-sessions"
         | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/files/{id}/hls/prepare-startup"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
         | "/api/v1/offline/packages/{id}/complete"

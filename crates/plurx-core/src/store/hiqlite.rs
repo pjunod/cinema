@@ -5191,9 +5191,9 @@ impl HiqliteAuthStore {
     async fn fragment_publication_installed(&self) -> Result<bool, StoreError> {
         let rows = self
             .client()
-            // Read committed schema state before admitting node startup.
+            // authority: committed trigger shape fences fragment publication before node startup is admitted.
             .query_consistent_map::<RemoteShapeRow, _>(
-                "fragment_publication_schema",
+                "fragment_publication_installed",
                 super::fragment_publication::SHAPE_SQL,
                 params!(),
             )

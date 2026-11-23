@@ -1687,10 +1687,14 @@ impl TranscodeManager {
         // Persist the verdict for this source revision, so the next plan reads
         // it from stored facts instead of probing the source again.
         if let Some(evidence) = collected.hevc_scan_evidence() {
-            let _ = self
-                .store
-                .merge_file_probe_hevc_scan(file.id, file.size, file.mtime, &evidence.to_string())
-                .await;
+            // Best effort: an unpersisted verdict is probed again next time.
+            crate::store_result::observe(
+                crate::store_result::Operation::MergeProbeHevcScan,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .merge_file_probe_hevc_scan(file.id, file.size, file.mtime, &evidence.to_string())
+                    .await,
+            );
         }
         Some(collected)
     }

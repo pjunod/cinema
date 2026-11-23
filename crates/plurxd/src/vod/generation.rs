@@ -28,7 +28,7 @@ pub(super) async fn spawn_generation(
         match input.close_and_wait().await {
             Ok(()) => work.unregistered_source_joined(),
             Err(error) => {
-                tracing::warn!(%error, rendition = %rendition.key, "could not join unregistered resume source");
+                tracing::warn!(target: "plurxd::vodserve", %error, rendition = %rendition.key, "could not join unregistered resume source");
             }
         }
         rendition.kick();
