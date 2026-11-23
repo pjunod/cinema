@@ -39,12 +39,22 @@ fn refused() -> ApiError {
         "Shared decision authority is unavailable",
     )
 }
-/// A wait that outlived the decision's budget is still a wait: the viewer
-/// gets the typed retry a busy Start gives, never "could not determine".
+/// A wait that outlived the decision's budget is still a wait, but no client
+/// retries a decision on its own: every one retries only its create. So it is
+/// answered with its own code, `sharing_decision_busy` and the Source's
+/// `Retry-After`, which no client reads as a "still starting" preparing
+/// surface: each stops and offers Try again, as it did before, now saying the
+/// host is busy rather than that it could not determine how to play.
 fn decision_upstream_failure(error: crate::sharing_client::PeerError) -> ApiError {
-    crate::sharing_client::StartRetry::from_peer(error)
-        .map(|retry| retry.response("The sharing host is busy. Retrying shortly."))
-        .unwrap_or_else(refused)
+    match error {
+        crate::sharing_client::PeerError::Busy { retry_after_secs } => ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "sharing_decision_busy",
+            message: "The sharing host is busy. Try again shortly.".into(),
+            retry_after_seconds: retry_after_secs,
+        },
+        _ => refused(),
+    }
 }
 fn invalid() -> ApiError {
     ApiError::typed(
@@ -70,13 +80,16 @@ async fn decision(
     Path((item, file)): Path<(String, String)>,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let _permit = DECISIONS.clone().try_acquire_owned().map_err(|_| {
-        ApiError::typed(
-            StatusCode::TOO_MANY_REQUESTS,
-            "sharing_decision_capacity",
-            "Shared decision capacity is busy",
-        )
-    })?;
+    // Load, not an outage: the receiver waits this out (honour_peer_wait).
+    let _permit = DECISIONS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "sharing_decision_capacity",
+            message: "Shared decision capacity is busy".into(),
+            retry_after_seconds: 1,
+        })?;
     tokio::time::timeout(Duration::from_secs(10), async {
         let bytes = to_bytes(body, 128 * 1024).await.map_err(|_| invalid())?;
         let input: SourceDecisionRequest = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
@@ -370,11 +383,22 @@ mod decision_upstream_tests {
 
     /// Regression (M4 Air, 2026-11-23 16:06:36Z, 'Avatar'): a busy upstream
     /// decision reached the viewer as `sharing_decision_unavailable`, "could
-    /// not determine how to play this file". It is the typed wait a busy Start
-    /// gives; a real refusal is still the decision verdict.
-    #[test]
-    fn a_busy_decision_upstream_is_a_typed_wait_not_a_verdict() {
+    /// not determine how to play this file". A wait that outlived the read is
+    /// `sharing_decision_busy` with the Source's wait: not the verdict, and not
+    /// `media_session_overloaded`, which every client shows as "still
+    /// starting" with nothing retrying the decision. A real refusal is still
+    /// the verdict.
+    #[tokio::test]
+    async fn a_busy_decision_upstream_is_a_typed_wait_not_a_verdict() {
         use crate::sharing_client::PeerError;
+        let code = |response: axum::response::Response| async move {
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("typed body");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("typed json")["code"]
+                .as_str()
+                .map(str::to_owned)
+        };
         let busy = decision_upstream_failure(PeerError::Busy {
             retry_after_secs: 2,
         })
@@ -386,6 +410,7 @@ mod decision_upstream_tests {
                 .and_then(|value| value.to_str().ok()),
             Some("2")
         );
+        assert_eq!(code(busy).await.as_deref(), Some("sharing_decision_busy"));
         for refusal in [
             PeerError::Rejected(StatusCode::NOT_FOUND),
             PeerError::Unavailable,

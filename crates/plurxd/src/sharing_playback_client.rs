@@ -403,6 +403,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -420,7 +421,10 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(PeerError::Rejected(status));
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    retry_after.as_ref(),
+                ));
             }
             SourceEndReceipt::parse(&bytes, session, known)
         })
@@ -1324,14 +1328,10 @@ mod resource_tests {
                 .expect("HTTP fixture joined");
         }
     }
-    /// Regression (M4 Air, 2026-11-22 22:15:30Z): the ingress's full credit
-    /// pool answered a status renewal 429 with `Retry-After`, and the status
-    /// client turned it into a refusal that retired a live session. Over the
-    /// actual HTTP decoding: typed busy is `Busy` with the Source's wait.
     /// Regression (M4 Air, 2026-11-23 16:06:36Z): the decision and catalogue
     /// reads' generic request turned the ingress's typed 429 into a plain
     /// refusal, dropping its Retry-After. Over actual HTTP decoding it is
-    /// `Busy` with the Source's own wait; an untyped 429 is still a refusal.
+    /// `Busy` with the Source's own wait; an untyped 429 is busy after the default wait.
     #[tokio::test]
     async fn sharing_catalogue_request_http_429_with_retry_after_is_busy() {
         for (status, retry_after) in [
@@ -1372,7 +1372,12 @@ mod resource_tests {
                     "{error:?}"
                 ),
                 (StatusCode::TOO_MANY_REQUESTS, None) => assert!(
-                    matches!(error, PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)),
+                    matches!(
+                        error,
+                        PeerError::Busy {
+                            retry_after_secs: 1
+                        }
+                    ),
                     "{error:?}"
                 ),
                 _ => assert!(matches!(error, PeerError::Unavailable), "{error:?}"),
@@ -1384,6 +1389,10 @@ mod resource_tests {
                 .expect("HTTP fixture joined");
         }
     }
+    /// Regression (M4 Air, 2026-11-22 22:15:30Z): the ingress's full credit
+    /// pool answered a status renewal 429 with `Retry-After`, and the status
+    /// client turned it into a refusal that retired a live session. Over the
+    /// actual HTTP decoding: typed busy is `Busy` with the Source's wait.
     #[tokio::test]
     async fn sharing_status_http_429_with_retry_after_is_busy_not_a_refusal() {
         for (status, retry_after) in [
@@ -1437,7 +1446,12 @@ mod resource_tests {
                     "{error:?}"
                 ),
                 (StatusCode::TOO_MANY_REQUESTS, None) => assert!(
-                    matches!(error, PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)),
+                    matches!(
+                        error,
+                        PeerError::Busy {
+                            retry_after_secs: 1
+                        }
+                    ),
                     "{error:?}"
                 ),
                 _ => assert!(matches!(error, PeerError::Unavailable), "{error:?}"),
@@ -2027,6 +2041,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -2044,7 +2059,10 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(PeerError::Rejected(status));
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    retry_after.as_ref(),
+                ));
             }
             Ok(bytes.to_vec())
         })

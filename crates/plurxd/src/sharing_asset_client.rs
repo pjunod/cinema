@@ -117,6 +117,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             if status != StatusCode::OK {
                 // Bounded and discarded: a refusal's text is never relayed.
                 axum::body::to_bytes(Body::new(response.into_body()), MANAGEMENT_RESPONSE_BYTES)
@@ -130,7 +131,10 @@ impl PeerConnection {
                     }
                     StatusCode::NO_CONTENT if revision.is_some() => Ok(PeerFileAsset::Absent),
                     StatusCode::UNAUTHORIZED => Err(PeerError::Authentication),
-                    _ => Err(PeerError::Rejected(status)),
+                    _ => Err(crate::sharing_client::peer_status_refusal(
+                        status,
+                        retry_after.as_ref(),
+                    )),
                 };
             }
             let headers = response.headers();

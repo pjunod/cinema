@@ -2746,10 +2746,61 @@ mod peer_wait_tests {
         .await;
         assert!(matches!(answer, Ok("decision")), "{answer:?}");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
-        assert_eq!(
-            start.elapsed(),
-            Duration::from_secs(4),
-            "each wait is the Source's own"
+        // The Source's 2 s, then doubled, each with under half a second of
+        // jitter: 6 s and less than 7 s in all.
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(6) && elapsed < Duration::from_secs(7),
+            "{elapsed:?}"
+        );
+    }
+
+    /// Review follow-up: a host that stays busy is asked three times at most,
+    /// never every second until the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_host_that_stays_busy_is_asked_three_times_at_most() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let start = tokio::time::Instant::now();
+        let answer = honour_peer_wait(start + Duration::from_secs(60), || async {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(PeerError::Busy {
+                retry_after_secs: 1,
+            })
+        })
+        .await;
+        assert!(matches!(
+            answer,
+            Err(PeerError::Busy {
+                retry_after_secs: 1
+            })
+        ));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// Review follow-up: the decision read is the one that waits. Removing the
+    /// wait from it must fail a test, not leave every test green.
+    #[test]
+    fn the_shared_decision_read_waits_out_a_busy_host() {
+        let source = include_str!("sharing.rs");
+        let start = source
+            .find("pub async fn read_file_decision(")
+            .expect("decision read");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("decision read end")];
+        let wait = body
+            .find("honour_peer_wait(deadline,")
+            .expect("the decision read waits");
+        let admission = body
+            .find("self.catalogue_admission.acquire(")
+            .expect("admission is taken");
+        let decision = body.find(".file_decision(").expect("the Source is asked");
+        assert!(
+            wait < admission && admission < decision,
+            "each attempt takes its own admission and asks the Source inside the wait"
+        );
+        assert!(
+            !body.contains("tokio::time::timeout("),
+            "the wait owns the deadline"
         );
     }
 
@@ -3569,16 +3620,21 @@ where
 {
     use crate::sharing_client::PeerError;
     let mut waited = None;
-    loop {
+    for attempt in 0..PEER_WAIT_ATTEMPTS {
         let answer = match tokio::time::timeout_at(deadline, read()).await {
             Ok(answer) => answer,
+            // A hung read after a wait is reported as that wait: busy is
+            // still the honest advice ("try again shortly").
             Err(_) => return Err(waited.unwrap_or(PeerError::Unavailable)),
         };
         match answer {
-            Err(PeerError::Busy { retry_after_secs }) => {
+            Err(PeerError::Busy { retry_after_secs }) if attempt + 1 < PEER_WAIT_ATTEMPTS => {
                 let busy = PeerError::Busy { retry_after_secs };
-                let wake =
-                    tokio::time::Instant::now() + Duration::from_secs(retry_after_secs.max(1));
+                // The Source's wait, doubled per attempt, plus jitter so
+                // viewers that met the same busy answer do not return in step.
+                let wait =
+                    Duration::from_secs(retry_after_secs.max(1) << attempt) + peer_wait_jitter();
+                let wake = tokio::time::Instant::now() + wait;
                 if wake >= deadline {
                     return Err(busy);
                 }
@@ -3588,4 +3644,12 @@ where
             answer => return answer,
         }
     }
+    Err(waited.unwrap_or(PeerError::Unavailable))
+}
+
+/// A busy read is asked at most this many times in all, inside its deadline.
+const PEER_WAIT_ATTEMPTS: u32 = 3;
+/// Up to half a second, so viewers that met one busy answer spread out.
+fn peer_wait_jitter() -> Duration {
+    Duration::from_millis((uuid::Uuid::new_v4().as_u128() % 500) as u64)
 }

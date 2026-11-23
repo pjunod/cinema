@@ -100,7 +100,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- **A busy sharing host is waited for, not reported as a failure.** When the Source or its relay answered a shared decision or catalogue read with "busy, retry in N seconds", the receiver read that as final: the viewer saw "the sharing host could not determine how to play this file". The receiver now waits the Source's own interval and asks again within the read's existing time budget. A wait that does not fit reaches the viewer as the same typed "retrying shortly" a busy Start gives. Its own one-read-per-import limit is classified the same way.
+- **A busy sharing host is waited for, not reported as a failure.** When the Source or its relay answered a shared decision with "busy, retry in N seconds", the receiver treated it as final, and the viewer saw "the sharing host could not determine how to play this file". The receiver now waits out the Source's interval and asks again, up to three times with growing waits and jitter, within the decision's existing 15 s budget. If the host is still busy after that, the viewer is told so and offered Try again. Catalogue, library and asset reads still answer immediately, but a busy host now reaches the viewer as their typed "busy" answer, not as "unavailable". The Source's own decision and body capacity limits now say how long to wait.
 
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.

@@ -774,7 +774,14 @@ pub(super) async fn guard_source_response(
         .into_response();
     };
     let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
-        return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
+        // Load, not an outage: typed, so the receiver reads it as a wait.
+        return ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "sharing_body_capacity",
+            message: "sharing body capacity".into(),
+            retry_after_seconds: 1,
+        }
+        .into_response();
     };
     // Armed before the admission look, so a revocation applied after the
     // look's read wakes the monitor below (A6 M3).
