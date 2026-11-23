@@ -5946,6 +5946,7 @@ class Controller internal constructor(
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
         directedChange?.takeIf(::directedChangeOutstanding)?.let { change ->
+            planReplacement.presented(change.quality)
             change.committed()
             logQualitySwitch("prepared", change.quality)
         }

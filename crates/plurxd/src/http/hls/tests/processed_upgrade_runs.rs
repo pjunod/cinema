@@ -527,6 +527,7 @@ async fn a_late_staging_cancellation_rearms_only_a_live_processed_upgrade() {
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    platform: None,
                     prepared_proof: None,
                     film_time_ms: 30_000,
                     desired_digest: None,
@@ -678,6 +679,7 @@ async fn a_refused_upgrade_reservation_is_not_rearmed_by_its_cleanup() {
         &fixture.state.node_id,
         PreparationPurpose::SelectionChange,
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             film_time_ms: 30_000,
             desired_digest: None,
@@ -1023,6 +1025,7 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         &fixture.state.node_id,
         PreparationPurpose::SelectionChange,
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
             desired_digest: None,

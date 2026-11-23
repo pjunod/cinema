@@ -1044,6 +1044,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut resolved_refit_origin = None;
     let mut refit_proofs = Vec::new();
+    let mut refit_cadence = plurx_core::segplan::refit_proof::FittedCadenceAccumulator::default();
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -1138,6 +1139,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     };
                     let mut fragment = fragment;
                     if refit.is_some() {
+                        refit_cadence.observe(&fragment, init);
                         match plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
                             &fragment, init,
                         ) {
@@ -1224,10 +1226,14 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
                     let fragment = fragment;
-                    let row = match IndexRow::from_fragment(&fragment, init) {
+                    let mut row = match IndexRow::from_fragment(&fragment, init) {
                         Ok(row) => row,
                         Err(reason) => return IndexOutcome::Unsupported(reason.into()),
                     };
+                    // Fitted rows already retain their own canonical clock proof.
+                    if refit.is_some() {
+                        row.first_cto = None;
+                    }
                     covered_ticks = covered_ticks.saturating_add(row.duration);
 
                     // Only a clean fragment can begin a segment, so only a
@@ -1446,6 +1452,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     if refit.is_some() {
         built.dv_refit_origin = resolved_refit_origin;
         built.dv_refit_proofs = Some(refit_proofs);
+        built.dv_refit_cadence = refit_cadence.finish();
     }
     IndexOutcome::Built(Box::new(built))
 }
@@ -1522,6 +1529,12 @@ fn identity_for_transform(
     transform: Option<&str>,
 ) -> SourceIdentity {
     let mut recipe = transcode::copy_video_args(file, video);
+    if video.dolby_vision_refit().is_none() {
+        recipe.push(format!(
+            "--plurx-copy-landing-clock={}",
+            plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+        ));
+    }
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
         // A failed pre-repair P5 index is a terminal persisted refusal.
         // Move only the affected recipe so it can rebuild after upgrading.
@@ -1543,6 +1556,9 @@ fn identity_for_transform(
         recipe.push(format!("--plurx-output-transform={transform}"));
         if let Some(digest) = video.dolby_vision_refit() {
             recipe.push(format!("--plurx-dv-refit-digest={}", hex::encode(digest)));
+            // Cadence is immutable index evidence, not a changed curve method.
+            // Rebuild only fitted indexes that predate this measurement.
+            recipe.push("--plurx-dv-refit-cadence=1".into());
         }
     }
     SourceIdentity::new(
@@ -1772,7 +1788,12 @@ impl DvTitleRide {
     /// Start the scanner from the pass's held source capability. A budgeted
     /// scan reads exclusively through the shared source service bridge. The
     /// caller retains and joins this task through scanner and read cleanup.
-    fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
+    fn spawn(
+        &self,
+        source: &std::fs::File,
+        runtime_cache: &Path,
+        wall_time: Duration,
+    ) -> Option<DvTitleScan> {
         let held = match source.try_clone() {
             Ok(held) => held,
             Err(error) => {
@@ -1781,6 +1802,7 @@ impl DvTitleRide {
             }
         };
         let scanner = self.tools.scanner.clone();
+        let runtime_cache = runtime_cache.to_owned();
         let index = self.stream_index.to_string();
         let source_budget = crate::background_jobs::source_budget();
         let pause = plurx_core::process::bounded::source_pause_controller();
@@ -1790,7 +1812,6 @@ impl DvTitleRide {
         let worker_cancel = cancel.clone();
         let task = tokio::spawn(async move {
             let work = async move {
-                use std::os::fd::AsRawFd;
                 let input = match crate::background_jobs::source_budget() {
                     Some(budget) => Some(
                         crate::source_input::SourceInput::open_background_held(
@@ -1802,24 +1823,13 @@ impl DvTitleRide {
                     ),
                     None => None,
                 };
-                let mut command = tokio::process::Command::new(&scanner);
-                command.args([
-                    input
-                        .as_ref()
-                        .map_or("/proc/self/fd/3", |input| input.url()),
+                let output = crate::source_probe::launch_scanner(
+                    &scanner,
                     &index,
-                ]);
-                if input.is_none() {
-                    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-                        &mut command,
-                        &[(held.as_raw_fd(), 3)],
-                        None,
-                    );
-                }
-                let output = plurx_core::process::bounded::output_command_clean_env(
-                    &mut command,
+                    &held,
+                    input.as_ref(),
+                    &runtime_cache,
                     wall_time,
-                    64 * 1024,
                     plurx_core::process::ChildWork::background(
                         "complete-title Dolby Vision scan (content-analysis pass)",
                     ),
@@ -3168,7 +3178,9 @@ async fn build_attested_pass(
         };
         #[cfg(target_os = "linux")]
         let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
-            Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
+            Some(ride) => ride
+                .spawn(source, runtime_cache, budget)
+                .map(|task| (ride, task)),
             None => None,
         };
         let input = input_bridge

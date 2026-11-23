@@ -3715,6 +3715,7 @@ mod tests {
             16_000,
             vec![plurx_core::segplan::IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 28_016,
                 bytes: 104_452,
                 video_bytes: 103_836,

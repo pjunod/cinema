@@ -337,7 +337,8 @@ def verify_desktop(data):
 
 def origin(api, artifact, scope, current, current_run, *, tv_cases=False):
     rid = positive(artifact['run_id'])
-    require(rid < current_run and artifact.get('expired') is False, 'Expired/current/future origin')
+    require((current_run is None or rid < current_run) and artifact.get('expired') is False,
+            'Expired/current/future origin')
     run = api.get(f'/actions/runs/{rid}')
     require(run['id'] == rid and run['repository']['id'] == scope['repository'], 'Foreign origin run')
     event = bounded_json(run['event_payload'].encode())

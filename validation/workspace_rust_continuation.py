@@ -83,13 +83,246 @@ def check_changes(record, candidate, targets):
     return invalidated
 
 
+SOURCE_GATE_UPLOAD = "      - name: Retain the selected Rust source-gate completion\n        if: steps.workspace-continuation.outputs.provider == 'workspace-nextest-shards-v1'\n        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4\n        with:\n          name: selected-pr-rust-source-gate-${{ github.run_id }}\n          path: |\n            target/validation/nextest-continuation/receipt.json\n            target/validation/nextest-continuation/listing.json\n          if-no-files-found: error\n          retention-days: 14\n"
+SOURCE_GATE_PAPERWORK = "      - name: Check current ordinary-PR source-gate paperwork\n        if: github.event_name == 'workflow_dispatch' && inputs.workspace_rust_evidence != ''\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n        run: python3 -m validation.source_gate_landing paperwork\n"
+
+
+# Main's reviewed ARM64 device route is outside the Rust/Python recipes.
+# These exact blocks remain mandatory native qualification, never retained
+# device test outcomes. Any other workflow byte still fails projection.
+ANDROID_DEVICE_ROUTE_SHA256 = {'e1f5fbed22eeba3b72031a31dbdb4f4eb8aeb00e9ac2679d0bbd4d440c606953', '8a870a911c050bc33281e7986196a5bcad125131dce15cf85ea717f5ababdbd8'}
+
+
+def non_rust_device_projection(raw):
+    matches = list(re.finditer(rb'(?ms)^  android_(?:apks|device):\n.*?(?=^  package_smoke:)', raw))
+    receipts.require(len(matches) == 1 and retention.digest(matches[0].group()) in ANDROID_DEVICE_ROUTE_SHA256,
+                     'Unreviewed native Android device workflow projection')
+    return raw[:matches[0].start()] + b'  <reviewed-native-android-device-jobs>\n' + raw[matches[0].end():]
+
+
+def metadata_only_workflow(before, after):
+    if not all(before.count(block.encode()) == 0 and after.count(block.encode()) == 1
+               for block in (SOURCE_GATE_UPLOAD, SOURCE_GATE_PAPERWORK)):
+        return False
+    stripped = after.replace(SOURCE_GATE_UPLOAD.encode(), b'').replace(SOURCE_GATE_PAPERWORK.encode(), b'')
+    if stripped == before:
+        return True
+    try:
+        return non_rust_device_projection(stripped) == non_rust_device_projection(before)
+    except receipts.ReceiptError:
+        return False
+
+
+SELECTED_PREFLIGHT_BLOCKS = (
+    (
+        b'    timeout-minutes: 30\n'
+        b'    outputs:\n'
+        b'      root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}\n'
+        b'      apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}\n'
+        b'      apple_current_reader_required: ${{ steps.python-continuation.outputs.apple_current_reader_required }}\n',
+        b'    timeout-minutes: 30\n',
+    ),
+    (
+        b'      - name: Prepare authenticated Python test selection\n'
+        b'        id: python-continuation\n'
+        b"        if: inputs.python_unit_evidence != ''\n"
+        b'        env:\n'
+        b'          GITHUB_TOKEN: ${{ github.token }}\n'
+        b'          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n'
+        b'          PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}\n'
+        b'          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}\n'
+        b'          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}\n'
+        b'          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n'
+        b'        run: python3 -m validation.native_python_execute prepare\n',
+        b'      - name: Prepare authenticated Python test selection\n'
+        b'        id: python-continuation\n'
+        b"        if: inputs.python_unit_evidence != ''\n"
+        b'        env:\n'
+        b'          GITHUB_TOKEN: ${{ github.token }}\n'
+        b'          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n'
+        b'          PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}\n'
+        b'          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}\n'
+        b'          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}\n'
+        b'        run: python3 -m validation.native_python_execute prepare\n',
+    ),
+    (
+        b'      - name: Check the shared player input contract\n'
+        b'        env:\n'
+        b'          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n'
+        b'          NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}\n'
+        b'          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}\n'
+        b'        run: |\n'
+        b'          if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then\n'
+        b'            echo "Adopted authenticated complete two-script Node preflight"\n'
+        b'          elif [ "$NODE_SELECTION" = true ]; then\n'
+        b'            python3 -m validation.native_python_execute node\n'
+        b'          else\n'
+        b'            node tests/playback/player-input-contract.test.js\n'
+        b'            node tests/web/player-dom.test.js\n'
+        b'          fi\n',
+        b'      - name: Check the shared player input contract\n'
+        b'        env:\n'
+        b'          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n'
+        b'        run: |\n'
+        b'          if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then\n'
+        b'            echo "Adopted authenticated complete two-script Node preflight"\n'
+        b'          else\n'
+        b'            node tests/playback/player-input-contract.test.js\n'
+        b'            node tests/web/player-dom.test.js\n'
+        b'          fi\n',
+    ),
+    (
+        b'      - name: Complete worker-refinement formal smoke configurations\n'
+        b'        id: formal-worker-refinement-smoke\n'
+        b"        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true' && steps.python-continuation.outputs.formal_worker_refinement_retained != 'true'\n"
+        b'        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain\n',
+        b'      - name: Complete worker-refinement formal smoke configurations\n'
+        b'        id: formal-worker-refinement-smoke\n'
+        b"        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true'\n"
+        b'        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain\n',
+    ),
+    (
+        b'      - name: Verify source recovery ownership in the root Linux unit container\n'
+        b"        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'\n"
+        b'        run: |\n'
+        b'          # This container is already the root-capable pinned Linux unit\n'
+        b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
+        b"          # non-root operations lane's ownership-case skip as coverage.\n"
+        b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
+        b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n',
+        b'      - name: Verify source recovery ownership in the root Linux unit container\n'
+        b"        if: steps.workspace-continuation.outputs.root_retained != 'true'\n"
+        b'        run: |\n'
+        b'          # This container is already the root-capable pinned Linux unit\n'
+        b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
+        b"          # non-root operations lane's ownership-case skip as coverage.\n"
+        b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
+        b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n',
+    ),
+    (
+        b'      - name: Build and test native macOS server tray\n'
+        b"        if: needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Build and test native macOS server tray\n'
+        b"        if: needs.scope.outputs.desktop_macos == 'true'\n",
+    ),
+    (
+        b'      - name: Preserve native macOS server tray check output\n'
+        b"        if: always() && needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Preserve native macOS server tray check output\n'
+        b"        if: always() && needs.scope.outputs.desktop_macos == 'true'\n",
+    ),
+    (
+        b'      - name: Compile and verify the current iOS reader resource\n'
+        b"        if: needs.preflight.outputs.apple_native_retained == 'true' && needs.preflight.outputs.apple_current_reader_required == 'true'\n"
+        b'        run: python3 -m validation.selected_apple_preflight build-current-ios-reader\n'
+        b'      - name: Verify the pinned mobile Apple toolchain\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Verify the pinned mobile Apple toolchain\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Create isolated iPhone, iPad, and Apple TV simulators\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Create isolated iPhone, iPad, and Apple TV simulators\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Require native TV navigation journeys\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Require native TV navigation journeys\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Preserve TV navigation evidence including failures\n'
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Preserve TV navigation evidence including failures\n'
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b"      - name: Delete the run's simulators\n"
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b"      - name: Delete the run's simulators\n"
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+)
+
+
+def job_body(raw, job, next_job):
+    header, end = f'\n  {job}:\n'.encode(), f'\n  {next_job}:\n'.encode()
+    start, finish = raw.find(header), raw.find(end)
+    receipts.require(raw.count(header) == raw.count(end) == 1 and 0 <= start < finish,
+                     'Invalid selected preflight workflow job boundary')
+    return raw[start:finish]
+
+
+def continuation_preflight_recipe(raw):
+    if b'SOURCE_GATE_REPAIR_SELECTION_SHA256' not in raw:
+        return raw
+    import hashlib
+    from validation import source_gate_repair as continuation
+    receipts.require(hashlib.sha256(raw).hexdigest() == continuation.WORKFLOW_SHA256,
+                     'Unreviewed ordinary source-gate continuation workflow')
+    original = retention.git_bytes(continuation.PREDECESSOR['head'], '.github/workflows/ci.yml')
+    preflight = job_body(raw, 'preflight', 'rust_compile')
+    previous = job_body(original, 'preflight', 'rust_compile')
+    hdr_guard = (b'      - name: Validate HDR measurement colour conversion\n'
+                 b"        if: needs.preflight.outputs.hdr_rgb_retained != 'true'\n")
+    hdr_original = b'      - name: Validate HDR measurement colour conversion\n'
+    check = job_body(raw, 'check', 'cluster_store_legacy')
+    receipts.require(hdr_guard in check and check.replace(hdr_guard, hdr_original) ==
+                     job_body(original, 'check', 'cluster_store_legacy'),
+                     'Ordinary continuation changed the reviewed Rust recipe')
+    return raw.replace(preflight, previous).replace(hdr_guard, hdr_original)
+
+
+def selected_preflight_projection(raw):
+    raw = continuation_preflight_recipe(raw)
+    if not any(marker in raw for marker in (
+        b'root_ownership_retained', b'NODE_SELECTION', b'formal_worker_refinement_retained', b'apple_native_retained',
+    )):
+        return raw
+    preflight = job_body(raw, 'preflight', 'rust_compile')
+    check = job_body(raw, 'check', 'cluster_store_legacy')
+    apple = job_body(raw, 'apple', 'android_apks')
+    blocks = (preflight,) * 4 + (check,) + (apple,) * 8
+    receipts.require(all(raw.count(selected) == 1 and selected in job
+                         for (selected, _), job in zip(SELECTED_PREFLIGHT_BLOCKS, blocks, strict=True)),
+                     'Unreviewed selected preflight workflow change or job placement')
+    for selected, original in SELECTED_PREFLIGHT_BLOCKS:
+        raw = raw.replace(selected, original)
+    return raw
+
+
+def source_gate_workflow_compatible(before, after):
+    try:
+        import hashlib
+        from validation import source_gate_repair as continuation
+        if hashlib.sha256(after).hexdigest() == continuation.WORKFLOW_SHA256:
+            # This exact reviewed workflow keeps the original Python producer
+            # under its ordinary dispatch. Package custody is outside that
+            # producer, and enrolled continuation uses a distinct step path.
+            continuation_preflight_recipe(after)
+            after = retention.git_bytes(continuation.PREDECESSOR['head'], '.github/workflows/ci.yml')
+        return metadata_only_workflow(before, selected_preflight_projection(after))
+    except receipts.ReceiptError:
+        return False
+
+
 def check_workflow_environment(workflow, expected):
+    workflow = selected_preflight_projection(workflow.encode()).decode()
     commands.canonical_job_keys(workflow)
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
     roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
     accepted = expected if isinstance(expected, tuple) else (expected,)
-    receipts.require(job and retention.digest(job[0].encode()) in accepted
+    receipts.require(job and job[0].count(SOURCE_GATE_UPLOAD) <= 1
+                     and retention.digest(job[0].replace(SOURCE_GATE_UPLOAD, '').encode()) in accepted
                      and roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']
                      and global_env == ['  CARGO_TERM_COLOR: always\n']
                      and not re.search(r'(?m)^defaults:',workflow),
@@ -103,13 +336,21 @@ def require_native_inputs(inputs):
         'Historical Rust job may not adopt earlier unit outcomes')
 
 
-def authenticate(api, descriptor, binding, candidate):
+def authenticate(api, descriptor, binding, candidate, *, current_run=None):
     receipts.require(set(descriptor) == {'sha256', 'attachment_id', 'attachment_uuid'},
                      'Unknown workspace continuation descriptor')
     attachment = receipts.positive(descriptor['attachment_id'])
     uuid, digest = descriptor['attachment_uuid'], descriptor['sha256']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, digest)
     record, _, repository, _ = retention.verify_identity(api, raw, digest, binding, candidate, attachment, uuid)
+    if record.get('version') == 'workspace-nextest-fel-base-bridge-v1':
+        from validation import nextest_base_bridge
+        proof = nextest_base_bridge.authenticate(api, record, binding, candidate, repository, current_run=current_run)
+        return {**proof, 'digest': digest}
+    if record.get('version') == 'workspace-nextest-shards-v1':
+        from validation import nextest_shard_continuation as nextest
+        proof = nextest.authenticate(api, record, binding, candidate, repository, current_run=current_run)
+        return {**proof, 'digest': digest}
     receipts.require(set(record) == {'version','repository','pr','branch','base_sha','source_commit',
                                     'prior','run','job','log_sha256','changes'}
                      and record['version'] == POLICY and record['source_commit'] == candidate,
@@ -183,8 +424,9 @@ def main():
                          receipts.bounded_json(os.environ['PROMOTION_BINDING'].encode()), candidate)
     destination = Path('target/validation/workspace-rust-selection.json')
     receipts.atomic_json(destination,proof)
-    print('Verified prior Rust passes for', sum(map(len, proof['retained'].values())), 'named target bodies')
+    print('Verified prior Rust passes for', (len(proof['retained_ids']) if 'retained_ids' in proof else sum(map(len, proof['retained'].values()))), 'named target bodies')
     with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+        print('provider=' + proof.get('provider', POLICY), file=output)
         print('root_retained=' + str(proof['root_ownership_passed']).lower(),file=output)
 
 

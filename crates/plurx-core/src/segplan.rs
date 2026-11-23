@@ -68,7 +68,7 @@ pub const SEGPLAN_VERSION: u32 = 3;
 /// publication-time validation contract proved the stored representation.
 /// Bump it whenever `ROW_BYTES`, promotion decoding, or `get`'s structural
 /// refusal rules change.
-pub const VALIDATION_REVISION: u32 = 1;
+pub const VALIDATION_REVISION: u32 = 2;
 
 /// How many consecutive fragments a landing match compares at least.
 ///
@@ -84,6 +84,9 @@ pub const VALIDATION_REVISION: u32 = 1;
 /// when three leave more than one possible landing, the producer keeps reading
 /// and [`match_landing`] compares every fragment it has seen.
 pub const LANDING_WINDOW: usize = 3;
+
+/// Copy index evidence revision for the ordinary presentation-clock fallback.
+pub const COPY_LANDING_CLOCK_REVISION: u32 = 1;
 
 /// Audio headroom over the pipe's *nominal* bitrate, as a fraction.
 ///
@@ -576,6 +579,10 @@ pub fn argv_fingerprint(video_args: &[String]) -> String {
 pub struct IndexRow {
     /// First-sample decode time of the video track, in index ticks.
     pub dts: u64,
+    /// Signed composition offset of the first video sample, in index ticks.
+    /// Older copy indexes lack this observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_cto: Option<i64>,
     /// The video track's sample durations, summed.
     pub duration: u64,
     /// Output bytes on the wire — `moof` + `mdat`, exactly what
@@ -632,6 +639,7 @@ impl IndexRow {
             .ok_or("video duration exceeds the index row limit")?;
         Ok(Self {
             dts: track.base_decode_time,
+            first_cto: track.samples().next().map(|sample| sample.cto),
             duration,
             bytes,
             video_bytes,
@@ -706,6 +714,10 @@ pub struct FragmentIndex {
     /// Legacy/native/processed indices omit this field entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dv_refit_proofs: Option<Vec<refit_proof::FittedFragmentProof>>,
+    /// Conservative one-picture interval observed across the fitted index.
+    /// The interval is expressed in this index's video track timescale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv_refit_cadence: Option<DvRefitCadence>,
     pub source: SourceIdentity,
 }
 
@@ -718,6 +730,13 @@ pub struct DvRefitOrigin {
     pub first_pts: i64,
     pub time_base_num: u32,
     pub time_base_den: u32,
+}
+
+/// A lower bound on the interval between presented pictures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DvRefitCadence {
+    pub minimum_interval_ticks: u64,
+    pub sample_count: u64,
 }
 
 impl FragmentIndex {
@@ -738,9 +757,57 @@ impl FragmentIndex {
             parameter_sets_constant: true,
             dv_refit_origin: None,
             dv_refit_proofs: None,
+            dv_refit_cadence: None,
             init_sha256: init_sha256.into(),
             source,
         }
+    }
+
+    /// Use the summary only alongside the full source-clock and row proofs.
+    pub fn verified_refit_cadence(&self) -> Option<DvRefitCadence> {
+        let cadence = self.dv_refit_cadence?;
+        let origin = self.dv_refit_origin?;
+        let proofs = self.dv_refit_proofs.as_ref()?;
+        if self.timescale == 0
+            || self.rows.is_empty()
+            || proofs.len() != self.rows.len()
+            || origin.time_base_num == 0
+            || origin.time_base_den == 0
+            || cadence.sample_count < 2
+            || cadence.sample_count < u64::try_from(self.rows.len()).ok()?
+            || cadence.minimum_interval_ticks == 0
+            || cadence.minimum_interval_ticks > u64::from(u32::MAX)
+        {
+            return None;
+        }
+        Some(cadence)
+    }
+
+    pub(crate) fn landing_composition_offsets(&self) -> Result<Option<Vec<i64>>, &'static str> {
+        if self.rows.iter().all(|row| row.first_cto.is_none()) {
+            return Ok(None);
+        }
+        self.rows
+            .iter()
+            .map(|row| row.first_cto)
+            .collect::<Option<Vec<_>>>()
+            .map(Some)
+            .ok_or("incomplete copy landing presentation clock")
+    }
+
+    pub(crate) fn restore_landing_composition_offsets(
+        &mut self,
+        offsets: Option<Vec<i64>>,
+    ) -> Result<(), &'static str> {
+        if let Some(offsets) = offsets {
+            if offsets.len() != self.rows.len() {
+                return Err("copy landing presentation clock row count mismatch");
+            }
+            for (row, offset) in self.rows.iter_mut().zip(offsets) {
+                row.first_cto = Some(offset);
+            }
+        }
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1058,14 +1125,72 @@ fn finish(entries: Vec<PlanEntry>, timescale: u32) -> SegmentPlan {
 // the landing matcher — plan §2.2, ruling A1
 // ---------------------------------------------------------------------------
 
+/// Measured source PTS relative to the film's first keyframe, and the
+/// landing packet's duration, represented in fractions of index ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingTime {
+    presentation_numerator: i128,
+    frame_numerator: u128,
+    denominator: u32,
+}
+
+impl LandingTime {
+    /// Place an observation already expressed on the index time base.
+    pub fn from_ticks(ticks: u64, frame_ticks: u64) -> Self {
+        Self {
+            presentation_numerator: i128::from(ticks),
+            frame_numerator: u128::from(frame_ticks.max(1)),
+            denominator: 1,
+        }
+    }
+
+    /// Rescale relative packet PTS and packet duration without rounding.
+    /// Both values must come from the same measured source time base.
+    pub fn from_source_pts(
+        delta: i128,
+        duration: u64,
+        time_base: (u32, u32),
+        timescale: u32,
+    ) -> Option<Self> {
+        let (numerator, denominator) = time_base;
+        if numerator == 0 || denominator == 0 || duration == 0 || timescale == 0 {
+            return None;
+        }
+        let scale = u64::from(numerator) * u64::from(timescale);
+        Some(Self {
+            presentation_numerator: delta.checked_mul(i128::from(scale))?,
+            frame_numerator: u128::from(duration) * u128::from(scale),
+            denominator,
+        })
+    }
+
+    pub fn offset_from(self, presentation_ticks: i128) -> u128 {
+        presentation_ticks
+            .checked_mul(i128::from(self.denominator))
+            .map_or(u128::MAX, |value| {
+                value.abs_diff(self.presentation_numerator)
+            })
+    }
+
+    pub fn admits(self, offset: u128, row_duration: u64) -> bool {
+        offset < self.frame_numerator
+            && offset.saturating_mul(2)
+                < u128::from(row_duration.max(1)) * u128::from(self.denominator)
+    }
+}
+
+impl fmt::Display for LandingTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let denominator = i128::from(self.denominator);
+        if self.presentation_numerator % denominator == 0 {
+            write!(f, "{}", self.presentation_numerator / denominator)
+        } else {
+            write!(f, "{}/{}", self.presentation_numerator, denominator)
+        }
+    }
+}
+
 /// Why a repositioned producer could not be placed in the index.
-///
-/// Both variants are a typed producer failure **and** an index invalidation,
-/// never a silent drift (plan §2.2). `NoMatch` is what an ffmpeg upgrade that
-/// re-fragments differently looks like: different fragmentation means
-/// different output byte counts, so the sequence misses rather than
-/// misaligning — which is how D4's "detected, not silently misaligned"
-/// promise survives the move from timestamps to byte counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LandingError {
     /// Fewer observed fragments than a match can be made from.
@@ -1082,9 +1207,13 @@ pub enum LandingError {
         second: usize,
         compared: usize,
     },
+    /// The copy index does not carry canonical presentation timestamps.
+    MissingPresentationClock,
+    /// Two row starts are equally close to the measured presentation time.
+    AmbiguousPresentationTime { time: LandingTime },
     /// The demuxer's measured landing time is not the start of any index
     /// row, so the index does not describe where this seek lands.
-    TimeOffIndex { ticks: u64 },
+    TimeOffIndex { time: LandingTime },
     /// The measured landing time names an index row whose byte sequence is
     /// not what the generation emitted: the time and the bytes disagree.
     TimeContradicts { row: usize },
@@ -1118,9 +1247,16 @@ impl fmt::Display for LandingError {
                  at index rows {first} and {second} over {compared} fragments; \
                  the landing is undetermined"
             ),
-            LandingError::TimeOffIndex { ticks } => write!(
+            LandingError::MissingPresentationClock => {
+                write!(f, "the copy index lacks a canonical presentation clock")
+            }
+            LandingError::AmbiguousPresentationTime { time } => write!(
                 f,
-                "the demuxer landed at {ticks} index ticks, which begins no \
+                "the demuxer landed at {time} index ticks, equally close to multiple index rows"
+            ),
+            LandingError::TimeOffIndex { time } => write!(
+                f,
+                "the demuxer landed at {time} index ticks, which begins no \
                  index row; the index does not describe this seek"
             ),
             LandingError::TimeContradicts { row } => write!(
@@ -1210,14 +1346,13 @@ pub fn match_landing(
 /// reproduces the whole observation. The generation's own timestamps cannot
 /// help either: `-avoid_negative_ts make_zero` rebases every generation to
 /// zero (module header). What does answer is the source time the demuxer
-/// actually landed at, which the caller measures with the generation's own
-/// seek and hands in as `landed_ticks`, in index ticks — counted, like the
-/// index, from the film's first video keyframe.
+/// actually landed at, which the caller measures as relative packet PTS with
+/// the generation's own seek. Both clocks count from the film's first video
+/// keyframe.
 ///
-/// The time names the row and the bytes must still agree. The row is the one
-/// whose start is nearest `landed_ticks`, and the time has to sit closer to
-/// that start than `tolerance_ticks` (the caller passes one frame) and than
-/// half the row's own duration: a landing is always a fragment start, so a
+/// The uniquely nearest canonical PTS names the row and the bytes must still
+/// agree. The time has to sit closer to that start than the measured packet
+/// duration and than half the row's own duration. A landing is a fragment start, so a
 /// time that is off by more than a frame is a measurement the index does not
 /// share — a typed failure, never the neighbouring row. Then the whole
 /// observation must reproduce from that row, exactly as [`match_landing`]
@@ -1228,26 +1363,39 @@ pub fn match_landing_at(
     index: &FragmentIndex,
     observed: &[u32],
     target: usize,
-    landed_ticks: u64,
-    tolerance_ticks: u64,
+    time: LandingTime,
 ) -> Result<usize, LandingError> {
     let last_start = last_landing_start(index, observed)?;
     let rows = &index.rows;
-    let after = rows.partition_point(|row| row.dts <= landed_ticks);
-    let Some(row) = [after.checked_sub(1), (after < rows.len()).then_some(after)]
-        .into_iter()
-        .flatten()
-        .min_by_key(|&row| rows[row].dts.abs_diff(landed_ticks))
-    else {
-        return Err(LandingError::TimeOffIndex {
-            ticks: landed_ticks,
-        });
-    };
-    let off = rows[row].dts.abs_diff(landed_ticks);
-    if off >= tolerance_ticks.max(1) || off.saturating_mul(2) >= rows[row].duration.max(1) {
-        return Err(LandingError::TimeOffIndex {
-            ticks: landed_ticks,
-        });
+    let first = &rows[0];
+    let origin = i128::from(first.dts)
+        + i128::from(
+            first
+                .first_cto
+                .ok_or(LandingError::MissingPresentationClock)?,
+        );
+    // Composition offsets can vary and PTS order need not match DTS order.
+    let mut nearest = (0, u128::MAX);
+    let mut tied = false;
+    for (row, indexed) in rows.iter().enumerate() {
+        let offset = indexed
+            .first_cto
+            .ok_or(LandingError::MissingPresentationClock)?;
+        let pts = i128::from(indexed.dts) + i128::from(offset) - origin;
+        let off = time.offset_from(pts);
+        if off < nearest.1 {
+            nearest = (row, off);
+            tied = false;
+        } else if off == nearest.1 {
+            tied = true;
+        }
+    }
+    let (row, off) = nearest;
+    if !time.admits(off, rows[row].duration) {
+        return Err(LandingError::TimeOffIndex { time });
+    }
+    if tied {
+        return Err(LandingError::AmbiguousPresentationTime { time });
     }
     if row > target {
         return Err(LandingError::PastTarget { row, target });
@@ -1478,6 +1626,7 @@ mod tests {
     fn row(dts: u64, duration: u64, bytes: u32, class: CutClass) -> IndexRow {
         IndexRow {
             dts,
+            first_cto: None,
             duration,
             bytes,
             // The fixtures make the two differ so nothing can pass by
@@ -1897,6 +2046,9 @@ mod tests {
     #[test]
     fn a_constant_size_run_is_placed_by_its_landing_time() {
         let mut index = gop_index(200, CutClass::CleanIdr);
+        for row in &mut index.rows {
+            row.first_cto = Some(0);
+        }
         for row in &mut index.rows[1..] {
             row.video_bytes = 244;
         }
@@ -1913,12 +2065,22 @@ mod tests {
         // can sit a few ticks off the row start.
         let landed = index.rows[149].dts + 7;
         assert_eq!(
-            match_landing_at(&index, &observed, 150, landed, FRAME),
+            match_landing_at(
+                &index,
+                &observed,
+                150,
+                LandingTime::from_ticks(landed, FRAME)
+            ),
             Ok(149)
         );
         let landed = index.rows[150].dts - 7;
         assert_eq!(
-            match_landing_at(&index, &observed, 150, landed, FRAME),
+            match_landing_at(
+                &index,
+                &observed,
+                150,
+                LandingTime::from_ticks(landed, FRAME)
+            ),
             Ok(150)
         );
     }
@@ -1926,24 +2088,44 @@ mod tests {
     #[test]
     fn a_landing_time_the_bytes_contradict_fails_typed() {
         let mut index = gop_index(200, CutClass::CleanIdr);
+        for row in &mut index.rows {
+            row.first_cto = Some(0);
+        }
         for row in &mut index.rows[1..] {
             row.video_bytes = 244;
         }
         let observed = vec![244u32; 40];
         // Row 0 is the opening fragment, which weighs something else.
         assert_eq!(
-            match_landing_at(&index, &observed, 150, index.rows[0].dts, FRAME),
+            match_landing_at(
+                &index,
+                &observed,
+                150,
+                LandingTime::from_ticks(index.rows[0].dts, FRAME)
+            ),
             Err(LandingError::TimeContradicts { row: 0 })
         );
         // A time halfway between two fragment starts names neither.
         let between = index.rows[100].dts + index.rows[100].duration / 2;
         assert_eq!(
-            match_landing_at(&index, &observed, 150, between, FRAME),
-            Err(LandingError::TimeOffIndex { ticks: between })
+            match_landing_at(
+                &index,
+                &observed,
+                150,
+                LandingTime::from_ticks(between, FRAME)
+            ),
+            Err(LandingError::TimeOffIndex {
+                time: LandingTime::from_ticks(between, FRAME)
+            })
         );
         // And a time past the target is still past the target.
         assert_eq!(
-            match_landing_at(&index, &observed, 150, index.rows[151].dts, FRAME),
+            match_landing_at(
+                &index,
+                &observed,
+                150,
+                LandingTime::from_ticks(index.rows[151].dts, FRAME)
+            ),
             Err(LandingError::PastTarget {
                 row: 151,
                 target: 150
@@ -1956,9 +2138,107 @@ mod tests {
         // as row 30.
         let late = index.rows[149].dts + 6_720;
         assert_eq!(
-            match_landing_at(&index, &observed, 150, late, FRAME),
-            Err(LandingError::TimeOffIndex { ticks: late })
+            match_landing_at(&index, &observed, 150, LandingTime::from_ticks(late, FRAME)),
+            Err(LandingError::TimeOffIndex {
+                time: LandingTime::from_ticks(late, FRAME)
+            })
         );
+    }
+
+    #[test]
+    fn reordered_repeated_copy_lands_on_the_measured_rap_presentation_time() {
+        let mut index = gop_index(50, CutClass::CleanCra);
+        // The Lenovo x16 source repeats every 12.929 seconds. Preserve its
+        // measured opening and landing clocks and give each cycle the same
+        // fragment byte sequence.
+        let source_pts_ms = [
+            0, 1_085, 1_669, 2_128, 3_045, 3_838, 4_922, 5_923, 6_590, 7_133, 8_217, 9_218, 10_219,
+            11_137, 11_929,
+        ];
+        let cto = [
+            2_000, 3_344, 3_344, 2_016, 3_328, 2_000, 3_328, 3_328, 3_328, 2_016, 3_344, 3_344,
+            3_344, 3_344, 2_000,
+        ];
+        for (row_number, row) in index.rows.iter_mut().enumerate() {
+            let rap = row_number % source_pts_ms.len();
+            let cycle = u64::try_from(row_number / source_pts_ms.len()).expect("fixture cycle");
+            row.dts = (source_pts_ms[rap] + cycle * 12_929) * 16 + 2_000 - cto[rap];
+            row.first_cto = Some(i64::try_from(cto[rap]).expect("fixture CTO"));
+            row.video_bytes = 1_000 + u32::try_from(rap).expect("fixture RAP");
+        }
+        let observed: Vec<_> = index.rows[37..46]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
+        let measured = LandingTime::from_source_pts(31_781, 41, (1, 1_000), 16_000)
+            .expect("measured packet clock");
+        assert_eq!(index.rows[0].first_cto, Some(2_000));
+        assert_eq!(
+            (index.rows[37].dts, index.rows[37].first_cto),
+            (507_168, Some(3_328))
+        );
+        assert_eq!(index.rows[38].dts, 517_840);
+        assert_eq!(
+            match_landing(&index, &observed, 38),
+            Err(LandingError::Ambiguous {
+                first: 7,
+                second: 22,
+                compared: 9
+            })
+        );
+        assert_eq!(match_landing_at(&index, &observed, 38, measured), Ok(37));
+        assert_eq!(
+            match_landing_at(&index, &observed, 36, measured),
+            Err(LandingError::PastTarget {
+                row: 37,
+                target: 36
+            })
+        );
+        assert_eq!(
+            match_landing_at(&index, &observed[..2], 38, measured),
+            Err(LandingError::NoMatch),
+        );
+
+        let decode_time = LandingTime::from_ticks(507_168, 656);
+        let frame_late = LandingTime::from_ticks(508_496 + 656, 656);
+        for time in [decode_time, frame_late] {
+            assert_eq!(
+                match_landing_at(&index, &observed, 38, time),
+                Err(LandingError::TimeOffIndex { time }),
+            );
+        }
+        let mut wrong_bytes = observed.clone();
+        *wrong_bytes.last_mut().expect("nine fragments") += 1;
+        assert_eq!(
+            match_landing_at(&index, &wrong_bytes, 38, measured),
+            Err(LandingError::TimeContradicts { row: 37 })
+        );
+
+        // Give the next row the same PTS using a signed CTO. A tied clock
+        // cannot pick a row even when only one reproduces the bytes.
+        index.rows[38].first_cto = Some(-7_344);
+        assert_eq!(
+            match_landing_at(&index, &observed, 38, measured),
+            Err(LandingError::AmbiguousPresentationTime { time: measured })
+        );
+        index.rows[0].first_cto = None;
+        assert_eq!(
+            match_landing_at(&index, &observed, 38, measured),
+            Err(LandingError::MissingPresentationClock)
+        );
+        let unique: Vec<_> = index.rows[1..4].iter().map(|row| row.video_bytes).collect();
+        assert_eq!(match_landing(&index, &unique, 2), Ok(1));
+    }
+
+    #[test]
+    fn the_landing_clock_preserves_fractional_index_ticks() {
+        let time =
+            LandingTime::from_source_pts(3, 4, (1, 4), 1).expect("three quarters of an index tick");
+        assert!(time.admits(time.offset_from(0), 2));
+        assert!(!time.admits(time.offset_from(0), 1));
+        let exactly_one_frame =
+            LandingTime::from_source_pts(4, 4, (1, 4), 1).expect("one index tick");
+        assert!(!exactly_one_frame.admits(exactly_one_frame.offset_from(0), 4));
     }
 
     #[test]

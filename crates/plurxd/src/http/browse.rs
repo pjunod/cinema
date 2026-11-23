@@ -1284,6 +1284,7 @@ mod tests {
                 (0..rows)
                     .map(|n| IndexRow {
                         dts: n as u64 * 1000,
+                        first_cto: None,
                         duration: 1000,
                         bytes: 100,
                         video_bytes: 90,
@@ -1474,6 +1475,7 @@ mod tests {
             1000,
             vec![plurx_core::segplan::IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 1000,
                 bytes: 100,
                 video_bytes: 90,

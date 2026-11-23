@@ -31,7 +31,8 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 # on this current job and its pinned toolchain checks.
                 expected_guard = "needs.scope.outputs.apple == 'true'"
                 if path == ".github/workflows/ci.yml":
-                    expected_guard += " && needs.scope.outputs.retain_apple != 'true'"
+                    expected_guard += (" && needs.scope.outputs.retain_apple != 'true'"
+                                       " && needs.preflight.outputs.apple_native_retained != 'true'")
                 else:
                     expected_guard += " && steps.native_receipts.outputs.tv_navigation != 'true'"
                     self.assertIn("run: python3 -m validation.native_receipts", apple_job)

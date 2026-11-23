@@ -345,6 +345,8 @@ jobs:
           done
           python3 trusted-packaging/scripts/build-linux-dolby-ffmpeg --step verify-shipping \
             --root "$audit_dir" --output "$audit_dir"
+      - name: Preflight tagged package workspace space
+        run: trusted-packaging/scripts/release-package-candidate --check-space release-source
       - name: Compile and export the exact tagged binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -386,6 +388,15 @@ jobs:
               python3 -m validation.release_dockerfile --list-binaries \
               release-source/Dockerfile
           )
+      - name: Retain the exact tagged binary receipt for one day
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: release-binary-receipt-${{ matrix.arch }}
+          path: release-source/release-bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
       - name: Bind release packaging to the selected runtime digest
         env:
           RUNTIME_REF: ${{ steps.runtime.outputs.ref }}
@@ -475,15 +486,6 @@ jobs:
           name: release-image-digest-${{ matrix.arch }}
           path: digests
           if-no-files-found: error
-          retention-days: 1
-      - name: Retain the exact tagged binary receipt for one day
-        continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: release-binary-receipt-${{ matrix.arch }}
-          path: release-source/release-bin
-          if-no-files-found: error
-          compression-level: 0
           retention-days: 1
 
   reuse:
