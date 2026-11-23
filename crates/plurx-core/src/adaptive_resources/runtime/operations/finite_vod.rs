@@ -890,11 +890,20 @@ impl NodeResourceRuntime {
         };
         // No bundle lock is held while joining. The SAME task/result remain in
         // graph custody if this waiter is cancelled before or after the join.
-        if let Some(root) = root.filter(|_| native && control.requested()) {
+        let root_killed = if let Some(root) = root.filter(|_| native && control.requested()) {
             graph.start_kill_root(root).await?;
-        }
+            true
+        } else {
+            false
+        };
         let writer = if let Some(task) = task {
-            let joined = graph.join_finite_vod(task, control.requested()).await?;
+            // A killed native root closes the writer's input, so the writer
+            // reaches its own terminal and finishes queued publications.
+            // Aborting it too would replace that known stop with an
+            // abandoned task, holding the output and refusing qualification.
+            // Only a stop with no killed root still needs the abort.
+            let abort = control.requested() && !root_killed;
+            let joined = graph.join_finite_vod(task, abort).await?;
             if joined.selection() != task {
                 return Err(OperationError::State);
             }
