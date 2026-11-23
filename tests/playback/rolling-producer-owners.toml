@@ -4245,9 +4245,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Shared status busy wire test: +1 `tokio::spawn` of the HTTP fixture server in
 # sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
 # no production task, timer or process.
+# DV run window pre-start: +2. Production: the pre-start task in
+# dv_segment/window_run.rs waits for the helper to begin the run's next
+# window, spawns that window's encoder on its FIFO and owns the child until a
+# window takes it; on the run's end, idle expiry or a dropped handle it kills
+# and reaps the child before releasing the claim, reader and directory, and it
+# reads the output to the capture bounds. Whoever ends the run waits for its
+# settlement, and a window's capture joins it after the encoder's reap. Test:
+# the run fixture's sleeping helper stand-in, retired and reaped by its slot.
+# Main e674a1419 merge: main 1213, branch +2; 1215.
 # Shared busy review follow-up: +1 test-only `tokio::spawn` of the HTTP
 # fixture in sharing_catalogue_request_http_429_with_retry_after_is_busy.
-expected_occurrences = 1214
+expected_occurrences = 1216
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -6369,6 +6378,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Shared status busy wire test: +1 `Duration::from_secs` join timeout in
 # sharing_status_http_429_with_retry_after_is_busy_not_a_refusal. Test-only;
 # no production task, timer or process.
+# DV run window pre-start: +3. Production: the requesting window's own deadline
+# while it waits for the pre-started encoder's spawn (in a select! with its
+# cancellation). Test: a 5 s bound on a dropped pre-start's reap and a 30 s
+# bound showing an over-limit drain fails at once.
+# Main e674a1419 merge: main 2349, branch +3; 2352.
 # Shared busy wait: +1 production tokio::time::sleep_until in
 # sharing::honour_peer_wait. It waits out a typed peer wait (429/503 with
 # Retry-After, or the receiver's own catalogue admission) and only while the
@@ -6379,7 +6393,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tokio::time::timeout in read_file_decision (production net 0). +3 test-only
 # paused sleeps in a_read_cut_off_after_a_wait_reports_the_wait_not_a_timeout
 # and +1 test-only Duration::from_secs join timeout in the wire test.
-expected_occurrences = 2354
+expected_occurrences = 2357
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -7775,11 +7789,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # no production task, timer or process.
 # P49 AC-5 merge: main 1009 plus the branch's +1 test-only output() in the
 # split admission test, which synchronously joins the FFmpeg fixture child; 1010.
+# DV run window pre-start: +1 spawn_streaming_encoder call; the window encoder
+# now also starts from the pre-start task, owned as described for its task.
+# Main e674a1419 merge: main 1010, branch +1; 1011.
 # Shared busy decision test: +2 `.status()` reads of HTTP responses in
 # a_busy_decision_upstream_is_a_typed_wait_not_a_verdict. No process launch.
 # Shared busy review follow-up: +1 `Response::builder().status(...)` fixture
 # reply in sharing_catalogue_request_http_429_with_retry_after_is_busy.
-expected_occurrences = 1013
+expected_occurrences = 1014
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -8125,7 +8142,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # bounded by its 1 s deadline. No production lifecycle call.
 # Cluster remainder + Main 5bf2f81d2 union: Main's count plus the remainder's
 # unchanged delta over Main 3d17c7d5a; matcher unchanged.
-expected_occurrences = 411
+# DV run window pre-start: +6. kill_and_reap's start_kill and wait (the
+# pre-start task's own reap of a child no window took), the settlement waits
+# of a killed run (pre-start, then helper), and the run kills in claim_for and
+# the handover unit tests.
+# Main e674a1419 merge: main 411, branch +6; 417.
+expected_occurrences = 417
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -8210,7 +8232,9 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # it neither signals an OS child nor creates another process/reap owner.
 # DV window runs (#1862): +1 is the declaration `async fn kill(self)` of the
 # WindowRun owner above; it signals the existing helper stage owner only.
-expected_occurrences = 89
+# DV run window pre-start: +1 kill_and_reap, the pre-start task's reap of an
+# encoder no window took.
+expected_occurrences = 90
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
