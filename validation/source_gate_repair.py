@@ -73,7 +73,11 @@ PREDECESSOR = {
 WORKFLOW = 'ci.yml'
 # Re-reviewed for #1811's preflight `runs-on` high-cpu label (67af36308): a
 # scheduling label and comment only; image, options and every step unchanged.
-WORKFLOW_SHA256 = '10172517eadc7413784ab66c95ee20df354d41c6a96d8fd7e7eed4b70a9977d1'
+# Re-reviewed for #1881 (derived build numbers): only the `mobile_version` job
+# changes -- it drops the merge-target fetch and the stored-counter comparison
+# and runs `python3 -m validation.mobile_versions` on the checked-out tree.
+# preflight, check and every other job are byte-identical.
+WORKFLOW_SHA256 = 'ec49904464984e8316820cf9e3c97bb0dd29e4dce310bd368a09ec07430c7db2'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+<!-- New entries no longer go here. Each pull request's entries live in its description's
+`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
+from the landing commits into the dated section. The entries below were written by hand
+before that and are released with the next cut. -->
+
 ### Added
 
 - Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
@@ -99,8 +104,6 @@ bump may break compatibility and a **patch** bump never does.
   and its evaluation never ran (the study PR #1262 is closed unmerged).
 
 ### Fixed
-
-- **A busy sharing host is waited for, not reported as a failure.** When the Source or its relay answered a shared decision with "busy, retry in N seconds", the receiver treated it as final, and the viewer saw "the sharing host could not determine how to play this file". The receiver now waits out the Source's interval and asks again, up to three times with growing waits and jitter, within the decision's existing 15 s budget. If the host is still busy after that, the viewer is told so and offered Try again. Catalogue, library and asset reads still answer immediately, but a busy host now reaches the viewer as their typed "busy" answer, not as "unavailable". The Source's own decision and body capacity limits now say how long to wait.
 
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.

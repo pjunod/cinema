@@ -93,6 +93,35 @@ def module_source(path: str | pathlib.Path) -> str:
     return "".join(pieces)
 
 
+def module_segments(path: str | pathlib.Path) -> list[tuple[pathlib.Path, str]]:
+    """Return `module_source(path)` as `(file, text)` segments, one per file.
+
+    The first segment is the parent with its product split blocks removed; each
+    further segment is one child's body as `module_source` would insert it. The
+    texts concatenate to `module_source(path)` (a chunked `impl` loses only its
+    shared header and closing brace once), so a count over the segments
+    attributes each occurrence to the file that now holds it.
+    """
+
+    path = _resolve(path)
+    text = path.read_text(encoding="utf-8")
+    try:
+        key = path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        key = ""
+    parent: list[str] = []
+    children: list[tuple[pathlib.Path, str]] = []
+    last = 0
+    for block, names in _product_blocks(text):
+        parent.append(text[last : block.start()])
+        last = block.end()
+        for name in names:
+            child = (path.parent / name).resolve()
+            children.append((child, _child_body(child, key)))
+    parent.append(text[last:])
+    return [(path.resolve(), "".join(parent)), *children]
+
+
 def split_children(path: str | pathlib.Path) -> set[pathlib.Path]:
     """The product child files `module_source(path)` expands."""
 

@@ -127,6 +127,9 @@ class ClientFixEntry:
     test: str
     test_anchor: str
     supplements: str | None = None
+    # The tests/client-fixes.d/ fragment the row lives in; None for a ledger row.
+    # Errors about the row are the pull request's own when it touched this file.
+    file: Path | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -395,6 +398,40 @@ def load_coverage(path: Path = DEFAULT_COVERAGE) -> tuple[CoverageEntry, ...]:
     )
 
 
+def client_fix_fragments(path: Path) -> list[Path]:
+    """The fragment files beside the ledger: `tests/client-fixes.d/*.toml`, in name order.
+
+    A pull request adds its new rows as a file of its own there, so two pull
+    requests adding fixes never edit the same lines; `scripts/fold` moves them
+    into the ledger after merge once the folder passes its bound, and at every
+    release cut.
+    """
+
+    folder = path.with_name(path.stem + ".d")
+    return sorted(folder.glob("*.toml")) if folder.is_dir() else []
+
+
+def _client_fix_rows(path: Path, raw: dict) -> list[tuple[str, object, Path | None]]:
+    rows: list[tuple[str, object, Path | None]] = [
+        (f"fixes[{index}]", item, None) for index, item in enumerate(raw.get("fixes", []))
+    ]
+    for fragment in client_fix_fragments(path):
+        try:
+            with fragment.open("rb") as handle:
+                extra = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise HistoryError(f"cannot read {fragment}: {exc}") from exc
+        if set(extra) != {"fixes"} or not isinstance(extra["fixes"], list) or not extra["fixes"]:
+            raise HistoryError(
+                f"{fragment.name} must hold only one or more [[fixes]] rows "
+                "(version and enforce_after live in the ledger)"
+            )
+        rows.extend(
+            (f"{fragment.name} fixes[{index}]", item, fragment) for index, item in enumerate(extra["fixes"])
+        )
+    return rows
+
+
 def load_client_fixes(path: Path) -> ClientFixLedger:
     if not path.exists():
         return ClientFixLedger(enforce_after=None, fixes=())
@@ -413,8 +450,7 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
         raise HistoryError("client fix enforce_after must be a Git SHA prefix")
 
     entries: list[ClientFixEntry] = []
-    for index, item in enumerate(raw.get("fixes", [])):
-        where = f"fixes[{index}]"
+    for where, item, fragment in _client_fix_rows(path, raw):
         if not isinstance(item, dict):
             raise HistoryError(f"{where} must be a table")
         required = {
@@ -444,6 +480,7 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
                 test=str(item["test"]),
                 test_anchor=str(item["test_anchor"]),
                 supplements=supplements,
+                file=fragment,
             )
         )
     # A supplementary row adds live obligations to exactly one primary; it
@@ -1119,7 +1156,8 @@ def audit_history(
     anchor_ids: set[str] = set()
     anchor_prefixes: set[str] = set()
     for index, entry in enumerate(client_fixes.fixes):
-        with errors.about(named_by(entry.commits), (client_fixes_file, entry.source, entry.test)):
+        row_file = _relative(root, entry.file) if entry.file is not None else client_fixes_file
+        with errors.about(named_by(entry.commits), (row_file, entry.source, entry.test)):
             where = f"fixes[{index}]"
             if not entry.id or entry.id in anchor_ids:
                 errors.append(f"{where} has a missing or duplicate id {entry.id!r}")

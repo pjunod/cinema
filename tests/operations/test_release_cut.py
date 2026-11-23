@@ -63,13 +63,21 @@ CARGO = textwrap.dedent(
     serde = { version = "1.0.0" }
     """
 )
-ANDROID = '    defaultConfig {\n        versionCode = 120\n        versionName = "0.3.0"\n    }\n'
+ANDROID = (
+    '    // runs scripts/build-number\n'
+    '    defaultConfig {\n        versionCode = plurxVersionCode\n        versionName = "0.3.0"\n    }\n'
+)
+STAMP = (
+    '        script: |\n'
+    '          number="$("${SRCROOT}/../../scripts/build-number" ${mode})"\n'
+    '          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${number}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"\n'
+)
 APPLE = textwrap.dedent(
     """\
     settings:
       base:
         MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "180"
+        CURRENT_PROJECT_VERSION: "1"
     targets:
       iOS:
         info:
@@ -82,29 +90,27 @@ APPLE = textwrap.dedent(
             CFBundleShortVersionString: "$(MARKETING_VERSION)"
             CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
     """
-)
+) + STAMP + STAMP
 
-# The status lines that quote the version and both build counters, in the
-# shape the real documents carry them (validation/apple_build.py and
-# validation/doc_versions.py pin those shapes on the real tree).
+# The status lines that quote the version, in the shape the real documents
+# carry them (validation/doc_versions.py pins those shapes on the real tree).
+# None quotes a build number: those are derived by scripts/build-number.
+DERIVED = "the build number is derived at build time by\n> [`scripts/build-number`](../../scripts/build-number)"
 DOCUMENTS = {
     release_cut.APPLE_README: (
         "# plurx for Apple\n\n"
-        "> Status: **v0.3.0**, build `180` in [`project.yml`](project.yml) — working\n"
+        f"> Status: **v0.3.0**; {DERIVED} — working\n"
         "> regression suite.\n"
     ),
     release_cut.APPLE_PARITY: (
-        "# Parity\n\n> Status (2026-09-15): source is v0.3.0, Apple build 180. Timer-only\n"
+        "# Parity\n\n> Status (2026-09-15): source is v0.3.0; the Apple build number is derived at\n"
+        "> build time by [`scripts/build-number`](../../scripts/build-number). Timer-only\n"
     ),
     release_cut.ANDROID_README: (
-        "# plurx for Android\n\n> Status: **v0.3.0**, build `120` — native viewer parity\n"
-    ),
-    release_cut.STATUS_PAGE: (
-        "<div>web · Android versionCode 119 source · Apple build 180 source, not yet uploaded</div>\n"
-        "<li>upload Apple build 180 (release notes: x) to TestFlight</li>\n"
-        "<li>Install Apple build 180 and Android versionCode 119 on the physical devices.</li>\n"
+        f"# plurx for Android\n\n> Status: **v0.3.0**; {DERIVED}. Native viewer parity\n"
     ),
 }
+STATUS_PAGE = "docs/STATUS.html"
 
 
 def git(root: Path, *args: str) -> str:
@@ -143,14 +149,71 @@ class ReleaseCutCase(unittest.TestCase):
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
+    def land(self, root: Path, number: int, message: str, path: str | None = None) -> str:
+        """A pull request landing the way main receives one: a merge commit carrying its description."""
+
+        main = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        git(root, "checkout", "-q", "-b", f"pr-{number}")
+        target = root / (path or f"change-{number}.txt")
+        target.write_text(f"{number}\n", encoding="utf-8")
+        topic = self.commit(root, f"change {number}")
+        git(root, "checkout", "-q", main)
+        subject = f"Merge pull request 'change {number}' (#{number}) from pr-{number} into main"
+        git(root, "merge", "-q", "--no-ff", "-m", subject, "-m", message, topic)
+        return git(root, "rev-parse", "HEAD")
+
+    def test_a_cut_collects_each_landing_entry_exactly_once(self):
+        """Entries come from landing commits; the marker keeps the next cut from repeating them."""
+
+        root = self.tree()
+        # The field exists from here on, so a landing without one is named.
+        (root / "validation").mkdir()
+        (root / "validation/changelog_field.py").write_text("# the field\n", encoding="utf-8")
+        self.commit(root, "add the field")
+        self.land(root, 7, "Changelog: Fixed — **Landed fix.** It works now,\n  across two lines.")
+        self.land(root, 9, "No field at all.")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("#9", result.stderr)
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        first = release_cut._section(changelog, "0.3.1")
+        self.assertIn("- **Something a server operator will notice.**", first)
+        self.assertIn("- **Landed fix.** It works now,\n  across two lines.", first)
+        self.assertEqual(first.count("### Fixed"), 1)
+
+        git(root, "checkout", "-q", "-b", "release/v0.3.1")
+        cut = self.commit(root, "release: v0.3.1")
+        git(root, "checkout", "-q", "-")
+        git(root, "merge", "-q", "--no-ff", "-m",
+            "Merge pull request 'release: v0.3.1' (#8) from release/v0.3.1 into main",
+            "-m", "Changelog: none — the release itself", cut)
+        self.land(root, 10, "Changelog: Added — A later feature.")
+        result = self.run_cut(root, "--date", "2026-10-05")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        second = release_cut._section(changelog, "0.3.2")
+        self.assertIn("### Added\n- A later feature.", second)
+        self.assertNotIn("Landed fix", second)
+        self.assertEqual(changelog.count("Landed fix"), 1)
+
+    def test_a_cut_with_nothing_to_release_is_refused(self):
+        root = self.tree(CHANGELOG.replace(
+            "### Fixed\n\n- **Something a server operator will notice.**\n", ""))
+        self.land(root, 7, "Changelog: none")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nothing to release", result.stderr)
+
     def test_a_patch_cut_rolls_the_changelog_and_every_version(self):
         root = self.tree()
         result = self.run_cut(root, "--date", "2026-09-28")
         self.assertEqual(result.returncode, 0, result.stderr)
         changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn(
-            "## [Unreleased]\n\n## [0.3.1] — 2026-09-28\n\n### Fixed\n", changelog
-        )
+        unreleased, _, rest = changelog.partition("## [0.3.1] — 2026-09-28\n")
+        self.assertTrue(rest, changelog)
+        # [Unreleased] keeps only the note saying where entries come from.
+        self.assertFalse(release_cut._has_content(unreleased.partition("## [Unreleased]\n")[2]))
+        self.assertRegex(rest, r"^<!-- changelog-through: [0-9a-f]{40} -->\n\n### Fixed\n")
         self.assertIn(
             "[Unreleased]: https://github.com/pjunod/plurx/compare/v0.3.1...HEAD\n"
             "[0.3.1]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.3.1\n"
@@ -163,20 +226,17 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertIn('serde = { version = "1.0.0" }', cargo)
         android = (root / release_cut.ANDROID).read_text(encoding="utf-8")
         self.assertIn('versionName = "0.3.1"', android)
-        self.assertIn("versionCode = 121", android)
         apple = (root / release_cut.APPLE).read_text(encoding="utf-8")
         self.assertIn('MARKETING_VERSION: "0.3.1"', apple)
-        self.assertIn('CURRENT_PROJECT_VERSION: "181"', apple)
-        # Every status document's quote of the version and both counters.
+        # Build numbers are derived at build time, so the cut stores none.
+        self.assertEqual(android, ANDROID.replace('"0.3.0"', '"0.3.1"'))
+        self.assertEqual(apple, APPLE.replace('"0.3.0"', '"0.3.1"'))
+        # Every status document's quote of the version.
         read = lambda path: (root / path).read_text(encoding="utf-8")  # noqa: E731
-        self.assertIn("> Status: **v0.3.1**, build `181` in", read(release_cut.APPLE_README))
-        self.assertIn("source is v0.3.1, Apple build 181. Timer-only", read(release_cut.APPLE_PARITY))
-        self.assertIn("> Status: **v0.3.1**, build `121` — native", read(release_cut.ANDROID_README))
-        status = read(release_cut.STATUS_PAGE)
-        self.assertIn("Android versionCode 121 source · Apple build 181 source", status)
-        self.assertIn("upload Apple build 181 (release notes", status)
-        self.assertIn("Install Apple build 181 and Android versionCode 121 on", status)
-        self.assertNotRegex(status, r"\b(180|119)\b")
+        self.assertIn("> Status: **v0.3.1**; the build number", read(release_cut.APPLE_README))
+        self.assertIn("source is v0.3.1; the Apple build number", read(release_cut.APPLE_PARITY))
+        self.assertIn("> Status: **v0.3.1**; the build number", read(release_cut.ANDROID_README))
+        self.assertNotIn(STATUS_PAGE, result.stdout)
         # It never tags; tagging is the scheduled run's, from a green gate.
         tags = subprocess.run(
             ["git", "tag", "-l"], cwd=root, text=True, stdout=subprocess.PIPE
@@ -188,20 +248,19 @@ class ReleaseCutCase(unittest.TestCase):
         from validation.mobile_versions import read_versions, validate_versions
 
         root = self.tree()
-        before = read_versions(lambda path: (root / path).read_text(encoding="utf-8"))
         self.assertEqual(self.run_cut(root, "--part", "minor").returncode, 0)
         after = read_versions(lambda path: (root / path).read_text(encoding="utf-8"))
         self.assertEqual(after.workspace, "0.4.0")
-        self.assertEqual(validate_versions(after, baseline=before), ())
+        self.assertEqual(validate_versions(after), ())
 
     def test_the_cut_real_tree_passes_the_build_claim_sweeps(self):
         """PR #485 review finding 2: the cut left the repository red.
 
-        `make operations-check` pins every status document's build claim to
-        the manifests (`test_mobile_build_claims`, `test_apple_build_claims`),
-        and a cut that advanced the counters without them failed both. This
-        runs the cut on a copy of this repository's own release files and
-        then those same sweeps on the result.
+        `make operations-check` pins every status document's version and
+        build-number wording (`test_mobile_build_claims`,
+        `test_apple_build_claims`). This runs the cut on a copy of this
+        repository's own release files and then those same sweeps on the
+        result.
         """
 
         from validation.apple_build import NOTES_DIR, check_repository
@@ -213,7 +272,7 @@ class ReleaseCutCase(unittest.TestCase):
         root = Path(temporary.name)
         for path in (
             "CHANGELOG.md", "Cargo.toml", release_cut.ANDROID, release_cut.APPLE,
-            *DOCUMENTS,
+            *DOCUMENTS, STATUS_PAGE,
         ):
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / path, root / path)
@@ -234,16 +293,17 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
         after = read_versions(read)
-        self.assertEqual(after.apple_build, before.apple_build + 1)
+        self.assertEqual(after.apple_build, before.apple_build, "the placeholder never moves")
+        self.assertEqual(after.android_version_code, before.android_version_code)
         self.assertEqual(validate_documented_builds(read), ())
         self.assertEqual(check_repository(root), ())
-        self.assertEqual(validate_versions(after, baseline=before), ())
+        self.assertEqual(validate_versions(after), ())
 
     def test_a_reworded_claim_refuses_the_cut_before_anything_is_written(self):
         root = self.tree()
         readme = root / release_cut.ANDROID_README
         readme.write_text(
-            DOCUMENTS[release_cut.ANDROID_README].replace("build `120`", "versionCode 120"),
+            DOCUMENTS[release_cut.ANDROID_README].replace("**v0.3.0**;", "version 0.3.0;"),
             encoding="utf-8",
         )
         result = self.run_cut(root)
