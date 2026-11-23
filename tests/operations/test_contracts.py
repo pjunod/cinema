@@ -1444,6 +1444,53 @@ assert.equal(context.ACT_TIMER, null);
             dockerfile,
         )
 
+    def test_release_build_stage_installs_its_pinned_toolchain_before_the_source(self):
+        # The `build` stage starts from a floating-version rust image, so the
+        # first cargo that sees rust-toolchain.toml makes rustup download the
+        # pinned compiler and components from static.rust-lang.org. When that
+        # happened inside the compile RUN it recurred on every source change,
+        # and one network blip failed `package and smoke (arm64)` (run 9051).
+        # The download must live in a layer keyed only on rust-toolchain.toml,
+        # and nothing after it may fetch silently.
+        dockerfile = read("Dockerfile")
+        build = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        copy_toolchain = build.index("COPY rust-toolchain.toml ./")
+        install = build.index("RUN rustup toolchain install --profile minimal")
+        no_auto = build.index("ENV RUSTUP_AUTO_INSTALL=0")
+        copy_source = build.index("\nCOPY . .\n")
+        self.assertLess(copy_toolchain, install)
+        self.assertLess(install, no_auto)
+        self.assertLess(no_auto, copy_source)
+        # Every ARG and ENV of the stage carries per-commit values (the build
+        # SHA, ref and SOURCE_DATE_EPOCH CI passes), and BuildKit invalidates
+        # every instruction after a changed one. The toolchain layer has to
+        # come before all of them, or each commit downloads it again.
+        first_arg_or_env = min(
+            build.index(marker) for marker in ("\nARG ", "\nENV ") if marker in build
+        )
+        self.assertLess(install, first_arg_or_env)
+        self.assertLess(build.index("ENV PLURX_BUILD_SHA"), copy_source)
+        # The layer verifies the installed compiler against the channel the
+        # file names, so the version is stated once.
+        self.assertIn("rust-toolchain.toml)", build[install:no_auto])
+        self.assertRegex(
+            (ROOT / "rust-toolchain.toml").read_text(),
+            r'(?m)^channel = "\d+\.\d+\.\d+"$',
+        )
+        with tempfile.TemporaryDirectory() as scratch:
+            output = Path(scratch) / "Dockerfile.binaries"
+            subprocess.run(
+                [
+                    sys.executable, "-m", "validation.release_dockerfile",
+                    "--binary-export", "Dockerfile", str(output),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            derived = output.read_text()
+        self.assertIn("RUSTUP_AUTO_INSTALL=0", derived)
+        self.assertIn("COPY rust-toolchain.toml ./", derived)
+
     def test_base_image_pin_drift_is_reported_weekly_and_gates_nothing(self):
         # A pin nobody looks at is a stale pin. The weekly dependency audit is
         # the job that already exists to say "upstream moved", so the report
