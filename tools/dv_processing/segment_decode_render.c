@@ -101,6 +101,10 @@ static struct rational run_ends[RUN_MAX];
 static int run_dirs[RUN_MAX];
 static const char *run_nuts[RUN_MAX], *run_dir_paths[RUN_MAX];
 static uint64_t run_bytes_base;
+// The first window's NUT output is usually an inherited descriptor named by
+// /proc/self/fd/N. Its encoder reads to end of input, so a run must close
+// this inherited copy when the first window ends, not when the helper exits.
+static int run_inherited_nut = -1;
 static struct coded_input coded_sets[RUN_MAX][64];
 static unsigned coded_counts[RUN_MAX], coded_printed[RUN_MAX];
 // Demux reads ahead into later run windows. A coded AU a single-window helper
@@ -689,6 +693,10 @@ static bool run_advance(int64_t boundary) {
   need(avio_closep(&nut_output->pb) >= 0, "NUT output close");
   avformat_free_context(nut_output);
   nut_output = NULL;
+  if (run_inherited_nut >= 0) {
+    need(close(run_inherited_nut) == 0, "first run window NUT descriptor close");
+    run_inherited_nut = -1;
+  }
   run_current++;
   run_bytes_base = movie_io.bytes;
   window_start = window_end;
@@ -1251,8 +1259,17 @@ int main(int argc, char **argv) {
     need(source_reader_start(&movie_reader, &movie_reader_source) == 0,
          "start owned source reader");
   }
-  if (streaming)
+  if (streaming) {
     open_nut(argv[11]);
+    if (run_windows > 1) {
+      int inherited = -1;
+      char tail;
+      if ((sscanf(argv[11], "/proc/self/fd/%d%c", &inherited, &tail) == 1 ||
+           sscanf(argv[11], "/dev/fd/%d%c", &inherited, &tail) == 1) &&
+          inherited > STDERR_FILENO)
+        run_inherited_nut = inherited;
+    }
+  }
   dv_host_pack = pack;
   writer_start();
   const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");

@@ -2,8 +2,43 @@
 //! segment, one warning when the producer makes no progress for a whole
 //! advertised target duration, and one line when production ends. It only
 //! observes: nothing here changes what the producer does or when.
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::Duration,
+};
 use tokio::time::Instant;
+
+/// The read bank's hold state, readable without its lock. The bank's own
+/// mutex is held across an `.await` while it changes state, so a reader that
+/// tried that lock would see "not held" exactly when it matters. `holds`
+/// counts holds begun, so a wait can ask whether the bank held at any point
+/// since it started, not only at the instant it is reported.
+#[derive(Default)]
+pub(super) struct HoldMirror {
+    held: AtomicBool,
+    holds: AtomicU64,
+}
+impl HoldMirror {
+    /// Record the bank's state after each transition it commits.
+    pub(super) fn set(&self, held: bool) {
+        if held {
+            if !self.held.swap(true, Ordering::SeqCst) {
+                self.holds.fetch_add(1, Ordering::SeqCst);
+            }
+        } else {
+            self.held.store(false, Ordering::SeqCst);
+        }
+    }
+    /// A mark to compare against later.
+    pub(super) fn mark(&self) -> u64 {
+        self.holds.load(Ordering::SeqCst)
+    }
+    /// Whether the bank is holding now or began a hold since `mark`.
+    pub(super) fn held_since(&self, mark: u64) -> bool {
+        self.held.load(Ordering::SeqCst) || self.holds.load(Ordering::SeqCst) != mark
+    }
+}
 
 /// Production's own accounting between two published segments.
 ///
@@ -53,6 +88,9 @@ impl ProductionMeter {
 
     /// Log one published segment and start the next interval. The rate is
     /// media seconds produced per wall second since the previous segment.
+    /// One child output can complete several segments at once; every one
+    /// after the first is `batched`: the interval's wall time, split and rate
+    /// belong to the first line, and a batched line claims none of them.
     pub(super) fn segment(
         &mut self,
         now: Instant,
@@ -60,7 +98,26 @@ impl ProductionMeter {
         media_start_ms: f64,
         media_end_ms: f64,
         bytes: u64,
+        batched: bool,
     ) {
+        if batched {
+            tracing::info!(
+                target: "plurxd::transcode",
+                incarnation = %self.incarnation,
+                range = %self.range_id,
+                segment = index,
+                media_start_ms = media_start_ms.round() as i64,
+                media_end_ms = media_end_ms.round() as i64,
+                bytes,
+                since_start_ms = now.saturating_duration_since(self.started).as_millis() as u64,
+                batched = true,
+                "Source copy segment published"
+            );
+            self.segments = self.segments.saturating_add(1);
+            self.media_end_ms = Some(media_end_ms);
+            self.interval_media_start_ms = Some(media_end_ms);
+            return;
+        }
         let wall = now.saturating_duration_since(self.interval_started);
         let produced_from = self.interval_media_start_ms.unwrap_or(media_start_ms);
         let media_ms = (media_end_ms - produced_from).max(0.0);
@@ -94,21 +151,35 @@ impl ProductionMeter {
         self.commit = Duration::ZERO;
     }
 
-    /// One warning for a wait that outlasted the advertised target duration.
-    /// `held` says the Source read bank was holding reads at that moment,
-    /// which is the bank's ordinary back-pressure rather than a fault.
+    /// One line for a wait that outlasted the advertised target duration.
+    /// `held` says the Source read bank held reads at some point during the
+    /// wait. A held bank is the producer running far enough ahead (its
+    /// watermarks are two target durations apart, so a healthy hold outlasts
+    /// one): debug. A wait with no hold is the child itself being slow: warn.
     pub(super) fn stalled(&self, stage: &'static str, waited: Duration, held: bool) {
-        tracing::warn!(
-            target: "plurxd::transcode",
-            incarnation = %self.incarnation,
-            range = %self.range_id,
-            stage,
-            waited_ms = waited.as_millis() as u64,
-            read_bank_held = held,
-            segments = self.segments,
-            media_end_ms = self.media_end_ms.map_or(-1, |end| end.round() as i64),
-            "Source copy producer made no progress for a target duration"
-        );
+        macro_rules! line {
+            ($level:ident, $message:literal) => {
+                tracing::$level!(
+                    target: "plurxd::transcode",
+                    incarnation = %self.incarnation,
+                    range = %self.range_id,
+                    stage,
+                    waited_ms = waited.as_millis() as u64,
+                    read_bank_held = held,
+                    segments = self.segments,
+                    media_end_ms = self.media_end_ms.map_or(-1, |end| end.round() as i64),
+                    $message
+                )
+            };
+        }
+        if held {
+            line!(debug, "Source copy producer waited on its read bank's hold");
+        } else {
+            line!(
+                warn,
+                "Source copy producer made no progress for a target duration"
+            );
+        }
     }
 
     /// The one line production ends with: how far it got and how long it
@@ -183,6 +254,7 @@ mod tests {
             4_463.0,
             19_478.0,
             37_000_000,
+            false,
         );
         meter.child(Duration::from_millis(26_000));
         meter.segment(
@@ -191,9 +263,18 @@ mod tests {
             19_478.0,
             26_610.0,
             17_000_000,
+            false,
+        );
+        meter.segment(
+            start + Duration::from_secs(51),
+            3,
+            26_610.0,
+            38_956.0,
+            30_000_000,
+            true,
         );
         let lines = lines(&logs);
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines[0].starts_with("INFO plurxd::transcode Source copy segment published"));
         for field in [
             "incarnation=inc-1",
@@ -220,6 +301,15 @@ mod tests {
         ] {
             assert!(lines[1].contains(field), "{field} in {}", lines[1]);
         }
+        // A segment the same child output completed claims no time or rate.
+        assert!(
+            lines[2].contains("segment=3") && lines[2].contains("batched=true"),
+            "{}",
+            lines[2]
+        );
+        for absent in ["rate=", "wall_ms=", "child_ms="] {
+            assert!(!lines[2].contains(absent), "{absent} in {}", lines[2]);
+        }
     }
 
     #[test]
@@ -227,7 +317,14 @@ mod tests {
         let (logs, _guard) = capture();
         let start = Instant::now();
         let mut meter = ProductionMeter::new("inc-2".into(), uuid::Uuid::nil(), start);
-        meter.segment(start + Duration::from_secs(5), 0, 0.0, 4_463.0, 1_000);
+        meter.segment(
+            start + Duration::from_secs(5),
+            0,
+            0.0,
+            4_463.0,
+            1_000,
+            false,
+        );
         meter.finished(
             start + Duration::from_secs(9),
             &Err("copy_sync_unverified".into()),
@@ -288,5 +385,49 @@ mod tests {
         ] {
             assert!(lines[0].contains(field), "{field} in {}", lines[0]);
         }
+    }
+
+    /// The production loop's own wiring: a wait marks the hold count, the
+    /// bank begins and ends a hold during it, and the report still knows it
+    /// was back-pressure. A wait with no hold is reported as the child's.
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_during_the_wait_makes_the_stall_back_pressure_not_a_warning() {
+        let (logs, _guard) = capture();
+        let meter = ProductionMeter::new("inc-4".into(), uuid::Uuid::nil(), Instant::now());
+        let mirror = std::sync::Arc::new(HoldMirror::default());
+        let target = Duration::from_secs(16);
+        for hold in [true, false] {
+            let mark = mirror.mark();
+            let bank = std::sync::Arc::clone(&mirror);
+            await_reporting_stall(
+                async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if hold {
+                        bank.set(true);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        bank.set(false);
+                    }
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                },
+                target,
+                |waited| meter.stalled("child_output", waited, mirror.held_since(mark)),
+            )
+            .await;
+        }
+        let lines = lines(&logs);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with(
+                "DEBUG plurxd::transcode Source copy producer waited on its read bank's hold"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("read_bank_held=true"), "{}", lines[0]);
+        assert!(
+            lines[1].starts_with("WARN plurxd::transcode Source copy producer made no progress"),
+            "{}",
+            lines[1]
+        );
     }
 }
