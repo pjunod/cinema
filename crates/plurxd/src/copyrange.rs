@@ -35,16 +35,15 @@ pub(crate) use observed::admission_charge;
 #[cfg(unix)]
 pub(crate) use production::{CommitWaiter, CopyRangeProduction, DeadlineEnd};
 
-/// What a seeked generation may read from its source before its landing is
-/// verified. A source-read allowance, not a memory figure: the read that
-/// sparse-cue titles have always landed within (96 MiB, one segment and the
-/// census), or 16 s of the source and one segment when that is more.
+/// The source read a sparse-cue title lands within before its landing is
+/// verified, unchanged from before copies were charged by what they hold.
 #[cfg(unix)]
-pub(crate) fn seek_bootstrap_bytes(file_size: i64, duration_ms: Option<i64>) -> u64 {
-    const LANDING_READ_BYTES: u64 = 96 * 1024 * 1024;
-    let segment = plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
-    LANDING_READ_BYTES
-        .max(observed::admission_charge(file_size, duration_ms) / 2)
-        .saturating_add(segment)
-        .saturating_add(census::MAX_CENSUS_SOURCE_BYTES)
-}
+const SEEK_LANDING_READ_BYTES: u64 = 96 * 1024 * 1024;
+/// What a seeked generation may read from its source before its landing is
+/// verified: a source-read allowance, not a memory figure. It equals the
+/// allowance before copies were charged by what they hold: the landing read,
+/// one segment and the census.
+#[cfg(unix)]
+pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES: u64 = SEEK_LANDING_READ_BYTES
+    + plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64
+    + census::MAX_CENSUS_SOURCE_BYTES;

@@ -2011,9 +2011,9 @@ async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_n
     fixture.shutdown().await;
 }
 
-/// A real copy's drive loop charges memory as it goes: after its cuts the
-/// charge has come back down from its peak (settle), and the peak covered
-/// the most the copy ever held (fit).
+/// A real copy's drive loop charges memory as it goes (each step checks the
+/// charge covers its hold), and a finished copy returns all of it, though
+/// its production stays up for its viewers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_a_real_copy_charges_what_it_holds() {
     use std::time::Duration;
@@ -2037,11 +2037,18 @@ async fn sharing_source_a_real_copy_charges_what_it_holds() {
     })
     .await
     .expect("the fixture copy finishes");
-    let (charged, peak) = production.memory_for_test();
-    assert!(
-        charged < peak,
-        "the charge settled after its cuts: {charged} of {peak}"
-    );
+    // A finished copy holds nothing: its charge goes back to the pool,
+    // though the production that served it lives on for its viewers.
+    let pool = fixture.state.transcode.admissions().copy_memory();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while production.memory_for_test().0.is_some() || pool.usage().0 != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the finished copy releases its charge");
+    let (_, peak) = production.memory_for_test();
+    assert!(peak > 0, "the copy was charged while it ran");
     session.stop().await;
     fixture.shutdown().await;
 }

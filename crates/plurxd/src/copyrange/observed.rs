@@ -28,16 +28,22 @@ use std::{
 /// be. The fragment holds join as fragments arrive ([`ObservedCopyMux::need_for`]).
 ///
 /// [`COPY_SEGMENT_MAX_BYTES`]: plurx_core::transcode::COPY_SEGMENT_MAX_BYTES
-pub(crate) fn admission_charge(file_size: i64, duration_ms: Option<i64>) -> u64 {
-    segment_window(file_size, duration_ms).saturating_mul(2)
+pub(crate) fn admission_charge(
+    file_size: i64,
+    duration_ms: Option<i64>,
+    audio_bits_per_second: u32,
+) -> u64 {
+    segment_window(file_size, duration_ms, audio_bits_per_second).saturating_mul(2)
 }
-/// The bytes of 16 s of the file at its own rate, capped at the segment byte
-/// ceiling. A size or duration that cannot describe the file (unknown, not
-/// positive, or a rate below any video stream's, as a file scanned while it
-/// was still growing reports) is unknown, and a full segment is assumed.
-fn segment_window(file_size: i64, duration_ms: Option<i64>) -> u64 {
-    /// No video stream plays below an audio track's rate.
-    const MIN_PLAUSIBLE_BITS_PER_SECOND: u128 = 64_000;
+/// The longest a segment may span, in seconds: a single fragment longer is
+/// `copy_target_exceeded`.
+pub(crate) const SEGMENT_STRICT_MAX_SECONDS: u32 = 16;
+/// The bytes of one longest segment of the file at its own rate, capped at
+/// the segment byte ceiling. A size or duration that cannot describe the
+/// file is unknown, and a full segment is assumed: not positive, or a rate
+/// below the copy's own audio track's, which the file carries in full (as a
+/// file scanned while it was still growing reports).
+fn segment_window(file_size: i64, duration_ms: Option<i64>, audio_bits_per_second: u32) -> u64 {
     let segment_max = plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
     match (
         u64::try_from(file_size).ok().filter(|size| *size > 0),
@@ -46,9 +52,11 @@ fn segment_window(file_size: i64, duration_ms: Option<i64>) -> u64 {
             .filter(|ms| *ms > 0),
     ) {
         (Some(size), Some(ms))
-            if u128::from(size) * 8 * 1000 / u128::from(ms) >= MIN_PLAUSIBLE_BITS_PER_SECOND =>
+            if u128::from(size) * 8 * 1000 / u128::from(ms)
+                >= u128::from(audio_bits_per_second) =>
         {
-            let sixteen = u128::from(size) * 16_000 / u128::from(ms);
+            let sixteen =
+                u128::from(size) * u128::from(SEGMENT_STRICT_MAX_SECONDS) * 1000 / u128::from(ms);
             u64::try_from(sixteen).unwrap_or(u64::MAX).min(segment_max)
         }
         _ => segment_max,
@@ -59,6 +67,9 @@ fn segment_window(file_size: i64, duration_ms: Option<i64>) -> u64 {
 const MAX_FRAGMENTS: usize = 8;
 /// What one held packet inspection costs: the record and its digest string.
 const INSPECTION_BYTES: usize = std::mem::size_of::<PacketInspection>() + 64;
+/// What one row inspection costs: the record, its configuration digest and
+/// its hex mastering-display payload (24 bytes as 48 hex characters).
+const ROW_INSPECTION_BYTES: usize = std::mem::size_of::<CopyRowInspection>() + 64 + 48;
 const MAX_PACKETS: usize = 131072;
 
 /// Each hold the mux has, in bytes, or in records for inspections. The two
@@ -73,9 +84,10 @@ struct HeldParts {
     assembler: usize,
     /// The kernel's pending AV before a cut; a cut clones it once more.
     kernel_pending: usize,
-    /// Packet inspections held for rows not yet cut, and those already
-    /// attached to rows awaiting their segment.
+    /// Packet inspections held for rows not yet cut.
     inspections: usize,
+    /// Row inspections attached to rows awaiting their segment.
+    rows: usize,
 }
 impl HeldParts {
     fn figure(self) -> u64 {
@@ -83,7 +95,8 @@ impl HeldParts {
             .saturating_add(self.av_reader)
             .saturating_add(self.assembler)
             .saturating_add(self.kernel_pending.saturating_mul(2))
-            .saturating_add(self.inspections.saturating_mul(INSPECTION_BYTES)) as u64
+            .saturating_add(self.inspections.saturating_mul(INSPECTION_BYTES))
+            .saturating_add(self.rows.saturating_mul(ROW_INSPECTION_BYTES)) as u64
     }
 }
 
@@ -227,10 +240,8 @@ impl ObservedCopyMux {
                 .kernel
                 .as_ref()
                 .map_or(0, |kernel| kernel.pending_bytes()),
-            inspections: self
-                .inspected
-                .len()
-                .saturating_add(self.row_inspections.len()),
+            inspections: self.inspected.len(),
+            rows: self.row_inspections.len(),
         }
         .figure()
     }
@@ -249,13 +260,68 @@ impl ObservedCopyMux {
         // event's bytes, if larger than any seen.
         let framing = match kind {
             Some(CopyPipeKind::Av) => self.av_reader.buffered().saturating_add(bytes),
-            Some(CopyPipeKind::Canonical) => self.assembler.held_bytes().saturating_add(bytes),
+            // A canonical chunk, or a clock line that releases the
+            // fragment its unframed backlog completes.
+            Some(CopyPipeKind::Canonical | CopyPipeKind::Clock) => self
+                .assembler
+                .held_bytes()
+                .saturating_add(self.pending_media_bytes())
+                .saturating_add(if kind == Some(CopyPipeKind::Canonical) {
+                    bytes
+                } else {
+                    0
+                }),
             _ => 0,
         };
         let largest = self.largest_fragment.max(framing) as u64;
         self.held()
             .saturating_add(bytes as u64)
             .saturating_add(largest.saturating_mul(2))
+    }
+    fn pending_media_bytes(&self) -> usize {
+        self.pending_media
+            .iter()
+            .map(|(bytes, at)| bytes.len().saturating_sub(*at))
+            .sum()
+    }
+    /// Fit this copy's charge to `event`, then feed it: the one step both
+    /// drive loops take per event. The caller applies the returned events,
+    /// then calls [`Self::after_apply`].
+    pub(crate) async fn step(
+        &mut self,
+        event: CopyPipeEvent,
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> Result<Vec<CopyMuxEvent>, String> {
+        self.fit(&event, stop).await?;
+        let events = self.feed(event)?;
+        self.covers(&events);
+        Ok(events)
+    }
+    /// After the events of a step are applied (a cut's segment committed and
+    /// dropped), return what the copy no longer holds.
+    pub(crate) async fn after_apply(&self, cut: bool) {
+        if cut {
+            self.settle().await;
+        }
+    }
+    /// The charge covers everything held now and the segments about to be
+    /// applied: a step whose charge fell short charged too late or returned
+    /// memory too early.
+    fn covers(&self, events: &[CopyMuxEvent]) {
+        let segments: u64 = events
+            .iter()
+            .map(|event| match event {
+                CopyMuxEvent::Segment(segment) => segment.segment.media.bytes.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        debug_assert!(
+            self.memory.bytes() >= self.held().saturating_add(segments),
+            "copy memory charge {} below its hold {} and segments {}",
+            self.memory.bytes(),
+            self.held(),
+            segments
+        );
     }
     /// The most this mux has held at once, readable after it is consumed.
     pub(crate) fn peak_held(&self) -> Arc<std::sync::atomic::AtomicUsize> {
@@ -551,7 +617,7 @@ impl ObservedCopyMux {
             plurx_core::transcode::COPY_SEGMENT_MAX_SECS,
             scale,
         )
-        .with_strict_max_seconds(16, scale);
+        .with_strict_max_seconds(SEGMENT_STRICT_MAX_SECONDS, scale);
         self.kernel = Some(
             VerifiedCopyKernel::new(
                 (*canonical).clone(),
@@ -803,6 +869,8 @@ fn observation_error(error: plurx_core::segplan::observed_range::ObservationErro
 #[cfg(test)]
 mod hold_tests {
     use super::{admission_charge, CopyMuxEvent, ObservedCopyMux};
+    /// A copy's audio track rate, as the recipe reserves for AAC.
+    const AUDIO: u32 = 256_000;
     use crate::admission::{CopyMemoryPool, CopyPriority};
     use crate::copyrange::pipes::{CopyPipeEvent, CopyPipeKind};
     use plurx_core::fmp4::{FragmentReader, Unit};
@@ -881,14 +949,17 @@ mod hold_tests {
     fn a_copy_is_admitted_for_its_files_rate() {
         let segment_max = plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
         // 1 MB/s: 16 MB per 16 s.
-        assert_eq!(admission_charge(100_000_000, Some(100_000)), 32_000_000);
+        assert_eq!(
+            admission_charge(100_000_000, Some(100_000), AUDIO),
+            32_000_000
+        );
         // 70 MB/s (a 4K remux): capped at the segment byte ceiling.
         assert_eq!(
-            admission_charge(7_000_000_000, Some(100_000)),
+            admission_charge(7_000_000_000, Some(100_000), AUDIO),
             2 * segment_max
         );
-        assert_eq!(admission_charge(100, None), 2 * segment_max);
-        assert_eq!(admission_charge(100, Some(0)), 2 * segment_max);
+        assert_eq!(admission_charge(100, None, AUDIO), 2 * segment_max);
+        assert_eq!(admission_charge(100, Some(0), AUDIO), 2 * segment_max);
     }
 
     /// The held figure counts every hold the mux has: here the AV pipe's
@@ -1003,6 +1074,7 @@ mod hold_tests {
                 "assembler" => parts.assembler = 1000,
                 "kernel" => parts.kernel_pending = 1000,
                 "inspections" => parts.inspections = 10,
+                "rows" => parts.rows = 10,
                 _ => unreachable!(),
             }
             parts.figure()
@@ -1012,6 +1084,7 @@ mod hold_tests {
         assert_eq!(one("assembler"), 1000);
         assert_eq!(one("kernel"), 2000, "the pending AV and its merge clone");
         assert_eq!(one("inspections"), 10 * super::INSPECTION_BYTES as u64);
+        assert_eq!(one("rows"), 10 * super::ROW_INSPECTION_BYTES as u64);
     }
 
     /// Before a fragment is framed, the transient copies it will cost are
@@ -1027,31 +1100,40 @@ mod hold_tests {
         assert!(mux.need_for(&event) >= 3 * fragment.len() as u64);
     }
 
+    /// A clock line can release the framed fragment and frame the next from
+    /// the canonical backlog: that backlog is charged as framing before the
+    /// clock is fed.
+    #[tokio::test]
+    async fn a_clock_is_charged_for_the_backlog_it_releases() {
+        let (init, fragment, _, _) = authored();
+        let mut mux = mux().await;
+        for bytes in [init, fragment.clone(), fragment.clone()] {
+            mux.feed(CopyPipeEvent::Data(CopyPipeKind::Canonical, bytes))
+                .expect("canonical");
+        }
+        let clock = CopyPipeEvent::Data(CopyPipeKind::Clock, Vec::new());
+        assert!(
+            mux.need_for(&clock) >= mux.held() + 2 * 2 * fragment.len() as u64,
+            "two fragments' backlog: {} over {}",
+            mux.need_for(&clock),
+            mux.held()
+        );
+    }
+
     /// A zero or implausible size is not a rate: such a file is admitted as
     /// unknown, for two full segments.
     #[test]
     fn an_unknown_or_implausible_size_is_not_a_zero_charge() {
         let full = 2 * plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
-        assert_eq!(admission_charge(0, Some(100_000)), full);
-        assert_eq!(admission_charge(-5, Some(100_000)), full);
+        assert_eq!(admission_charge(0, Some(100_000), AUDIO), full);
+        assert_eq!(admission_charge(-5, Some(100_000), AUDIO), full);
         // 100 bytes over 100 s, as a file scanned while still growing reports.
-        assert_eq!(admission_charge(100, Some(100_000)), full);
-    }
-
-    /// A sparse-cue title's landing read is never less than it was before
-    /// copies were charged by rate: a low-bitrate source keeps the old
-    /// 96 MiB landing allowance, a high-bitrate one may read more.
-    #[test]
-    fn a_seek_may_read_at_least_its_old_landing_allowance() {
-        let old = 96 * 1024 * 1024
-            + plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64
-            + crate::copyrange::census::MAX_CENSUS_SOURCE_BYTES;
-        // 2 Mb/s, where a 2x memory factor would have allowed far less.
-        assert_eq!(
-            crate::copyrange::seek_bootstrap_bytes(250_000_000, Some(1_000_000)),
-            old
-        );
-        assert!(crate::copyrange::seek_bootstrap_bytes(7_000_000_000, Some(100_000)) >= old);
+        assert_eq!(admission_charge(100, Some(100_000), AUDIO), full);
+        // The floor is the copy's own audio rate: 500 kb/s is a rate beside
+        // 256 kb/s audio, and below the 640 kb/s audio a passthrough carries.
+        let rate = 500_000 / 8 * 100;
+        assert!(admission_charge(rate, Some(100_000), 256_000) < full);
+        assert_eq!(admission_charge(rate, Some(100_000), 640_000), full);
     }
 
     /// One pipe far ahead of the other is the child's protocol fault, named

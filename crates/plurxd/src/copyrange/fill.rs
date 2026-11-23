@@ -170,7 +170,11 @@ where
     // Before the head is read, so a wait discards no work. As the rest of
     // this fill, the wait has no deadline of its own: it ends when the memory
     // is free or the phase is lost. Live copies are served first.
-    let charge = crate::copyrange::admission_charge(file.size, file.duration_ms);
+    let charge = crate::copyrange::admission_charge(
+        file.size,
+        file.duration_ms,
+        fill.recipe.tracks(file).audio_bits_per_second,
+    );
     let memory = tokio::select! {
         memory = fill.copy_memory.acquire(
             charge,
@@ -238,9 +242,7 @@ where
     // The census Input and its readers are joined. A seeked start may read
     // only the bounded bootstrap allowance until its landing is verified.
     let input = open().await.map_err(failed)?;
-    let seek_bootstrap = match input
-        .seal_seek_bootstrap_limit(super::seek_bootstrap_bytes(file.size, file.duration_ms))
-    {
+    let seek_bootstrap = match input.seal_seek_bootstrap_limit(super::SOURCE_SEEK_BOOTSTRAP_BYTES) {
         Ok(handle) => handle,
         Err(error) => {
             let _ = input.close_and_wait().await;
@@ -277,15 +279,12 @@ where
                 event=pipes.next()=>event.ok_or("copy_output_readers_lost")?,
             };
             let eof = pipes.all_eof();
-            mux.fit(&event, fill.stop).await?;
-            let events = mux.feed(event)?;
+            let events = mux.step(event, fill.stop).await?;
             let cut = super::observed::cuts(&events);
             // The batch keeps only rows and inspections (bounded by
             // max_rows); the segment's media is dropped with `events`.
             batch.apply(events)?;
-            if cut {
-                mux.settle().await;
-            }
+            mux.after_apply(cut).await;
             if reached(fill.gap, &batch.rows) {
                 return Ok(FillEnd::NextObservedRow);
             }

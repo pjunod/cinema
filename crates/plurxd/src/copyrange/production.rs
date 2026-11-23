@@ -164,15 +164,23 @@ pub(crate) struct CopyRangeProduction {
     stall: ProductionStall,
     seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     wanted_ms: i64,
-    /// This copy's memory charge, as its mux and drive loop resize it.
-    memory: Arc<crate::admission::CopyMemoryPermit>,
+    /// The most this copy was charged. The charge itself belongs to the mux
+    /// alone, so it returns to the pool the moment the mux is dropped, when
+    /// `run` ends however it ends; the production only reads its peak.
+    memory_peak: Arc<std::sync::atomic::AtomicU64>,
+    /// The charge, without keeping it alive: a test can see it is gone.
+    #[cfg(test)]
+    memory: std::sync::Weak<crate::admission::CopyMemoryPermit>,
 }
 impl CopyRangeProduction {
-    /// The copy's memory charge now and its peak, for a test of the drive
-    /// loop's fit and settle.
+    /// The copy's memory charge now (`None` once released) and its peak,
+    /// for a test of the drive loop's fit, settle and release.
     #[cfg(test)]
-    pub(crate) fn memory_for_test(&self) -> (u64, u64) {
-        (self.memory.bytes(), self.memory.peak())
+    pub(crate) fn memory_for_test(&self) -> (Option<u64>, u64) {
+        (
+            self.memory.upgrade().map(|memory| memory.bytes()),
+            self.memory_peak.load(std::sync::atomic::Ordering::SeqCst),
+        )
     }
     /// Must be retained by the actual serving actor until wait_stopped joins
     /// every physical operation. HTTP waiter cancellation does not own it.
@@ -189,8 +197,12 @@ impl CopyRangeProduction {
         seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     ) -> Arc<Self> {
         let publisher = files.publisher();
-        let memory = mux.memory();
+        let memory_peak = mux.memory().peak_handle();
+        #[cfg(test)]
+        let memory = Arc::downgrade(&mux.memory());
         let production = Arc::new(Self {
+            memory_peak,
+            #[cfg(test)]
             memory,
             files: AsyncMutex::new(files),
             changed: Notify::new(),
@@ -524,13 +536,12 @@ impl CopyRangeProduction {
                 let eof=pipes.all_eof();
                 let converting=tokio::time::Instant::now();
                 // A live copy's growth is granted at once: it never waits here.
-                mux.fit(&event,&self.stop).await?;
-                let events=mux.feed(event)?;
+                let events=mux.step(event,&self.stop).await?;
                 let cut=super::observed::cuts(&events);
                 meter.convert(converting.elapsed());
                 self.apply(events,&census,canonical_title_start,&mut meter).await?;
                 // Only once the cut's segment is committed and dropped.
-                if cut{mux.settle().await;}
+                mux.after_apply(cut).await;
                 if eof{break;}
             }
             running.slot.request_registered_completion(&running.registration).await.map_err(|_|"copy_reap_unavailable".to_owned())?;
@@ -571,7 +582,7 @@ impl CopyRangeProduction {
             &result,
             peak_held.load(std::sync::atomic::Ordering::Relaxed),
             // The copy's peak charge: what the pool gave it at most.
-            self.memory.peak(),
+            self.memory_peak.load(std::sync::atomic::Ordering::SeqCst),
         );
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();

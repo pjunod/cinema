@@ -1664,8 +1664,9 @@ pub struct CopyMemoryPermit {
     pool: Arc<CopyMemoryPool>,
     id: u64,
     bytes: std::sync::atomic::AtomicU64,
-    /// The most this permit has been charged.
-    peak: std::sync::atomic::AtomicU64,
+    /// The most this permit has been charged; shared, so a copy's peak can
+    /// be read after the permit itself is gone.
+    peak: Arc<std::sync::atomic::AtomicU64>,
     priority: CopyPriority,
 }
 
@@ -1688,9 +1689,9 @@ impl CopyMemoryPermit {
         self.bytes.load(Ordering::SeqCst)
     }
 
-    /// The most this permit has been charged.
-    pub fn peak(&self) -> u64 {
-        self.peak.load(Ordering::SeqCst)
+    /// The peak figure, which outlives the permit.
+    pub fn peak_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.peak)
     }
 
     /// The node's own memory: no copy may ever be charged more.
@@ -1701,17 +1702,22 @@ impl CopyMemoryPermit {
     /// Follow the copy's hold to `to` bytes. Shrinking returns the
     /// difference at once.
     ///
-    /// A live copy's growth is granted at once, even past the budget. A
-    /// background copy's waits while any viewer waits to be admitted, then
-    /// in arrival order among growers until it fits, or it is the only
-    /// holder, or every holder is a background copy waiting to grow: a copy
-    /// frees memory only by reading more, so then the oldest grower goes,
-    /// and two gap fills cannot wait on each other forever.
+    /// A copy that could not be held on this node even alone (`to` above
+    /// the node's memory) is refused: it is too large for this node. Short
+    /// of that, growth waits only while the node as a whole cannot take it
+    /// (the total across copies would pass its memory), which other copies'
+    /// ending relieves. Within the node:
     ///
-    /// The node's own memory bounds the total across all copies: growth
-    /// that would pass it is refused, live or not, rather than exhaust the
-    /// node.
+    /// - a live copy's growth is granted at once, even past the budget;
+    /// - a background copy's growth waits in arrival order among growers,
+    ///   until it is the only holder, or every holder is a background copy
+    ///   waiting to grow (a copy frees memory only by reading more, so the
+    ///   oldest grower goes and two gap fills cannot wait on each other
+    ///   forever), or it fits the budget with no viewer waiting.
     pub async fn resize(&self, to: u64) -> Result<(), CopyMemoryRefusal> {
+        if to > self.pool.ceiling {
+            return Err(CopyMemoryRefusal::OverCeiling);
+        }
         let mut grower = None;
         loop {
             let changed = self.pool.changed.notified();
@@ -1728,22 +1734,25 @@ impl CopyMemoryPermit {
                     return Ok(());
                 }
                 let more = to - held;
-                if state.used.saturating_add(more) > self.pool.ceiling {
-                    return Err(CopyMemoryRefusal::OverCeiling);
-                }
+                let node_has_room = state.used.saturating_add(more) <= self.pool.ceiling;
                 let fits = state.used.saturating_add(more) <= state.budget;
                 let alone = state.used <= held;
                 let first = state.growers.front().is_none_or(|id| *id == self.id);
                 let all_blocked = grower.is_some() && state.growers.len() >= state.holders;
-                if self.priority == CopyPriority::Live
-                    || (!state.live_waiting() && first && (alone || fits || all_blocked))
-                {
+                let granted = node_has_room
+                    && match self.priority {
+                        CopyPriority::Live => true,
+                        CopyPriority::Background => {
+                            first && (alone || all_blocked || (fits && !state.live_waiting()))
+                        }
+                    };
+                if granted {
                     state.used = state.used.saturating_add(more);
                     self.bytes.store(to, Ordering::SeqCst);
                     self.peak.fetch_max(to, Ordering::SeqCst);
                     return Ok(());
                 }
-                if grower.is_none() {
+                if grower.is_none() && self.priority == CopyPriority::Background {
                     state.growers.push_back(self.id);
                     grower = Some(CopyMemoryGrower {
                         pool: &self.pool,
@@ -1812,8 +1821,21 @@ pub fn copy_memory_budget() -> (u64, &'static str) {
         }
     }
     match crate::node_memory::node_memory_bytes() {
-        Some(bytes) => (bytes / 8, "node_memory/8"),
+        Some(bytes) => (bytes / NODE_SHARE, "node_memory/8"),
         None => (DEFAULT_COPY_MEMORY_BUDGET, "default"),
+    }
+}
+
+/// The share of a node's memory its copies are budgeted: one in eight.
+const NODE_SHARE: u64 = 8;
+
+/// What bounds every copy charge on this node: its memory, or, when that
+/// cannot be read, the budget's own source scaled back by [`NODE_SHARE`],
+/// never nothing.
+fn node_ceiling(node_memory: Option<u64>, budget: u64) -> (u64, bool) {
+    match node_memory {
+        Some(bytes) => (bytes, true),
+        None => (budget.saturating_mul(NODE_SHARE), false),
     }
 }
 
@@ -1845,21 +1867,21 @@ impl CopyMemoryPool {
     /// A pool of `budget` bytes on this node, whose own memory bounds every
     /// charge.
     pub fn new(budget: u64) -> Arc<Self> {
-        let ceiling = match crate::node_memory::node_memory_bytes() {
-            Some(bytes) => bytes,
-            None => {
-                // Never run with no ceiling: the budget is an eighth of the
-                // node by design, so its source bounds the node too.
-                let ceiling = budget.saturating_mul(8);
-                tracing::warn!(
-                    target: "plurxd::admission",
-                    ceiling_bytes = ceiling,
-                    "this node's memory cannot be read; copies are bounded by eight times the copy memory budget"
-                );
-                ceiling
-            }
-        };
-        Self::with_ceiling(budget, ceiling)
+        Self::on_node(budget, crate::node_memory::node_memory_bytes())
+    }
+
+    /// A pool of `budget` bytes on a node of `node_memory` bytes, if known.
+    fn on_node(budget: u64, node_memory: Option<u64>) -> Arc<Self> {
+        let (ceiling, read) = node_ceiling(node_memory, budget);
+        if !read {
+            tracing::warn!(
+                target: "plurxd::admission",
+                ceiling_bytes = ceiling,
+                "this node's memory cannot be read; copies are bounded by eight times the copy memory budget"
+            );
+        }
+        // A budget above the node's own memory could never be held.
+        Self::with_ceiling(budget.min(ceiling), ceiling)
     }
 
     pub fn with_ceiling(budget: u64, ceiling: u64) -> Arc<Self> {
@@ -1937,7 +1959,7 @@ impl CopyMemoryPool {
                         pool: Arc::clone(self),
                         id: ticket.ticket,
                         bytes: std::sync::atomic::AtomicU64::new(bytes),
-                        peak: std::sync::atomic::AtomicU64::new(bytes),
+                        peak: Arc::new(std::sync::atomic::AtomicU64::new(bytes)),
                         priority,
                     });
                 }
@@ -3656,34 +3678,35 @@ mod copy_memory_tests {
         assert_eq!(pool.usage(), (0, 100 * MIB));
     }
 
-    /// A gap fill's growth waits while it does not fit, and yields to a
-    /// viewer waiting to be admitted; once memory comes back it grows. Alone
-    /// in the pool it always grows.
+    /// A gap fill's growth waits while it does not fit, and, even when it
+    /// fits, while a viewer waits to be admitted. Alone in the pool it always
+    /// grows, past the budget if need be.
     #[tokio::test(start_paused = true)]
     async fn background_growth_waits_and_yields_to_live() {
         let pool = CopyMemoryPool::with_ceiling(100 * MIB, 1000 * MIB);
         let fill = std::sync::Arc::new(
-            pool.acquire(40 * MIB, CopyPriority::Background, Instant::now())
+            pool.acquire(20 * MIB, CopyPriority::Background, Instant::now())
                 .await
                 .expect("fill"),
         );
         let viewer = pool
-            .acquire(50 * MIB, CopyPriority::Live, Instant::now())
+            .acquire(70 * MIB, CopyPriority::Live, Instant::now())
             .await
             .expect("viewer");
-        let growing = {
+        let too_much = {
             let fill = std::sync::Arc::clone(&fill);
-            tokio::spawn(async move { fill.resize(70 * MIB).await })
+            tokio::spawn(async move { fill.resize(40 * MIB).await })
         };
         tokio::time::sleep(Duration::from_secs(1)).await;
-        assert!(!growing.is_finished(), "70 + 50 does not fit");
-        // A viewer arrives and waits; when the first viewer leaves, the new
-        // one is admitted before the fill grows.
+        assert!(!too_much.is_finished(), "40 + 70 does not fit");
+        too_much.abort();
+        let _ = too_much.await;
+        // A viewer arrives and waits for room the first viewer holds.
         let arriving = {
             let pool = std::sync::Arc::clone(&pool);
             tokio::spawn(async move {
                 pool.acquire(
-                    50 * MIB,
+                    20 * MIB,
                     CopyPriority::Live,
                     Instant::now() + Duration::from_secs(60),
                 )
@@ -3691,16 +3714,21 @@ mod copy_memory_tests {
             })
         };
         tokio::time::sleep(Duration::from_secs(1)).await;
-        drop(viewer);
-        let second = arriving.await.expect("arrival").expect("viewer first");
+        assert!(!arriving.is_finished(), "70 + 20 + 20 does not fit");
+        let fitting = {
+            let fill = std::sync::Arc::clone(&fill);
+            tokio::spawn(async move { fill.resize(25 * MIB).await })
+        };
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(
-            !growing.is_finished(),
-            "the fill still waits behind the viewer"
+            !fitting.is_finished(),
+            "75 + 20 fits the budget, but the waiting viewer goes first"
         );
+        drop(viewer);
+        let second = arriving.await.expect("arrival").expect("viewer");
+        fitting.await.expect("grow").expect("then the fill grows");
+        assert_eq!(pool.usage(), (45 * MIB, 100 * MIB));
         drop(second);
-        growing.await.expect("grow").expect("then the fill grows");
-        assert_eq!(fill.bytes(), 70 * MIB);
         // Alone, it grows past the budget.
         fill.resize(300 * MIB)
             .await
@@ -3807,8 +3835,9 @@ mod copy_memory_tests {
     }
 
     /// A viewer's copy always grows, but never past what the node holds in
-    /// all: growth that would push the total past the node's memory ends the
-    /// copy as too large, rather than exhaust the node.
+    /// all: growth that would push the total past the node's memory waits for
+    /// another copy to finish, rather than exhaust the node. Only a copy that
+    /// could not fit the node even alone is too large.
     #[tokio::test(start_paused = true)]
     async fn live_growth_is_bounded_by_the_nodes_total_memory() {
         use super::CopyMemoryRefusal;
@@ -3817,22 +3846,51 @@ mod copy_memory_tests {
             .acquire(90 * MIB, CopyPriority::Live, Instant::now())
             .await
             .expect("other");
-        let copy = pool
-            .acquire(10 * MIB, CopyPriority::Live, Instant::now())
-            .await
-            .expect("copy");
+        let copy = std::sync::Arc::new(
+            pool.acquire(10 * MIB, CopyPriority::Live, Instant::now())
+                .await
+                .expect("copy"),
+        );
         copy.resize(200 * MIB)
             .await
             .expect("past the budget, within the node");
-        assert_eq!(
-            copy.resize(250 * MIB).await,
-            Err(CopyMemoryRefusal::OverCeiling),
-            "200 + 90 + 50 would pass the node's 300"
+        let growing = {
+            let copy = std::sync::Arc::clone(&copy);
+            tokio::spawn(async move { copy.resize(250 * MIB).await })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !growing.is_finished(),
+            "200 + 90 + 50 would pass the node's 300: it waits"
         );
+        assert_eq!(pool.usage(), (290 * MIB, 100 * MIB));
         drop(other);
-        copy.resize(250 * MIB)
+        tokio::time::timeout(Duration::from_secs(1), growing)
             .await
-            .expect("once the node has room");
+            .expect("once the node has room")
+            .expect("grow")
+            .expect("grown");
+        assert_eq!(
+            copy.resize(301 * MIB).await,
+            Err(CopyMemoryRefusal::OverCeiling),
+            "more than the node holds even alone"
+        );
+    }
+
+    /// A node whose memory cannot be read bounds its copies by the budget's
+    /// own source, eight times the budget, never by nothing; a budget
+    /// override above the node's memory is held to it.
+    #[test]
+    fn the_ceiling_is_the_node_or_the_budgets_own_share() {
+        use super::{node_ceiling, NODE_SHARE};
+        assert_eq!(node_ceiling(Some(64 * MIB), 8 * MIB), (64 * MIB, true));
+        assert_eq!(node_ceiling(None, 8 * MIB), (8 * MIB * NODE_SHARE, false));
+        let unread = CopyMemoryPool::on_node(8 * MIB, None);
+        assert_eq!(unread.usage(), (0, 8 * MIB));
+        assert_eq!(unread.ceiling, 8 * MIB * NODE_SHARE);
+        let clamped = CopyMemoryPool::on_node(512 * MIB, Some(256 * MIB));
+        assert_eq!(clamped.usage(), (0, 256 * MIB));
+        assert_eq!(clamped.ceiling, 256 * MIB);
     }
 
     #[test]

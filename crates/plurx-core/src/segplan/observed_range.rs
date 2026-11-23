@@ -98,12 +98,17 @@ impl ObservedRangeAssembler {
         })
     }
 
-    /// Bytes this assembler holds now: the canonical box being framed and
-    /// the framed fragment waiting for its clock.
+    /// Bytes this assembler holds now: the canonical box being framed, the
+    /// framed fragment waiting for its clock, and the clock packets queued.
     pub fn held_bytes(&self) -> usize {
         self.media
             .buffered()
             .saturating_add(self.fragment.as_ref().map_or(0, Fragment::len))
+            .saturating_add(
+                self.packets
+                    .len()
+                    .saturating_mul(std::mem::size_of::<SourcePacketObservation>()),
+            )
     }
 
     pub fn feed_media(&mut self, bytes: &[u8]) -> Result<FeedProgress, ObservationError> {
@@ -530,6 +535,23 @@ mod tests {
         assert_eq!(partial.mark_media_eof(), Err(ObservationError::Incomplete));
         assert_eq!(partial.finish(), Err(ObservationError::Failed));
     }
+    /// Clock packets queued ahead of their media are held bytes too.
+    #[test]
+    fn queued_clock_packets_are_held() {
+        let (media, clocks, origin, count, _) = fixture();
+        let mut assembler = ObservedRangeAssembler::new(origin, 23, count + 1, media.len())
+            .expect("valid bounded assembler limits");
+        assert_eq!(assembler.held_bytes(), 0);
+        assembler
+            .feed_clock(&clocks)
+            .expect("valid fixture packet-clock chunk");
+        assert!(
+            assembler.held_bytes()
+                >= assembler.packets.len() * std::mem::size_of::<SourcePacketObservation>()
+        );
+        assert!(!assembler.packets.is_empty());
+    }
+
     #[test]
     fn clocks_can_arrive_first_but_trailer_and_exhausted_packets_are_required() {
         let (media, clocks, origin, count, _) = fixture();

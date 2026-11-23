@@ -552,9 +552,20 @@ impl TranscodeManager {
         // reads its head: a start waiting for memory holds nothing another
         // copy needs and discards no work. A node whose copies hold their
         // budget answers busy, which the receiver retries.
+        // The one recipe of this range. An Analysis gap fill of the same
+        // source repeats it, so its rows are comparable with these.
+        let recipe = crate::copy_analysis::CopyRecipe {
+            video,
+            audio_index: prepared.request().audio_index,
+            transcode_audio: aac,
+            audio_delivery: prepared.request().audio_delivery.clone(),
+        };
         *stage = "growing.copy_memory";
-        let charge =
-            crate::copyrange::admission_charge(prepared.file().size, prepared.file().duration_ms);
+        let charge = crate::copyrange::admission_charge(
+            prepared.file().size,
+            prepared.file().duration_ms,
+            recipe.tracks(prepared.file()).audio_bits_per_second,
+        );
         let memory = std::sync::Arc::new(
             self.admissions
                 .copy_memory()
@@ -722,14 +733,6 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        // The one recipe of this range. An Analysis gap fill of the same
-        // source repeats it, so its rows are comparable with these.
-        let recipe = crate::copy_analysis::CopyRecipe {
-            video,
-            audio_index: prepared.request().audio_index,
-            transcode_audio: aac,
-            audio_delivery: prepared.request().audio_delivery.clone(),
-        };
         *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
@@ -766,15 +769,14 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        let seek_bootstrap = match input.seal_seek_bootstrap_limit(
-            crate::copyrange::seek_bootstrap_bytes(file.size, file.duration_ms),
-        ) {
-            Ok(handle) => handle,
-            Err(_) => {
-                let _ = input.close_and_wait().await;
-                return Err(SourceWorkerError::Unavailable);
-            }
-        };
+        let seek_bootstrap =
+            match input.seal_seek_bootstrap_limit(crate::copyrange::SOURCE_SEEK_BOOTSTRAP_BYTES) {
+                Ok(handle) => handle,
+                Err(_) => {
+                    let _ = input.close_and_wait().await;
+                    return Err(SourceWorkerError::Unavailable);
+                }
+            };
         *stage = "growing.source_observer";
         let observer = input.observer();
         input
