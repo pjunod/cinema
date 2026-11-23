@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         number, explain, warnings = resolve(args.repo, release=args.release)
     except Unavailable as exc:
-        print(f"build-number: cannot derive a release build number: {exc}", file=sys.stderr)
+        print(f"build-number: cannot derive the build number: {exc}", file=sys.stderr)
         return 1
     for warning in warnings:
         print(f"build-number: warning: {warning}", file=sys.stderr)
