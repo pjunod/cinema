@@ -264,7 +264,10 @@ async fn wait_original_removal(
         }
         assert!(
             Instant::now() < deadline,
-            "original close or required qualification remains unverified at {delegated:?} / {output:?}\n{}",
+            "original close or required qualification remains unverified at {delegated:?} / {output:?} \
+             (native leaves {}, output exists {}, qualification required {qualified})\n{}",
+            native_leaf_count(delegated),
+            output.exists(),
             node.diagnostics()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;

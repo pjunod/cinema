@@ -2666,6 +2666,8 @@ impl Shared {
                     // The paid original service owns completion. Maintenance
                     // does not become a second cleanup future while an alias
                     // or application lease still holds the native close.
+                    tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                        "dormant finite close requested from its collector");
                     slot.request_close();
                 } else {
                     self.retry_finite_closing(key.to_owned(), closing).await;
@@ -3093,6 +3095,8 @@ impl Shared {
         let key = work.key();
         let closing = self.finite_closing.lock().await.get(key).cloned();
         let deadline = Instant::now() + Duration::from_secs(30);
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            envelope = closing.is_some(), "collected finite close stage=started");
         if let Some(closing) = closing.as_ref() {
             if !closing.cleanup_ready.load(Acquire) {
                 return Err("original finite builder still owns its close arm".into());
@@ -3125,6 +3129,8 @@ impl Shared {
                 drop(rendition);
             }
             drop(producer);
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                "collected finite close stage=driver_joined");
             port.mark_abandon_registered(work)
                 .map_err(|error| format!("finite registration observation: {error:?}"))?;
             if !port
@@ -3188,9 +3194,13 @@ impl Shared {
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            "collected finite close stage=ticket_installed");
         port.wait_application_release(work, deadline)
             .await
             .map_err(|error| error.to_string())?;
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            "collected finite close stage=applications_released");
         let gate = port
             .gate(work)
             .map_err(|error| format!("original finite finalization gate: {error:?}"))?;
@@ -3198,6 +3208,8 @@ impl Shared {
         port.finish_retirement(work, deadline)
             .await
             .map_err(|error| error.to_string())?;
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            "collected finite close stage=retired");
         // The ticket was consumed only after real native/application close.
         // Any surviving empty daemon envelope remains independently charged
         // until its outer reference drops the actual Arc/header completely.
