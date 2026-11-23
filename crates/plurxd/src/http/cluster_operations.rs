@@ -2029,7 +2029,11 @@ async fn fetch_peer_status(
         Err(PeerTransportError::InvalidResponse) => (ObservationState::InvalidResponse, None),
         Err(PeerTransportError::Unreachable) => (ObservationState::Unreachable, None),
         Err(PeerTransportError::LocalUnavailable) => (ObservationState::Unavailable, None),
-        Err(PeerTransportError::AuthenticationRefused(_)) => (ObservationState::Refused, None),
+        Err(PeerTransportError::AuthenticationRefused(_))
+        | Err(PeerTransportError::UnauthenticatedStatus(401 | 403)) => {
+            (ObservationState::Refused, None)
+        }
+        Err(PeerTransportError::UnauthenticatedStatus(_)) => (ObservationState::HttpError, None),
     };
     PeerStatusOutcome {
         node_id: expected_node_id.to_owned(),

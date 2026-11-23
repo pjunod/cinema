@@ -563,6 +563,9 @@ impl PeerActivityClient {
             Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
             Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
             Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
+            Err(PeerTransportError::UnauthenticatedStatus(status)) => {
+                unauthenticated_status_outcome(status)
+            }
         }
     }
 
@@ -710,6 +713,18 @@ async fn read_snapshot_response(
         Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
         Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
         Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
+        Err(PeerTransportError::UnauthenticatedStatus(status)) => {
+            unauthenticated_status_outcome(status)
+        }
+    }
+}
+
+/// An unsigned error status is classified like the signed one it stands for,
+/// with no body: its bytes are never decoded as a snapshot.
+fn unauthenticated_status_outcome(status: u16) -> PeerActivityOutcome {
+    match StatusCode::from_u16(status) {
+        Ok(status) if !status.is_success() => classify_snapshot_response(status, &[], ""),
+        _ => PeerActivityOutcome::InvalidResponse,
     }
 }
 
@@ -2160,6 +2175,29 @@ mod tests {
         );
         assert_eq!(
             classify_snapshot_response(StatusCode::OK, b"not JSON", "node-b"),
+            PeerActivityOutcome::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn unsigned_error_status_reports_the_answer_not_an_invalid_response() {
+        // A response-bound Activity read whose 503 came from a layer in front
+        // of the signing handler is a busy peer, not a protocol violation.
+        assert_eq!(
+            unauthenticated_status_outcome(503),
+            PeerActivityOutcome::HttpError
+        );
+        assert_eq!(
+            unauthenticated_status_outcome(403),
+            PeerActivityOutcome::Refused
+        );
+        // An unsigned success never stands for a snapshot.
+        assert_eq!(
+            unauthenticated_status_outcome(200),
+            PeerActivityOutcome::InvalidResponse
+        );
+        assert_eq!(
+            unauthenticated_status_outcome(1_000),
             PeerActivityOutcome::InvalidResponse
         );
     }

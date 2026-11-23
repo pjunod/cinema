@@ -1049,6 +1049,8 @@ fn catalogue_transport_cause(
         PeerTransportError::InvalidResponse => CatalogCause::PeerProtocol,
         PeerTransportError::Unreachable => CatalogCause::Transport,
         PeerTransportError::LocalUnavailable => CatalogCause::SnapshotUnavailable,
+        PeerTransportError::UnauthenticatedStatus(429 | 503) => CatalogCause::PeerBusy,
+        PeerTransportError::UnauthenticatedStatus(_) => CatalogCause::PeerProtocol,
         PeerTransportError::AuthenticationRefused(reason) => {
             use crate::cluster::calls::PeerAuthRefusal;
             match reason {

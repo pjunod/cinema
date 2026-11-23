@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::http::{header, HeaderMap, Response, StatusCode};
 use axum::routing::get;
 use axum::Router;
 use plurx_core::cluster::membership::UNKNOWN_HOSTNAME;
@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 const FORWARD: u8 = 0;
 const HTTP_ERROR: u8 = 1;
 const HUNG: u8 = 2;
-const AUTH_ADMISSION_BURST: u8 = 3;
+const REPLAYED_PROOF_BURST: u8 = 3;
 const KEY_LOOKUP_BURST: u8 = 4;
 const ACTIVITY_PATH: &str = "/_internal/v1/activity-snapshot";
 // The paused-time unit contract in `http::internal_activity` pins the common
@@ -176,10 +176,16 @@ impl Drop for Daemon {
     }
 }
 
+/// Node B's own answers to one replayed-proof burst: (status, refusal class).
+type ReplayedAnswers = Arc<std::sync::Mutex<Vec<(StatusCode, Option<String>)>>>;
+
 #[derive(Clone)]
 struct ActivityProxyState {
     mode: Arc<AtomicU8>,
     requests: Arc<AtomicU64>,
+    /// Node B's own answers to the last replayed-proof burst, as (status,
+    /// peer-auth refusal class).
+    replayed: ReplayedAnswers,
     target: String,
     client: reqwest::Client,
 }
@@ -191,25 +197,47 @@ async fn activity_proxy(
     state.requests.fetch_add(1, Ordering::AcqRel);
     let mode = state.mode.load(Ordering::Acquire);
     match mode {
-        HTTP_ERROR => return response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
+        HTTP_ERROR => {
+            return response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                HeaderMap::new(),
+                Vec::new(),
+            )
+        }
         HUNG => {
             tokio::time::sleep(Duration::from_secs(10)).await;
-            return response(StatusCode::SERVICE_UNAVAILABLE, Vec::new());
+            return response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                HeaderMap::new(),
+                Vec::new(),
+            );
         }
         _ => {}
     }
 
-    if mode == AUTH_ADMISSION_BURST {
+    if mode == REPLAYED_PROOF_BURST {
         let responses = futures_util::future::join_all(
             (0..3).map(|_| forward_activity(&state, &headers, None, None)),
         )
         .await;
+        *state.replayed.lock().expect("replayed answers") = responses
+            .iter()
+            .map(|(status, headers, _)| {
+                (
+                    *status,
+                    headers
+                        .get("x-plurx-peer-auth-refusal")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned),
+                )
+            })
+            .collect();
         let selected = responses
             .iter()
-            .find(|(status, _)| *status == StatusCode::UNAUTHORIZED)
+            .find(|(status, _, _)| *status == StatusCode::UNAUTHORIZED)
             .or_else(|| responses.first())
             .expect("three upstream Activity responses");
-        return response(selected.0, selected.1.clone());
+        return response(selected.0, selected.1.clone(), selected.2.clone());
     }
 
     if mode == KEY_LOOKUP_BURST {
@@ -230,63 +258,93 @@ async fn activity_proxy(
         .await;
         assert!(responses
             .iter()
-            .all(|(status, _)| *status == StatusCode::UNAUTHORIZED));
-        return response(StatusCode::UNAUTHORIZED, Vec::new());
+            .all(|(status, _, _)| *status == StatusCode::UNAUTHORIZED));
+        return response(StatusCode::UNAUTHORIZED, HeaderMap::new(), Vec::new());
     }
 
-    let (status, body) = forward_activity(&state, &headers, None, None).await;
-    response(status, body)
+    let (status, headers, body) = forward_activity(&state, &headers, None, None).await;
+    response(status, headers, body)
 }
 
+/// Relay one Activity read to node B as the transparent hop it stands in for.
+///
+/// Activity reads are exact-request, member-response peer calls: node A signs
+/// the method, path, raw body and a fresh nonce, and accepts only an answer
+/// that node B signed over that nonce, its status and its exact body. Every
+/// request header therefore crosses the hop (the auth set has grown before —
+/// the nonce arrived with exact-request auth and an allow-list here silently
+/// dropped it), and every response header comes back, so the proxy changes
+/// nothing a real network path would not. Only hop-by-hop framing is left to
+/// each leg's own HTTP stack. The two overrides forge an unknown sender.
 async fn forward_activity(
     state: &ActivityProxyState,
     headers: &HeaderMap,
     node_override: Option<&str>,
     signature_override: Option<&str>,
-) -> (StatusCode, Vec<u8>) {
-    let mut request = state
-        .client
-        .get(format!("{}{}", state.target, ACTIVITY_PATH));
-    for name in [
-        "x-plurx-cluster-node",
-        "x-plurx-cluster-target",
-        "x-plurx-cluster-time-ms",
-        "x-plurx-cluster-signature",
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut forwarded = relayed_headers(headers);
+    for (name, value) in [
+        ("x-plurx-cluster-node", node_override),
+        ("x-plurx-cluster-signature", signature_override),
     ] {
-        let override_value = match name {
-            "x-plurx-cluster-node" => node_override,
-            "x-plurx-cluster-signature" => signature_override,
-            _ => None,
-        };
-        if let Some(value) =
-            override_value.or_else(|| headers.get(name).and_then(|value| value.to_str().ok()))
-        {
-            request = request.header(name, value.to_owned());
+        if let Some(value) = value {
+            forwarded.insert(name, value.parse().expect("override header value"));
         }
     }
+    let request = state
+        .client
+        .get(format!("{}{}", state.target, ACTIVITY_PATH))
+        .headers(forwarded);
     match request.send().await {
         Ok(upstream) => {
             let status = upstream.status();
+            let headers = relayed_headers(upstream.headers());
             let bytes = upstream
                 .bytes()
                 .await
                 .map_or_else(|_| Vec::new(), |body| body.to_vec());
-            (status, bytes)
+            (status, headers, bytes)
         }
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HeaderMap::new(),
+            Vec::new(),
+        ),
     }
 }
 
-fn response(status: StatusCode, body: Vec<u8>) -> Response<Body> {
-    Response::builder()
+/// End-to-end headers only: each leg frames its own connection and body.
+fn relayed_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut relayed = headers.clone();
+    for name in [
+        header::HOST,
+        header::CONNECTION,
+        header::CONTENT_LENGTH,
+        header::TRANSFER_ENCODING,
+        header::TE,
+        header::TRAILER,
+        header::UPGRADE,
+        header::PROXY_AUTHORIZATION,
+    ] {
+        relayed.remove(name);
+    }
+    relayed.remove("keep-alive");
+    relayed
+}
+
+fn response(status: StatusCode, headers: HeaderMap, body: Vec<u8>) -> Response<Body> {
+    let mut response = Response::builder()
         .status(status)
         .body(Body::from(body))
-        .expect("proxy response")
+        .expect("proxy response");
+    *response.headers_mut() = headers;
+    response
 }
 
 struct ActivityProxy {
     mode: Arc<AtomicU8>,
     requests: Arc<AtomicU64>,
+    replayed: ReplayedAnswers,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -295,10 +353,12 @@ impl ActivityProxy {
     async fn start(listener: TcpListener, target_port: u16) -> Self {
         let mode = Arc::new(AtomicU8::new(FORWARD));
         let requests = Arc::new(AtomicU64::new(0));
+        let replayed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let shutdown = CancellationToken::new();
         let state = ActivityProxyState {
             mode: Arc::clone(&mode),
             requests: Arc::clone(&requests),
+            replayed: Arc::clone(&replayed),
             target: format!("http://127.0.0.1:{target_port}"),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -321,6 +381,7 @@ impl ActivityProxy {
         Self {
             mode,
             requests,
+            replayed,
             shutdown,
             task,
         }
@@ -332,6 +393,10 @@ impl ActivityProxy {
 
     fn request_count(&self) -> u64 {
         self.requests.load(Ordering::Acquire)
+    }
+
+    fn replayed_answers(&self) -> Vec<(StatusCode, Option<String>)> {
+        self.replayed.lock().expect("replayed answers").clone()
     }
 
     async fn stop(self) {
@@ -1158,11 +1223,14 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     let _ = activity_detail(&client, &a_base, &token).await;
     assert_eq!(proxy.request_count(), after_views + 1);
 
-    // Reproduce the receiver's actual per-sender refusal independently of the
-    // fixed sender gate: the proxy duplicates one valid signed request three
-    // times inside one receiver window. The public status and the receiver
-    // counter must identify authentication, not transport.
-    proxy.set(AUTH_ADMISSION_BURST);
+    // Replay one valid exact-request proof three times at once. Since #1732
+    // the snapshot is an exact-request read: node B admits each nonce once,
+    // so exactly one copy is answered and the other two are refused as
+    // invalid proofs, by B itself, before any authority read. Node A must
+    // report that 401 as an authentication refusal, never as transport. The
+    // legacy per-sender Activity guard is no longer on this route, so its
+    // counter does not move, and a replay never reaches the key-lookup guard.
+    proxy.set(REPLAYED_PROOF_BURST);
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     let auth_before = metric_value(
         &client,
@@ -1176,20 +1244,34 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         "plurx_cluster_activity_key_lookup_refusals_total",
     )
     .await;
-    let authority_refused = activity_detail(&client, &a_base, &token).await;
-    assert!(authority_refused["activity_nodes"]
-        .as_array()
-        .expect("activity nodes")
-        .iter()
-        .any(|node| node["node_id"] == remote_node && node["status"] == "refused"));
+    let replay_refused = activity_detail(&client, &a_base, &token).await;
     assert!(
+        replay_refused["activity_nodes"]
+            .as_array()
+            .expect("activity nodes")
+            .iter()
+            .any(|node| node["node_id"] == remote_node && node["status"] == "refused"),
+        "a replayed proof was not reported as refused: {replay_refused}"
+    );
+    let mut replayed = proxy.replayed_answers();
+    replayed.sort_by_key(|(status, _)| status.as_u16());
+    assert_eq!(
+        replayed,
+        vec![
+            (StatusCode::OK, None),
+            (StatusCode::UNAUTHORIZED, Some("invalid_proof".to_owned())),
+            (StatusCode::UNAUTHORIZED, Some("invalid_proof".to_owned())),
+        ],
+        "node B must answer one copy of a replayed proof and refuse the rest"
+    );
+    assert_eq!(
         metric_value(
             &client,
             &b_base,
             "plurx_cluster_activity_auth_admission_refusals_total",
         )
-        .await
-            > auth_before
+        .await,
+        auth_before
     );
     assert_eq!(
         metric_value(
@@ -2741,10 +2823,11 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     measured.push(("index miss, rolling copy", line));
     // The fifth shape is the one a current client sends: capabilities (v2)
     // and an intent envelope. The intent adds the selection write, which
-    // since D3c rides in the claim's transaction (no write of its own). The catalog read is NOT
-    // exercised: this fixture runs with the media pool off, so no
-    // `playback_planning_snapshot` per offer reads the catalog here. D3d
-    // measures that read, and owes its own pin.
+    // since D3c rides in the claim's transaction (no write of its own).
+    // Since #1802 display-aware Auto is always on, so this create builds its
+    // quality catalog from the plan (D3d: no planning-snapshot re-read). The
+    // caps carry no audio sinks, so no rung can prove a measured cost and the
+    // catalog makes no source-row read for one.
     let (with_intent, line) = create_and_measure(
         &client,
         &mut node_b,
@@ -2825,12 +2908,29 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // intent shape's separate `record_desired_selection` write is gone (9 ->
     // 8), and the claim answers the recorded row by one authority read that
     // replaces the `desired_row` read-back that write made (21 stays 21).
+    // Re-pinned 2026-11-23 on Main e674a1419; each delta has a named cause:
+    // - #1802 (always-on playback features) deleted
+    //   `playback.display_aware_auto`, so the planning settings read
+    //   (`local_get_settings`, one Local read) is gone from every shape.
+    // - #1827 (f8ecda856) claims a first session by one guarded insert and
+    //   leaves maintenance to its loop: the four new-playback shapes lose
+    //   `maintain_media_sessions` and one `session_layout` read. A reopen's
+    //   playback already has a pointer, so its guarded insert matches no row
+    //   and it takes the old maintain-then-claim path: one more claim read,
+    //   the zero-row insert as one write, and one more layout read (30 -> 32,
+    //   8 -> 9 writes). That is the fallback #1827 chose, not a defect here.
+    // - With display-aware Auto always on, the caps-v2 create builds its
+    //   quality catalog. It paid one `get_file` per rung, twice (catalog and
+    //   link receipts), for a measured-cost proof that cannot exist without
+    //   an audio claim; that wasted read is fixed in
+    //   `measured_candidate_cost`, so the shape is 21 - 2 = 19.
+    // Layout reads exist only on this fixture's Legacy layout (see below).
     let expected: [(&str, (u64, u64, u64)); 5] = [
-        ("first play, VOD index", (23, 2, 6)),
-        ("reopen, new position", (30, 2, 8)),
-        ("Auto encode, VOD", (19, 2, 8)),
-        ("index miss, rolling copy", (20, 2, 9)),
-        ("caps-v2 Auto, intent", (21, 2, 8)),
+        ("first play, VOD index", (21, 1, 6)),
+        ("reopen, new position", (32, 1, 9)),
+        ("Auto encode, VOD", (17, 1, 8)),
+        ("index miss, rolling copy", (18, 1, 9)),
+        ("caps-v2 Auto, intent", (19, 1, 8)),
     ];
     let observed = measured
         .iter()
@@ -2848,17 +2948,34 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // (measured: 33 or 36 at B-M1, on otherwise identical runs). Any other
     // difference fails.
     const AHEAD_LIMITS_REFRESH_READS: u64 = 3;
+    // The caps-v2 create asks the cached peer directory for media workers.
+    // That cache reloads, by one Local `read_roster`, whenever an applied
+    // roster-table revision moved since the last ask (a heartbeat, say), so
+    // whether this create pays it is timing too. Exactly that read, on that
+    // shape, is tolerated; it is removed from the method split below as well.
+    const ROSTER_RELOAD: (&str, (u64, u64, u64)) = ("read_roster", (0, 1, 0));
+    let roster_reloaded = |shape: &str, line: &CreateBudgetLine| {
+        shape.contains("caps-v2")
+            && line
+                .methods
+                .iter()
+                .any(|(method, counts)| (method.as_str(), *counts) == ROSTER_RELOAD)
+    };
     let observed = observed
         .into_iter()
         .zip(&expected)
-        .map(|((shape, (reads, local, writes)), (_, (pinned, _, _)))| {
-            let refreshed =
-                shape.contains("rolling") && reads == pinned + AHEAD_LIMITS_REFRESH_READS;
-            (
-                shape,
-                (if refreshed { *pinned } else { reads }, local, writes),
-            )
-        })
+        .zip(&measured)
+        .map(
+            |(((shape, (reads, local, writes)), (_, (pinned, _, _))), (_, line))| {
+                let refreshed =
+                    shape.contains("rolling") && reads == pinned + AHEAD_LIMITS_REFRESH_READS;
+                let local = local - u64::from(roster_reloaded(shape, line));
+                (
+                    shape,
+                    (if refreshed { *pinned } else { reads }, local, writes),
+                )
+            },
+        )
         .collect::<Vec<_>>();
     // Each shape's counts by the Store method that makes them, as
     // (authority reads, local reads, writes). Measured on D3b's build;
@@ -2889,12 +3006,10 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
                 ("get_setting", (1, 0, 0)),
-                ("local_get_settings", (0, 1, 0)),
                 ("local_playback_planning_snapshot", (0, 1, 0)),
-                ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("session_layout", (8, 0, 0)),
+                ("session_layout", (7, 0, 0)),
                 // Two timed writes, one physical UPDATE: Confirm is double-timed
                 // (`source_layout_idempotent` times its retry loop and the inner
                 // `txn_source_layout_attempt` times the statement). Left as is
@@ -2908,20 +3023,19 @@ async fn create_path_store_operations_are_pinned_per_shape() {
             &[
                 ("activate_media_session", (3, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (1, 0, 1)),
+                ("claim_media_session_request", (2, 0, 2)),
                 ("complete_media_session_handoff", (1, 0, 1)),
                 ("complete_media_session_terminal_projection", (1, 0, 1)),
                 ("copy_index_source_attestation", (1, 0, 0)),
                 ("copy_index_v3_variant", (1, 0, 0)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("local_get_settings", (0, 1, 0)),
                 ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_by_incarnation", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("session_layout", (12, 0, 0)),
+                ("session_layout", (13, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
@@ -2934,13 +3048,11 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("local_get_settings", (0, 1, 0)),
                 ("local_playback_planning_snapshot", (0, 1, 0)),
-                ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
                 ("register_foreground_source", (0, 0, 1)),
-                ("session_layout", (8, 0, 0)),
+                ("session_layout", (7, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
@@ -2956,13 +3068,11 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("copy_index_v3_variant", (1, 0, 0)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("local_get_settings", (0, 1, 0)),
                 ("local_playback_planning_snapshot", (0, 1, 0)),
-                ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
                 ("register_foreground_source", (0, 0, 1)),
-                ("session_layout", (8, 0, 0)),
+                ("session_layout", (7, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("suspend_playback_analysis_interest", (0, 0, 1)),
             ],
@@ -2977,13 +3087,11 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 // second authority read is the recorded row.
                 ("claim_media_session_request", (2, 0, 1)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("local_get_settings", (0, 1, 0)),
                 ("local_playback_planning_snapshot", (0, 1, 0)),
-                ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
                 ("register_foreground_source", (0, 0, 1)),
-                ("session_layout", (9, 0, 0)),
+                ("session_layout", (8, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],
@@ -3015,6 +3123,10 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     for ((shape, line), (pinned_shape, pinned)) in measured.iter().zip(&expected_methods) {
         assert_eq!(shape, pinned_shape);
         let mut observed = line.methods.clone();
+        let roster_reload = roster_reloaded(shape, line);
+        if roster_reload {
+            observed.retain(|(method, counts)| (method.as_str(), *counts) != ROSTER_RELOAD);
+        }
         let reads = line.authority_reads;
         let total_pinned = expected
             .iter()
@@ -3046,7 +3158,7 @@ async fn create_path_store_operations_are_pinned_per_shape() {
             (authority, local, writes),
             (
                 line.authority_reads - (reads - total_pinned).min(AHEAD_LIMITS_REFRESH_READS),
-                line.local_reads,
+                line.local_reads - u64::from(roster_reload),
                 line.mutations
             ),
             "{shape}: the method split does not add up to the totals"
