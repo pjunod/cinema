@@ -111,6 +111,10 @@ bump may break compatibility and a **patch** bump never does.
   published. A scanner failure on readable input stays `title_scan_failed`
   and now records the exit status and the end of the scanner's stderr,
   redacted, instead of a bare "scan failed".
+- **Shared Matroska titles start from the beginning and restart mid-title.** A shared copy of a Matroska title with reordered frames (B-frames) was refused with `copy_clock_unknown` on its first fragment: from the start for titles like *Countdown*, and on every restart after a seek for titles like *Avatar*. Matroska stores no decode times, so FFmpeg makes them up after every start and rounds each into its own output's time base. A 1/1000 packet clock never matched the 1/16000 MP4 to the tick, and a decode time FFmpeg repeated was kept by the clock but raised by one tick in the MP4. The packet clock is now written in the MP4 track's own timescale. Each sample is checked against the decode time the MP4 muxer actually writes, still exactly.
+- **Shared watch progress is saved and acknowledged.** Every progress beat (and every explicit watched toggle) for a shared title was written on the receiver and then answered `503`, because the receiver's catalogue-body guard refused a success that carried no Source content. The player kept resending the first beat, so only the first position of each session was ever recorded. These answers now carry the receiver's own history, marked as such for the guard.
+- **Shared playback-control refusals name their step.** The receiver logs which step refused a shared control exchange (attachment, peer, transport failure or the Source's own refusal code), and the Source logs why its growing copy refused one, instead of both collapsing into an unlogged `control_unavailable`.
+
 - 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
   with playback instead of stalling every few seconds. Each 2-second window
   used to start its own renderer, which re-read and re-decoded the source

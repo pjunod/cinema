@@ -619,12 +619,19 @@ impl SourceViewerActor {
         // Each refusal names its check: Status answers every one of them
         // with the same terminal-only projection, which ends a shared
         // session, so the cause has to be on record here.
+        // Hashed as every log line carries it: the id is a capability.
+        let incarnation =
+            super::session_log_id(&self.0.assignment.binding().incarnation_id().to_string());
         let refused = |check: &'static str| {
-            tracing::warn!(target: "plurxd::transcode", check, "Source start response refused");
+            tracing::warn!(target: "plurxd::transcode", incarnation = %incarnation, check, "Source start response refused");
             SourceWorkerError::Unavailable
         };
+        // A stored start failure was already warned once, where it happened
+        // ("Source producer startup failed"); a retirement, a deadline or a
+        // start not yet published are expected or transient. Every Status or
+        // control call replays these, so they stay at debug.
         let response = self.wait_ready(deadline).await.inspect_err(|error| {
-            tracing::warn!(target: "plurxd::transcode", check = "wait_ready", error_class = ?error, "Source start response refused");
+            tracing::debug!(target: "plurxd::transcode", incarnation = %incarnation, check = "wait_ready", error_class = ?error, "Source start response refused");
         })?;
         let manager = self.0.manager.upgrade().ok_or_else(|| refused("manager"))?;
         {
@@ -657,8 +664,9 @@ impl SourceViewerActor {
         #[cfg(unix)]
         if let Some(backing) = self.growing_backing() {
             let traced = |check: &'static str| {
+                let incarnation = &incarnation;
                 move |error: &SourceWorkerError| {
-                    tracing::warn!(target: "plurxd::transcode", check, error_class = ?error, "Source start response refused");
+                    tracing::warn!(target: "plurxd::transcode", incarnation = %incarnation, check, error_class = ?error, "Source start response refused");
                 }
             };
             guard.source = Some(

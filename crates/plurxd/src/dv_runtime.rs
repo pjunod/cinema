@@ -3615,6 +3615,33 @@ mod hdr10e_export_throughput {
             .0
     }
 
+    /// A window run's first window writes its NUT output to the inherited
+    /// descriptor its encoder reads (`/proc/self/fd/5`). The helper must close
+    /// that inherited copy when the window ends: holding it while the run goes
+    /// on kept the encoder from ever reaching end of input, so every 4K run
+    /// window 0 hit its deadline in production and DV processing was refused.
+    #[test]
+    fn a_run_closes_the_first_window_inherited_nut_descriptor_at_its_boundary() {
+        let main = include_str!("../../../tools/dv_processing/segment_decode_render.c");
+        let advance = c_body(main, "static bool run_advance(");
+        let closed = advance
+            .find("avio_closep(&nut_output->pb)")
+            .expect("the window's NUT output closes");
+        let inherited = advance
+            .find("close(run_inherited_nut)")
+            .expect("the first window's inherited NUT descriptor closes");
+        let next = advance.find("run_current++").expect("the run advances");
+        assert!(closed < inherited && inherited < next, "{advance}");
+        let start = &main[main
+            .find("open_nut(argv[11]);")
+            .expect("first NUT output opens")..];
+        assert!(
+            start.contains("\"/proc/self/fd/%d%c\"")
+                && start.contains("run_inherited_nut = inherited;"),
+            "the first window records the inherited NUT descriptor"
+        );
+    }
+
     /// 4K HDR10-E fell behind real time on the GPU export, not the decode:
     /// the reconstruction wrote 32-bit float, three passes read it back, and
     /// every frame waited for its own download. The export now renders into
