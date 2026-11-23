@@ -2,7 +2,6 @@
 
 **Status:** built — 2026-10-04, source only; no signed release, install or device check.
 
-Build: 209
 Issue: #634
 
 The pure Swift and Kotlin ports of `PlaybackPolicy.decideRung` that #634 added

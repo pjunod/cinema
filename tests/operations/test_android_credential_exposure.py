@@ -506,6 +506,13 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
         (self.tmp / "plurx-upload.jks").write_bytes(b"not really a keystore")
         (self.tmp / "old-debug.jks").write_bytes(b"old signer fixture")
         (self.tmp / "lineage.bin").write_bytes(b"lineage fixture")
+        # The recipe derives the build number on the host; the stub stands in
+        # for scripts/build-number and records the flags it was given.
+        (self.tmp / "scripts").mkdir()
+        _write_executable(
+            self.tmp / "scripts/build-number",
+            '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$DOCKER_LOG.build-number"\necho 2001\n',
+        )
         self.outputs = self.tmp / "outputs"
         self.data = self.tmp / "data"
         self.data.mkdir()
@@ -553,6 +560,22 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
             f"ANDROID_OUTPUTS={self.outputs}",
             f"ANDROID_DATA_DIR={self.data}",
         )
+
+    def test_the_release_build_number_is_derived_on_the_host(self) -> None:
+        """The build image has no Git history; the host hands Gradle the number."""
+        result = self._make("android-release")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(
+            Path(f"{self.docker_log}.build-number").read_text(encoding="utf-8"), "--release\n"
+        )
+        words = self.docker_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn("ORG_GRADLE_PROJECT_plurxVersionCode=2001", words)
+
+    def test_a_release_build_number_that_cannot_be_derived_stops_the_build(self) -> None:
+        _write_executable(self.tmp / "scripts/build-number", "#!/bin/sh\nexit 1\n")
+        result = self._make("android-release")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.docker_log.exists(), "docker must not run without a build number")
 
     def test_a_relative_keystore_reaches_docker_as_an_absolute_bind_path(self) -> None:
         """Docker reads a non-absolute `-v` source as a named volume.

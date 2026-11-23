@@ -1,6 +1,5 @@
 # Directional arrows for seek distances
 
-Build: 204
 Issue: #694
 
 The playback controls use two arrowheads for a 10-second seek and three for a

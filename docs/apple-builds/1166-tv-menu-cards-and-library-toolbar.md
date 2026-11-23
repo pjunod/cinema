@@ -1,6 +1,5 @@
 # Compact TV choice cards and a library toolbar reached by Back
 
-Build: 260
 Issue: #1163
 
 Choice menus are compact cards sized to their content in the house button

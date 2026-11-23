@@ -38,6 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from validation import changelog_field
 from validation.history import (
     CORRECTIVE_RE,
     REGRESSION_TRAILER,
@@ -791,6 +792,14 @@ def main_check(argv: list[str] | None = None) -> int:
     except HistoryError as error:
         print(f"landing check error: {error}", file=sys.stderr)
         return 2
+    try:
+        known = bool(args.before) and set(args.before) != {"0"}
+        notices = changelog_field.landing_notices(args.root, args.before if known else None, args.after) \
+            if known else []
+    except changelog_field.ChangelogError as error:
+        notices = [f"the Changelog field audit could not read the push: {error}"]
+    for notice in notices:
+        print(f"::warning::{notice}")
     if errors:
         for error in errors:
             print(f"::error::{error.splitlines()[0]}")
