@@ -1,3 +1,16 @@
+## Changelog
+
+<!-- Required for a pull request into main (scripts/paperwork checks it); never edit
+CHANGELOG.md, scripts/release-cut writes it from these lines. One line per change a
+person running the server would notice, with a section (Added, Changed, Deprecated,
+Removed, Fixed, Security), a dash and the entry; indent continuation lines by two
+spaces. For example:
+Changelog: Fixed — **Shared titles start again.** A shared copy of a Matroska
+  title now starts from the beginning.
+Write `Changelog: none` when nothing user-visible changed. -->
+
+Changelog: 
+
 ## Promotion checklist
 
 This checklist applies only when the pull request targets `main`.

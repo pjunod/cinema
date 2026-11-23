@@ -1,6 +1,5 @@
 # Keep the Apple TV timeline moving while a direction is held
 
-Build: 284
 Issue: #1348
 
 Holding the remote's right or left direction on the focused timeline keeps

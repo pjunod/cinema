@@ -2,7 +2,6 @@
 
 **Status:** open · **Reconciled:** 2026-09-20
 
-Build: 161
 Issue: #321
 
 Apple playback information now uses Overview, Details, Diagnostics and Compact

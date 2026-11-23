@@ -1,6 +1,5 @@
 # Do not discard the verdict that stopped the reporter
 
-Build: 99
 Issue: #708
 
 A terminal verdict is answered and then ends reporting in the same instant.

@@ -1,6 +1,5 @@
 # Shared input foundation for watch and browse
 
-Build: 173
 Issue: #383
 
 The pure player input policy now describes browser/fullscreen presentation

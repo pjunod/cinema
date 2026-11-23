@@ -1,6 +1,5 @@
 # Show offloaded titles and ask Curator to get them back
 
-Build: 299
 Issue: #1
 
 **Status:** built; physical device acceptance pending.

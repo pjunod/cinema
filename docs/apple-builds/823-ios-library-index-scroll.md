@@ -2,7 +2,6 @@
 
 **Status:** open — review and focused UI validation passed; merge pending.
 
-Build: 213
 Issue: #823
 
 The letter/year index and the vertical rows previously shared raw group IDs

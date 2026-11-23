@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+<!-- New entries no longer go here. Each pull request's entries live in its description's
+`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
+from the landing commits into the dated section. The entries below were written by hand
+before that and are released with the next cut. -->
+
 ### Added
 
 - Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
@@ -100,13 +105,6 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- **A slow shared copy is no longer mistaken for a stuck one.** A copy whose
-  producer takes longer than one 25 s segment wait to commit a segment (a
-  source read slower than about two thirds of real time) was retired as stuck.
-  Output the producer's child keeps delivering now counts as progress; only a
-  child that delivers nothing in a whole wait is stuck. A segment request whose
-  own read hangs (an unresponsive share) also answers at its deadline again,
-  instead of waiting behind that read.
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
