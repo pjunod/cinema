@@ -93,7 +93,7 @@ A status record that also lives at this level:
 
 Assets and generated records also live at this level:
 [`img/`](img/) (README screenshots) · [`apple-builds/`](apple-builds/README.md)
-(one note per Apple build, read by `validation/apple_build.py`) ·
+(one note per Apple change, read by `validation/apple_build.py`) ·
 [`mockups/`](mockups/) · [`evidence/`](evidence/).
 
 ## Subject folders

@@ -2,7 +2,6 @@
 
 **Status:** built · **Reconciled:** 2026-09-20
 
-Build: 163
 Issue: #330
 
 Home starts with Recently added, excluding recordings; Continue watching uses

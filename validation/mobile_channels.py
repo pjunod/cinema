@@ -24,6 +24,13 @@ from validation.mobile_versions import (
 # build-number update. Mirror its layout here so the workflow skips such a
 # platform with a warning instead of starting a build the guard will refuse.
 # Keep this table in step with the controller's LAYOUTS["plurx"].
+#
+# That rule only applies to a tree that still stores its build numbers. A tree
+# carrying DERIVED_BUILD_NUMBER derives them at build time from main's
+# first-parent history, so every main commit already has a unique, higher
+# number and nothing can be "unbumped": platforms are selected by changed
+# paths alone (see `unbumped_changes`).
+DERIVED_BUILD_NUMBER = "scripts/build-number"
 _README = r"(^|/)README(?:\.[^/]*)?$"
 GUARD_LAYOUT = {
     "apple": ("clients/apple/project.yml", "CURRENT_PROJECT_VERSION", "clients/apple",
@@ -37,15 +44,27 @@ def _guard_group(platform: str) -> str:
     return "android" if platform == "android" else "apple"
 
 
+def derives_build_numbers(root: Path, head: str) -> bool:
+    """Whether ``head``'s tree derives its build numbers (scripts/build-number)."""
+    return subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"{head}:{DERIVED_BUILD_NUMBER}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
 def unbumped_changes(root: Path, head: str, platform: str) -> list[str]:
     """Client paths changed on main since this platform's build number landed.
 
-    The bump is found along main's first-parent history and merge commits are
-    diffed against their first parent, so a pull request whose bump commit is
-    older than its later source commits still counts as bumped when it merges:
-    the merge is the moment both reached main together. An empty list means
-    the platform is releasable at ``head``.
+    A tree that derives its build numbers has none to land, so nothing in it is
+    unbumped and the list is empty. Otherwise the bump is found along main's
+    first-parent history and merge commits are diffed against their first
+    parent, so a pull request whose bump commit is older than its later source
+    commits still counts as bumped when it merges: the merge is the moment both
+    reached main together. An empty list means the platform is releasable at
+    ``head``.
     """
+    if derives_build_numbers(root, head):
+        return []
     metadata, pattern, client, ignored = GUARD_LAYOUT[_guard_group(platform)]
     bump = git(root, "log", "-1", "--first-parent", "--diff-merges=first-parent", "--no-patch",
                "--format=%H", "-G", pattern, head, "--", metadata)

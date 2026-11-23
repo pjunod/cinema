@@ -201,9 +201,9 @@ jobs:
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
-  # A stale counter must fail the aggregate gate without hiding the native test
-  # result. Run release hygiene beside preflight and the affected platform jobs
-  # rather than making it their prerequisite.
+  # A broken version declaration must fail the aggregate gate without hiding
+  # the native test result. Run release hygiene beside preflight and the
+  # affected platform jobs rather than making it their prerequisite.
   mobile_version:
     name: mobile release version
     needs: scope
@@ -223,45 +223,11 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          fetch-depth: 0
-      # The recorded base sha is the target tip at event time, not now. Two
-      # branches that write the same build counter auto-merge with no conflict
-      # and no BEHIND signal in this job, so a branch bumped to N stays green
-      # forever once an unrelated release bump lands N on the target. Re-fetch
-      # the target here so the counter is compared against what the target
-      # actually ships, while the recorded base still scopes which release
-      # inputs this branch touched.
-      - name: Resolve the current merge target
-        if: github.event_name == 'pull_request' || needs.scope.outputs.qualification == 'true'
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GITHUB_TOKEN: ${{ github.token }}
-          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
-        run: |
-          set -euo pipefail
-          if [ -n "$BOUND_BASE_SHA" ]; then BASE_REF=main; fi
-          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
-            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          if [ -n "$BOUND_BASE_SHA" ]; then
-            test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"
-          fi
-          echo "MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"
+      # Build numbers are derived at build time (scripts/build-number), so
+      # there is no counter to compare against a merge target: the check is
+      # the checked-out tree's marketing versions and derived-number wiring.
       - name: Check mobile release hygiene
-        env:
-          VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
-        run: |
-          if [ -n "$BOUND_BASE_SHA" ]; then VALIDATION_BASE="$BOUND_BASE_SHA"; fi
-          if [ -n "$VALIDATION_BASE" ] \
-            && git cat-file -e "$VALIDATION_BASE^{commit}" 2>/dev/null; then
-            PLURX_VALIDATION_MODE=changed-from \
-              PLURX_VALIDATION_BASE="$VALIDATION_BASE" \
-              PLURX_VALIDATION_MERGE_TARGET="$MERGE_TARGET" \
-              python3 -m validation.mobile_versions
-          else
-            python3 -m validation.mobile_versions
-          fi
+        run: python3 -m validation.mobile_versions
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |

@@ -170,7 +170,7 @@ required before an effort push, and ordinary changes still need their affected
 validation before a pull request.
 
 `make hooks` also installs a pre-push hook that runs `scripts/paperwork`: the
-bookkeeping rules — doc index rows, release counters, infra names, API route
+bookkeeping rules — doc index rows, mobile versions, infra names, API route
 docs, status-page shape, `Regression-Test:` lines — in seconds, with the fix
 printed beside each failure. The fast lane, the effort lane and every pull
 request into an effort branch run the same script as their first job, and no

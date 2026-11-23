@@ -158,16 +158,16 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
-# The bookkeeping rules CI enforces — index rows, release counters, infra
+# The bookkeeping rules CI enforces — index rows, mobile versions, infra
 # names, Regression-Test lines, route docs — checked in seconds with the fix
 # printed beside each failure. The pre-push hook and the fast lane's first job
 # run the same script. docs/ci/PAPERWORK.md lists every rule.
 .PHONY: paperwork
-paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
+paperwork: ## Fast bookkeeping checks (index rows, mobile versions, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
 
 .PHONY: paperwork-fix
-paperwork-fix: ## Apply the derivable paperwork fixes (counters, Markdown host names, index rows) to the working tree
+paperwork-fix: ## Apply the derivable paperwork fixes (Markdown host names, index rows) to the working tree
 	@python3 scripts/paperwork-fix
 
 .PHONY: history-check
@@ -1929,10 +1929,6 @@ desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 t
 
 ## ---- apple clients -----------------------------------------------------
 
-.PHONY: apple-build-bump
-apple-build-bump: ## Claim the next Apple build number across every generated surface
-	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
-
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
 # `test-without-building` — the third full Swift compile per run was pure
@@ -2081,6 +2077,10 @@ apk: android ## Build the Android debug APK (alias for android)
 # applies the audited lineage and verifies the effective signer at API 28 and
 # 36. Any missing input or mismatch fails before publishing an APK.
 #
+# The image carries no Git and cannot see a worktree's history, so the store
+# build number is derived here on the host (`scripts/build-number --release`)
+# and handed to Gradle as the plurxVersionCode project property.
+#
 # The keystore path is resolved to an absolute one before `docker run -v`
 # sees it. Docker reads a source that is not absolute as a *volume name*: the
 # `plurx-upload.jks` that PUBLISHING.md's `keytool` line leaves in the cwd
@@ -2095,6 +2095,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
 	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
+	versioncode="$$(scripts/build-number --release)" && \
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -2106,6 +2107,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
 	  -e PLURX_ANDROID_OLD_KEYSTORE=/signing/old.jks \
 	  -e PLURX_ANDROID_LINEAGE=/signing/lineage.bin \
+	  -e ORG_GRADLE_PROJECT_plurxVersionCode="$$versioncode" \
 	  -v "$$keystore":/signing/upload.jks:ro \
 	  -v "$$oldkeystore":/signing/old.jks:ro \
 	  -v "$$lineage":/signing/lineage.bin:ro \

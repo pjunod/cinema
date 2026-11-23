@@ -78,16 +78,17 @@ wrong and needs an errata row. `.github/workflows/landing-check.yml` fails on
 ## Before you push: paperwork
 
 `make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the
-bookkeeping rules CI enforces — doc index rows, Apple/Android release
-counters, infra names, `docs/API.md` routes, status-page shape, and the
+bookkeeping rules CI enforces — doc index rows, mobile marketing versions,
+infra names, `docs/API.md` routes, status-page shape, and the
 `Regression-Test:` lines a `fix(`/`perf(` commit needs in the pull request
 description — and prints the fix under each failure. `make hooks` runs it on
 every push. Forgejo runs it as the first job of every pull request, drafts
 included, and nothing else starts until it passes, so skipping it only costs
-you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
+you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules. Never bump a
+mobile build number: both apps derive it at build time from `scripts/build-number`.
 
-`make paperwork-fix` applies the ones with a single right answer — release
-counters, host names in Markdown, missing index rows — and the lane does the
+`make paperwork-fix` applies the ones with a single right answer — host names
+in Markdown, missing index rows — and the lane does the
 same on its own: it pushes a `chore(paperwork)` commit to your branch instead
 of failing, so `git pull --rebase` before your next push. A new push cancels
 the PR's in-flight lane run; successes from earlier finished runs are still reused.
