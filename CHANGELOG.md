@@ -100,6 +100,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A copied title's shared video (the one every language plays over) is now tied to the exact source file it was packaged from. Replacing a file in place with one of the same size and timestamp no longer replays the old file's pictures under the new soundtracks; the shared video is packaged again, once. A language family whose soundtracks and video come from different revisions of the file is refused instead of played. A cache write that fails part-way, for example on a full disk, no longer leaves its temporary file behind.
+
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
