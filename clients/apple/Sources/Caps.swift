@@ -145,13 +145,17 @@ enum Caps {
     }
     private static let logger = Logger(subsystem: "tv.plurx.app", category: "capabilities")
 
-    static func capsDocument() -> DeviceCaps {
-        snapshot().document
+    static func capsDocument(displayPeak: HDRDisplayPeak) -> DeviceCaps {
+        snapshot(displayPeak: displayPeak).document
     }
 
     /// Capture the four live probes once, then spell that exact state in both
     /// protocols (the legacy query has no peak). Output format can change while a POST is in flight on tvOS.
-    static func snapshot() -> CapabilitySnapshot {
+    ///
+    /// `displayPeak` is the viewer's setting, passed by whoever owns the
+    /// `SettingsStore` this client was built with, so an injected store is the
+    /// one that is read.
+    static func snapshot(displayPeak: HDRDisplayPeak) -> CapabilitySnapshot {
         let audioRoute = AudioRouteFacts.current()
         let hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
         let av1 = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
@@ -176,7 +180,7 @@ enum Caps {
                 dolbyVision: dolbyVision,
                 audioRoute: audioRoute,
                 hlsHevcSampleEntries: hlsHevcSampleEntries(),
-                displayPeak: SettingsStore().hdrDisplayPeak
+                displayPeak: displayPeak
             ),
             legacyQuery: legacyQuery
         )
@@ -267,8 +271,9 @@ enum Caps {
         return supported ? ["hvc1"] : []
     }
 
+    /// The legacy query carries no display peak, so the setting is irrelevant here.
     static func query() -> [URLQueryItem] {
-        snapshot().legacyQuery
+        snapshot(displayPeak: .auto).legacyQuery
     }
 
     /// Pure spelling of the route claim. AVPlayer decodes every listed codec

@@ -57,6 +57,42 @@ private final class PDFReaderURLProtocol: URLProtocol {
 }
 #endif
 
+private final class PeakTestTokenStore: TokenStoring {
+    func read() -> String? { nil }
+    func write(_ token: String) -> Bool { true }
+    func clear() {}
+}
+
+/// Records each POSTed `/decision` body and answers with the smallest valid decision.
+private final class DecisionCaptureHTTP: URLProtocol {
+    static var bodies: [Data] = []
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        var body = request.httpBody ?? Data()
+        if let stream = request.httpBodyStream {
+            stream.open()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                body.append(contentsOf: buffer.prefix(count))
+            }
+            stream.close()
+        }
+        Self.bodies.append(body)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"file_id":1,"method":"direct_play","play_url":"/stream"}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 private struct LayoutWidthPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -8447,23 +8483,70 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(refreshed.maxNits, 1000)
     }
 
-    /// The peak fields change nothing about the HDR10 versus Dolby Vision claim.
-    func testPeakDoesNotChangeTheHDR10VersusDolbyVisionClaim() {
-        for peak in HDRDisplayPeak.allCases {
-            let hdr10Only = Caps.capsDocument(hevc: true, av1: true, displayHDR: true, dolbyVision: false, displayPeak: peak)
-            XCTAssertTrue(hdr10Only.display.hdr)
-            XCTAssertFalse(hdr10Only.display.dolbyVision)
-            XCTAssertNil(hdr10Only.video.first { $0.codec == "hevc" }?.dvProfiles)
-            XCTAssertEqual(hdr10Only.video.first { $0.codec == "hevc" }?.present, ["sdr", "pq", "hlg"])
+    /// `playbackDecision` reads the peak from the settings the model was built
+    /// with, not from standard defaults, and sends exactly that on the wire.
+    @MainActor
+    func testPlaybackDecisionSendsThePeakOfTheInjectedSettings() async throws {
+        let one = try await peakDecision(setting: .nits1000)
+        XCTAssertEqual(one.caps.display.maxNits, 1000)
+        XCTAssertEqual(one.caps.display.peakSource, .viewer)
+        XCTAssertEqual(one.sent["max_nits"] as? Int, 1000)
+        XCTAssertEqual(one.sent["peak_source"] as? String, "viewer")
 
-            let dolbyVision = Caps.capsDocument(hevc: true, av1: true, displayHDR: true, dolbyVision: true, displayPeak: peak)
-            XCTAssertTrue(dolbyVision.display.dolbyVision)
-            XCTAssertEqual(dolbyVision.video.first { $0.codec == "hevc" }?.dvProfiles, [5, 8])
+        let auto = try await peakDecision(setting: .auto)
+        XCTAssertNil(auto.caps.display.maxNits)
+        XCTAssertNil(auto.sent["max_nits"])
+        XCTAssertNil(auto.sent["peak_source"])
+    }
 
-            let sdr = Caps.capsDocument(hevc: true, av1: true, displayHDR: false, dolbyVision: true, displayPeak: peak)
-            XCTAssertFalse(sdr.display.hdr)
-            XCTAssertFalse(sdr.display.dolbyVision)
+    /// A playback keeps the peak its first decision admitted: a setting of 1000
+    /// does not replace an admitted 600, and an admitted unknown stays unknown.
+    @MainActor
+    func testPlaybackDecisionKeepsTheAdmittedPeakOverTheSetting() async throws {
+        let admitted600 = DisplayCaps(hdr: true, dolbyVision: false, maxNits: 600, peakSource: .viewer)
+        let kept = try await peakDecision(setting: .nits1000, admitted: admitted600)
+        XCTAssertEqual(kept.caps.display.maxNits, 600)
+        XCTAssertEqual(kept.sent["max_nits"] as? Int, 600)
+        XCTAssertEqual(kept.sent["peak_source"] as? String, "viewer")
+
+        let admittedUnknown = DisplayCaps(hdr: true, dolbyVision: false)
+        let unknown = try await peakDecision(setting: .nits1000, admitted: admittedUnknown)
+        XCTAssertNil(unknown.caps.display.maxNits)
+        XCTAssertNil(unknown.caps.display.peakSource)
+        XCTAssertNil(unknown.sent["max_nits"])
+        XCTAssertNil(unknown.sent["peak_source"])
+    }
+
+    /// One `playbackDecision` through a stubbed transport; returns the caps it
+    /// reports and the `display` object it actually POSTed.
+    @MainActor
+    private func peakDecision(
+        setting: HDRDisplayPeak, admitted: DisplayCaps? = nil
+    ) async throws -> (caps: DeviceCaps, sent: [String: Any]) {
+        let suite = "tv.plurx.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DecisionCaptureHTTP.self]
+        let transport = URLSession(configuration: configuration)
+        DecisionCaptureHTTP.bodies = []
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            transport.invalidateAndCancel()
+            DecisionCaptureHTTP.bodies = []
         }
+        let settings = SettingsStore(defaults: defaults, tokenVault: PeakTestTokenStore(), persistentDomainName: suite)
+        settings.hdrDisplayPeak = setting
+        let model = AppModel(startServices: false, settings: settings, makeAPI: { _ in
+            var api = PlurxAPI(origin: "https://peak.test"); api.testTransport = transport; return api
+        })
+        defer { model.discovery.stop() }
+        let result = try await Caps.PresentationContext.$admittedDisplay.withValue(admitted) {
+            try await model.playbackDecision(fileId: 1)
+        }
+        let body = try XCTUnwrap(DecisionCaptureHTTP.bodies.first, "the decision request was not sent")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let caps = try XCTUnwrap(json["caps"] as? [String: Any])
+        return (result.caps, try XCTUnwrap(caps["display"] as? [String: Any]))
     }
 
     func testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver() throws {

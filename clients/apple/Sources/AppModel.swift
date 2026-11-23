@@ -160,7 +160,7 @@ final class AppModel: ObservableObject {
 
     /// Read live for every decision. In particular, Apple TV output format can
     /// change in Settings without the app relaunching.
-    func caps() -> DeviceCaps { Caps.capsDocument() }
+    func caps() -> DeviceCaps { Caps.capsDocument(displayPeak: hdrDisplayPeak) }
 
     // MARK: - Session lifecycle
 
@@ -1250,7 +1250,7 @@ final class AppModel: ObservableObject {
         fileContext: PlaybackFileContext? = nil,
         speculative: Bool = false
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
-        let snapshot = Caps.snapshot()
+        let snapshot = Caps.snapshot(displayPeak: hdrDisplayPeak)
         var document = snapshot.document
         document.display.presentationTarget = displayAwareAuto ? Caps.PresentationContext.target : nil
         // A re-decision of a playing title keeps the peak it was admitted with.
@@ -1332,7 +1332,7 @@ final class AppModel: ObservableObject {
             let context = try await PlaybackFileContext.authenticatedDetail(reference: reference, fileId: fileId)
             guard !Task.isCancelled, current?() ?? true, context.lifecycleGeneration == detail.lifecycleGeneration else { throw APIError.badURL }
             let client = try SharedDecisionClient()
-            let result = try await client.decision(context: context, quality: playbackQuality)
+            let result = try await client.decision(context: context, quality: playbackQuality, displayPeak: hdrDisplayPeak)
             guard !Task.isCancelled, current?() ?? true else { throw CancellationError() }
             let position = detail.watch.map { $0.watched ? 0 : $0.positionMs } ?? 0
             let subject = SharedPlaybackSubject(context: context, title: detail.item.title, resumeMs: position, watchSequence: detail.watch?.sequence ?? 0)

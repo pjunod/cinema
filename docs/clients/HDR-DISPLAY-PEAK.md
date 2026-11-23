@@ -1,7 +1,8 @@
 # HDR display peak — Android reports, browser and Apple choices
 
 **Status:** client candidate compiled; independent review and regression
-execution pending · **Written:** 2026-10-22.
+execution pending; Apple setting added in PR #1891, simulator-tested, not
+device-verified · **Written:** 2026-10-22 · **Updated:** 2026-11-23.
 
 Companion to [the display-targeted HDR10-E build](../streaming/DISPLAY-TARGETED-DV-BUILD.md)
 (the server policy and phased delivery). This document describes the client
@@ -146,6 +147,15 @@ clients/android/gradlew -p clients/android :app:testDebugUnitTest --tests 'tv.pl
 `hdr-display-peak.test.js` exercises Unknown, local persistence/provenance,
 incumbent/new-playback separation, storage refusal and embedded `nclx` tags.
 `CapsPolicyTest` covers invalid Android reports, overrides, serialized provenance
-and retained capabilities. Physical acceptance remains open: prove actual HDR
+and retained capabilities.
+
+Apple (2026-11-23, PR #1891): the tvOS simulator ran only the focused
+`AppleClientTests` and `SharedDecisionClientTests` cases for the setting (wire
+spelling, storage, `AppModel.playbackDecision` and `SharedDecisionClient.decision`
+retaining the admitted peak); the iOS scheme was built but its tests were not
+run. No physical iPhone, iPad or Apple TV was used, so no Apple display
+presentation, HDMI change or photometric result is claimed.
+
+Physical acceptance remains open: prove actual HDR
 presentation before using the comparison, and verify HDMI changes reach a new
 session while the current session and successors keep the admitted target.

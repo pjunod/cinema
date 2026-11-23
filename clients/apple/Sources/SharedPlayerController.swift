@@ -536,9 +536,11 @@ final class SharedPlayerController: ObservableObject {
             let subtitle = change?.subtitleIndex ?? plan.rawSubtitleIndex
             let subject = SharedPlaybackSubject(context: plan.subject.context, title: plan.subject.title,
                                                 resumeMs: Int64(max(0, positionMs)), watchSequence: plan.subject.watchSequence)
+            // A reopen always carries the admitted display, which supplies the peak
+            // (even an unknown one), so the setting is never consulted here.
             let decided = try await client.decision(context: subject.context,
                 selection: PrePlaySelection(audioIndex: audio, subtitleIndex: subtitle ?? PrePlaySelection.subtitleOff),
-                quality: quality, admittedDisplay: plan.caps.display)
+                quality: quality, displayPeak: .auto, admittedDisplay: plan.caps.display)
             let next = try SharedPlaybackPlan.make(subject: subject, decision: decided.decision, caps: decided.caps,
                 quality: quality, audioIndex: audio, subtitleIndex: subtitle, playbackId: plan.request.playbackId)
             try await attach(next, client: client, play: play, predecessor: predecessor)

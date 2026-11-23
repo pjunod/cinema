@@ -72,7 +72,7 @@ final class SharedPlaybackControlTests: XCTestCase {
     private func started(height: Int? = nil, auto: Bool? = nil, copy: Bool? = true) async throws -> (SharedStartedPlayback, SharedPlaybackPlan, SharedDecisionClient) {
         let context = try await context(), bytes = try reply()
         ControlHTTP.answer = { _ in (200, bytes) }
-        let caps = Caps.snapshot().document
+        let caps = Caps.snapshot(displayPeak: .auto).document
         let request = CreateSessionRequest(playbackId: "shared-player", requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", height: height, qualityAuto: auto, start: 0, copy: copy, caps: caps)
         let client = try SharedDecisionClient(testConfiguration: configuration)
         let playback = try await client.start(context: context, request: request)
@@ -88,7 +88,7 @@ final class SharedPlaybackControlTests: XCTestCase {
         wire["media_origin_ms"] = 5_398_000
         let start = try SharedStart.decode(JSONSerialization.data(withJSONObject: wire))
         var request = CreateSessionRequest(playbackId: "bounded", requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-            start: 5_400, caps: Caps.snapshot().document)
+            start: 5_400, caps: Caps.snapshot(displayPeak: .auto).document)
         let bound = try start.bindInitial(context, request: request)
         let response = bound.start.response
         let timeline = SharedPlaybackTimeline(vod: response.vod, mediaOriginMs: response.mediaOriginMs,
@@ -295,7 +295,7 @@ final class SharedPlaybackControlTests: XCTestCase {
     }
 
     func testSharedBurnAndHDRPlanUseSourceOwnedStartFields() async throws {
-        let context = try await context(), caps = Caps.snapshot().document
+        let context = try await context(), caps = Caps.snapshot(displayPeak: .auto).document
         let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 0, watchSequence: 1)
         let burn = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "transcode"), caps: caps, quality: .auto, subtitleIndex: 4)
         XCTAssertEqual(burn.request.subtitleBurn, 4)
@@ -321,7 +321,7 @@ final class SharedPlaybackControlTests: XCTestCase {
     }
 
     func testReopenPlanKeepsPlaybackIdHasNoLineageAndChoosesDirectOnlyWhenAVPlayerCanTakeTheBytes() async throws {
-        let context = try await context(), caps = Caps.snapshot().document
+        let context = try await context(), caps = Caps.snapshot(displayPeak: .auto).document
         let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 61_500, watchSequence: 7)
         let direct = try SharedPlaybackPlan.make(subject: subject, decision: try directDecision(), caps: caps, quality: .auto, playbackId: "player-1")
         XCTAssertEqual(direct.request.presentation, "direct"); XCTAssertEqual(direct.request.playbackId, "player-1")
@@ -354,7 +354,7 @@ final class SharedPlaybackControlTests: XCTestCase {
     }
 
     func testDirectStartPlaysTheBoundAliasWithoutAccountHeadersAndEndsThroughB() async throws {
-        let context = try await context(), caps = Caps.snapshot().document
+        let context = try await context(), caps = Caps.snapshot(displayPeak: .auto).document
         let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 0, watchSequence: 7)
         let plan = try SharedPlaybackPlan.make(subject: subject, decision: try directDecision(), caps: caps, quality: .auto)
         let url = "\(base)/direct?session=\(session)"

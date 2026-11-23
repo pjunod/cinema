@@ -200,7 +200,7 @@ final class LiveTvTests: XCTestCase {
     }
 
     func testLibraryChannelExecutesPlaybackDecision() throws {
-        let caps = Caps.snapshot().document
+        let caps = Caps.snapshot(displayPeak: .auto).document
         func request(_ decision: Decision) -> CreateSessionRequest {
             LibraryChannelPlayerController.playbackRequest(
                 decision: decision, caps: caps, playbackId: "channel-player", positionMs: 3_217_072

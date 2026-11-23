@@ -66,7 +66,7 @@ final class SharedDecisionClientTests: XCTestCase {
                 XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer"); sent = try self.body(request)
                 return (request.url!, 200, [:], response)
             }
-            let result = try await SharedDecisionClient(testConfiguration: configuration).decision(context: context, selection: .init(audioIndex: 2, subtitleIndex: -1), quality: .original, audioOffsetMs: -500)
+            let result = try await SharedDecisionClient(testConfiguration: configuration).decision(context: context, selection: .init(audioIndex: 2, subtitleIndex: -1), quality: .original, audioOffsetMs: -500, displayPeak: .auto)
             let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
             struct Body: Decodable { let caps: DeviceCaps }
             XCTAssertEqual(try decoder.decode(Body.self, from: XCTUnwrap(sent)).caps, result.caps); XCTAssertEqual(result.caps.v, 2)
@@ -77,6 +77,29 @@ final class SharedDecisionClientTests: XCTestCase {
             XCTAssertEqual(result.decision.wire["future"]?.object?["exact"], .integer(Int64.max)); XCTAssertThrowsError(try context.path("direct"))
         }
     }
+    /// `decision(admittedDisplay:)` carries the first decision's peak, even an
+    /// unknown one, over the current setting; without one the setting applies.
+    func testDecisionRetainsTheAdmittedPeakOverTheSetting() async throws {
+        let context = try await context(), response = try wire(); var sent: [Data] = []
+        DecisionHTTP.answer = { request in sent.append(try self.body(request)); return (request.url!, 200, [:], response) }
+        let client = try SharedDecisionClient(testConfiguration: configuration)
+        let admitted600 = DisplayCaps(hdr: true, dolbyVision: false, maxNits: 600, peakSource: .viewer)
+        let admittedUnknown = DisplayCaps(hdr: true, dolbyVision: false)
+        let kept = try await client.decision(context: context, displayPeak: .nits1000, admittedDisplay: admitted600)
+        let unknown = try await client.decision(context: context, displayPeak: .nits1000, admittedDisplay: admittedUnknown)
+        let fresh = try await client.decision(context: context, displayPeak: .nits1000)
+        XCTAssertEqual(kept.caps.display.maxNits, 600); XCTAssertEqual(kept.caps.display.peakSource, .viewer)
+        XCTAssertNil(unknown.caps.display.maxNits); XCTAssertNil(unknown.caps.display.peakSource)
+        XCTAssertEqual(fresh.caps.display.maxNits, 1000); XCTAssertEqual(fresh.caps.display.peakSource, .viewer)
+        func display(_ data: Data) throws -> [String: Any] {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return try XCTUnwrap((json["caps"] as? [String: Any])?["display"] as? [String: Any])
+        }
+        XCTAssertEqual(sent.count, 3)
+        XCTAssertEqual(try display(sent[0])["max_nits"] as? Int, 600)
+        XCTAssertNil(try display(sent[1])["max_nits"]); XCTAssertNil(try display(sent[1])["peak_source"])
+        XCTAssertEqual(try display(sent[2])["max_nits"] as? Int, 1000)
+    }
     func testLifecycleAndLocatorAreRequiredWithoutLocalFallback() async throws {
         for invalid in [0, -1, 1.5, "1", true] as [Any] { do { _ = try await context(lifecycle: invalid); XCTFail("accepted invalid lifecycle") } catch {} }
         for missing in ["lifecycle_generation", "files"] { do { _ = try await context { $0.removeValue(forKey: missing) }; XCTFail("accepted missing lifecycle/file") } catch {} }
@@ -86,7 +109,7 @@ final class SharedDecisionClientTests: XCTestCase {
         do { _ = try await context { detail in var files = detail["files"] as! [[String: Any]]; var b = files[0]["reference"] as! [String: Any]; b["lifecycle_generation"] = 1; files[0]["reference"] = b; detail["files"] = files }; XCTFail("accepted mismatched lifecycle") } catch {}
     }
     func testBoundedResponseAndForeignDecisionRefuse() async throws {
-        let context = try await context(), caps = Caps.snapshot().document
+        let context = try await context(), caps = Caps.snapshot(displayPeak: .auto).document
         for size in [4_194_304, 4_194_305] {
             var data = try wire { $0["large_future"] = String(repeating: "x", count: 1_048_577) }; data.append(Data(repeating: 32, count: size - data.count))
             DecisionHTTP.answer = { ($0.url!, 200, [:], data) }
@@ -103,7 +126,7 @@ final class SharedDecisionClientTests: XCTestCase {
         for accountChange in [true, false] {
             let context = try await context(), started = expectation(description: "request started"), stopped = expectation(description: "actual URLProtocol stopped")
             DecisionHTTP.answer = { _ in started.fulfill(); return nil }; DecisionHTTP.stopped = { stopped.fulfill() }
-            let task = Task { try await SharedDecisionClient(testConfiguration: configuration).decisionForTest(context: context, caps: Caps.snapshot().document) }
+            let task = Task { try await SharedDecisionClient(testConfiguration: configuration).decisionForTest(context: context, caps: Caps.snapshot(displayPeak: .auto).document) }
             await fulfillment(of: [started], timeout: 3)
             if accountChange { Session.shared.setCredentials(origin: "https://new.test", token: "new-bearer") } else { task.cancel() }
             do { _ = try await task.value; XCTFail("published cancelled decision") } catch {}
@@ -113,7 +136,7 @@ final class SharedDecisionClientTests: XCTestCase {
         }
     }
     func testClosedQueryOldContextAndRequestBodyCannotIssueRequest() async throws {
-        let context = try await context(), caps = Caps.snapshot().document; var calls = 0
+        let context = try await context(), caps = Caps.snapshot(displayPeak: .auto).document; var calls = 0
         DecisionHTTP.answer = { request in calls += 1; return (request.url!, 200, [:], try self.wire()) }
         let client = try SharedDecisionClient(testConfiguration: configuration)
         for query in [[URLQueryItem(name: "token", value: "x")], [URLQueryItem(name: "audio", value: "01")], [URLQueryItem(name: "subtitle", value: "-2")], [URLQueryItem(name: "audio_offset_ms", value: "15001")], [URLQueryItem(name: "audio", value: "1"), URLQueryItem(name: "audio", value: "2")]] {
@@ -148,7 +171,7 @@ final class SharedDecisionClientTests: XCTestCase {
             XCTAssertEqual(request.timeoutInterval, 310); sent = try self.body(request)
             return (request.url!, 200, [:], bytes)
         }
-        let request = CreateSessionRequest(playbackId: "shared-browser", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", height: 720, start: 12.5, audio: 2, copy: true, caps: Caps.snapshot().document)
+        let request = CreateSessionRequest(playbackId: "shared-browser", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", height: 720, start: 12.5, audio: 2, copy: true, caps: Caps.snapshot(displayPeak: .auto).document)
         let result = try await SharedDecisionClient(testConfiguration: configuration).start(context: context, request: request)
         var receiptRead = URLRequest(url: URL(string: "https://b.test/api/v1/libraries")!)
         Session.shared.authorize(&receiptRead)
@@ -298,7 +321,7 @@ final class SharedDecisionClientTests: XCTestCase {
     func testInitialStartRefusesUnsupportedOriginalFieldsBeforeNetwork() async throws {
         let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration); var calls = 0
         DecisionHTTP.answer = { _ in calls += 1; return nil }
-        let base = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
+        let base = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot(displayPeak: .auto).document)
         for index in [0, 1, 2, 5] {
             var request = base
             switch index {
@@ -322,7 +345,7 @@ final class SharedDecisionClientTests: XCTestCase {
             sent = try JSONSerialization.jsonObject(with: try self.body(request)) as? [String: Any]
             return (request.url!, 500, [:], Data())
         }
-        var request = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
+        var request = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot(displayPeak: .auto).document)
         request.copy = true; request.preserveDolbyVision = true
         _ = try? await client.start(context: context, request: request)
         XCTAssertEqual(sent?["preserve_dolby_vision"] as? Bool, true)

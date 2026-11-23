@@ -692,7 +692,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         {"sessionId":"\(id)","playlistUrl":"/hls/\(id)/index.m3u8","mediaOriginMs":0,"durationMs":120000,"vod":true}
         """.utf8)) }
         let queued=outcome.hasPrefix("queued")
-        let caps=Caps.snapshot().document,entered=expectation(description:"subtitle-off successor held")
+        let caps=Caps.snapshot(displayPeak: .auto).document,entered=expectation(description:"subtitle-off successor held")
         var calls=0,release:CheckedContinuation<HlsStart,Error>?
         var initialAttached=false,holdNextChange=false
         let controller=PlayerController(player:CaptionHandoffPlayer(),
@@ -784,7 +784,7 @@ final class ProgressiveCaptionTests: XCTestCase {
          "durationMs":120000,"vod":true,"deliveredDynamicRange":"hdr10"}
         """.utf8))
         let player = CaptionHandoffPlayer()
-        let caps = Caps.snapshot().document
+        let caps = Caps.snapshot(displayPeak: .auto).document
         var sessionStarts = 0
         var nativeSelections: [Int?] = []
         let controller = PlayerController(

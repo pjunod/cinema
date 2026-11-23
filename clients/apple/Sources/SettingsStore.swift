@@ -149,7 +149,7 @@ struct SettingsStore {
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.playbackQuality) }
     }
     /// Auto (peak unknown) until a person chooses a value; unreadable storage
-    /// reads as Auto. Read by `Caps.snapshot()` for each new playback.
+    /// reads as Auto. `AppModel` passes it to `Caps.snapshot(displayPeak:)` for each decision.
     var hdrDisplayPeak: HDRDisplayPeak {
         get { HDRDisplayPeak.fromStorage(defaults.string(forKey: Key.hdrDisplayPeak)) }
         nonmutating set { defaults.set(newValue.storageValue, forKey: Key.hdrDisplayPeak) }

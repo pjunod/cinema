@@ -43,8 +43,9 @@ struct SharedDecisionClient {
     func decision(context: PlaybackFileContext, selection: PrePlaySelection = .none,
                   quality: PlaybackQuality = .auto, audioOffsetMs: Int = 0,
                   presentationTarget: PresentationTarget? = nil,
+                  displayPeak: HDRDisplayPeak,
                   admittedDisplay: DisplayCaps? = nil) async throws -> (decision: SharedDecision, caps: DeviceCaps) {
-        var document = Caps.snapshot().document
+        var document = Caps.snapshot(displayPeak: displayPeak).document
         document.display.presentationTarget = presentationTarget
         // A reopen of the same playback keeps the peak its first decision admitted.
         document.display = document.display.withPeak(from: admittedDisplay)

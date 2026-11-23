@@ -64,7 +64,7 @@ final class SharedPreparedHandoffTests: XCTestCase {
             "start_seconds": 0.0, "duration_ms": 600_000, "control": ["protocol": "plurx-playback-control-v1", "url": "/api/v1/hls/\(predecessor)/control",
             "generation": generation, "control_epoch": 4, "next_exchange_ms": 5_000, "lease_timeout_ms": 300_000]])
         PreparedHTTP.answer = { _, _ in (200, reply) }
-        let caps = Caps.snapshot().document
+        let caps = Caps.snapshot(displayPeak: .auto).document
         let request = CreateSessionRequest(playbackId: "shared-player", requestId: "dddddddd-dddd-4ddd-8ddd-ddddddddddd0", qualityAuto: false, start: 0, copy: true, caps: caps)
         let client = try SharedDecisionClient(testConfiguration: configuration)
         let playback = try await client.start(context: context, request: request)

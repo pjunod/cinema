@@ -266,7 +266,8 @@ struct LiveTvPlaybackEnvelope: Encodable {
     }
 
     static func current(compatibility: LiveTvCompatibility?, aacChannels: Int) -> Self {
-        let caps = Caps.capsDocument()
+        // Only codecs and audio are read; the envelope has no display peak.
+        let caps = Caps.capsDocument(displayPeak: .auto)
         let liveAudio = caps.audio.filter { ["aac", "ac3", "eac3"].contains($0) }
         var formats = [LiveTvHlsFormat(container: "mpegts", video: "h264", audio: "aac")]
         for video in caps.video {

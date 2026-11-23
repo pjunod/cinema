@@ -70,7 +70,7 @@ final class SharedProtocolFixtureTests: XCTestCase {
     private func request(rangeCapable: Bool = true) -> CreateSessionRequest {
         CreateSessionRequest(playbackId: "player-fixture",
             requestId: "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0", start: 30.5, copy: true,
-            caps: rangeCapable ? Caps.snapshot().document : nil)
+            caps: rangeCapable ? Caps.snapshot(displayPeak: .auto).document : nil)
     }
     private func started(_ context: PlaybackFileContext) throws -> SharedStartedPlayback {
         let wire = try XCTUnwrap(object("hls_start")["public"])
