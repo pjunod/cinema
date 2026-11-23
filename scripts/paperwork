@@ -3,7 +3,7 @@
 
 Every rule here is one an agent or contributor meets by failing CI half an
 hour after pushing: a corrective commit without its `Regression-Test:` line,
-a client change without a release-counter bump, a doc missing from its index,
+a mobile version that drifted from the workspace, a doc missing from its index,
 a real host name, a route missing from docs/API.md. Each check below runs the
 same validator or test the CI lane runs, and prints the fix beside the
 failure, so the rule is learned at push time instead of after a fan-out.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -53,21 +54,20 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "test_apple_build_claims",
-        "the Apple build number has one owner and generated copies",
-        "run `make apple-build-bump` (never hand-edit the generated surfaces); a user-visible "
-        "change also gets a docs/apple-builds/ fragment",
+        "Apple per-change notes name their issue and no build; status blockquotes carry no ledger",
+        "a user-visible Apple change gets a docs/apple-builds/<issue>-<slug>.md fragment with an "
+        "`Issue:` line and no `Build:` line",
     ),
     (
         "test_mobile_build_claims",
-        "the Apple and Android README/status build claims match the build files",
-        "run `make apple-build-bump`; for Android edit versionCode in "
-        "clients/android/app/build.gradle.kts and the status line in clients/android/README.md",
+        "README/parity/STATUS.html status lines quote no build number (they are derived)",
+        "remove the number; the status line names scripts/build-number instead",
     ),
     (
         "test_status_page_shape",
         "STATUS.md stays short and indexes the sections moved out of it",
-        "move the oldest STATUS.md sections verbatim into their subject folder's status history "
-        "and leave one index row each (docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.4)",
+        "move the oldest status.d/ entries verbatim into their subject folder's STATUS-HISTORY.md, "
+        "delete their files and add one row each to status.d/INDEX.md (status.d/README.md)",
     ),
     (
         "test_status_pr_claims",
@@ -246,23 +246,133 @@ def check_regression_fields(base: str, body: str | None, title: str) -> Result:
     return Result(name, code == 0, time.monotonic() - start, "" if code == 0 else tail(out), hint)
 
 
-def check_mobile_versions(base: str, merge_target: str) -> Result:
+def _workspace_version(text: str) -> str | None:
+    section = re.search(r"(?ms)^\[workspace\.package\]$(.*?)(?=^\[|\Z)", text)
+    version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', section.group(1)) if section else None
+    return version.group(1) if version else None
+
+
+def _semver(text: str | None) -> tuple[int, ...] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _is_release_cut(base: str, paths: list[str]) -> bool:
+    """Whether this branch is a release cut: its own diff raises the workspace version.
+
+    Judged from the merge base, not `base` (the lane passes the target's tip):
+    a branch that merely predates a release would otherwise read as one.
+    """
+
+    if "Cargo.toml" not in paths:
+        return False
+    merge_base = subprocess.run(["git", "merge-base", base, "HEAD"], cwd=ROOT,
+                                capture_output=True, text=True).stdout.strip() or base
+    before = _semver(_workspace_version(_at(merge_base, "Cargo.toml")))
+    after = _semver(_workspace_version(_at(None, "Cargo.toml")))
+    return before is not None and after is not None and after > before
+
+
+def check_changelog(base: str, body: str | None, merge_target: str, paths: list[str]) -> Result:
+    """The pull request carries its changelog entry in its description, not in CHANGELOG.md.
+
+    validation/changelog_field.py is the field's reference. Only a pull request
+    into `main` is asked for it: a task pull request into an effort branch
+    never lands on `main`'s first-parent line, so the effort's own pull request
+    carries the entries for all of its tasks.
+    """
+
+    start = time.monotonic()
+    sys.path.insert(0, str(ROOT))
+    from validation.changelog_field import HINT, ChangelogError, require  # noqa: PLC0415
+
+    name = "Changelog field in the description, never an edit to CHANGELOG.md"
+    problems = []
+    if "CHANGELOG.md" in paths:
+        # The cutover is judged at the target's tip: once the field is on main,
+        # no branch -- however old -- may edit CHANGELOG.md by hand.
+        cutover = not _at(base, "validation/changelog_field.py")
+        if not (cutover or _is_release_cut(base, paths)):
+            problems.append(
+                "CHANGELOG.md changed, and this is not a release cut (the workspace version did not "
+                "move). Move the entry into the description's `Changelog:` field."
+            )
+    targets_main = merge_target.rsplit("/", 1)[-1] == "main"
+    if targets_main and body is None:
+        return Result(
+            name, not problems, time.monotonic() - start,
+            "\n".join(problems + ["(pass --body-file <description> to check the Changelog field now)"]),
+            HINT, warn=not problems,
+        )
+    if targets_main:
+        try:
+            require(body or "")
+        except ChangelogError as error:
+            problems.append(str(error))
+    return Result(name, not problems, time.monotonic() - start, "\n".join(problems), HINT)
+
+
+def _at(revision: str | None, path: str) -> str:
+    """`path` at `revision`, or in the working tree when `revision` is None; "" when absent."""
+
+    if revision is None:
+        return (ROOT / path).read_text(encoding="utf-8") if (ROOT / path).exists() else ""
+    proc = subprocess.run(["git", "show", f"{revision}:{path}"], cwd=ROOT, capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def check_folded_pages(base: str, paths: list[str], title: str) -> Result:
+    """Pull requests edit fragment folders; only the fold writes the pages folded from them."""
+
+    start = time.monotonic()
+    import importlib.machinery  # noqa: PLC0415
+    import importlib.util  # noqa: PLC0415
+
+    loader = importlib.machinery.SourceFileLoader("fold_script", str(ROOT / "scripts/fold"))
+    spec = importlib.util.spec_from_loader("fold_script", loader)
+    fold = importlib.util.module_from_spec(spec)
+    # Registered before it runs: a dataclass in it looks its module up
+    # in sys.modules (Python 3.12 fails on an unregistered one).
+    sys.modules[spec.name] = fold
+    loader.exec_module(fold)
+    name = "folded pages change only through scripts/fold"
+    hint = ("edit your own file in the page's fragment folder (`scripts/fold --list` names them) "
+            "and revert the page; the fold workflow rewrites it after merge")
+    problems = []
+    try:
+        fold.changes(ROOT)
+    except fold.FoldError as error:
+        problems.append(str(error))
+    # The fold's own pull request: its title, and a diff that touches nothing
+    # but folded pages and their fragment folders. The title alone is not enough.
+    owned = {item.page for item in fold.FOLDS}
+    folders = tuple(item.source for item in fold.FOLDS)
+    by_fold = title.startswith("chore(fold):") and bool(paths) and all(
+        path in owned or path.startswith(folders) for path in paths
+    )
+    cutover = not _at(base, "scripts/fold")
+    if not (by_fold or cutover or _is_release_cut(base, paths)):
+        for item in fold.FOLDS:
+            if item.page in paths:
+                problem = item.guard(_at(base, item.page), _at(None, item.page))
+                if problem:
+                    problems.append(problem)
+    return Result(name, not problems, time.monotonic() - start, "\n".join(problems), hint)
+
+
+def check_mobile_versions() -> Result:
     start = time.monotonic()
     code, out = run(
         [sys.executable, "-m", "validation.mobile_versions"],
-        env={
-            "PLURX_VALIDATION_MODE": "changed-from",
-            "PLURX_VALIDATION_BASE": base,
-            "PLURX_VALIDATION_MERGE_TARGET": merge_target,
-        },
+        env={"PLURX_VALIDATION_MODE": "changed-from"},
     )
     return Result(
-        "mobile release counters rise with client changes",
+        "mobile versions match the workspace; build numbers are derived",
         code == 0,
         time.monotonic() - start,
         "" if code == 0 else tail(out),
-        "Apple: `make apple-build-bump`; Android: raise versionCode in "
-        "clients/android/app/build.gradle.kts and the clients/android/README.md status line",
+        "keep both marketing versions at the workspace version; never store a build number "
+        "(project.yml keeps the placeholder, build.gradle.kts uses scripts/build-number)",
     )
 
 
@@ -326,7 +436,9 @@ def print_list() -> None:
     print("paperwork checks — what each guards, and the fix:\n")
     print("  catalog            every governed file maps to a functionality point")
     print("  Regression-Test    fix(/perf( commits need `Regression-Test:` lines in the PR description")
-    print("  mobile counters    Apple/Android build numbers rise when client code changes")
+    print("  Changelog          PRs into main carry `Changelog:` lines in the description; CHANGELOG.md is release-only")
+    print("  folded pages       STATUS.md is generated; new client-fixes rows go in tests/client-fixes.d/")
+    print("  mobile versions    marketing versions match; build numbers derived, never stored")
     for module, guard, hint in TEST_RULES:
         print(f"  {module:<26} {guard}\n  {'':<26} fix: {hint}")
     print(f"  web (node)                 {WEB_HINT}")
@@ -336,10 +448,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--base", help="base revision (default: merge base with --merge-target)")
     parser.add_argument("--merge-target", default="origin/main", help="branch the work merges into")
-    parser.add_argument(
-        "--counter-target",
-        help="branch whose release counters a client change must exceed (default: --merge-target)",
-    )
     parser.add_argument("--body-file", type=Path, help="pull request description to check")
     parser.add_argument(
         "--body-env",
@@ -404,12 +512,14 @@ def main(argv: list[str] | None = None) -> int:
     results: list[Result] = [
         check_catalog(),
         check_regression_fields(base, body, title),
-        check_mobile_versions(base, args.counter_target or args.merge_target),
+        check_mobile_versions(),
         *(check_tests(base, args.merge_target) if unit_results is None else unit_results),
     ]
     web = check_web(paths)
     if web is not None:
         results.append(web)
+    results.append(check_changelog(base, body, args.merge_target, paths))
+    results.append(check_folded_pages(base, paths, title))
 
     failed = [r for r in results if not r.ok]
     for result in results:

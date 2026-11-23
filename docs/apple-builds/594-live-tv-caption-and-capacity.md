@@ -4,7 +4,6 @@
 focused cases pass. Fast qualification, deployment and physical acceptance
 remain pending (2026-09-28).
 
-Build: 198
 Issue: #594
 
 Ordinary Release Live TV exposes caption choices from the attached player's

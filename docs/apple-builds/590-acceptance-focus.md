@@ -2,7 +2,6 @@
 
 **Status:** open — sole review finding addressed; signed compilation and source-scoped regressions pass; fast qualification and final installed acceptance pending.
 
-Build: 197
 Issue: #590
 
 The physical TV navigation helper crosses tab/content boundaries vertically and moves between disjoint rows before steering horizontally. This prevents a rightward move on Category from changing grouping to Library and removing the requested movie shelf. The original build194 failed focus observation remains retained; no production view or playback contract changes.

@@ -51,7 +51,7 @@ make test       # just the tests
 make effort-rust-check # compile every Rust target; execute no Rust tests
 make coverage   # line coverage via cargo-llvm-cov → lcov.info
 make hooks      # pre-commit lint + pre-push paperwork
-make paperwork  # index rows, release counters, names, Regression-Test — seconds
+make paperwork  # index rows, mobile versions, names, Regression-Test — seconds
 make docker     # build the container image
 ```
 

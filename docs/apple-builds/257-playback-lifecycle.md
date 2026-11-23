@@ -1,6 +1,5 @@
 # Keep playback recovery and prepared handoff under one lifecycle
 
-Build: 143
 Issue: #257
 
 Playback recovery now preserves the viewer's latest intent while a loaded
