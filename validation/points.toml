@@ -1712,6 +1712,7 @@ paths = [
   "scripts/pre-commit",
   "scripts/pre-push",
   "scripts/paperwork",
+  "scripts/fold",
   "scripts/paperwork-fix",
   "validation/pr_event.py",
   "scripts/outline",
