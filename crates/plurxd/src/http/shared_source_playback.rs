@@ -1087,7 +1087,7 @@ async fn status(
         .await
         // A Store that cannot answer passes only for an owner still live: an
         // ending one cannot be kept by a retry, whatever the Store says later.
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", retiring = owned.actor.is_retiring(), "Source status refused"); if owned.actor.is_retiring() { unavailable() } else { live_refusal_retry() } })?
+        .map_err(|_| { let retiring = owned.actor.is_retiring(); tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", retiring, "Source status refused"); if retiring { unavailable() } else { live_refusal_retry() } })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "absent", "Source status refused"); unavailable() })?;
     let cleanup_only = headers.cleanup_only()
         || current.is_err()

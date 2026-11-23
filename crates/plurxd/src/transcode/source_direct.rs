@@ -443,7 +443,7 @@ impl TranscodeManager {
             publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: now,
-            lease_expires_at_ms: now.saturating_add(60_000),
+            lease_expires_at_ms: now.saturating_add(super::SOURCE_SESSION_LEASE_MS),
             expected_desired_revision: None,
         };
         owner
@@ -460,6 +460,7 @@ impl TranscodeManager {
         if outcome.route.session_id != session_id {
             return Err(SourceWorkerError::Conflict);
         }
+        owner.gate.activated(&outcome.route);
         authority
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -553,10 +554,17 @@ impl TranscodeManager {
                         if idle {
                             break;
                         }
-                        // Only a refusal that does not pass ends the owner. A
+                        // The lease is renewed only for a file proven the one
+                        // this session admitted. One that could not be read
+                        // just now is retried at the next tick without
+                        // renewing, so the lease the Store last confirmed bounds
+                        // how long it can pass; one proven replaced ends it.
+                        if let Some(direct) = owner.direct.as_ref() {
+                            match owner.gate.tick_fence(direct.fence().await) { super::TickFence::Renew => {}, super::TickFence::Skip => continue, super::TickFence::End => break }
+                        }
+                        // Only a refusal that does not pass ends the owner; a
                         // transient one is retried at the next tick, bounded by
-                        // the Store lease itself: renewals that keep failing let
-                        // it expire, and the next read is then refused.
+                        // the lease the Store last confirmed.
                         if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
                             owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
                             break;

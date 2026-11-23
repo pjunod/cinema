@@ -7622,9 +7622,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process launch.
 # Live-refusal regression (sharing_source_live_refusals_retry_while_they_pass_and_end_only_when_the_copy_does): +7 response.status() reads on the
 # fixture's HTTP answers. No process launch, kill or wait.
-# Source refusal review: +11 response.status() reads on the fixture's HTTP
+# Source refusal review: +12 response.status() reads on the fixture's HTTP
 # answers in the LiveSourceSession tests. No process launch, kill or wait.
-expected_occurrences = 1000
+expected_occurrences = 1001
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

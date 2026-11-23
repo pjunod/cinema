@@ -2,7 +2,7 @@
 //! The Source actor retains grant/assignment/lease authority; this owner only
 //! joins the child and outputs and commits the verified physical observations.
 use super::{
-    meter::{await_reporting_stall, HoldMirror, ProductionMeter},
+    meter::{await_reporting_stall, ProductionMark, ProductionMeter, ProductionStall},
     CopyClockCensus, CopyMuxEvent, CopyRangeFiles, CopyRangePublisher, ObservedCopyMux,
     RunningCopyGeneration,
 };
@@ -43,15 +43,6 @@ pub(super) fn landing_failure(
     } else {
         error
     }
-}
-/// What a range's production had committed at one instant: its init and
-/// its published segments, which only ever grow, and the bank's hold count.
-/// Compared later, it says whether production advanced in between. Bytes a
-/// segment has in flight do not count: only a commit is progress.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ProductionMark {
-    committed: usize,
-    holds: u64,
 }
 
 /// A producer a resource wait can watch: what it has committed, and whether
@@ -128,8 +119,9 @@ pub(crate) struct CopyRangeProduction {
     stop: CancellationToken,
     outcome: Mutex<Option<Result<(), String>>>,
     bank: AsyncMutex<ReadBank>,
-    /// `bank.held`, readable without the bank's lock.
-    holding: HoldMirror,
+    /// `bank.held`, readable without the bank's lock, and whether a wait
+    /// that saw no commit met a stuck producer.
+    stall: ProductionStall,
     seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     wanted_ms: i64,
 }
@@ -166,7 +158,7 @@ impl CopyRangeProduction {
                 high_ms: watermarks.1,
                 held: false,
             }),
-            holding: HoldMirror::default(),
+            stall: ProductionStall::default(),
         });
         let task = Arc::clone(&production);
         tokio::spawn(async move {
@@ -238,7 +230,7 @@ impl CopyRangeProduction {
         if bank.held && !hold {
             bank.observer.refill().await?;
             bank.held = false;
-            self.holding.set(false);
+            self.stall.holding().set(false);
             return Ok(());
         }
         // Segment checkpoints perform local arithmetic only until an actual
@@ -246,11 +238,18 @@ impl CopyRangeProduction {
         if hold == bank.held && !publish_observation {
             return Ok(());
         }
-        bank.observer
+        // The mirror shows the decided hold while the observer records it,
+        // so a wait judged meanwhile sees production pausing, not stuck.
+        self.stall.holding().set(hold);
+        if let Err(error) = bank
+            .observer
             .rolling(lead, bank.low_ms, bank.high_ms, hold, fresh)
-            .await?;
+            .await
+        {
+            self.stall.holding().set(bank.held);
+            return Err(error);
+        }
         bank.held = hold;
-        self.holding.set(hold);
         Ok(())
     }
     pub(crate) fn is_live(&self) -> bool {
@@ -261,22 +260,48 @@ impl CopyRangeProduction {
     }
     pub(crate) async fn mark(&self) -> ProductionMark {
         let files = self.files.lock().await;
-        ProductionMark {
-            committed: Self::committed(&files),
-            holds: self.holding.mark(),
-        }
+        self.stall.mark(Self::committed(&files))
     }
-    /// Whether production is stuck since `mark`: still running and not
-    /// finished, it committed nothing, and its read bank neither held nor
-    /// began a hold (a hold is production pausing by design, ahead of its
-    /// viewer). A copy that stopped or finished is not stuck; the callers'
-    /// own checks end those.
+    /// Whether production is stuck since `mark` ([`ProductionStall`]).
     pub(crate) async fn stalled_since(&self, mark: ProductionMark) -> bool {
-        if !self.is_live() || self.holding.held_since(mark.holds) {
-            return false;
-        }
+        let live = self.is_live();
         let files = self.files.lock().await;
-        !files.complete() && Self::committed(&files) == mark.committed
+        self.stall
+            .stalled_since(mark, Self::committed(&files), files.complete(), live)
+    }
+    pub(crate) fn is_holding(&self) -> bool {
+        self.stall.holding().is_held()
+    }
+    /// A viewer asked for media at the production head while the bank
+    /// held: the viewer is at least there, whatever its last demand
+    /// snapshot said (a control exchange refused, a player not rendering, an
+    /// extrapolation capped). Re-anchor the bank's position to the produced
+    /// end and decide the hold again; until production commits again, a
+    /// hold no longer excuses a wait.
+    pub(crate) async fn reanchor_at_head(&self) -> Result<(), String> {
+        let (end, committed) = {
+            let files = self.files.lock().await;
+            let end = files.media_origin_ms().map(|origin| {
+                let produced = files
+                    .segments()
+                    .iter()
+                    .map(|segment| segment.seconds * 1000.0)
+                    .sum::<f64>();
+                (origin as f64 + produced).floor() as i64
+            });
+            (end, Self::committed(&files))
+        };
+        let Some(end) = end else {
+            return Ok(());
+        };
+        {
+            let mut bank = self.bank.lock().await;
+            bank.anchor_ms = end;
+            bank.snapshot = None;
+            bank.observed_at = Instant::now();
+        }
+        self.stall.reanchored(committed);
+        self.refresh_read_bank_inner(true).await
     }
     pub(crate) fn retire(&self) {
         self.publisher.retire();
@@ -439,9 +464,9 @@ impl CopyRangeProduction {
             loop {
                 let pipes=running.pipes.as_mut().ok_or("copy_output_readers_missing")?;
                 let waiting=tokio::time::Instant::now();
-                let holds=self.holding.mark();
+                let holds=self.stall.holding().mark();
                 let next=await_reporting_stall(pipes.next(),target,|waited|{
-                    meter.stalled("child_output",waited,self.holding.held_since(holds));
+                    meter.stalled("child_output",waited,self.stall.holding().held_since(holds));
                 });
                 let event=tokio::select!{biased;()=self.stop.cancelled()=>return Err("copy_range_cancelled".to_owned()),event=next=>event.ok_or("copy_output_readers_lost")?};
                 meter.child(waiting.elapsed());
@@ -493,19 +518,21 @@ impl CopyRangeProduction {
 
 #[cfg(test)]
 mod commit_wait_tests {
-    use super::{CommitProgress, CommitWaiter, DeadlineEnd};
+    use super::{CommitProgress, CommitWaiter, DeadlineEnd, ProductionMark, ProductionStall};
     use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     };
     use std::time::Duration;
     use tokio::sync::Notify;
 
-    /// A producer's commit count and hold, as the real range reports them.
+    /// A producer's commit count, judged by the real [`ProductionStall`] a
+    /// [`super::CopyRangeProduction`] owns: only its range and child are
+    /// stood in for.
     #[derive(Default)]
     struct Producer {
         committed: AtomicUsize,
-        holding: AtomicBool,
+        stall: ProductionStall,
         changed: Notify,
     }
     impl Producer {
@@ -513,14 +540,18 @@ mod commit_wait_tests {
             self.committed.fetch_add(1, Ordering::SeqCst);
             self.changed.notify_waiters();
         }
-    }
-    impl CommitProgress for Producer {
-        type Mark = usize;
-        async fn mark(&self) -> usize {
+        fn committed(&self) -> usize {
             self.committed.load(Ordering::SeqCst)
         }
-        async fn stalled_since(&self, mark: usize) -> bool {
-            !self.holding.load(Ordering::SeqCst) && self.committed.load(Ordering::SeqCst) == mark
+    }
+    impl CommitProgress for Producer {
+        type Mark = ProductionMark;
+        async fn mark(&self) -> ProductionMark {
+            self.stall.mark(self.committed())
+        }
+        async fn stalled_since(&self, mark: ProductionMark) -> bool {
+            self.stall
+                .stalled_since(mark, self.committed(), false, true)
         }
     }
 
@@ -535,9 +566,8 @@ mod commit_wait_tests {
             let changed = producer.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let committed = producer.committed.load(Ordering::SeqCst);
-            if committed >= wanted {
-                return Ok(committed);
+            if producer.committed() >= wanted {
+                return Ok(producer.committed());
             }
             waiter.changed(changed).await?;
         }
@@ -585,11 +615,47 @@ mod commit_wait_tests {
     }
 
     /// A producer holding ahead of its viewer by design commits nothing,
-    /// and that is not a stall.
+    /// and that is not a stall, whether the hold began before the wait or
+    /// during it.
     #[tokio::test(start_paused = true)]
     async fn a_holding_producer_is_not_stuck() {
         let producer = Producer::default();
-        producer.holding.store(true, Ordering::SeqCst);
+        producer.stall.holding().set(true);
         assert_eq!(request(&producer, 1).await, Err(DeadlineEnd::Slow));
+        producer.stall.holding().set(false);
+        let waiter = CommitWaiter::begin(&producer, tokio::time::Instant::now() + WINDOW).await;
+        producer.stall.holding().set(true);
+        producer.stall.holding().set(false);
+        let changed = producer.changed.notified();
+        tokio::pin!(changed);
+        assert_eq!(waiter.changed(changed).await, Err(DeadlineEnd::Slow));
+    }
+
+    /// A hold is the bank's decision from its last demand snapshot, not a
+    /// sign the producer is alive. Once the bank is re-anchored to a viewer
+    /// waiting at the head, a hold that persists excuses nothing until
+    /// production commits again; a commit restores the excuse.
+    #[tokio::test(start_paused = true)]
+    async fn a_reanchored_hold_that_persists_is_stuck() {
+        let producer = Producer::default();
+        producer.commit();
+        producer.stall.holding().set(true);
+        assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Slow));
+        producer.stall.reanchored(producer.committed());
+        assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Stalled));
+        producer.commit();
+        assert_eq!(request(&producer, 3).await, Err(DeadlineEnd::Slow));
+    }
+
+    /// A copy that finished or stopped committed nothing too, and is not
+    /// stuck: the callers' own checks end those.
+    #[test]
+    fn only_a_running_unfinished_copy_can_be_stuck() {
+        let stall = ProductionStall::default();
+        let mark = stall.mark(4);
+        assert!(stall.stalled_since(mark, 4, false, true));
+        assert!(!stall.stalled_since(mark, 4, true, true));
+        assert!(!stall.stalled_since(mark, 4, false, false));
+        assert!(!stall.stalled_since(mark, 5, false, true));
     }
 }

@@ -1935,19 +1935,21 @@ async fn sharing_source_unanswerable_store_passes_within_the_confirmed_lease_and
         LiveSourceSession::is_retry(session.status(&fixture).await).await,
         "a Store that cannot answer is a retry"
     );
-    // At least one renewal tick passes while the Store cannot answer.
-    tokio::time::sleep(Duration::from_secs(11)).await;
+    // A renewal tick runs to its end while the Store cannot answer: the
+    // next one begins, and the owner is still not retiring.
+    tokio::time::timeout(Duration::from_secs(30), owned.actor.ticks_for_test(2))
+        .await
+        .expect("renewal ticks run");
     assert!(
         !owned.actor.retirement_requested_for_test(),
         "the tick keeps the session while the lease holds"
     );
     assert_eq!(owned.actor.settlement_status(), None);
     owned.actor.lapse_lease_for_test();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !owned.actor.retirement_requested_for_test() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        owned.actor.retirement_requested_wait_for_test(),
+    )
     .await
     .expect("past the confirmed lease the tick retires the owner");
     assert!(
@@ -1968,6 +1970,42 @@ async fn sharing_source_unanswerable_store_passes_within_the_confirmed_lease_and
         ),
         "{settled:?}"
     );
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
+/// The growing deadline judgement on a real owner: a wait over a producer
+/// that advanced passes and keeps the owner; a stuck one is terminal and
+/// retires it, with Revoke, and the owner settles. Judging the same stall
+/// again (the request's own deadline after its inner wait) changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_not() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let slow = owned.actor.deadline_refusal_for_test(false);
+    assert!(slow.is_transient());
+    assert!(!owned.actor.retirement_requested_for_test());
+    session
+        .assert_live(&fixture, "a slow producer keeps the session")
+        .await;
+    let stuck = owned.actor.deadline_refusal_for_test(true);
+    assert!(!stuck.is_transient());
+    assert!(owned.actor.retirement_requested_for_test());
+    assert!(!owned.actor.deadline_refusal_for_test(true).is_transient());
+    assert!(
+        !LiveSourceSession::is_retry(session.status(&fixture).await).await,
+        "a stuck producer's session is never answered as a retry"
+    );
+    tokio::time::timeout(Duration::from_secs(20), owned.actor.settled_for_test())
+        .await
+        .expect("the stuck owner settles")
+        .expect("settled cleanly");
     session.stop().await;
     fixture.shutdown().await;
 }

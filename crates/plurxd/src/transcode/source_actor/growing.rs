@@ -264,9 +264,25 @@ impl SourceViewerActor {
                         return Err(ended);
                     }
                     drop(files);
-                    waiter.changed(changed).await.map_err(|end| {
-                        self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
-                    })?;
+                    if let Err(end) = waiter.changed(changed).await {
+                        // Anything not yet published is at or past the
+                        // production head. A viewer waiting there while the
+                        // bank holds is ahead of the bank's own picture of
+                        // it: re-anchor the bank to it, so production resumes,
+                        // and a hold that persists no longer excuses a wait.
+                        if end == crate::copyrange::DeadlineEnd::Slow
+                            && backing.production.is_holding()
+                        {
+                            if let Err(error) = backing.production.reanchor_at_head().await {
+                                // The renewal tick's own read-bank refresh
+                                // ends a copy whose observer fails.
+                                tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.reanchor", %error, "Source growing copy could not re-anchor its read bank");
+                            }
+                        }
+                        return Err(
+                            self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
+                        );
+                    }
                 };
                 // The opened immutable segment is pinned through the real body.
                 ready.delivery = Arc::clone(&backing.delivery);
@@ -455,7 +471,11 @@ impl SourceViewerActor {
         if !stalled {
             return super::LiveRefusal::transient(SourceWorkerError::Deadline);
         }
-        tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.producer_stalled", "Source growing copy committed nothing in a resource wait; retiring it");
+        // The inner wait and the request's own deadline can both judge the
+        // same stall; only the one that starts the retirement says so.
+        if !self.is_retiring() {
+            tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.producer_stalled", "Source growing copy committed nothing in a resource wait; retiring it");
+        }
         let stuck = super::LiveRefusal::terminal(SourceWorkerError::Unavailable);
         self.retire_on_terminal(Some(&stuck));
         stuck
@@ -974,7 +994,7 @@ impl TranscodeManager {
                 publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: origin,
                 now_ms: now,
-                lease_expires_at_ms: now.saturating_add(60_000),
+                lease_expires_at_ms: now.saturating_add(super::SOURCE_SESSION_LEASE_MS),
                 expected_desired_revision: None,
             };
             owner
@@ -994,6 +1014,7 @@ impl TranscodeManager {
             if outcome.route.session_id != session_id || !actual.is_live() {
                 return Err(SourceWorkerError::Conflict);
             }
+            owner.gate.activated(&outcome.route);
             startup_stage = "growing.publication_authority";
             let members = owner
                 .gate
@@ -1101,15 +1122,14 @@ impl TranscodeManager {
                     ()=retirement=>{},
                     ()=physical=>{},
                     _=renewal.tick()=>{
+                        #[cfg(test)]
+                        owner.gate.ticked();
                         if backing.activity_expired() || backing.production.refresh_read_bank().await.is_err() {break;}
                         // The lease is renewed only for an object proven
                         // unchanged. One that could not be read just now is
                         // retried at the next tick without renewing, so the
                         // confirmed lease bounds how long it can pass.
-                        if let Err(refusal) = backing.physical_fence().await {
-                            if owner.gate.bounded(refusal).is_transient() { continue; }
-                            break;
-                        }
+                        match owner.gate.tick_fence(backing.physical_fence().await) { super::TickFence::Renew => {}, super::TickFence::Skip => continue, super::TickFence::End => break }
                         // Only a refusal that does not pass ends the owner; the
                         // confirmed lease bounds how long transient ones may last.
                         if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {

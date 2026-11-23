@@ -27,6 +27,17 @@ pub(crate) struct SourceProducerAuthority {
     ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
     /// The latest Source session lease the Store confirmed for this owner.
     lease: LeaseBound,
+    /// Renewal ticks begun, for a test that waits on the tick itself.
+    #[cfg(test)]
+    ticks: tokio::sync::watch::Sender<u64>,
+}
+
+/// What a renewal tick does after re-proving its source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TickFence {
+    Renew,
+    Skip,
+    End,
 }
 
 /// How far one renewal extends this owner's Source session lease.
@@ -50,10 +61,24 @@ impl LeaseBound {
             ),
         }
     }
-    /// Record a lease the Store confirmed; never moves it backward.
+    /// The lease the activation wrote: the owner's first confirmed lease,
+    /// replacing the presumed one it was constructed with.
+    pub(crate) fn activated(&self, until_ms: i64) {
+        self.confirmed_until_ms
+            .store(until_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Record a lease a guarded renewal wrote; never moves it backward.
     pub(crate) fn confirmed(&self, until_ms: i64) {
         self.confirmed_until_ms
             .fetch_max(until_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// [`SourceProducerAuthority::tick_fence`] at `now_ms`.
+    pub(crate) fn tick_fence<T>(&self, fenced: Result<T, LiveRefusal>, now_ms: i64) -> TickFence {
+        match fenced.map_err(|refusal| self.bound(refusal, now_ms)) {
+            Ok(_) => TickFence::Renew,
+            Err(refusal) if refusal.is_transient() => TickFence::Skip,
+            Err(_) => TickFence::End,
+        }
     }
     pub(crate) fn bound(&self, refusal: LiveRefusal, now_ms: i64) -> LiveRefusal {
         let until = self
@@ -111,7 +136,13 @@ impl SourceProducerAuthority {
             registry_boot_id,
             ingress,
             lease: LeaseBound::from(crate::fragment_index_cluster::unix_ms()),
+            #[cfg(test)]
+            ticks: tokio::sync::watch::Sender::new(0),
         }
+    }
+    #[cfg(test)]
+    pub(super) fn ticked(&self) {
+        self.ticks.send_modify(|ticks| *ticks += 1);
     }
     pub(crate) fn retained_ingress(
         &self,
@@ -370,6 +401,32 @@ pub(super) fn wait_ready_refusal(error: SourceWorkerError) -> LiveRefusal {
 mod live_refusal_tests {
     use super::*;
     use SourceWorkerError as E;
+
+    /// Every renewal tick (VOD, growing and direct) decides by this after
+    /// re-proving its source: an object proven renews; one that could not be
+    /// read just now skips the renewal while the confirmed lease holds and
+    /// ends the owner once it has passed; one proven changed ends it.
+    #[test]
+    fn a_tick_renews_only_for_a_proven_object() {
+        use crate::fragment_index_cluster::SourceFenceError as F;
+        let lease = LeaseBound::from(1_000);
+        let until = 1_000 + SOURCE_SESSION_LEASE_MS;
+        let unreadable = || Err::<(), _>(LiveRefusal::from_fence(&F::Unreachable("io".into())));
+        let changed = || Err::<(), _>(LiveRefusal::from_fence(&F::Changed("size".into())));
+        assert_eq!(lease.tick_fence(Ok(()), until + 1), TickFence::Renew);
+        assert_eq!(lease.tick_fence(unreadable(), until - 1), TickFence::Skip);
+        assert_eq!(lease.tick_fence(unreadable(), until), TickFence::End);
+        assert_eq!(lease.tick_fence(changed(), 0), TickFence::End);
+        // A skipped renewal confirms nothing, so the bound does not move;
+        // only a guarded renewal does.
+        lease.confirmed(until + 10_000);
+        assert_eq!(lease.tick_fence(unreadable(), until), TickFence::Skip);
+        lease.activated(until - 10_000);
+        assert_eq!(
+            lease.tick_fence(unreadable(), until - 10_000),
+            TickFence::End
+        );
+    }
 
     /// A refusal that passes stays transient while the lease the Store last
     /// confirmed holds, and is terminal once it has passed; a terminal one
@@ -827,6 +884,35 @@ impl SourceViewerActor {
     pub(crate) fn retirement_requested_for_test(&self) -> bool {
         self.is_retiring()
     }
+    /// Wait until retirement is requested, without polling.
+    #[cfg(test)]
+    pub(crate) async fn retirement_requested_wait_for_test(&self) {
+        loop {
+            let notification = self.0.changed.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            if self.is_retiring() {
+                return;
+            }
+            notification.await;
+        }
+    }
+    /// Wait until `count` more renewal ticks have begun. The second one
+    /// beginning means the first ran to its end without ending the owner.
+    #[cfg(test)]
+    pub(crate) async fn ticks_for_test(&self, count: u64) {
+        let mut ticks = self.0.gate.ticks.subscribe();
+        let target = *ticks.borrow_and_update() + count;
+        ticks
+            .wait_for(|ticks| *ticks >= target)
+            .await
+            .expect("the gate outlives its owner");
+    }
+    /// The growing deadline judgement, on this real owner.
+    #[cfg(all(test, unix))]
+    pub(crate) fn deadline_refusal_for_test(&self, stalled: bool) -> LiveRefusal {
+        self.deadline_refusal(stalled)
+    }
     /// Wait for settlement without requesting it.
     #[cfg(test)]
     pub(crate) async fn settled_for_test(&self) -> Result<(), SourceWorkerError> {
@@ -1061,16 +1147,25 @@ impl SourceViewerActor {
         resource: &SharingHlsResource,
         deadline: Instant,
     ) -> Result<SourceOpenedResource, LiveRefusal> {
-        // This deadline bounds the same wait the growing segment wait does,
-        // so it is judged the same way: by whether production advanced.
+        // For a segment or init, this deadline bounds the same wait the
+        // growing segment wait does, so it is judged the same way: by whether
+        // production advanced. Any other resource waits on no production,
+        // and its deadline says nothing about the producer.
+        let segment = matches!(
+            resource.kind(),
+            SharingHlsResourceKind::Init | SharingHlsResourceKind::MediaSegment
+        );
         #[cfg(unix)]
-        let growing = match self.growing_backing() {
+        let growing = match self.growing_backing().filter(|_| segment) {
             Some(backing) => {
                 let waited = backing.production.mark().await;
                 Some((backing, waited))
             }
             None => None,
         };
+        // A frozen VOD's segment wait has no progress signal here; its
+        // deadline ends the request as it always has.
+        let vod_segment = segment && self.0.direct.is_none() && self.growing_backing().is_none();
         let actor = self.clone();
         let resource = resource.clone();
         let job = tokio::spawn(Box::pin(async move {
@@ -1085,6 +1180,7 @@ impl SourceViewerActor {
                 let (backing, waited) = growing.expect("growing wait");
                 Err(self.deadline_refusal(backing.production.stalled_since(waited).await))
             }
+            Err(_) if vod_segment => Err(LiveRefusal::terminal(SourceWorkerError::Deadline)),
             Err(_) => Err(LiveRefusal::transient(SourceWorkerError::Deadline)),
         }
     }
@@ -1212,11 +1308,14 @@ impl SourceViewerActor {
                         custody.clone(),
                     )
                     .await
-                    .ok_or(pending)?;
-                // A segment not yet produced before its deadline.
+                    .ok_or(ended)?;
+                // A VOD segment not produced before its deadline ends the
+                // request, as it always has: the VOD generation that produces
+                // it reports no progress here to tell a slow job from a stuck
+                // one.
                 (
                     SourceResourcePayload::File(
-                        publication.result.map_err(|_| pending)?.ok_or(pending)?,
+                        publication.result.map_err(|_| ended)?.ok_or(ended)?,
                     ),
                     publication.owner,
                 )
@@ -1330,8 +1429,18 @@ impl SourceViewerActor {
 
         // Detached observation survives waiter timeout only to settle actual
         // jobs; an expired request cannot extend authority or viewer activity.
+        // A VOD segment past its deadline ends the request, as it always has.
         if Instant::now() >= deadline {
-            return Err(LiveRefusal::transient(SourceWorkerError::Deadline));
+            return Err(
+                if matches!(
+                    kind,
+                    SharingHlsResourceKind::Init | SharingHlsResourceKind::MediaSegment
+                ) {
+                    LiveRefusal::terminal(SourceWorkerError::Deadline)
+                } else {
+                    LiveRefusal::transient(SourceWorkerError::Deadline)
+                },
+            );
         }
         // A parked segment can outlive the first observation's five-second
         // window. Re-observe real membership/current binding after the wait.
@@ -1445,6 +1554,18 @@ impl SourceProducerAuthority {
         error: &crate::fragment_index_cluster::SourceFenceError,
     ) -> LiveRefusal {
         self.bounded(LiveRefusal::from_fence(error))
+    }
+    /// Seed the confirmed lease from the activation's own route.
+    pub(super) fn activated(&self, route: &MediaSessionRoute) {
+        self.lease.activated(route.lease_expires_at_ms);
+    }
+    /// What a renewal tick does after re-proving its source: renew the lease
+    /// only for an object proven; skip this renewal for one that could not be
+    /// read just now, so the confirmed lease bounds how long that can pass;
+    /// end the owner for one proven changed, or once that lease has passed.
+    pub(super) fn tick_fence<T>(&self, fenced: Result<T, LiveRefusal>) -> TickFence {
+        self.lease
+            .tick_fence(fenced, crate::fragment_index_cluster::unix_ms())
     }
     /// A refusal bounded by the lease the Store last confirmed.
     pub(super) fn bounded(&self, refusal: LiveRefusal) -> LiveRefusal {
@@ -1568,7 +1689,6 @@ impl SourceProducerAuthority {
             .await
             .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.route", error_class = "store", "Source admission refused"); LiveRefusal::transient(SourceWorkerError::Unresolved) })?
             .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.route", error_class = "absent", "Source admission refused"); LiveRefusal::terminal(SourceWorkerError::Unavailable) })?;
-        self.lease.confirmed(route.lease_expires_at_ms);
         let now = crate::fragment_index_cluster::unix_ms();
         self.store
             .renew_source_media_session(
@@ -2410,7 +2530,7 @@ impl TranscodeManager {
                     publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                     media_origin_ms: response.media_origin_ms.unwrap_or(0),
                     now_ms: now,
-                    lease_expires_at_ms: now.saturating_add(60_000),
+                    lease_expires_at_ms: now.saturating_add(SOURCE_SESSION_LEASE_MS),
                     expected_desired_revision: None,
                 };
                 owner
@@ -2428,6 +2548,7 @@ impl TranscodeManager {
                 if outcome.route.session_id != session_id {
                     return Err(SourceWorkerError::Conflict);
                 }
+                owner.gate.activated(&outcome.route);
                 authority
                     .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
                     .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -2546,10 +2667,8 @@ impl TranscodeManager {
                             // unchanged. One that could not be read just now is
                             // retried at the next tick without renewing, so the
                             // confirmed lease bounds how long it can pass.
-                            if let Err(error) = self.vod.source_response_physical_fence(&facts.response_owner).await {
-                                if owner.gate.fence_refusal(&error).is_transient() { continue; }
-                                break;
-                            }
+                            let fenced = self.vod.source_response_physical_fence(&facts.response_owner).await.map_err(|error| LiveRefusal::from_fence(&error));
+                            match owner.gate.tick_fence(fenced) { TickFence::Renew => {}, TickFence::Skip => continue, TickFence::End => break }
                         }
                         // Only a refusal that does not pass ends the owner. A
                         // transient one is retried at the next tick, bounded by
