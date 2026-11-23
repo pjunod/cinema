@@ -8,8 +8,8 @@
 # file's line, so two pull requests touching different files do not conflict.
 # Split-out S-14 child files are counted under their own path.
 # Put the reason for a count change in the pull request description. Do not add
-# narrative here; the frozen history is
-# docs/playback-control/ROLLING-PRODUCER-OWNERS-HISTORY.md.
+# narrative here; the per-change narrative written before 2026-11-23 is in
+# `git show c516dd678:tests/playback/rolling-producer-owners.toml`.
 
 version = 1
 source = "crates/plurxd/src/transcode.rs"
