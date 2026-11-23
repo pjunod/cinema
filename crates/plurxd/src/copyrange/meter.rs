@@ -4,7 +4,7 @@
 //! observes: nothing here changes what the producer does or when.
 use std::{
     future::Future,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
 use tokio::time::Instant;
@@ -34,9 +34,77 @@ impl HoldMirror {
     pub(super) fn mark(&self) -> u64 {
         self.holds.load(Ordering::SeqCst)
     }
+    pub(super) fn is_held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
     /// Whether the bank is holding now or began a hold since `mark`.
     pub(super) fn held_since(&self, mark: u64) -> bool {
         self.held.load(Ordering::SeqCst) || self.holds.load(Ordering::SeqCst) != mark
+    }
+}
+
+/// What a range's production had committed at one instant (its init and
+/// its published segments, which only ever grow) and the bank's hold count.
+/// Compared later, it says whether production advanced in between. Bytes a
+/// segment has in flight do not count: only a commit is progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProductionMark {
+    committed: usize,
+    holds: u64,
+}
+
+/// Whether a wait that saw no commit met a stuck producer. The read bank's
+/// hold excuses it: a holding producer pauses by design, ahead of its viewer.
+/// But the hold is the bank's decision from its last demand snapshot, not a
+/// sign the producer is alive, so a viewer that asks for media at the
+/// production head while held re-anchors the bank to that request
+/// ([`Self::reanchored`]). From then until production commits again, a hold
+/// excuses nothing.
+pub(super) struct ProductionStall {
+    holding: HoldMirror,
+    /// The commit count when the bank was last re-anchored at a held head,
+    /// or `usize::MAX`.
+    reanchored_at: AtomicUsize,
+}
+impl Default for ProductionStall {
+    fn default() -> Self {
+        Self {
+            holding: HoldMirror::default(),
+            reanchored_at: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+impl ProductionStall {
+    pub(super) fn holding(&self) -> &HoldMirror {
+        &self.holding
+    }
+    pub(super) fn mark(&self, committed: usize) -> ProductionMark {
+        ProductionMark {
+            committed,
+            holds: self.holding.mark(),
+        }
+    }
+    /// The bank was re-anchored to a viewer's request at the head, with
+    /// `committed` committed.
+    pub(super) fn reanchored(&self, committed: usize) {
+        self.reanchored_at.store(committed, Ordering::SeqCst);
+    }
+    /// Stuck since `mark`: still running and unfinished, nothing committed,
+    /// and no hold that still excuses it. A copy that stopped or finished is
+    /// not stuck; its callers' own checks end those.
+    pub(super) fn stalled_since(
+        &self,
+        mark: ProductionMark,
+        committed: usize,
+        complete: bool,
+        live: bool,
+    ) -> bool {
+        if !live || complete || committed != mark.committed {
+            return false;
+        }
+        let excused = self.holding.held_since(mark.holds)
+            && self.reanchored_at.load(Ordering::SeqCst) != committed;
+        !excused
     }
 }
 
