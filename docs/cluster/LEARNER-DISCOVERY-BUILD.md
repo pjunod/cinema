@@ -1,7 +1,12 @@
 # Learner discovery — advertise client-serving membership only
 
-**Status:** open — integrated on the finished facade, reviewed and fixed; Effort gate, landing on the effort and main qualification remain. **Owner:** Claude (effort `E-E154B131A2`); implemented by Codex.
+**Status:** built — implemented and independently reviewed. **Owner:** Claude (effort `E-E154B131A2`); implemented by Codex.
 **Decision:** Paul, 2026-11-16: “Hide learners from discovery.”
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 C8 from the [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md).
 Implementation branch: `codex/cluster-learner-discovery` (`9b8c85e`), integrated on

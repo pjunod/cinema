@@ -15,7 +15,7 @@ const ACTIVITY_STARTS_INDEX_STATES={indexed:"Indexed",partial:"Partly indexed",p
 // paired on the node that handled the create, and a client that keeps no
 // cookie behind a cluster address can send it to another node.
 const ACTIVITY_STARTS_UNOBSERVED="No first-frame report reached the node that handled this create. The client may have sent it to a different node than the create (a client without a cookie behind a cluster address), or the viewer left before a picture.";
-const ACTIVITY_STARTS_REASONS={unhealthy:"marked unhealthy",unsupported:"cannot be asked",unreachable:"unreachable",timed_out:"timed out",refused:"refused the request",http_error:"returned an error",invalid_response:"sent an unreadable answer"};
+const ACTIVITY_STARTS_REASONS={unhealthy:"marked unhealthy",unsupported:"cannot be asked",unreachable:"unreachable",local_unavailable:"could not be asked from this server",timed_out:"timed out",refused:"refused the request",http_error:"returned an error",invalid_response:"sent an unreadable answer"};
 
 function activityStartsMs(ms){
   if(!Number.isFinite(ms))return "—";

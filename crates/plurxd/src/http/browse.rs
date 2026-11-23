@@ -1037,6 +1037,15 @@ pub async fn hubs(
             .map_err(ApiError::from)
     };
     let ((in_progress, next), recent) = tokio::try_join!(progress_rows, recent_rows)?;
+    if let Some(slot) = state
+        .subtitle_models
+        .translation
+        .try_borrow_read_preparation_slot()
+    {
+        state
+            .transcode
+            .offer_predicted_resume(user.id, &in_progress, &state.shutdown, slot);
+    }
     let mut continue_watching: Vec<ItemDto> =
         in_progress.into_iter().map(in_progress_dto).collect();
 
@@ -1284,6 +1293,7 @@ mod tests {
                 (0..rows)
                     .map(|n| IndexRow {
                         dts: n as u64 * 1000,
+                        first_cto: None,
                         duration: 1000,
                         bytes: 100,
                         video_bytes: 90,
@@ -1474,6 +1484,7 @@ mod tests {
             1000,
             vec![plurx_core::segplan::IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 1000,
                 bytes: 100,
                 video_bytes: 90,

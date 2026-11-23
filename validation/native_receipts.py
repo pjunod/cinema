@@ -89,11 +89,13 @@ BUILD_SPECS = {
     # P49 adds only `node --test tests/playback/audio-alternation.test.js` to
     # the web-unit-check recipe (a Node playback-lab observer test); no native
     # recipe changes.
+    # #1866 changes only cluster-wal-check's exact `snapshot_metrics` hiqlite
+    # test count from 13 to 17 (four landed snapshot recovery contracts).
     # Derived build numbers remove only the `apple-build-bump` target, reword
     # the paperwork help and comment, and make android-release hand the
     # host-derived build number to Gradle as a project property; no native
     # recipe changes.
-    'Makefile': '9de64997709195c088b2de69f4612d805f90b52e8cd86830909202dca43b7cf3',
+    'Makefile': '7d7b9cb5a429c7c185cb7d8cb23c5b42b60bee749c6097a071b469659b163e7a',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
@@ -345,7 +347,8 @@ def verify_desktop(data):
 
 def origin(api, artifact, scope, current, current_run, *, tv_cases=False):
     rid = positive(artifact['run_id'])
-    require(rid < current_run and artifact.get('expired') is False, 'Expired/current/future origin')
+    require((current_run is None or rid < current_run) and artifact.get('expired') is False,
+            'Expired/current/future origin')
     run = api.get(f'/actions/runs/{rid}')
     require(run['id'] == rid and run['repository']['id'] == scope['repository'], 'Foreign origin run')
     event = bounded_json(run['event_payload'].encode())

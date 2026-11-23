@@ -1,6 +1,6 @@
 # One video for two VOD soundtracks
 
-**Status** · Built on `effort/shared-video-vod` (Claude Opus 5.5 owns). Lab-qualified for the AAC/AAC fixture on desktop Chrome: Proof A 20/20 in-place switches, Proof B one stored video. Hardening and canary (AC-5) and the DTS→AAC fixture are open. Project effort `E-70D9217053` owns progress and evidence.
+**Status** · Built on `effort/shared-video-vod` (Claude Opus 5.5 owns). Lab-qualified for the AAC/AAC fixture on desktop Chrome: Proof A 20/20 in-place switches, Proof B one stored video. DTS→AAC, admission, fallback, restart, authorization and revocation are lab-qualified. Stale identity, eviction, failover, disk-full and crash-before-rename, and the canary (AC-5) are open. Project effort `E-70D9217053` owns progress and evidence.
 
 A viewer starts an English-language movie, then selects French. Cinema keeps the same pictures moving while the sound changes. A second viewer can watch the same interval in English while both sessions read the same packaged video from one cache owner. Each viewer still receives the video over their own connection.
 
@@ -71,6 +71,9 @@ Rollback stops new split admissions, drains existing sessions on their frozen ma
 | Implementation | Built: video-only copy, per-language shared AAC, split family master, in-place hls.js switch, control selection | `effort/shared-video-vod` |
 | Proof A, AAC/AAC, desktop Chrome | Passed: 20/20 healthy, p50 267 ms, p95 278 ms, worst 286 ms | EV-37ab84f36a |
 | Proof B, AAC/AAC | Passed: one video rendition, one producer spawn, every video packet stored once; muxed and copy negative controls fail, hard-link alias passes (`scripts/vod-storage-audit`) | EV-1d4e88af61 |
-| DTS→AAC fixture, failure/eviction/authorization, restart, canary | Open (AC-5) | — |
+| DTS→AAC fixture | Passed: 20/20 in-place switches, p50 273 ms, p95 343 ms (≈ +65 ms p95 against the AAC/AAC fixture in the same run) | EV-c4fe5f3548 |
+| Admission and fallback | Passed: only an AVC copy with 2–3 soundtracks splits; transcode, burn, DV, HEVC, 1 or 4+ soundtracks stay muxed | `vodencode_manager_tests.rs::split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_copy` |
+| Restart, authorization, revocation | Passed in the lab HTTP drive: restart on the retained cache re-produces no cached interval; an unrelated session gets 404 on the split child; a released split session's URLs answer 410 | EV-c4fe5f3548 |
+| Stale identity, eviction under pressure, cross-node failover, disk-full and crash-before-rename, canary | Open (AC-5) | — |
 
 Known limits of the first release: two or three soundtracks per title (the family's atomic encode reservation holds three roles), soundtracks are re-encoded to AAC even from AAC sources, and an older node refuses a split request rather than degrading it because `split_audio` and `audio_alternates` are new fields on deny-unknown types.

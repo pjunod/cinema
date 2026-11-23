@@ -697,7 +697,28 @@ async fn execute_raft_request(
     let response = match request {
         #[cfg(feature = "sqlite")]
         RaftStreamRequest::AppendDB((request_id, request)) => {
+            let remote = request.vote.leader_id.node_id;
+            let endpoint = state
+                .raft_db
+                .raft
+                .metrics()
+                .borrow()
+                .membership_config
+                .membership()
+                .get_node(&remote)
+                .map(|node| node.addr_raft.clone())
+                .unwrap_or_default();
+            let timing = crate::append_timing::record_append(
+                state.id,
+                remote,
+                state.append_timing_epoch,
+                request.vote.leader_id.term,
+                &endpoint,
+                crate::AppendTimingStage::ReceiveEntry,
+                request.entries.is_empty(),
+            );
             let result = state.raft_db.raft.append_entries(request).await;
+            timing.complete(result.is_err());
             if let Err(RaftError::Fatal(Fatal::Stopped)) = &result {
                 debug!("Raft DB stopped - exiting");
                 state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);

@@ -4133,6 +4133,27 @@ impl MediaStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn merge_file_probe_hevc_scan(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        scan_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "merge_file_probe_hevc_scan",
+                "UPDATE files \
+                    SET probe_json = json_set(probe_json, '$.plurx_hevc_scan_v1', json($1)) \
+                  WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
+                params!(scan_json, file_id, size, mtime),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
     async fn merge_file_probe_content_encoding(
         &self,
         file_id: i64,

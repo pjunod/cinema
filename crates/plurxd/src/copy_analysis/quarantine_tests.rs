@@ -75,6 +75,7 @@ fn rows(count: u64, bytes: u32) -> Vec<IndexRow> {
     (0..count)
         .map(|n| IndexRow {
             dts: n * 3_003,
+            first_cto: None,
             duration: 3_003,
             bytes,
             video_bytes: bytes - 100,

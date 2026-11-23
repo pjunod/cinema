@@ -3714,3 +3714,249 @@ async fn create_local_vod(
     .await
     .map(|creation| creation.info)
 }
+
+/// A split copy admits only what its family can serve: an AVC copy with two
+/// or three soundtracks prepares one shared AAC soundtrack per stream, in
+/// source order. Every other request keeps the muxed copy (no soundtracks).
+#[tokio::test]
+async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_copy() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("split admission fixture");
+    let source = base.path().join("two-languages.mkv");
+    let made = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=24:duration=6",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=6",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=660:sample_rate=48000:duration=6",
+        ])
+        .args([
+            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-g", "48",
+        ])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-shortest",
+        ])
+        .args([
+            "-metadata:s:a:0",
+            "language=eng",
+            "-metadata:s:a:1",
+            "language=fre",
+        ])
+        .arg(&source)
+        .output()
+        .expect("two-language fixture");
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            crate::fragment_index_cluster::source_stamp(&metadata).mtime,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    // Each shared AAC soundtrack reserves VOD_SHARED_AUDIO_CPU_THREADS; pin a
+    // budget that admits it rather than inheriting this machine's core count.
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "8")
+        .await
+        .expect("software pool budget");
+    let file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    assert_eq!(file.audio_streams.len(), 2, "{:?}", file.audio_streams);
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let copy = SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    let req = SessionRequest {
+        dv_processing_destination: None,
+        retain_output: None,
+        dv_refit_digest: None,
+        continuous_media: None,
+        quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        request_id: Some("split-admission".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: copy,
+        split_audio: true,
+        audio_index: Some(0),
+        ..reopen_request(file_id, "split-admission", "unused", "unused")
+    };
+
+    let soundtracks = manager
+        .prepare_vod_split_soundtracks(&req, &file, None)
+        .await
+        .expect("an eligible split copy prepares its soundtracks");
+    assert_eq!(soundtracks.len(), 2, "one soundtrack per source stream");
+    for (index, (request, soundtrack)) in soundtracks.iter().enumerate() {
+        assert_eq!(request.audio_index, Some(index as i64), "source order");
+        assert!(
+            !request.split_audio,
+            "a soundtrack is not itself a split request"
+        );
+        assert!(soundtrack.shared_audio.is_some(), "a shared AAC soundtrack");
+        assert_eq!(soundtrack.options.audio_index, Some(index as i64));
+    }
+
+    let refused = |label: &str, req: &SessionRequest, file: &plurx_core::domain::MediaFile| {
+        let label = label.to_owned();
+        let req = req.clone();
+        let file = file.clone();
+        let manager = &manager;
+        async move {
+            assert!(
+                manager
+                    .prepare_vod_split_soundtracks(&req, &file, None)
+                    .await
+                    .expect("an ineligible request is not a refusal")
+                    .is_empty(),
+                "{label} keeps the muxed copy"
+            );
+        }
+    };
+    refused(
+        "an unnegotiated copy",
+        &SessionRequest {
+            split_audio: false,
+            ..req.clone()
+        },
+        &file,
+    )
+    .await;
+    refused(
+        "a transcode",
+        &SessionRequest {
+            kind: SessionKind::Transcode { height: 240 },
+            ..req.clone()
+        },
+        &file,
+    )
+    .await;
+    refused(
+        "a subtitle burn",
+        &SessionRequest {
+            subtitle_burn: Some(0),
+            ..req.clone()
+        },
+        &file,
+    )
+    .await;
+    refused(
+        "a Dolby Vision copy",
+        &SessionRequest {
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+                dual_layer_as_copied: false,
+            },
+            ..req.clone()
+        },
+        &file,
+    )
+    .await;
+    let mut hevc = file.clone();
+    hevc.video_codec = Some("hevc".into());
+    refused("an HEVC copy", &req, &hevc).await;
+    let mut single = file.clone();
+    single.audio_streams.truncate(1);
+    refused("one soundtrack", &req, &single).await;
+    let mut many = file.clone();
+    for index in 2..4 {
+        let mut stream = many.audio_streams[0].clone();
+        stream.index = index;
+        many.audio_streams.push(stream);
+    }
+    refused("four soundtracks", &req, &many).await;
+    refused(
+        "a continuous family role",
+        &SessionRequest {
+            continuous_media: Some(Box::new(crate::transcode::ContinuousMediaRequest {
+                version: 1,
+                controlled: false,
+                family_generation: uuid::Uuid::new_v4().to_string(),
+                role: crate::transcode::ContinuousMediaRole::Video,
+                autonomous_companion: None,
+                companion_catalog: None,
+                family_descriptor: None,
+                companion_context: None,
+            })),
+            ..req.clone()
+        },
+        &file,
+    )
+    .await;
+    refused(
+        "a rolling presentation",
+        &SessionRequest {
+            presentation: Presentation::Live,
+            ..req.clone()
+        },
+        &file,
+    )
+    .await;
+    // The upper bound is admitted: three soundtracks is the family's limit.
+    let mut three = file.clone();
+    let mut stream = three.audio_streams[0].clone();
+    stream.index = 2;
+    three.audio_streams.push(stream);
+    let soundtracks = manager
+        .prepare_vod_split_soundtracks(&req, &three, None)
+        .await
+        .expect("three soundtracks prepare");
+    assert_eq!(soundtracks.len(), 3, "three soundtracks still split");
+}

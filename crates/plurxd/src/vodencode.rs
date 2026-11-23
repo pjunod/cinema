@@ -189,6 +189,8 @@ pub(crate) fn try_admit_frozen_bundle(
 /// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
 #[derive(Default)]
 pub(crate) struct ProcessedTrialAdmission {
+    // Written only by `with_claim` and read only by `claim`; both share this gate.
+    #[cfg(any(target_os = "linux", test))]
     _claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
     needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
 }
@@ -198,6 +200,7 @@ tokio::task_local! {
 }
 
 impl ProcessedTrialAdmission {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn with_claim(claim: Arc<crate::vodserve::TrialClaim>) -> Self {
         Self {
             _claim: std::sync::Mutex::new(Some(claim)),

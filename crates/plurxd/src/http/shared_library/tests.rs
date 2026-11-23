@@ -3910,6 +3910,7 @@ async fn shared_decision_reports_a_locally_indexed_dolby_vision_title_as_indexed
             bytes: 100_000,
             video_bytes: 99_000,
             class: plurx_core::fmp4::CutClass::CleanIdr,
+            first_cto: None,
         }],
         "sha",
         crate::fragindex::identity_for(&file, local),

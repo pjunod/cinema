@@ -11,7 +11,7 @@
 //! the spool without decoding it again. The spool is keyed by the source
 //! identity and the helper's refit identity; it is listed and deleted from
 //! the Developer card (`GET`/`DELETE /api/v1/admin/dv-refit/spool`).
-use crate::vodencode::dv_runtime::ToolSet;
+use crate::dv_tools::ToolSet;
 use plurx_core::{
     domain::MediaFile,
     transcode::{
@@ -615,7 +615,11 @@ pub(super) async fn run(
         ),
         None => None,
     };
-    let descriptor = "/proc/self/fd/3";
+    let descriptor = if cfg!(target_os = "linux") {
+        "/proc/self/fd/3"
+    } else {
+        "/dev/fd/3"
+    };
     let direct = input.is_none();
     let output = spawn(
         &tools.renderer,

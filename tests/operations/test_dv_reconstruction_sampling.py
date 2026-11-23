@@ -38,7 +38,7 @@ class DvReconstructionSamplingTests(unittest.TestCase):
         self.assertIn(f'abi.get("libplacebo") != {api}', (TOOLS / "bundle-manifest.py").read_text())
         self.assertIn(f"libplacebo.so.{api}", (TOOLS / "build-bundle.sh").read_text())
         self.assertIn(f'manifest.abi.get("libplacebo") != Some(&{api})',
-                      (ROOT / "crates/plurxd/src/dv_runtime.rs").read_text())
+                      (ROOT / "crates/plurxd/src/dv_tools.rs").read_text())
 
     def test_both_sides_sample_every_plane_bilinearly_without_a_tie_bias(self):
         player = (PLAYER / "patches/mpv/0003-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch").read_text()

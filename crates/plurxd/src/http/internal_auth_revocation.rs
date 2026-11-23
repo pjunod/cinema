@@ -25,21 +25,28 @@ use crate::state::AppState;
 
 pub(crate) const PATH: &str = "/api/v1/internal/auth/cache-revocation";
 pub(crate) const MAX_REQUEST_BYTES: usize = 256;
-const FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
+const FANOUT_TIMEOUT: Duration = plurx_core::cluster::timing::revocation::FANOUT_TIMEOUT;
 const FANOUT_CONCURRENCY: usize = 8;
 const MAX_STABLE_ROSTER_PASSES: usize = MAX_CACHE_ADMIN_REVOCATION_PEERS + 2;
 const WIRE_SCHEMA_VERSION: u32 = 2;
-const MEMBERSHIP_EXCLUSION_DURATION: Duration = Duration::from_secs(15);
-const EXCLUSION_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
-const EXCLUSION_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
-const LOCAL_CLAIM_APPLY_TIMEOUT: Duration = Duration::from_millis(1_500);
-const LOCAL_CLAIM_APPLY_POLL: Duration = Duration::from_millis(10);
-const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+const MEMBERSHIP_EXCLUSION_DURATION: Duration =
+    plurx_core::cluster::timing::revocation::MEMBERSHIP_EXCLUSION_DURATION;
+const EXCLUSION_CLEANUP_RETRY_INITIAL: Duration =
+    plurx_core::cluster::timing::revocation::EXCLUSION_CLEANUP_RETRY_INITIAL;
+const EXCLUSION_CLEANUP_RETRY_MAX: Duration =
+    plurx_core::cluster::timing::revocation::EXCLUSION_CLEANUP_RETRY_MAX;
+const LOCAL_CLAIM_APPLY_TIMEOUT: Duration =
+    plurx_core::cluster::timing::revocation::LOCAL_CLAIM_APPLY_TIMEOUT;
+const LOCAL_CLAIM_APPLY_POLL: Duration =
+    plurx_core::cluster::timing::revocation::LOCAL_CLAIM_APPLY_POLL;
+const ACTIVATION_RETRY_INTERVAL: Duration =
+    plurx_core::cluster::timing::revocation::ACTIVATION_RETRY_INTERVAL;
 /// A condition this loop cannot clear on its own — a stuck lifecycle fence, a
 /// held exclusion — is not worth one Raft transaction and one warning line
 /// every three seconds until someone notices. Back off toward this ceiling
 /// while the reason stays the same, and reset the moment it changes.
-const ACTIVATION_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(60);
+const ACTIVATION_RETRY_MAX_INTERVAL: Duration =
+    plurx_core::cluster::timing::revocation::ACTIVATION_RETRY_MAX_INTERVAL;
 
 type PeerIdentity = (String, u64, Option<String>);
 
@@ -293,6 +300,17 @@ impl ClusterCacheRevocation {
             barrier.wait().await;
             tokio::time::sleep(Duration::from_secs(40)).await;
         }
+        Self::begin(state, local, operation_guard).await
+    }
+
+    /// Every cached user may be affected by an expiry-policy tightening.
+    pub(crate) async fn begin_token_policy(state: &AppState) -> Result<Self, ApiError> {
+        let operation_guard = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .map_err(|_| admission_error())?;
+        let local = state.cache_only_admin_proofs.begin_global_revocation();
         Self::begin(state, local, operation_guard).await
     }
 

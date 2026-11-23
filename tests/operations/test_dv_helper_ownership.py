@@ -21,7 +21,7 @@ from validation.runner import load_catalog
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "Dockerfile"
 MEDIA_DOCKERFILE = ROOT / "Dockerfile.media-runtime"
-DAEMON = ROOT / "crates/plurxd/src/dv_runtime.rs"
+DAEMON = ROOT / "crates/plurxd/src/dv_tools.rs"
 PACKAGING = runpy.run_path(str(ROOT / "tools/dv_processing/bundle-manifest.py"))
 loader = SourceFileLoader("media_runtime_for_dv_helpers", str(ROOT / "scripts/media-runtime"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -46,10 +46,11 @@ def daemon_identity_inputs() -> list[tuple[str, Path]]:
     source = DAEMON.read_text(encoding="utf-8")
     body = source[source.index("fn renderer_source_identity() -> String {"):]
     body = body[:body.index("hex::encode(identity.finalize())")]
-    declared = re.search(r"let inputs: \[\(&str, &\[u8\]\); (\d+)\] = \[", body)
-    pairs = re.findall(r'\(\s*"([^"]+)",\s*include_bytes!\("([^"]+)"\),?\s*\)', body)
-    if declared is None or int(declared.group(1)) != len(pairs):
+    declared = re.search(r"let inputs: &\[\(&str, &\[u8\]\)\] = &\[(.*?)\];", body, re.S)
+    pattern = r'\(\s*"([^"]+)",\s*include_bytes!\("([^"]+)"\),?\s*\)'
+    if declared is None or re.sub(pattern, "", declared.group(1)).strip(" \t\n,"):
         raise AssertionError("renderer_source_identity no longer has the shape this contract reads")
+    pairs = re.findall(pattern, declared.group(1))
     return [(name, (DAEMON.parent / path).resolve()) for name, path in pairs]
 
 
@@ -80,7 +81,7 @@ class DvHelperOwnershipTests(unittest.TestCase):
         self.assertLess(runtime.index("COPY --from=build /plurxd /usr/local/bin/plurxd"), runtime.index(verdict))
         self.assertNotIn("dv-helper-source-sha256", source)
         main = (ROOT / "crates/plurxd/src/main.rs").read_text(encoding="utf-8")
-        self.assertIn("crate::vodencode::dv_runtime::installed_helper_identity().await", main)
+        self.assertIn("crate::dv_tools::installed_helper_identity().await", main)
         capture = DAEMON.read_text(encoding="utf-8")
         capture = capture[capture.index("pub(crate) async fn installed_helper_identity()"):]
         self.assertIn("ToolSet::capture()", capture[:capture.index("\n}\n")])

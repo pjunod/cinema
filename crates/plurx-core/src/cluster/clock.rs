@@ -5,11 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const CLOCK_OFFSET_REFUSAL_MS: i64 = 2_000;
-pub const CLOCK_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(25);
-pub const CLOCK_LOCAL_DISCONTINUITY_TOLERANCE_MS: i64 = 250;
+pub const CLOCK_OFFSET_REFUSAL_MS: i64 = crate::cluster::timing::clock::CLOCK_OFFSET_REFUSAL_MS;
+pub const CLOCK_OBSERVATION_MAX_AGE: Duration =
+    crate::cluster::timing::clock::CLOCK_OBSERVATION_MAX_AGE;
+pub const CLOCK_LOCAL_DISCONTINUITY_TOLERANCE_MS: i64 =
+    crate::cluster::timing::clock::CLOCK_LOCAL_DISCONTINUITY_TOLERANCE_MS;
 #[cfg(feature = "hiqlite-store")]
-const REMOVAL_REACHABILITY_STABILIZATION: Duration = Duration::from_secs(30);
+const REMOVAL_REACHABILITY_STABILIZATION: Duration =
+    crate::cluster::timing::clock::REMOVAL_REACHABILITY_STABILIZATION;
 
 /// Address-free identity of a locally applied Raft membership entry. Log
 /// identity is part of coverage even when an ABA change restores the same IDs.
