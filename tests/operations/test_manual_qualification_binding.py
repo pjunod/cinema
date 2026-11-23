@@ -106,8 +106,10 @@ class ManualQualificationBindingCase(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("--bind-manual", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
-        self.assertIn('VALIDATION_BASE="$BOUND_BASE_SHA"', workflow)
-        self.assertIn('test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"', workflow)
+        # The mobile job used to compare stored build counters against the bound
+        # base; build numbers are derived now (scripts/build-number), so no job
+        # reads that base for them any more.
+        self.assertNotIn("PLURX_VALIDATION_MERGE_TARGET", workflow)
         self.assertNotIn("needs.windows_compile", workflow)
         publish = workflow.split("  publish:\n", 1)[1].split("  publish_main:\n", 1)[0]
         self.assertIn("startsWith(github.ref, 'refs/tags/v')", publish)
