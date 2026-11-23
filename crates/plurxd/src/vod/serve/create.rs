@@ -1003,6 +1003,23 @@ impl VodServe {
             ),
             current => current,
         };
+        // The source moved between soundtrack preparation and this inspection:
+        // refuse before any video is produced; a fresh start re-prepares all.
+        if prepared.encoding.is_none()
+            && !prepared.split_soundtracks.is_empty()
+            && !super::vod_serve_split::split_family_shares_source(
+                source_object_version.as_deref(),
+                prepared
+                    .split_soundtracks
+                    .iter()
+                    .map(|(_, soundtrack)| soundtrack.source_object_version.as_str()),
+            )
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_rescan_required",
+                "split video and soundtracks do not share one source revision",
+            ));
+        }
         let recipe = Recipe {
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
@@ -1433,20 +1450,6 @@ impl VodServe {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_family_invalid",
                 "split soundtracks require the video-only copy",
-            ));
-        }
-        if split
-            && !super::vod_serve_split::split_family_shares_source(
-                rendition.recipe.source_object_version.as_deref(),
-                prepared
-                    .split_soundtracks
-                    .iter()
-                    .map(|(_, soundtrack)| soundtrack.source_object_version.as_str()),
-            )
-        {
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_family_invalid",
-                "split video and soundtracks do not share one source revision",
             ));
         }
         let mut media = vec![Arc::clone(&rendition)];
