@@ -65,6 +65,9 @@ mod causal_tests {
                 node_id: node,
                 observer,
             })
+            .layer(axum::middleware::from_fn(
+                crate::cluster::calls::auth_refusal_response,
+            ))
     }
 
     async fn send(

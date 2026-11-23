@@ -7,11 +7,9 @@
 //! budget, then grafted onto the stored probe so every node and every later
 //! copy decides from the same record.
 //!
-//! It runs on the playback copy decision path, the first time a file without a
-//! current record is played, because that is where the answer is needed and
-//! the file is known to be readable. Background index discovery reads the
-//! stored probe without measuring, so the library is never swept; the
-//! preparation a play queues names the identity the census chose. Measured on the NAS-mounted
+//! Index workers resolve this prerequisite only after admission. Foreground
+//! copy can still resolve it when playback races analysis. Both store the
+//! verdict against the same catalog revision. Measured on the NAS-mounted
 //! library: seven samples of a cold 2160p film cost about a second. A census
 //! that fails or overruns records nothing and answers with the stored probe
 //! unchanged, which is the copy path's behaviour before this existed. A run
@@ -20,6 +18,8 @@
 //! that cannot be read does not charge every request for the attempt.
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io::Seek;
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,10 +43,16 @@ const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(600);
 /// for the first and then read its record.
 static IN_FLIGHT: LazyLock<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-/// A source revision: (file id, size, mtime).
-type Revision = (i64, i64, i64);
-/// Source revisions whose census recently failed.
-static FAILED: LazyLock<Mutex<HashMap<Revision, Instant>>> =
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum CensusScope {
+    Playback,
+    Index,
+}
+
+/// Successful verdicts are shared. The two admission paths have different
+/// read and execution budgets, so a failure only suppresses its own path.
+type FailedRevision = (i64, i64, i64, CensusScope);
+static FAILED: LazyLock<Mutex<HashMap<FailedRevision, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The file's stored probe, with its HEVC parameter-set census recorded first
@@ -73,7 +79,9 @@ pub(crate) async fn probe_json_for_copy_from(
     file: &MediaFile,
     probe_json: Option<String>,
 ) -> Result<Option<String>, StoreError> {
-    if !hevc_census::needs_census(file, probe_json.as_deref()) || recently_failed(file) {
+    if !hevc_census::needs_census(file, probe_json.as_deref())
+        || recently_failed(file, CensusScope::Playback)
+    {
         return Ok(probe_json);
     }
     let lock = {
@@ -87,18 +95,20 @@ pub(crate) async fn probe_json_for_copy_from(
     drop(measuring);
     // Nobody else waits on this file's lock: forget it, so the map holds only
     // files being measured rather than every HEVC title ever played.
-    {
-        let mut in_flight = IN_FLIGHT
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if in_flight
-            .get(&file.id)
-            .is_some_and(|held| Arc::ptr_eq(held, &lock) && Arc::strong_count(held) == 2)
-        {
-            in_flight.remove(&file.id);
-        }
-    }
+    forget_census_lock(file.id, &lock);
     answer
+}
+
+fn forget_census_lock(file_id: i64, lock: &Arc<tokio::sync::Mutex<()>>) {
+    let mut in_flight = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if in_flight
+        .get(&file_id)
+        .is_some_and(|held| Arc::ptr_eq(held, lock) && Arc::strong_count(held) == 2)
+    {
+        in_flight.remove(&file_id);
+    }
 }
 
 async fn measure_and_record(
@@ -107,14 +117,35 @@ async fn measure_and_record(
 ) -> Result<Option<String>, StoreError> {
     // Another request may have recorded it while this one waited.
     let probe_json = store.get_file_probe_json(file.id).await?;
-    if !hevc_census::needs_census(file, probe_json.as_deref()) || recently_failed(file) {
+    if !hevc_census::needs_census(file, probe_json.as_deref())
+        || recently_failed(file, CensusScope::Playback)
+    {
         return Ok(probe_json);
     }
     let started = Instant::now();
     let Some(census) = measure(file).await else {
-        note_failure(file);
+        note_failure(file, CensusScope::Playback);
         return Ok(probe_json);
     };
+    record_census(
+        store,
+        file,
+        probe_json,
+        census,
+        started,
+        CensusScope::Playback,
+    )
+    .await
+}
+
+async fn record_census(
+    store: &dyn Store,
+    file: &MediaFile,
+    probe_json: Option<String>,
+    census: Census,
+    started: Instant,
+    scope: CensusScope,
+) -> Result<Option<String>, StoreError> {
     match store
         .merge_file_probe_hevc_parameter_sets(file.id, file.size, file.mtime, &census.to_json())
         .await
@@ -138,28 +169,219 @@ async fn measure_and_record(
                 file_id = file.id,
                 "HEVC parameter-set census not recorded: the file changed while it was measured"
             );
-            note_failure(file);
+            note_failure(file, scope);
             Ok(probe_json)
         }
         Err(error) => {
             tracing::warn!(file_id = file.id, %error, "recording the HEVC parameter-set census");
-            note_failure(file);
+            note_failure(file, scope);
             Ok(probe_json)
         }
     }
 }
 
-fn recently_failed(file: &MediaFile) -> bool {
-    let mut failed = FAILED.lock().unwrap_or_else(|poison| poison.into_inner());
-    failed.retain(|_, at| at.elapsed() < RETRY_AFTER_FAILURE);
-    failed.contains_key(&(file.id, file.size, file.mtime))
+pub(crate) enum IndexCensus {
+    Ready,
+    Deferred,
+    Failed,
 }
 
-fn note_failure(file: &MediaFile) {
+/// Resolve the HEVC recipe prerequisite under an admitted index source
+/// owner. A cluster analysis claim already supplies the shared read budget;
+/// the node-local pass supplies its heavy-lane admission and a held source.
+pub(crate) async fn ensure_index_census(
+    store: &dyn Store,
+    file: &MediaFile,
+) -> Result<IndexCensus, StoreError> {
+    let probe = store.get_file_probe_json(file.id).await?;
+    if !hevc_census::needs_census(file, probe.as_deref()) {
+        return Ok(IndexCensus::Ready);
+    }
+    // Foreground measurement may be in progress. Let it finish without
+    // holding up its reader or duplicating reads under two owners.
+    if recently_failed(file, CensusScope::Index) {
+        return Ok(IndexCensus::Deferred);
+    }
+    let lock = {
+        let mut in_flight = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        Arc::clone(in_flight.entry(file.id).or_default())
+    };
+    let answer = async {
+        let Ok(_measuring) = lock.try_lock() else {
+            return Ok(IndexCensus::Deferred);
+        };
+        let probe = store.get_file_probe_json(file.id).await?;
+        if !hevc_census::needs_census(file, probe.as_deref()) {
+            return Ok(IndexCensus::Ready);
+        }
+        let started = Instant::now();
+        let census = match measure_for_index(file).await {
+            Ok(census) => census,
+            Err(reason) => {
+                tracing::debug!(file_id = file.id, %reason, "index census source unavailable");
+                return Ok(IndexCensus::Failed);
+            }
+        };
+        let Some(census) = census else {
+            if plurx_core::process::bounded::check_cancellation().is_err() {
+                return Ok(IndexCensus::Deferred);
+            }
+            note_failure(file, CensusScope::Index);
+            return Ok(IndexCensus::Failed);
+        };
+        let recorded =
+            record_census(store, file, probe, census, started, CensusScope::Index).await?;
+        Ok(if hevc_census::needs_census(file, recorded.as_deref()) {
+            IndexCensus::Failed
+        } else {
+            IndexCensus::Ready
+        })
+    }
+    .await;
+    forget_census_lock(file.id, &lock);
+    answer
+}
+
+/// Own one finite census input until its children and queued reads settle.
+/// A study under the shared source budget never exposes a raw descriptor to
+/// the child. The local lane uses the same held-descriptor policy as its
+/// fragment pass.
+async fn measure_for_index(file: &MediaFile) -> Result<Option<Census>, String> {
+    use plurx_core::process::bounded;
+    let object = crate::fragment_index_cluster::inspect_source(file).await?;
+    let source = crate::fragment_index_cluster::open_source_fence(file, Some(&object)).await?;
+    let input = match crate::background_jobs::source_budget() {
+        Some(budget) => {
+            let held = crate::fragment_index_cluster::SourceFence::clone_held(
+                &source.handle,
+                source.object_version(),
+            )?;
+            Some(
+                crate::source_input::SourceInput::open_background_held(
+                    held,
+                    crate::http::stream::file_content_type(&file.path),
+                    budget,
+                )
+                .await?,
+            )
+        }
+        None => None,
+    };
+    let result = async {
+        if let Some(input) = &input {
+            input.seal_read_ceiling(128 * 1024 * 1024)?;
+        }
+        let deadline = Instant::now() + CENSUS_BUDGET;
+        let cancel = bounded::cancellation();
+        let mut observations = Vec::new();
+        let mut failures = Vec::new();
+        let mut timed_out = false;
+        for at in hevc_census::sample_points(file.duration_ms) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || bounded::check_cancellation().is_err() {
+                timed_out = true;
+                break;
+            }
+            match sample_for_index(
+                &source.handle,
+                input.as_ref().map(|source| source.url()),
+                at,
+                remaining.min(SAMPLE_WALL_TIME),
+                cancel.as_ref(),
+            )
+            .await
+            {
+                Ok(sample) => observations.push(sample),
+                Err(reason) => failures.push(reason),
+            }
+        }
+        Ok(
+            if bounded::check_cancellation().is_ok()
+                && source.unchanged()
+                && !input
+                    .as_ref()
+                    .is_some_and(|input| input.source_read_failed())
+            {
+                conclude(file, &observations, &failures, timed_out)
+            } else {
+                None
+            },
+        )
+    }
+    .await;
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    result
+}
+
+async fn sample_for_index(
+    mut file: &std::fs::File,
+    input_url: Option<&str>,
+    at_seconds: f64,
+    budget: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<InBandParameterSets, String> {
+    if input_url.is_none() {
+        file.rewind().map_err(|error| error.to_string())?;
+    }
+    #[cfg(unix)]
+    let raw_input = Path::new("/dev/fd/3");
+    #[cfg(windows)]
+    let raw_path;
+    #[cfg(windows)]
+    let raw_input = if input_url.is_some() {
+        Path::new("")
+    } else {
+        raw_path = crate::ffmpeg::windows_source_path(file)?;
+        crate::ffmpeg::verify_windows_source_path(file, &raw_path)?;
+        raw_path.as_path()
+    };
+    let path = input_url.map_or(raw_input, Path::new);
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    command.args(hevc_census::sample_args(path, at_seconds));
+    #[cfg(unix)]
+    let descriptors = crate::producer_spawn::Descriptors::from_files(
+        input_url.is_none().then_some(file),
+        None,
+        None,
+        false,
+    );
+    #[cfg(not(unix))]
+    let descriptors = crate::producer_spawn::Descriptors::default();
+    let pass = crate::ffmpeg::bounded_ffmpeg_output_descriptors_cancellable(
+        command,
+        budget,
+        SAMPLE_MAX_BYTES as u64,
+        "HEVC index census",
+        cancel,
+        plurx_core::process::ChildWork::background("HEVC index census"),
+        descriptors,
+    );
+    let output = if input_url.is_some() {
+        plurx_core::process::source_lifetime::mediated(pass).await
+    } else {
+        pass.await
+    }?;
+    hevc_census::observe(&output.stdout)
+}
+
+fn recently_failed(file: &MediaFile, scope: CensusScope) -> bool {
+    let mut failed = FAILED.lock().unwrap_or_else(|poison| poison.into_inner());
+    failed.retain(|_, at| at.elapsed() < RETRY_AFTER_FAILURE);
+    failed.contains_key(&(file.id, file.size, file.mtime, scope))
+}
+
+fn note_failure(file: &MediaFile, scope: CensusScope) {
     FAILED
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .insert((file.id, file.size, file.mtime), Instant::now());
+        .insert((file.id, file.size, file.mtime, scope), Instant::now());
 }
 
 /// Sample the film and conclude, or `None` when nothing conclusive came back.
@@ -228,6 +450,12 @@ async fn sample(args: Vec<OsString>) -> Result<InBandParameterSets, String> {
     )
     .await
     .map_err(|error| error.to_string())?;
+    observe_sample(output)
+}
+
+fn observe_sample(
+    output: plurx_core::process::bounded::Output,
+) -> Result<InBandParameterSets, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -356,6 +584,86 @@ mod tests {
             probed: true,
             dolby_vision: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn held_index_census_finds_the_same_varying_recipe_as_playback() {
+        let temp = crate::test_tempdir().expect("tempdir");
+        let (_, path) = changing_pps_fixture(temp.path());
+        let mut file = hevc_file(&path, 4_000);
+        let metadata = std::fs::metadata(&path).expect("source metadata");
+        file.mtime = metadata
+            .modified()
+            .expect("source mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source epoch")
+            .as_secs() as i64;
+
+        let index = measure_for_index(&file)
+            .await
+            .expect("held index source")
+            .expect("index census");
+        let playback = measure(&file).await.expect("playback census");
+        // Recipes read the verdict for the measured revision. The sample count
+        // is how far each run got inside its wall-clock budget: the index
+        // census samples serially, so a loaded host stops it sooner.
+        assert_eq!(index.verdict, hevc_census::Verdict::Varying);
+        assert_eq!(index.verdict, playback.verdict);
+        assert_eq!((index.size, index.mtime), (playback.size, playback.mtime));
+    }
+
+    #[tokio::test]
+    async fn index_census_defers_while_another_owner_is_measuring() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        use plurx_core::store::{LibraryStore, MediaStore, SqliteStore};
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Index census".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Index census".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let id = store
+            .upsert_file(
+                item,
+                "/media/census-contention.mkv",
+                4096,
+                2,
+                &ProbeResult {
+                    video_codec: Some("hevc".into()),
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("query").expect("source");
+        let lock = {
+            let mut in_flight = IN_FLIGHT.lock().expect("census lock map");
+            Arc::clone(in_flight.entry(id).or_default())
+        };
+        let measuring = lock.lock().await;
+        let result = ensure_index_census(&store, &file).await;
+        drop(measuring);
+        forget_census_lock(id, &lock);
+
+        assert!(matches!(result, Ok(IndexCensus::Deferred)));
     }
 
     /// Decoded-frame MD5s, in presentation order.
@@ -627,12 +935,15 @@ mod tests {
         file.id = 4191;
         testfixtures::require_ffmpeg();
         assert_eq!(measure(&file).await, None);
-        note_failure(&file);
-        assert!(recently_failed(&file));
+        note_failure(&file, CensusScope::Index);
+        assert!(recently_failed(&file, CensusScope::Index));
+        assert!(!recently_failed(&file, CensusScope::Playback));
+        note_failure(&file, CensusScope::Playback);
+        assert!(recently_failed(&file, CensusScope::Playback));
         let mut replaced = file.clone();
         replaced.mtime += 1;
         assert!(
-            !recently_failed(&replaced),
+            !recently_failed(&replaced, CensusScope::Playback),
             "a new revision is measured afresh"
         );
     }

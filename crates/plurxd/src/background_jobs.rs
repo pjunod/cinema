@@ -37,7 +37,8 @@ pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
 pub(crate) use source::{
-    budgeted, source_budget, RawRetirement, SourceHolder, SourcePacingClock, SourceReadBudget,
+    budgeted, settle_read_lease, source_budget, RawRetirement, SourceHolder, SourcePacingClock,
+    SourceReadBudget,
 };
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);

@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Semaphore};
 
 const CLOCK_FILTER_DEPTH: usize = 8;
-const CLOCK_PROBE_MAX_RTT_MS: i64 = 2_000;
-const CLOCK_RTT_QUANTIZATION_FLOOR_US: i64 = 1_000;
-const CLOCK_PROBE_INTERVAL: Duration = Duration::from_secs(10);
-const CLOCK_ROSTER_BUDGET: Duration = Duration::from_secs(2);
+const CLOCK_PROBE_MAX_RTT_MS: i64 = plurx_core::cluster::timing::clock::CLOCK_PROBE_MAX_RTT_MS;
+const CLOCK_RTT_QUANTIZATION_FLOOR_US: i64 =
+    plurx_core::cluster::timing::clock::CLOCK_RTT_QUANTIZATION_FLOOR_US;
+const CLOCK_PROBE_INTERVAL: Duration = plurx_core::cluster::timing::clock::CLOCK_PROBE_INTERVAL;
+const CLOCK_ROSTER_BUDGET: Duration = plurx_core::cluster::timing::clock::CLOCK_ROSTER_BUDGET;
 const CLOCK_WAITER_LIMIT: usize = 64;
 
 type PeerDirectory = BTreeMap<String, (u64, String)>;
@@ -706,7 +707,8 @@ impl Filter {
 
 /// How often a node looks at the replicated enforcement switch, so a change
 /// saved on another node reaches this node's guard without a restart.
-const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
+const CLOCK_ENFORCEMENT_REFRESH: Duration =
+    plurx_core::cluster::timing::clock::CLOCK_ENFORCEMENT_REFRESH;
 
 /// How long an advisory answer (enforcement off) is held before a consistent
 /// read proves it again, change signal or not. A held answer otherwise lasts
@@ -716,7 +718,8 @@ const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
 /// This caps that at two minutes and one look after the save commits, for
 /// 720 consistent reads a day while enforcement is off and none while it is
 /// on. A held "on" needs no cap: holding it past a disable only refuses more.
-const CLOCK_ADVISORY_MAX_HOLD: Duration = Duration::from_secs(120);
+const CLOCK_ADVISORY_MAX_HOLD: Duration =
+    plurx_core::cluster::timing::clock::CLOCK_ADVISORY_MAX_HOLD;
 
 /// The Store reads that follow the enforcement switch, parsed by the same
 /// `stored_switch` as the settings page (missing is off): an authority read

@@ -234,6 +234,15 @@ impl Fixture {
     }
 
     async fn resolve(&self) -> Option<ResolvedCopyIndex> {
+        self.resolve_with_mode(ResolveMode::Foreground)
+            .await
+            .expect("resolution")
+    }
+
+    async fn resolve_with_mode(
+        &self,
+        mode: ResolveMode,
+    ) -> Result<Option<ResolvedCopyIndex>, String> {
         resolve(
             &self.store,
             None,
@@ -244,10 +253,10 @@ impl Fixture {
             &self.file,
             self.video,
             Some(&self.defects),
+            mode,
         )
         .await
-        .expect("resolution")
-        .index
+        .map(|resolution| resolution.index)
     }
 
     /// Every defect the reader has reported since the last call.
@@ -404,6 +413,62 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
     assert!(fixture.resolve().await.is_some());
     refuse_on_this_engine(&resolved.rendition_cache_key);
     assert!(fixture.resolve().await.is_none());
+}
+
+#[tokio::test]
+async fn local_only_resolution_uses_verified_bytes_without_repairing_the_head() {
+    let fixture = fixture().await;
+    let mode = ResolveMode::LocalOnly;
+    assert!(fixture
+        .resolve_with_mode(mode)
+        .await
+        .expect("no head")
+        .is_none());
+
+    let source_sha256 = hex64('a');
+    let (artifact, blob) = variant(
+        &fixture.namespace,
+        fixture.file.id,
+        &sealed_index(&source_sha256, true),
+        &source_sha256,
+    );
+    fixture.publish(NODE, &fixture.object_version, &artifact);
+    assert!(
+        fixture.resolve_with_mode(mode).await.is_err(),
+        "missing blob"
+    );
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
+
+    fixture.install(&artifact, &blob).await;
+    let path = crate::copy_analysis::v3_blob_path(
+        &crate::copy_analysis::v3_root(&fixture.cache),
+        &artifact.blob_sha256,
+    )
+    .expect("blob path");
+    let mut corrupt = blob.clone();
+    *corrupt.last_mut().expect("rows") ^= 1;
+    std::fs::write(&path, &corrupt).expect("corrupt the blob");
+    assert!(
+        fixture.resolve_with_mode(mode).await.is_err(),
+        "corrupt blob"
+    );
+    assert_eq!(std::fs::read(&path).expect("retained blob"), corrupt);
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
+
+    std::fs::write(path, blob).expect("restore the verified blob");
+    assert!(fixture
+        .store
+        .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, NODE)
+        .await
+        .expect("retire the holder"));
+    let resolved = fixture
+        .resolve_with_mode(mode)
+        .await
+        .expect("resolution")
+        .expect("verified local blob");
+    assert!(fixture.holders(&artifact).await.is_empty());
+    assert!(fixture.reported().is_empty());
+    assert_eq!(sealed_init_defect(&resolved.rendition_cache_key), None);
 }
 
 #[tokio::test]
@@ -741,4 +806,41 @@ async fn a_planned_variant_names_its_head_for_a_sealed_init_refusal() {
             kind: CopyIndexDefectKind::SealedInit,
         })
     );
+}
+
+/// A fast corrupt answer is not a winner, and a stalled first holder does
+/// not prevent the later verified artifact from being selected.
+#[tokio::test]
+async fn holder_race_selects_verified_bytes_after_a_fast_corrupt_answer() {
+    use futures_util::StreamExt;
+    let source = hex64('8');
+    let (artifact, blob) = variant("race", 100, &sealed_index(&source, true), &source);
+    let requests = (0..3).map(|holder| {
+        let blob = &blob;
+        async move {
+            match holder {
+                0 => std::future::pending::<Vec<u8>>().await,
+                1 => b"corrupt first answer".to_vec(),
+                _ => {
+                    tokio::task::yield_now().await;
+                    blob.clone()
+                }
+            }
+        }
+    });
+    let responses = crate::cluster::calls::race_holders(
+        requests,
+        crate::cluster::calls::deadline_after(PEER_DEADLINE),
+    );
+    futures_util::pin_mut!(responses);
+    let mut refused = 0;
+    let selected = loop {
+        let bytes = responses.next().await.expect("a valid holder remains");
+        if blob_matches(&bytes, &artifact) {
+            break bytes;
+        }
+        refused += 1;
+    };
+    assert_eq!(refused, 1);
+    assert_eq!(selected, blob);
 }

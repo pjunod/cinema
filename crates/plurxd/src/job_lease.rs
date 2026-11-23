@@ -34,10 +34,11 @@ impl ClusterJobAuthority for AdmittedRoleJobAuthority {
     }
 }
 
-pub(crate) const JOB_LEASE_TTL: Duration = Duration::from_secs(90);
-pub(crate) const JOB_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
-const RELEASE_ATTEMPTS: usize = 5;
-const RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
+pub(crate) const JOB_LEASE_TTL: Duration = plurx_core::cluster::timing::jobs::JOB_LEASE_TTL;
+pub(crate) const JOB_LEASE_HEARTBEAT: Duration =
+    plurx_core::cluster::timing::jobs::JOB_LEASE_HEARTBEAT;
+const RELEASE_ATTEMPTS: usize = plurx_core::cluster::timing::jobs::RELEASE_ATTEMPTS;
+const RELEASE_RETRY_DELAY: Duration = plurx_core::cluster::timing::jobs::RELEASE_RETRY_DELAY;
 
 pub(crate) struct ActiveJobLease {
     coordinator: StoreCoordinator,

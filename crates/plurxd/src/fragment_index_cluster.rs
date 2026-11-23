@@ -15,12 +15,14 @@ use plurx_core::store::{
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use futures_util::StreamExt;
+
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 mod source_digest;
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/fragment-index/";
-const PEER_DEADLINE: Duration = Duration::from_secs(8);
+const PEER_DEADLINE: Duration = plurx_core::cluster::timing::holders::FRAGMENT_INDEX_PEER_DEADLINE;
 const HASH_CHUNK: usize = 256 * 1024;
 /// How far a whole-file digest reads between checkpoints a later attempt may
 /// resume from. At the ~105 MB/s a NAS mount gives, that is under a second of
@@ -232,6 +234,14 @@ impl SourceFence {
         open_source_fence(file, Some(&self.object_version)).await
     }
 
+    /// [`Self::reopen`], saying whether its failure can pass.
+    pub(crate) async fn reopen_classified(
+        &self,
+        file: &MediaFile,
+    ) -> Result<Self, SourceFenceError> {
+        open_source_fence_classified(file, Some(&self.object_version)).await
+    }
+
     pub(crate) fn unchanged(&self) -> bool {
         self.drift().is_none()
     }
@@ -327,24 +337,126 @@ fn describe_object_version_drift(before: &str, after: &str) -> String {
     moved.join(", ")
 }
 
+/// Why a source fence could not be opened.
+///
+/// A fence answers two different questions, and their failures mean opposite
+/// things. Whether the object is still the one admitted: a size, mtime,
+/// object-version or length mismatch, a missing file, or a link where a file
+/// was named are all proof it is not, and no retry can change that. Whether
+/// it could be read just now: a failed open, stat or blocking task says
+/// nothing about the object, and the next attempt may succeed.
+#[derive(Debug)]
+pub(crate) enum SourceFenceError {
+    /// The object is not the one admitted, or is gone.
+    Changed(String),
+    /// The object could not be read this time.
+    Unreachable(String),
+}
+impl SourceFenceError {
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(self, Self::Unreachable(_))
+    }
+    fn from_open(context: String, error: &std::io::Error) -> Self {
+        #[cfg(unix)]
+        let link = error.raw_os_error() == Some(libc::ELOOP);
+        #[cfg(not(unix))]
+        let link = false;
+        if error.kind() == std::io::ErrorKind::NotFound || link {
+            Self::Changed(context)
+        } else {
+            Self::Unreachable(context)
+        }
+    }
+}
+/// The I/O error the next fence open of a path meets, for a test that needs
+/// an object the fence cannot read just now. A mode change cannot stand in:
+/// it moves the file's ctime, and a privileged test runner reads through it.
+#[cfg(test)]
+static OPEN_FAULTS: std::sync::Mutex<Vec<(PathBuf, i32)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) struct OpenFaultForTest(PathBuf);
+#[cfg(test)]
+impl OpenFaultForTest {
+    /// Every fence open of `path` fails with OS error `errno` until dropped.
+    pub(crate) fn new(path: &Path, errno: i32) -> Self {
+        OPEN_FAULTS
+            .lock()
+            .expect("open faults")
+            .push((path.to_path_buf(), errno));
+        Self(path.to_path_buf())
+    }
+}
+#[cfg(test)]
+impl Drop for OpenFaultForTest {
+    fn drop(&mut self) {
+        OPEN_FAULTS
+            .lock()
+            .expect("open faults")
+            .retain(|(path, _)| path != &self.0);
+    }
+}
+/// A fence open's own result, or the fault a test injected for its path.
+fn opened<T>(path: &Path, result: std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(test)]
+    if let Some((_, errno)) = OPEN_FAULTS
+        .lock()
+        .expect("open faults")
+        .iter()
+        .find(|(faulted, _)| faulted == path)
+    {
+        return Err(std::io::Error::from_raw_os_error(*errno));
+    }
+    #[cfg(not(test))]
+    let _ = path;
+    result
+}
+
+impl std::fmt::Display for SourceFenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(reason) | Self::Unreachable(reason) => formatter.write_str(reason),
+        }
+    }
+}
+impl From<SourceFenceError> for String {
+    fn from(error: SourceFenceError) -> Self {
+        error.to_string()
+    }
+}
+
 pub(crate) async fn open_source_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    open_source_fence_classified(file, expected_object_version)
+        .await
+        .map_err(String::from)
+}
+
+/// [`open_source_fence`], saying whether its failure can pass.
+pub(crate) async fn open_source_fence_classified(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> Result<SourceFence, SourceFenceError> {
     #[cfg(unix)]
     {
-        let source = tokio::fs::File::open(&file.path)
-            .await
-            .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let metadata = source
-            .metadata()
-            .await
-            .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
-        let object_version = object_version(&metadata)?;
+        let source =
+            opened(&file.path, tokio::fs::File::open(&file.path).await).map_err(|error| {
+                SourceFenceError::from_open(
+                    format!("opening {}: {error}", file.path.display()),
+                    &error,
+                )
+            })?;
+        let metadata = source.metadata().await.map_err(|error| {
+            SourceFenceError::Unreachable(format!("fstat {}: {error}", file.path.display()))
+        })?;
+        let object_version = object_version(&metadata).map_err(SourceFenceError::Changed)?;
         if let Some(expected) = expected_object_version {
-            scanner_identity_matches(&metadata, file)?;
+            scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
             if expected != object_version {
-                return Err("source changed after cluster index resolution".to_owned());
+                return Err(SourceFenceError::Changed(
+                    "source changed after cluster index resolution".to_owned(),
+                ));
             }
         }
         Ok(SourceFence {
@@ -359,15 +471,22 @@ pub(crate) async fn open_source_fence(
             plurx_core::fs_secure::open_read_nofollow_blocking(&path)
         })
         .await
-        .map_err(|error| format!("opening source task failed: {error}"))?
-        .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let metadata = source
-            .metadata()
-            .map_err(|error| format!("stating {}: {error}", file.path.display()))?;
-        scanner_identity_matches(&metadata, file)?;
-        let object_version = windows_object_version(&source)?;
+        .map_err(|error| {
+            SourceFenceError::Unreachable(format!("opening source task failed: {error}"))
+        })?
+        .map_err(|error| {
+            SourceFenceError::from_open(format!("opening {}: {error}", file.path.display()), &error)
+        })?;
+        let metadata = source.metadata().map_err(|error| {
+            SourceFenceError::Unreachable(format!("stating {}: {error}", file.path.display()))
+        })?;
+        scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
+        let object_version =
+            windows_object_version(&source).map_err(SourceFenceError::Unreachable)?;
         if expected_object_version.is_some_and(|expected| expected != object_version) {
-            return Err("source changed after cluster index resolution".to_owned());
+            return Err(SourceFenceError::Changed(
+                "source changed after cluster index resolution".to_owned(),
+            ));
         }
         Ok(SourceFence {
             handle: source,
@@ -383,26 +502,48 @@ pub(crate) async fn open_source_playback_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    open_source_playback_fence_classified(file, expected_object_version)
+        .await
+        .map_err(String::from)
+}
+
+/// [`open_source_playback_fence`], saying whether its failure can pass.
+pub(crate) async fn open_source_playback_fence_classified(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> Result<SourceFence, SourceFenceError> {
     let path = file.path.clone();
     let source = tokio::task::spawn_blocking(move || {
-        plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        opened(
+            &path,
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path),
+        )
     })
     .await
-    .map_err(|_| "Source file open task failed".to_owned())?
-    .map_err(|_| "Source file cannot be opened without following links".to_owned())?;
+    .map_err(|_| SourceFenceError::Unreachable("Source file open task failed".to_owned()))?
+    .map_err(|error| {
+        SourceFenceError::from_open(
+            "Source file cannot be opened without following links".to_owned(),
+            &error,
+        )
+    })?;
     let metadata = source
         .metadata()
-        .map_err(|_| "Source file cannot be stated".to_owned())?;
+        .map_err(|_| SourceFenceError::Unreachable("Source file cannot be stated".to_owned()))?;
     if !metadata.is_file() || file.size < 0 {
-        return Err("Source file is not a bounded regular media object".to_owned());
+        return Err(SourceFenceError::Changed(
+            "Source file is not a bounded regular media object".to_owned(),
+        ));
     }
-    scanner_identity_matches(&metadata, file)?;
+    scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
     #[cfg(unix)]
-    let object_version = object_version(&metadata)?;
+    let object_version = object_version(&metadata).map_err(SourceFenceError::Changed)?;
     #[cfg(windows)]
-    let object_version = windows_object_version(&source)?;
+    let object_version = windows_object_version(&source).map_err(SourceFenceError::Unreachable)?;
     if expected_object_version.is_some_and(|expected| expected != object_version) {
-        return Err("Source file changed after its owned observation".to_owned());
+        return Err(SourceFenceError::Changed(
+            "Source file changed after its owned observation".to_owned(),
+        ));
     }
     Ok(SourceFence {
         handle: source,
@@ -1587,62 +1728,71 @@ async fn hydrate_inner(
                 .map(|base| (peer.node_id.clone(), (base, peer.reachable)))
         })
         .collect::<HashMap<_, _>>();
-    let locations = store
+    let mut locations = store
         .cluster_fragment_index_locations(&artifact.cache_key)
         .await
         .map_err(|error| error.to_string())?;
     let transport = calls;
     let path = format!("{PEER_PATH_PREFIX}{}", artifact.cache_key);
-    for location in locations {
-        let Some((base, _)) = peers.get(&location.node_id) else {
-            continue;
-        };
-        let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
-        let response = transport
-            .request(
-                &location.node_id,
-                base,
-                reqwest::Method::GET,
-                &path,
-                Vec::new(),
-                deadline,
-                MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-                PeerAuthMode::ExactRequest,
-            )
-            .await;
-        let Ok(response) = response else { continue };
-        if response.status == reqwest::StatusCode::NOT_FOUND {
-            // Best-effort: this peer has already been excluded from the
-            // current hydration attempt; later repair retries stale cleanup.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetMissingPeerIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                    .await,
-            );
-            continue;
-        }
-        if !response.status.is_success() {
-            continue;
-        }
-        if validate_blob(&response.body, artifact).is_err() {
-            // Best-effort: the invalid blob is never installed, and future
-            // reconciliation can remove this peer's stale location row.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetCorruptPeerIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                    .await,
-            );
-            continue;
-        }
-        install_local_blob(root, artifact, &response.body).await?;
+    locations.sort_by_cached_key(|location| {
+        peers.get(&location.node_id).map_or(1, |(base, _)| {
+            transport.preference(&location.node_id, base, PEER_DEADLINE)
+        })
+    });
+    let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
+    let requests = locations.into_iter().filter_map(|location| {
+        let (base, _) = peers.get(&location.node_id)?;
+        let path = &path;
+        Some(async move {
+            let response = transport
+                .request(
+                    &location.node_id,
+                    base,
+                    reqwest::Method::GET,
+                    path,
+                    Vec::new(),
+                    deadline,
+                    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await;
+            let Ok(response) = response else { return None };
+            let forget = if response.status == reqwest::StatusCode::NOT_FOUND {
+                Some(crate::store_result::Operation::ForgetMissingPeerIndex)
+            } else if response.status.is_success()
+                && validate_blob(&response.body, artifact).is_err()
+            {
+                Some(crate::store_result::Operation::ForgetCorruptPeerIndex)
+            } else {
+                None
+            };
+            if let Some(operation) = forget {
+                // Cleanup belongs to this candidate's future: a slow Store
+                // cannot hold up a different, already valid holder.
+                crate::store_result::observe(
+                    operation,
+                    crate::store_result::Discard::BestEffort,
+                    store
+                        .forget_cluster_fragment_index_location(
+                            &artifact.cache_key,
+                            &location.node_id,
+                        )
+                        .await,
+                );
+                return None;
+            }
+            response.status.is_success().then_some(response.body)
+        })
+    });
+    let responses = crate::cluster::calls::race_holders(requests, deadline);
+    futures_util::pin_mut!(responses);
+    while let Some(candidate) = responses.next().await {
+        let Some(body) = candidate else { continue };
+        install_local_blob(root, artifact, &body).await?;
         if publish {
             publish_location(store, node_id, artifact).await?;
         }
-        return decode_artifact(&response.body, artifact).map(Some);
+        return decode_artifact(&body, artifact).map(Some);
     }
     Ok(None)
 }
@@ -1820,6 +1970,78 @@ mod tests {
             .expect("second page");
         assert_eq!(second_removed, 1);
         assert_eq!(cursor, "01/");
+    }
+
+    // ---- fence failures ------------------------------------------------
+
+    /// Only an object that could not be read just now passes. A missing
+    /// file, a link where a file was named, a size or mtime that no longer
+    /// matches the scan, or an object version other than the one held are
+    /// all proof the object is not the one admitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fence_failure_passes_only_when_the_object_could_not_be_read() {
+        let dir = tempfile::tempdir().expect("fence directory");
+        let path = dir.path().join("source.mkv");
+        std::fs::write(&path, filler(4096)).expect("source");
+        let file = sampled_file(path.clone());
+        let held = open_source_playback_fence_classified(&file, None)
+            .await
+            .expect("the scanned object");
+        let changed = |result: Result<SourceFence, SourceFenceError>| match result {
+            Err(error) => !error.is_transient(),
+            Ok(_) => panic!("a fence over a different object opened"),
+        };
+
+        assert!(changed(
+            open_source_playback_fence_classified(&file, Some("not-the-held-version")).await
+        ));
+        assert!(changed(
+            open_source_fence_classified(&file, Some("not-the-held-version")).await
+        ));
+        let mut resized = file.clone();
+        resized.size += 1;
+        assert!(changed(
+            open_source_playback_fence_classified(&resized, None).await
+        ));
+        let mut retimed = file.clone();
+        retimed.mtime += 1;
+        assert!(changed(held.reopen_classified(&retimed).await));
+        let link = dir.path().join("link.mkv");
+        std::os::unix::fs::symlink(&path, &link).expect("link");
+        let mut linked = file.clone();
+        linked.path = link;
+        assert!(changed(
+            open_source_playback_fence_classified(&linked, None).await
+        ));
+        let mut missing = file.clone();
+        missing.path = dir.path().join("missing.mkv");
+        assert!(changed(
+            open_source_playback_fence_classified(&missing, None).await
+        ));
+        assert!(changed(held.reopen_classified(&missing).await));
+
+        // The same object, unreadable just now (the I/O error an offline
+        // share answers): a retry may succeed, and does once it reads again.
+        let offline = OpenFaultForTest::new(&path, libc::EIO);
+        let playback = open_source_playback_fence_classified(&file, Some(held.object_version()))
+            .await
+            .err()
+            .expect("an unreadable object is not fenced");
+        let reopened = held
+            .reopen_classified(&file)
+            .await
+            .err()
+            .expect("not reopened");
+        drop(offline);
+        assert!(playback.is_transient(), "{playback}");
+        assert!(reopened.is_transient(), "{reopened}");
+        assert!(
+            open_source_playback_fence_classified(&file, Some(held.object_version()))
+                .await
+                .is_ok()
+        );
+        assert!(held.reopen_classified(&file).await.is_ok());
     }
 
     // ---- sampled source attestation -----------------------------------

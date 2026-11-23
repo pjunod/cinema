@@ -1493,7 +1493,7 @@ impl ReceiverStartActor {
                     () = tokio::time::sleep_until(looked + Duration::from_secs(1)) => {}
                 }
                 // Re-armed before the look it follows.
-                watch = state.applied.sharing_watch(RECEIVER_CONNECTION_WATCH);
+                watch = state.cluster.watch(RECEIVER_CONNECTION_WATCH);
                 looked = tokio::time::Instant::now();
                 // Original B login and exact delivery binding remain required
                 // while a writer has queued bytes, including after Body EOF.
@@ -4332,6 +4332,38 @@ pub(crate) mod relay_log {
                 "{}",
                 lines[2]
             );
+        }
+
+        /// The receiver's own mapping of a Source answer: unavailable for
+        /// now (a 503 with Retry-After) keeps its session, through both its
+        /// Status owner and its resource relay; a refusal does not.
+        #[test]
+        fn a_source_retry_keeps_the_receiver_session_and_a_refusal_does_not() {
+            use crate::sharing_client::PeerError;
+            assert!(matches!(
+                super::super::peer_failure(crate::sharing_client::peer_status_refusal(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    true
+                )),
+                super::super::ReceiverStartError::PeerUnavailable
+            ));
+            assert!(matches!(
+                super::super::peer_failure(PeerError::Busy {
+                    retry_after_secs: 1
+                }),
+                super::super::ReceiverStartError::PeerUnavailable
+            ));
+            assert!(matches!(
+                super::super::peer_failure(crate::sharing_client::peer_status_refusal(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    false
+                )),
+                super::super::ReceiverStartError::Unresolved
+            ));
+            assert!(matches!(
+                super::super::peer_failure(PeerError::InvalidResponse),
+                super::super::ReceiverStartError::Unresolved
+            ));
         }
 
         /// The client's Range is bounded, and a retry answer is not news.

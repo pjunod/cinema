@@ -65,6 +65,90 @@ async fn claim(
         .unwrap_or_else(|error| panic!("{backend}: claim {request}: {error}"))
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_first_play_claim_defers_unrelated_session_maintenance() {
+    for_each_backend(|store, backend| async move {
+        if backend != "hiqlite-3-voter" {
+            return;
+        }
+        let user = store
+            .create_user("first-play-claim", "hash", false)
+            .await
+            .expect("create user");
+        let principal = PlaybackPrincipal::LocalUser { user_id: user.id };
+        let expired = incarnation(31);
+        let fresh = incarnation(32);
+        let (outcome, _) = claim(
+            store.as_ref(),
+            user.id,
+            "expired",
+            FP,
+            "previous-play",
+            &expired,
+            1_000,
+            1_100,
+            None,
+            backend,
+        )
+        .await;
+        assert!(matches!(outcome, MediaSessionRequestClaim::Acquired { .. }));
+
+        let digest = "a".repeat(64);
+        let (outcome, selection) = claim(
+            store.as_ref(),
+            user.id,
+            "fresh",
+            FP,
+            "first-play",
+            &fresh,
+            1_200,
+            2_000,
+            Some(&ask_at(&digest, "v1;quality=auto", 1_200)),
+            backend,
+        )
+        .await;
+        assert!(matches!(outcome, MediaSessionRequestClaim::Acquired { .. }));
+        let selection = selection.expect("the fresh claim recorded its selection");
+        assert_eq!(selection.digest, digest);
+        assert_eq!(
+            store
+                .media_session_request_progress(&principal, "expired")
+                .await
+                .expect("read unrelated claim")
+                .expect("first play did not run cleanup")
+                .claim_expires_at_ms,
+            1_100,
+        );
+
+        let (outcome, recorded) = claim(
+            store.as_ref(),
+            user.id,
+            "fresh",
+            FP,
+            "first-play",
+            &fresh,
+            1_300,
+            2_100,
+            None,
+            backend,
+        )
+        .await;
+        assert!(matches!(outcome, MediaSessionRequestClaim::InFlight { .. }));
+        assert!(recorded.is_none());
+        assert!(store
+            .media_session_request_progress(&principal, "expired")
+            .await
+            .expect("read unrelated claim")
+            .is_none());
+        assert_eq!(
+            desired(store.as_ref(), user.id, "first-play").await,
+            Some(selection)
+        );
+    })
+    .await;
+}
+
 /// An acquired claim records the ask and answers with the row; a joined,
 /// conflicting or overloaded claim records nothing and answers `None`; a
 /// plain claim records nothing; a repeated digest does not move the revision

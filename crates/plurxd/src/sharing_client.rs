@@ -1634,6 +1634,10 @@ mod driver_lifetime_tests {
 /// then are retryable answers decoded (a 429 as `Busy`, a typed 503
 /// `startup_timeout` as `StartNotYet`, each with the bounded `Retry-After`
 /// every peer wait uses), so every other Start keeps today's mapping.
+/// The code a Source answers a passing live refusal with (a 503 with
+/// `Retry-After`); see `shared_source_playback::live_refusal_retry`.
+pub(crate) const SOURCE_LIVE_RETRY_CODE: &str = "sharing_source_retry";
+
 fn source_start_refusal(
     status: StatusCode,
     bytes: &[u8],
@@ -1658,6 +1662,13 @@ fn source_start_refusal(
                     }
                     if refusal.code == StartRetryCode::SourceNotPrepared.as_str() {
                         return PeerError::StartNotPrepared { retry_after_secs };
+                    }
+                    // The Source's own answer for a refusal that passes on
+                    // its own (a store renewal, a lost lease race, its body
+                    // limit): the attempt lives on, and the same request id
+                    // rejoins it, as a startup timeout does.
+                    if refusal.code == SOURCE_LIVE_RETRY_CODE {
+                        return PeerError::StartNotYet { retry_after_secs };
                     }
                 }
             }
@@ -1760,6 +1771,23 @@ mod peer_status_refusal_tests {
 #[cfg(test)]
 mod source_start_refusal_tests {
     use super::*;
+    /// A Source's typed live retry is a Start that lives on: the receiver
+    /// rejoins it with the same request id. Unbudgeted, it stays a refusal.
+    #[test]
+    fn a_source_live_retry_rejoins_the_start() {
+        let body = br#"{"code":"sharing_source_retry","message":"Shared playback is briefly unavailable"}"#;
+        let wait = HeaderValue::from_static("1");
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, Some(Some(&wait))),
+            PeerError::StartNotYet {
+                retry_after_secs: 1
+            }
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, None),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+    }
     #[test]
     fn source_not_prepared_is_a_bounded_retry_only_for_budgeted_start() {
         let body = br#"{"code":"sharing_source_not_prepared","message":"Source has not prepared"}"#;

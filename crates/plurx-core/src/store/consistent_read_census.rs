@@ -60,7 +60,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Scoped application login (delegation) checks its shape and marker: two more.
     // Curation (tags, rows, Home layouts) checks its shape and marker: two more.
     // F+ curve fits check their extension shape and marker: two more.
-    ("hiqlite.rs", 80),
+    // Fragment publication (#1827) checks its trigger shape before startup.
+    ("hiqlite.rs", 81),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -558,6 +559,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("bootstrap_with_clock", STARTUP),
     ("bridge_private_lineage_inner", STARTUP),
     ("custody_retention_schema_version", STARTUP),
+    ("fragment_publication_installed", STARTUP),
     ("dispatch_turns_installed", STARTUP),
     ("committed_schema_version_unchecked", STARTUP),
     ("custody_migration_settled", STARTUP),

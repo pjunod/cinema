@@ -36,6 +36,39 @@ def compose_document(
 
 
 class DockerStartupBudgetTests(unittest.TestCase):
+    def test_startup_phase_follows_the_verified_canonical_alias(self):
+        name = "HIQLITE_HEALTH_TIMEOUT"
+        migration = f"const {name}: Duration =\n    crate::cluster::timing::startup::{name};"
+        timing = (
+            "pub mod startup {\n"
+            f"    pub const {name}: Duration = Duration::from_secs(73);\n"
+            "}\n"
+        )
+        self.assertEqual(CHECKER["source_duration"](migration, timing, name), 73)
+
+    def test_startup_phase_refuses_unverified_or_ambiguous_policy(self):
+        name = "HIQLITE_HEALTH_TIMEOUT"
+        alias = f"const {name}: Duration = crate::cluster::timing::startup::{name};"
+        declaration = f"    pub const {name}: Duration = Duration::from_secs(73);\n"
+        timing = "pub mod startup {\n" + declaration + "}\n"
+        cases = (
+            ("", timing),
+            (alias + "\n" + alias, timing),
+            (alias.replace("startup::", "jobs::"), timing),
+            (alias.replace(f"crate::cluster::timing::startup::{name}", "Duration::from_secs(73)"), timing),
+            (alias, "pub mod startup {\n}\n"),
+            (alias, "pub mod startup {\n" + declaration * 2 + "}\n"),
+            (alias, timing * 2),
+            (alias + "\n" + alias.replace(": Duration", ": u64"), timing),
+            (alias, timing.replace("}\n", declaration.replace(": Duration", ": u64") + "}\n")),
+            (alias, timing.replace("Duration::from_secs(73)", "other_policy()")),
+            (alias, timing.replace("startup", "jobs")),
+        )
+        for migration, policy in cases:
+            with self.subTest(migration=migration, policy=policy):
+                with self.assertRaises(BudgetError):
+                    CHECKER["source_duration"](migration, policy, name)
+
     def test_product_defaults_fit_the_compose_health_grace(self):
         budget = CHECKER["validate_document"](compose_document())
 

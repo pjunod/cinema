@@ -478,7 +478,7 @@ pub(super) async fn phase_current<T: QueueSql>(
     let body = encode(
         &serde_json::json!({"claim":phase.claim,"source":phase.source,"custody_id":phase.custody.custody_id,"sequence":phase.phase_sequence,"now_ms":now_ms}),
     )?;
-    let blocked = super::background_jobs_resources::foreground_blocks(
+    let blocked = super::background_jobs_resources::analysis_blocks(
         "resource.value",
         "json_extract($1,'$.now_ms')",
     );

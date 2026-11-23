@@ -100,7 +100,7 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/stream.rs",
         "decision_for_file",
         "http/stream.rs",
-        "decision",
+        "local_decision",
     ),
     (
         "http/stream.rs",
@@ -232,6 +232,12 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "ingress_plan",
         "http/hls/create.rs",
         "create_with_purpose_attempt",
+    ),
+    (
+        "http/hls/start_plan.rs",
+        "ingress_plan",
+        "http/hls/create.rs",
+        "prepare_startup",
     ),
     // D3d: a peers catalog request plans at the senders binding.
     (

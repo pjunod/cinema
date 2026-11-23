@@ -254,6 +254,12 @@ final class PictureInPictureController: NSObject, ObservableObject,
     }
 }
 
+func backingPresentationSize(_ bounds: CGSize, scale: CGFloat) -> CGSize? {
+    let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+    guard size.width >= 1, size.height >= 1, size.width <= 16384, size.height <= 16384 else { return nil }
+    return size
+}
+
 /// A video-only AVPlayer surface. Unlike SwiftUI's `VideoPlayer`, this view
 /// does not install a second transport overlay or participate in the tvOS
 /// focus engine; PlayerView remains the sole owner of playback controls.
@@ -418,9 +424,7 @@ final class PlayerSurfaceView: UIView {
               Self.finiteNonempty(playerLayer.frame), Self.finiteNonempty(bounds),
               Self.finiteNonempty(convert(bounds, to: window).intersection(window.bounds)),
               Self.finiteNonempty(playerLayer.frame.intersection(bounds)) else { return nil }
-        let size = CGSize(width: bounds.width * window.screen.scale, height: bounds.height * window.screen.scale)
-        guard size.width >= 1, size.height >= 1, size.width <= 16384, size.height <= 16384 else { return nil }
-        return size
+        return backingPresentationSize(bounds.size, scale: window.screen.scale)
     }
 
     private static func finiteNonempty(_ rect: CGRect) -> Bool {
