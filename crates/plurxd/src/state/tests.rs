@@ -5383,8 +5383,12 @@ async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling()
         .await
         .expect_err("background preparation still stops at the ceiling");
     assert!(
-        matches!(&refusal, plurx_core::error::StoreError::Task(message)
-            if message == "analysis source changed or the active request queue is full"),
+        matches!(
+            &refusal,
+            plurx_core::error::StoreError::AnalysisAdmission(
+                plurx_core::error::AnalysisAdmissionRefusal::QueueFull
+            )
+        ),
         "background preparation must hit the real queue cap, not an unrelated error: {refusal}"
     );
     let viewer = store
