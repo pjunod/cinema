@@ -551,6 +551,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
         | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
@@ -590,6 +591,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/hls/continuous-sessions"
         | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/files/{id}/hls/prepare-startup"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
         | "/api/v1/offline/packages/{id}/complete"
@@ -2323,6 +2325,14 @@ pub fn router(state: AppState) -> Router {
                 // the same reason. A real create is under a kilobyte; a
                 // browser holding the full 256 learned limits is about 40 KiB.
                 .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/prepare-startup",
+            post(hls::prepare_startup).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/startup-decision",
+            post(stream::startup_decision_post).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/files/{id}/hls/continuous-candidates",

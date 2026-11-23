@@ -363,6 +363,7 @@
             height: 1080,
             encoder: "staged".to_owned(),
             vod: true,
+            startup_seek_ready_ms: None,
             ladder: Vec::new(),
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),

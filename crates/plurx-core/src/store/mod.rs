@@ -295,6 +295,7 @@ mod custody_retention;
 pub mod dv_refit_jobs;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
+mod fragment_publication;
 mod library_annotations_schema;
 mod library_curation_schema;
 pub mod offline_claim;
@@ -3714,6 +3715,16 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         census_json: &str,
     ) -> Result<bool, StoreError>;
+    /// Graft a probed HEVC scan verdict onto a file's stored probe JSON under
+    /// `transcode::HEVC_SCAN_PROBE_KEY`, fenced to the measured size and mtime
+    /// like the parameter-set census. Answers `false` when nothing was written.
+    async fn merge_file_probe_hevc_scan(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        scan_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Persist a bounded, measured encoding result only for the source revision
     /// that was analyzed. Reprobing replaces the containing JSON and invalidates it.
     async fn merge_file_probe_content_encoding(
@@ -5500,9 +5511,9 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// The claim row of `request_id`, read only. A retry waiting on an owner
     /// that is still starting reads this between ticks instead of re-running
     /// [`claim_media_session_request`](Self::claim_media_session_request),
-    /// which maintains the session tables first (a replicated write whenever
-    /// a cleanup is due) and reads the routes; it claims again only once the
-    /// row says the owner let go, resolved, or expired.
+    /// which can maintain the session tables and read the routes on the
+    /// existing-claim path. It claims again once the row says the owner let
+    /// go, resolved, or expired.
     async fn media_session_request_progress(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,

@@ -543,6 +543,7 @@ paths = [
   "crates/plurx-core/src/store/candidate_recovery.rs",
   "crates/plurx-core/src/store/fragindex.rs",
   "crates/plurx-core/src/store/fragment_index_cluster.rs",
+  "crates/plurx-core/src/store/fragment_publication.rs",
   "crates/plurx-core/src/store/analysis_reconcile.sql",
   "crates/plurx-core/src/store/hiqlite_fragment_index_cluster.rs",
   "crates/plurx-core/src/store/hiqlite_timeline_annotations.rs",

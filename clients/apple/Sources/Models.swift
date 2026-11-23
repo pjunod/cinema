@@ -1213,6 +1213,8 @@ struct HlsStart: Codable {
     /// Source-timeline timestamp represented by player-local time zero.
     /// Optional so this client remains compatible with older servers.
     var mediaOriginMs: Int?
+    /// The source-timeline position covered by this create's VOD preparation.
+    var startupSeekReadyMs: Int?
     var encoder: String?
     var vod: Bool?
     var ladder: [QualityRung]?
@@ -1248,6 +1250,10 @@ struct HlsStart: Codable {
     /// either way the client simply does not report, which is the passive
     /// M2 behaviour rather than a failure.
     var control: ControlBootstrap?
+
+    func isStartupSeekReady(at positionMs: Int) -> Bool {
+        positionMs > 0 && startupSeekReadyMs == positionMs
+    }
 }
 
 /// The mapping actually carried by this served generation, not a new fit

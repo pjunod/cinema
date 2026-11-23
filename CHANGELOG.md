@@ -99,6 +99,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Dolby Vision FEL upgrade staged for a session that the viewer then closed no longer keeps
+  rendering for nobody until its deadline. Releasing the session retires its staged successor,
+  which frees the worker's reconstruction slot for the viewer's next session. An upgrade that
+  finds the slot busy now waits for the next rendering exchange instead of being declined for
+  good. Copy sessions now log why a native split layout was declined or never reserved.
 - A shared title no longer ends because its Source briefly could not answer.
   When a healthy Source copy could not answer one Status or resource request
   (a slow store renewal, a lost renewal race, its open-body limit, a segment
@@ -607,6 +612,18 @@ bump may break compatibility and a **patch** bump never does.
 - Android direct Dolby Vision playback lists preserved dynamic metadata, and
   native DYN indicators wait for a selected Dolby Vision decoder instead of
   claiming enhancement during HDR/SDR decoder fallback.
+- A complete-title Dolby Vision scan whose source read was withdrawn by the
+  source service (an exhausted pause, or a revoked or unavailable read
+  budget) no longer counts against the title's five attempts. It yields as
+  `title_source_interrupted` and retries after the usual backoff, the way a
+  preempted scan does. Before, such interruptions were charged as
+  `title_scan_failed`, and readable titles failed permanently after five.
+  A storage read failure (an I/O error or a short read) is still charged,
+  now as `title_source_read_failed`, so a bad sector stays bounded by the
+  attempt limit. An aggregate built from interrupted input is never
+  published. A scanner failure on readable input stays `title_scan_failed`
+  and now records the exit status and the end of the scanner's stderr,
+  redacted, instead of a bare "scan failed".
 
 ### Added
 

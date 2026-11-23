@@ -401,7 +401,18 @@ pub(crate) async fn reserve(path: &Path, bytes: u64) -> io::Result<Option<CacheR
     let Some(budget) = lookup(path) else {
         return Ok(None);
     };
-    budget.reserve_owned(path, bytes).await.map(Some)
+    budget.reserve_owned(path, bytes, true).await.map(Some)
+}
+
+/// Speculative work may consume existing headroom, but cannot evict media.
+pub(crate) async fn reserve_without_eviction(
+    path: &Path,
+    bytes: u64,
+) -> io::Result<Option<CacheReservation>> {
+    let Some(budget) = lookup(path) else {
+        return Ok(None);
+    };
+    budget.reserve_owned(path, bytes, false).await.map(Some)
 }
 
 /// Best-effort metadata work while a private window is being verified. This
@@ -763,6 +774,7 @@ impl PlaybackCacheBudget {
         self: &Arc<Self>,
         path: &Path,
         bytes: u64,
+        allow_eviction: bool,
     ) -> io::Result<CacheReservation> {
         let path = normalized(path)?;
         let index = self.root_index(&path).ok_or_else(|| {
@@ -771,14 +783,26 @@ impl PlaybackCacheBudget {
                 "path is outside playback cache roots",
             )
         })?;
-        let _operation = self.operation().await?;
+        let _operation = if allow_eviction {
+            self.operation().await?
+        } else {
+            self.operations
+                .try_lock()
+                .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?
+        };
         // A cancelled write or eviction can invalidate a scan while it runs.
         // Reconcile again instead of turning that transient state into a fatal
         // StorageFull. Bound the whole retry sequence, including owner work.
-        tokio::time::timeout(IO_TIMEOUT + PRESSURE_TIMEOUT, async {
+        let timeout = if allow_eviction {
+            IO_TIMEOUT + PRESSURE_TIMEOUT
+        } else {
+            SAMPLE_AGE / 4
+        };
+        tokio::time::timeout(timeout, async {
             loop {
-                if let Some(reservation) =
-                    self.try_reserve_from_inventory(&path, index, bytes).await?
+                if let Some(reservation) = self
+                    .try_reserve_from_inventory(&path, index, bytes, allow_eviction)
+                    .await?
                 {
                     return Ok(reservation);
                 }
@@ -800,6 +824,7 @@ impl PlaybackCacheBudget {
         path: &Path,
         index: usize,
         bytes: u64,
+        allow_eviction: bool,
     ) -> io::Result<Option<CacheReservation>> {
         self.refresh(false).await?;
         let (device, allocation_unit) = {
@@ -831,7 +856,11 @@ impl PlaybackCacheBudget {
                 "write exceeds shared playback cache budget",
             ));
         }
-        let report = self.make_room(Some((device, bytes))).await?;
+        let report = if allow_eviction {
+            self.make_room(Some((device, bytes))).await?
+        } else {
+            SweepReport::default()
+        };
         let mut state = self.lock();
         if state.dirty {
             // The admission and pending grant share this lock, so a drop
@@ -844,19 +873,21 @@ impl PlaybackCacheBudget {
             } else {
                 "no_room"
             };
-            tracing::warn!(
-                cause,
-                requested_bytes = bytes,
-                ceiling = state.ceiling,
-                used = state.used(),
-                remaining = state.remaining(device),
-                dirty_revision = state.dirty_revision,
-                evicted = report.evicted,
-                protected = report.protected,
-                bytes_before = report.bytes_before,
-                bytes_after = report.bytes_after,
-                "shared playback cache reservation refused"
-            );
+            if allow_eviction {
+                tracing::warn!(
+                    cause,
+                    requested_bytes = bytes,
+                    ceiling = state.ceiling,
+                    used = state.used(),
+                    remaining = state.remaining(device),
+                    dirty_revision = state.dirty_revision,
+                    evicted = report.evicted,
+                    protected = report.protected,
+                    bytes_before = report.bytes_before,
+                    bytes_after = report.bytes_after,
+                    "shared playback cache reservation refused"
+                );
+            }
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "shared playback cache budget or filesystem reserve exhausted",
@@ -2122,6 +2153,27 @@ mod tests {
         );
         assert_eq!(fixture.budget.ceiling_bytes().await.expect("ceiling"), 0);
         assert!(reserve(&fixture.roots[0].join("second"), 1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn speculative_reservation_preserves_other_cached_media() {
+        let fixture = Fixture::new();
+        let existing = fixture.file(0, "existing.m4s", 16 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline);
+        fixture.budget.register(Files::new(vec![existing.clone()]));
+        let dest = fixture.roots[1].join("optional.m4s");
+
+        let error = reserve_without_eviction(&dest, 8 * 1024)
+            .await
+            .expect_err("speculation cannot evict");
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert!(existing.exists());
+        assert!(reserve(&dest, 8 * 1024)
+            .await
+            .expect("ordinary reservation")
+            .is_some());
+        assert!(!existing.exists(), "ordinary playback may still evict");
     }
 
     /// M0: a refusal carries the sweep report, so the log alone says whether

@@ -15275,15 +15275,17 @@ pub(crate) fn prepared_seam_counts(platform: ClientPlatform, processed: bool) ->
 /// and thrown away, or which policy threw them.
 ///
 /// Index order is [`PREPARATION_CANCELLED_REASONS`].
-static PREPARATIONS_CANCELLED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static PREPARATIONS_CANCELLED: [AtomicU64; PREPARATION_CANCELLED_REASONS.len()] =
+    [const { AtomicU64::new(0) }; PREPARATION_CANCELLED_REASONS.len()];
 
 /// The label vocabulary for [`record_preparation_cancelled`], in index order.
 ///
 /// `other` is last and is deliberately not removable: it is what keeps the sum
 /// of this counter equal to the number of settlements, so a reason nobody
 /// mapped shows up as an unexplained teardown instead of vanishing.
-pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 8] = [
+pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 9] = [
     "predecessor_superseded",
+    "incumbent_released",
     "incumbent_waiting",
     "foreground_claimed",
     "disabled",
@@ -15302,6 +15304,7 @@ pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 8] = [
 pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
     match reason {
         "predecessor superseded by a new session" => "predecessor_superseded",
+        "incumbent released before commit" => "incumbent_released",
         "incumbent playback needed prepared capacity" => "incumbent_waiting",
         "foreground playback claimed prepared capacity" => "foreground_claimed",
         "prepared handoff disabled" => "disabled",

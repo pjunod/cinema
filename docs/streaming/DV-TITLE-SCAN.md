@@ -59,6 +59,16 @@ It runs two ways, with one aggregate:
   fresh title's job waits up to an hour for the node-local pass that reads it
   anyway.
 
+A standalone scan reads through the budgeted source bridge, and a failed read
+there means the scanner saw truncated input, so no aggregate from that run is
+published. How the attempt settles depends on the failure. A read the source
+service withdrew (an exhausted pause, a revoked or unavailable budget) yields
+uncharged as `title_source_interrupted`, like a preemption. A storage failure (an
+I/O error or a short read) is charged as `title_source_read_failed`, so a bad
+sector ends at the attempt limit. A scanner that refuses readable input is
+charged as `title_scan_failed`, with its exit status and redacted stderr in
+the reason.
+
 ## Playback qualification precedes maintenance scanning
 
 An exact, unexpired `playback_qualification` waiter with an outstanding
