@@ -14,9 +14,12 @@ version = "0.3.0"
 ```
 
 Every crate inherits it with `version.workspace = true`. The native apps keep
-their store-facing marketing versions aligned with the workspace separately;
-their monotonically increasing build counters advance whenever their release
-paths change, and CI enforces that contract.
+their store-facing marketing versions aligned with the workspace separately,
+and CI enforces that. Their store build number is not stored at all: both apps
+take one number derived at build time by
+[`scripts/build-number`](../scripts/build-number) — the first-parent commit
+count of the `main` commit a build is based on — so it rises with every
+commit that lands on `main` and no pull request ever raises a counter.
 
 plurx follows [semantic versioning](https://semver.org/) under the 0.x rules,
 which are worth stating plainly because they are not what 1.x users expect:
@@ -74,17 +77,16 @@ CI passes the tag name automatically when it publishes an image.
    moves `CHANGELOG.md`'s `Unreleased` section under a dated
    `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
    bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
-   marketing versions to it and advances both native build counters (the
-   mobile-version contract requires all of that of a version bump), rewrites
-   the status lines that quote the version or a build counter
+   marketing versions to it (the mobile-version contract requires that),
+   rewrites the status lines that quote the version
    (`clients/apple/README.md`, `clients/android/README.md`,
-   `docs/clients/APPLE-CLIENT-PARITY.md`, `docs/STATUS.html`, the Apple ones
-   through `validation/apple_build.py`'s generator) so the tree it leaves
-   passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
-   `spikes/hiqlite-m0/Cargo.lock`. It never tags.
+   `docs/clients/APPLE-CLIENT-PARITY.md`) so the tree it leaves passes
+   `make operations-check`, and lets Cargo relock `Cargo.lock` and
+   `spikes/hiqlite-m0/Cargo.lock`. It never tags, and it touches no build
+   number: those are derived at build time by `scripts/build-number`.
 
    Review the exact-file fingerprints before pushing. Apple project version
-   and build changes need a reviewed refresh of `BUILD_SPECS` in
+   changes need a reviewed refresh of `BUILD_SPECS` in
    `validation/native_receipts.py`. Cargo manifest and lockfile changes also
    need reviewed fingerprints in the durable-jobs and operation-progress
    formal mappings, even when only workspace versions changed. The release
