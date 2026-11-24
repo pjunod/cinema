@@ -2273,6 +2273,7 @@ async fn claim_entry(
     // its only column is named so no table's column resolves to it.
     let entry = store
         .session_client()
+        // authority: the claim's path and its replay answer rest on the committed request row.
         .query_consistent_map::<ClaimEntryRow, _>(
             method,
             format!(
