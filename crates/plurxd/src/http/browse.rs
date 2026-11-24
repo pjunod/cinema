@@ -745,15 +745,19 @@ pub async fn item_detail(
     // or a media probe. Missing/unmounted files can therefore still explain
     // which tracks they contain and which policy choice would apply.
     //
-    // Both settings this page uses are display choices, read once through the
+    // The settings this page uses are display choices, read once through the
     // catalogue reader (K-04): they were two Authority reads on every item
-    // page, which alone put the route over its one-read bar.
-    let (playback_prefs, convert_setting) = state.transcode.detail_display_from(
+    // page, which alone put the route over its one-read bar. The same read
+    // carries the rest of what Play's verdict takes from settings, for the
+    // per-device lines below.
+    let display = state.transcode.detail_display_from(
         state
             .catalogue
             .display_settings(&crate::transcode::TranscodeManager::DETAIL_DISPLAY_SETTING_KEYS)
             .await,
     );
+    let playback_prefs = display.prefs.clone();
+    let convert_setting = display.dv_convert;
     let availability = state
         .detail_availability
         .observe_many(
@@ -780,32 +784,29 @@ pub async fn item_detail(
     let (coverage, statuses) =
         vod_index_coverage(&state, &files, &probes, &availability, have_dovi, convert).await?;
     // How each version plays on this account's devices (Curator ADR 0026
-    // §7): the capabilities each device last reported, and the same pure
-    // decision Play makes on this node. A listing failure costs the lines,
-    // never the page.
+    // §7): the capabilities each device last reported, judged by the same
+    // function Play's decision uses on this node. One keyed, bounded read of
+    // this account's live sign-ins; a listing failure costs the lines, never
+    // the page.
     let devices: Vec<(
         super::playback_devices::PlaybackDeviceDto,
-        plurx_core::playback::DeviceProfile,
+        plurx_core::playback::DeviceCaps,
     )> = if has_video {
         super::playback_devices::devices_for(&state, Some(user.id))
             .await
             .unwrap_or_default()
-            .into_iter()
-            .map(|(dto, record)| {
-                (
-                    dto,
-                    plurx_core::playback::DeviceProfile::from_caps_v2(&record.caps),
-                )
-            })
-            .collect()
     } else {
         Vec::new()
     };
-    let render = if devices.is_empty() {
-        None
-    } else {
-        Some(super::stream::render_caps(&state).await)
+    let verdict_inputs = super::stream::PlayVerdictInputs {
+        node: super::stream::render_caps_with(&state, display.hdr10_max_height, display.dv_convert),
+        prefs: display.prefs,
+        dv_hdr_processing: display.dv_hdr_processing,
+        now_ms: crate::media_sessions::unix_ms(),
     };
+    let devices_limit_geometry = devices
+        .iter()
+        .any(|(_, caps)| super::stream::caps_limit_geometry(Some(caps)));
     record_detail_projection(&statuses, probe_bytes);
     for ((f, observation), (raw_probe, coverage)) in files
         .into_iter()
@@ -814,26 +815,49 @@ pub async fn item_detail(
     {
         let path = f.path.clone();
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
-        let el_kind = if f.dolby_vision.el_present == Some(true) {
-            super::dto::dv_el_kind(raw_probe.as_deref())
+        let judged = !devices.is_empty() && f.video_codec.is_some();
+        let el_present = f.dolby_vision.el_present == Some(true);
+        // The probe is parsed once for this file, and only when something
+        // below reads it: the complete-title scan's enhancement-layer kind,
+        // or the measured geometry a device's decoder limit is judged by.
+        let probe: Option<serde_json::Value> = if el_present || (judged && devices_limit_geometry) {
+            raw_probe
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
         } else {
             None
         };
-        let plays_on: Vec<super::dto::PlaysOnDto> = match &render {
-            Some(node) if f.video_codec.is_some() => devices
+        let el_kind = probe
+            .as_ref()
+            .filter(|_| el_present)
+            .and_then(super::dto::dv_el_kind);
+        let geometry = probe
+            .as_ref()
+            .filter(|_| judged && devices_limit_geometry)
+            .and_then(|probe| {
+                crate::transcode::TranscodeManager::quality_facts_from_probe(&f, probe)
+            });
+        let plays_on: Vec<super::dto::PlaysOnDto> = if judged {
+            devices
                 .iter()
-                .map(|(device, profile)| super::dto::PlaysOnDto {
+                .map(|(device, caps)| super::dto::PlaysOnDto {
                     id: device.id.clone(),
                     device: device.device.clone(),
                     client: device.client.clone(),
                     outcome: plurx_core::playback::hdr_devices::plays_on(
                         &f,
                         el_kind,
-                        &plurx_core::playback::decide(&f, profile, node),
+                        &super::stream::default_play_verdict(
+                            &f,
+                            caps,
+                            &verdict_inputs,
+                            geometry.as_ref(),
+                        ),
                     ),
                 })
-                .collect(),
-            _ => Vec::new(),
+                .collect()
+        } else {
+            Vec::new()
         };
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.dv_el_kind = el_kind.map(super::dto::el_kind_str);

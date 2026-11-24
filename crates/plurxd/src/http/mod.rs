@@ -396,6 +396,8 @@ fn http_route_group(path: &str) -> usize {
         // attributed here rather than opening a group of their own.
         | "/api/v1/me/devices"
         | "/api/v1/me/devices/{prefix}"
+        // The same sign-ins, with the capabilities each last reported.
+        | "/api/v1/playback/devices"
         | "/api/v1/users/{id}/devices"
         | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"

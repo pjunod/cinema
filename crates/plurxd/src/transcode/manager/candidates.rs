@@ -1732,7 +1732,7 @@ impl TranscodeManager {
         Self::quality_facts_from_probe(&snapshot.file, &probe)
     }
 
-    pub(super) fn quality_facts_from_probe(
+    pub(crate) fn quality_facts_from_probe(
         file: &plurx_core::domain::MediaFile,
         probe: &serde_json::Value,
     ) -> Option<DecodeFacts> {

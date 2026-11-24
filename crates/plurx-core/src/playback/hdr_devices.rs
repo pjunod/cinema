@@ -8,59 +8,52 @@
 //! device. The outcome is a readout of [`super::decide`] — the same verdict
 //! Play would reach — never a second opinion.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use super::caps::{DeviceCaps, Transfer};
+use super::caps::{DeviceCaps, LearnedLimit, Transfer};
 use super::{Decision, PlaybackMethod};
 use crate::domain::MediaFile;
 use crate::scan::dv_title::TitleElKind;
+use crate::store::playback_device_caps::MAX_STORED_DEVICE_CAPS_BYTES;
 
-/// Settings-key prefix of a device's last capability document. One key per
-/// login token, so two devices of one account never race each other.
-pub const DEVICE_CAPS_KEY_PREFIX: &str = "playback.device_caps.";
-
-/// The settings key for a login token's capability record: the prefix and
-/// the first sixteen hex digits of the token's digest. The digest itself
-/// stays in the token table.
-pub fn device_caps_key(token_hash: &str) -> String {
-    let prefix: String = token_hash.chars().take(16).collect();
-    format!("{DEVICE_CAPS_KEY_PREFIX}{prefix}")
+/// The capability document as a device record keeps it: only what can
+/// change a verdict.
+///
+/// Clients send diagnostics alongside their abilities — the build and user
+/// agent, where the display's peak came from, the current window's backing
+/// size, and the wording and frame counts of a learned decode limit. None of
+/// them changes [`super::decide`]'s answer, and several change with every
+/// resize or session, so keeping them would rewrite the record on every Play.
+/// They are dropped; the peak keeps only its HDR10 target bucket, and a
+/// learned limit keeps the identity it matches on and the time its retest
+/// clock runs from.
+pub fn stored_caps(caps: &DeviceCaps) -> DeviceCaps {
+    let mut caps = caps.clone();
+    if let Some(client) = caps.client.as_mut() {
+        client.build.clear();
+        client.ua.clear();
+    }
+    if let Some(display) = caps.display.as_mut() {
+        display.max_nits = display.hdr10_target_bucket().map(i64::from);
+        display.peak_source = None;
+        display.presentation_target = None;
+    }
+    for limit in &mut caps.learned_limits {
+        *limit = LearnedLimit {
+            identity: std::mem::take(&mut limit.identity),
+            at_ms: limit.at_ms,
+            ..LearnedLimit::default()
+        };
+    }
+    caps
 }
 
-/// The record stored under [`device_caps_key`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceCapsRecord {
-    pub user_id: i64,
-    /// First eight hex digits of the token digest: what the device list
-    /// (`TokenSummary::token_hash_prefix`) names the device by.
-    pub token_prefix: String,
-    pub caps: DeviceCaps,
-    pub recorded_at: i64,
-}
-
-impl DeviceCapsRecord {
-    /// The caps as recorded: the window-size and peak-provenance readings,
-    /// which change with every resize and say nothing about what the device
-    /// decodes, are left out so a record is rewritten only when the device's
-    /// abilities change.
-    pub fn new(user_id: i64, token_hash: &str, mut caps: DeviceCaps, recorded_at: i64) -> Self {
-        if let Some(display) = caps.display.as_mut() {
-            display.presentation_target = None;
-            display.peak_source = None;
-        }
-        DeviceCapsRecord {
-            user_id,
-            token_prefix: token_hash.chars().take(8).collect(),
-            caps,
-            recorded_at,
-        }
-    }
-
-    /// Whether `other` describes the same abilities (ignoring when).
-    pub fn same_abilities(&self, other: &DeviceCapsRecord) -> bool {
-        serde_json::to_value(&self.caps).ok() == serde_json::to_value(&other.caps).ok()
-            && self.user_id == other.user_id
-    }
+/// The stored form of `caps`, or `None` when even that is larger than a
+/// record keeps ([`MAX_STORED_DEVICE_CAPS_BYTES`]).
+pub fn stored_caps_json(caps: &DeviceCaps) -> Option<String> {
+    serde_json::to_string(&stored_caps(caps))
+        .ok()
+        .filter(|json| json.len() <= MAX_STORED_DEVICE_CAPS_BYTES)
 }
 
 /// What a device does with each HDR presentation, for Curator.
@@ -205,20 +198,48 @@ mod tests {
     }
 
     #[test]
-    fn a_record_ignores_window_geometry() {
+    fn a_record_keeps_only_what_changes_a_verdict() {
         let mut a = caps(&[8], true, true, &[Transfer::Pq]);
-        let b = a.clone();
-        a.display.as_mut().expect("display").max_nits = Some(1000);
-        let ra = DeviceCapsRecord::new(1, "abcdef0123456789ffff", a, 10);
-        let rb = DeviceCapsRecord::new(1, "abcdef0123456789ffff", b, 20);
-        assert_eq!(ra.token_prefix, "abcdef01");
-        assert!(
-            !ra.same_abilities(&rb),
-            "a different peak is a different device reading"
-        );
+        a.client = Some(crate::playback::caps::ClientInfo {
+            kind: "web".into(),
+            build: "1".into(),
+            ua: "Mozilla/5.0 one".into(),
+        });
+        a.display.as_mut().expect("display").max_nits = Some(1012);
+        a.learned_limits = vec![LearnedLimit {
+            identity: "hevc:2160:main10".into(),
+            label: "4K HEVC".into(),
+            lost: 40,
+            secs: 60,
+            rate: 40.0,
+            at_ms: 5,
+        }];
+        let mut b = a.clone();
+        b.client.as_mut().expect("client").ua = "Mozilla/5.0 two".into();
+        b.display.as_mut().expect("display").max_nits = Some(1090);
+        b.learned_limits[0].lost = 41;
+        b.learned_limits[0].rate = 41.5;
         assert_eq!(
-            device_caps_key("abcdef0123456789ffff"),
-            "playback.device_caps.abcdef0123456789"
+            stored_caps_json(&a),
+            stored_caps_json(&b),
+            "diagnostics and jitter inside one bucket write nothing new"
         );
+        let stored = stored_caps(&a);
+        assert_eq!(stored.client.as_ref().expect("client").kind, "web");
+        assert_eq!(
+            stored.display.as_ref().expect("display").max_nits,
+            Some(1000)
+        );
+        assert_eq!(stored.learned_limits[0].identity, "hevc:2160:main10");
+        assert_eq!(stored.learned_limits[0].at_ms, 5);
+
+        // A different bucket, or a new limit, is a different device reading.
+        b.display.as_mut().expect("display").max_nits = Some(600);
+        assert_ne!(stored_caps_json(&a), stored_caps_json(&b));
+
+        // An oversized document is not kept at all.
+        let mut huge = caps(&[8], true, true, &[Transfer::Pq]);
+        huge.audio = vec!["x".repeat(MAX_STORED_DEVICE_CAPS_BYTES)];
+        assert_eq!(stored_caps_json(&huge), None);
     }
 }

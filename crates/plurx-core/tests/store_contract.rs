@@ -132,6 +132,8 @@ mod jellyfin_play;
 mod library_schedule;
 #[path = "store_contract/offload.rs"]
 mod offload;
+#[path = "store_contract/playback_device_caps.rs"]
+mod playback_device_caps;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -45505,49 +45507,6 @@ async fn library_path_removal_runs_through_dyn_store() {
                 .await
                 .expect("current identity"),
             RootFingerprintStatus::Established,
-            "{backend}"
-        );
-    })
-    .await;
-}
-
-/// `delete_setting` removes one key on every backend, and removing an absent
-/// key is not an error: a device's capability record is deleted when its
-/// login token is gone (Curator ADR 0026 §5).
-#[tokio::test]
-async fn delete_setting_removes_one_key_and_tolerates_an_absent_one() {
-    for_each_backend(|store, backend| async move {
-        store
-            .put_setting("playback.device_caps.aaaa", "{}")
-            .await
-            .expect("put a");
-        store
-            .put_setting("playback.device_caps.bbbb", "{}")
-            .await
-            .expect("put b");
-        store
-            .delete_setting("playback.device_caps.aaaa")
-            .await
-            .expect("delete a");
-        store
-            .delete_setting("playback.device_caps.never")
-            .await
-            .expect("delete absent");
-        assert_eq!(
-            store
-                .get_setting("playback.device_caps.aaaa")
-                .await
-                .expect("get a"),
-            None,
-            "{backend}"
-        );
-        assert_eq!(
-            store
-                .get_setting("playback.device_caps.bbbb")
-                .await
-                .expect("get b")
-                .as_deref(),
-            Some("{}"),
             "{backend}"
         );
     })

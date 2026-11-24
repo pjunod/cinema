@@ -1659,6 +1659,9 @@ impl SqliteStore {
         // `user_version` stays where it is, so an older binary still opens it.
         super::playback_input_keys::install_sqlite(&conn)?;
         super::fragment_publication::install_sqlite(&conn)?;
+        // Each signed-in device's capability record, owned by its token. The
+        // same additive extension shape as the planning keys.
+        super::playback_device_caps::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
@@ -2496,15 +2499,6 @@ impl SettingsStore for SqliteStore {
                 settings.insert(key, value);
             }
             Ok(settings)
-        })
-        .await
-    }
-
-    async fn delete_setting(&self, key: &str) -> Result<(), StoreError> {
-        let key = key.to_owned();
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
-            Ok(())
         })
         .await
     }
