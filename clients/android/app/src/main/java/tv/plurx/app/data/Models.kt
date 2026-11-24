@@ -780,6 +780,10 @@ data class EffectiveProcessingReport(
     val sdrProcessed: Boolean = false,
     /** Some, but not every, served frame applied creative trims. */
     val creativeTrimsPartial: Boolean = false,
+    /** Server-written Dolby Vision metadata sub-row texts for this processed delivery. */
+    val dvMetadata: DvMetadataTexts? = null,
+    /** Server-written display-target sub-row texts for this processed delivery. */
+    val displayTarget: DisplayTargetTexts? = null,
 ) {
     val mark: String get() = if (sdrProcessed) "SDR-E" else "HDR10-E"
     fun matches(active: String?, delivered: String?): Boolean = ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) &&
@@ -816,7 +820,36 @@ data class EffectiveProcessingReport(
                 }
             }
             return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
-                boolean("fel_contributed") ?: return null, names, sdr, boolean("creative_trims_partial") ?: false)
+                boolean("fel_contributed") ?: return null, names, sdr, boolean("creative_trims_partial") ?: false,
+                DvMetadataTexts.fromJson(objectValue["dv_metadata"]), DisplayTargetTexts.fromJson(objectValue["display_target"]))
+        }
+    }
+}
+
+private fun jsonText(obj: kotlinx.serialization.json.JsonObject, key: String): String? =
+    (obj[key] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+
+private fun jsonTextAt(element: kotlinx.serialization.json.JsonElement?, key: String): String? =
+    (element as? kotlinx.serialization.json.JsonObject)?.let { jsonText(it, key) }
+
+/** The `text` of each `dv_metadata` sub-row; the server wrote them, the client only shows them. */
+data class DvMetadataTexts(val inFile: String?, val applied: String?, val leftForDisplay: String?) {
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): DvMetadataTexts? {
+            val obj = value as? kotlinx.serialization.json.JsonObject ?: return null
+            return DvMetadataTexts(jsonTextAt(obj["in_file"], "text"), jsonTextAt(obj["applied"], "text"),
+                jsonTextAt(obj["left_for_display"], "text"))
+        }
+    }
+}
+
+/** The server-written `display_target` texts of a processed delivery's report. */
+data class DisplayTargetTexts(val reportedPeak: String?, val mappedFor: String?, val titlePeak: String?) {
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): DisplayTargetTexts? {
+            val obj = value as? kotlinx.serialization.json.JsonObject ?: return null
+            return DisplayTargetTexts(jsonText(obj, "reported_peak_text"), jsonText(obj, "mapped_for_text"),
+                jsonText(obj, "title_peak_text"))
         }
     }
 }
@@ -864,6 +897,8 @@ data class PlaybackEnhancement(
      * holds a current, generation-matching `effective_processing` report.
      */
     val requiresEffectiveProcessing: Boolean = false,
+    /** Dolby Vision metadata texts of an unprocessed delivery; a processed one's ride its report. */
+    val dvMetadata: DvMetadataTexts? = null,
 ) {
     fun explainingSkip(skip: ProcessingSkip?, generation: String?): PlaybackEnhancement {
         if (skip?.matches(generation) != true) return this
@@ -932,7 +967,7 @@ data class PlaybackEnhancement(
             if (active.isEmpty() && details.isEmpty()) return null
             val requires = (objectValue["requires_effective_processing"] as? kotlinx.serialization.json.JsonPrimitive)
                 ?.takeIf { !it.isString }?.content == "true"
-            return PlaybackEnhancement(active, details, requires)
+            return PlaybackEnhancement(active, details, requires, DvMetadataTexts.fromJson(objectValue["dv_metadata"]))
         }
     }
 }

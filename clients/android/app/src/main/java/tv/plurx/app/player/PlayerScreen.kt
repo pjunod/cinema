@@ -2503,6 +2503,12 @@ private fun PlayerInfo(
             ),
             enhancementSummary = enhancementSummary(shownEnhancement),
             enhancement = enhancementLines(shownEnhancement),
+            dvRows = tv.plurx.app.ui.components.dvInfoRows(
+                controller.enhancement,
+                controller.effectiveProcessing,
+                controller.effectiveProcessingGeneration,
+                controller.deliveredRange,
+            ),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
             stalls = "${controller.playbackStallCount} (${controller.playbackStallCount} supply · 0 decode)",
@@ -2600,6 +2606,8 @@ internal data class PlaybackInfoDetails(
     val enhancementSummary: String? = null,
     /** Server-computed Dolby Vision enhancement, one sentence per line. */
     val enhancement: List<String>? = null,
+    /** Server-written Dolby Vision metadata and display target rows; null value hides each. */
+    val dvRows: tv.plurx.app.ui.components.DvInfoRows = tv.plurx.app.ui.components.DvInfoRows(),
     val subtitles: String = "Off",
     val decoder: String? = null,
     val stalls: String? = null,
@@ -2722,6 +2730,7 @@ internal data class InfoRow(
 )
 
 private val StandardAndDebug = setOf(PlaybackStatsMode.Standard, PlaybackStatsMode.Details, PlaybackStatsMode.Debug)
+private val DetailsAndDebug = setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug)
 private val AllInfoModes = PlaybackStatsMode.entries.toSet()
 
 /** Android's fixture-order row model. Platform-exclusive web/Apple fields are absent. */
@@ -2788,6 +2797,10 @@ internal fun playbackInfoRows(
             placement = "notes",
             tone = PlaybackStatTone.Muted,
         ),
+        InfoRow("dv_metadata", "Dolby Vision metadata", "NOW DECODING", DetailsAndDebug,
+            details.dvRows.metadata?.value, note = details.dvRows.metadata?.note, placement = "notes"),
+        InfoRow("display_target", "Display target", "NOW DECODING", DetailsAndDebug,
+            details.dvRows.target?.value, note = details.dvRows.target?.note, placement = "notes"),
         InfoRow("decode_audio", "Stream audio track", "NOW DECODING", StandardAndDebug, details.playingAudio, placement = "notes"),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
         InfoRow(
