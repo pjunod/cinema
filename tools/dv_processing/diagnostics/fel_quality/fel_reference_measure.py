@@ -76,28 +76,30 @@ def sample(plane, ys, xs):
 # Texel index sampled for output pixel n of a BL-sized raster, per axis. The
 # capture's BL signals top-left chroma. The renderer's EL phases were fitted
 # against its own output (the validation block confirms them on every
-# measured frame): the EL frame is co-sited with the BL horizontally and
-# centre-aligned vertically, with its chroma co-sited inside the EL frame.
-# That is also the phase of Annex B's EL filters, so today and the reference
-# sample the EL at the same luma positions and differ in filter taps.
+# measured frame): for an EL at scale s of the BL (0.5 or 1), the EL frame is
+# co-sited with the BL horizontally and centre-aligned vertically, with its
+# chroma co-sited inside the EL frame (at s = 1 that is the BL's own
+# sampling). At s = 0.5 that is also the phase of Annex B's EL filters, so
+# today and the reference sample the EL at the same luma positions and
+# differ in filter taps.
 def bl_chroma_coord(n):
     return n / 2.0
 
 
-def el_luma_x(n):
-    return n / 2.0
+def el_luma_x(n, s):
+    return n * s
 
 
-def el_luma_y(n):
-    return (n + 0.5) / 2.0 - 0.5
+def el_luma_y(n, s):
+    return (n + 0.5) * s - 0.5
 
 
-def el_chroma_x(n):
-    return n / 4.0
+def el_chroma_x(n, s):
+    return el_luma_x(n, s) / 2.0
 
 
-def el_chroma_y(n):
-    return n / 4.0 - 0.125
+def el_chroma_y(n, s):
+    return el_luma_y(n, s) / 2.0
 
 
 def params_text(meta):
@@ -121,9 +123,10 @@ def params_text(meta):
     return ' '.join(map(str, out)) + '\n'
 
 
-def today_composition(meta, bl, el, w, h):
+def today_composition(meta, bl, el, w, h, ew):
     """CPU model of the shipped renderer: normalised float YCbCr at w x h."""
     hd, curves = meta['header'], meta['mapping']['curves']
+    scale = ew / w
     denom = float(1 << hd['coef_log2_denom'])
     cols, rows = np.arange(w), np.arange(h)
     out = []
@@ -132,10 +135,10 @@ def today_composition(meta, bl, el, w, h):
         assert len(curve['pieces']) == 1 and curve['pieces'][0]['mapping_idc'] == 0
         if c == 0:
             b = bl[0].astype(np.float64)
-            e = sample(el[0], el_luma_y(rows), el_luma_x(cols))
+            e = sample(el[0], el_luma_y(rows, scale), el_luma_x(cols, scale))
         else:
             b = sample(bl[c], bl_chroma_coord(rows), bl_chroma_coord(cols))
-            e = sample(el[c], el_chroma_y(rows), el_chroma_x(cols))
+            e = sample(el[c], el_chroma_y(rows, scale), el_chroma_x(cols, scale))
         s = b * 64 / 65535  # UNORM16 texture holding code << 6
         coef = [x / denom for x in curve['pieces'][0]['poly_coef']]
         mapped = sum(k * s ** i for i, k in enumerate(coef))
@@ -213,7 +216,7 @@ def measure_frame(args, meta, pair, w, h, ew, eh):
     bl, el = planes(args.capture / 'bl.yuv', frame, w, h), planes(args.capture / 'el.yuv', frame, ew, eh)
     modelled = all(len(cv['pieces']) == 1 and cv['pieces'][0]['mapping_idc'] == 0
                    for cv in meta['mapping']['curves'])
-    today = today_composition(meta, bl, el, w, h) if modelled else None
+    today = today_composition(meta, bl, el, w, h, ew) if modelled else None
     reference = reference_planes(ref, w, h)
     # The reference before clause 5.4.3.3 rounds to 12 bits: v + r in the
     # 16-bit mapped domain, which the renderer's UNORM16 convention reads as
@@ -275,6 +278,51 @@ def measure_frame(args, meta, pair, w, h, ew, eh):
     return row
 
 
+def compose(args, capture, meta, frame, w, h, ew, eh, tag):
+    """The reference's 12-bit 4:2:0 planes for one captured frame."""
+    params = args.work / f'params-{tag}-{frame:03d}.txt'
+    params.write_text(params_text(meta))
+    raw = args.work / f'reference-{tag}-{frame:03d}.raw'
+    subprocess.run([str(args.oracle), str(params), str(capture / 'bl.yuv'), str(capture / 'el.yuv'),
+                    str(frame), str(w), str(h), str(ew), str(eh), str(raw)], check=True, timeout=600)
+    ref = planes(raw, 0, w, h)
+    raw.unlink()
+    return ref
+
+
+def measure_clamp(args, metas, pairs):
+    """A clamp-binding capture against the same layers with vdr_in_max at its
+    ceiling: what clause 5.4.3.2's clamp changes. Today's helper refuses the
+    binding stream, so this is the difference admitting it unclamped would make."""
+    events = [json.loads(line) for line in (args.unclamped_capture / 'events.jsonl').read_text().splitlines()]
+    other_pairs = {e['frame']: e for e in events if e['kind'] == 'accepted_source_pair'}
+    other = {m['frame']: m for m in map(json.loads, (args.unclamped_capture / 'metadata.jsonl').read_text().splitlines())}
+    for name in ('bl.yuv', 'el.yuv'):
+        assert sha(args.capture / name) == sha(args.unclamped_capture / name), f'{name} differs between the captures'
+    rows = []
+    for frame in args.frames:
+        meta, pair = metas[frame], pairs[frame]
+        assert other_pairs[frame]['pts'] == pair['pts']
+        w, h, ew, eh = pair['bl_width'], pair['bl_height'], pair['el_width'], pair['el_height']
+        clamped = compose(args, args.capture, meta, frame, w, h, ew, eh, 'clamped')
+        free = compose(args, args.unclamped_capture, other[frame], frame, w, h, ew, eh, 'unclamped')
+        row = {'frame': frame, 'pts': pair['pts'], 'rpu_sha256': meta['rpu_sha256'],
+               'vdr_in_max': [cv['vdr_in_max'] for cv in meta['mapping']['curves']],
+               'unclamped_vdr_in_max': [cv['vdr_in_max'] for cv in other[frame]['mapping']['curves']],
+               'changed_fraction': {}, 'code_change_12bit': {}}
+        for c, name in enumerate(('Y', 'Cb', 'Cr')):
+            d = free[c].astype(np.float64) - clamped[c]
+            row['changed_fraction'][name] = float((d != 0).mean())
+            row['code_change_12bit'][name] = code_stats(d)
+        a = display(reference_planes(clamped, w, h), meta)
+        b = display(reference_planes(free, w, h), other[frame])
+        row['delta_e_itp'] = vm.stats(vm.delta(a, b))
+        rows.append(row)
+        print(json.dumps({'frame': frame, 'changed_fraction': row['changed_fraction'],
+                          'delta_e_itp': row['delta_e_itp']}), flush=True)
+    return rows
+
+
 def decide(rows):
     reasons = []
     for row in rows:
@@ -293,20 +341,38 @@ def decide(rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--capture', required=True, type=Path)
-    ap.add_argument('--helper-frames', required=True, type=Path,
+    ap.add_argument('--helper-frames', type=Path,
                     help='directory of frame-NNN.rgb48le extracted from the helper render')
-    ap.add_argument('--helper-report', required=True, type=Path)
+    ap.add_argument('--helper-report', required=True, type=Path,
+                    help="the helper's stdout (in clamp mode, its stderr refusal)")
     ap.add_argument('--oracle', required=True, type=Path)
     ap.add_argument('--work', required=True, type=Path)
     ap.add_argument('--frames', type=int, nargs='+', default=[0, 24])
     ap.add_argument('--label', required=True)
     ap.add_argument('--out', required=True, type=Path)
+    ap.add_argument('--unclamped-capture', type=Path,
+                    help='clamp mode: the same layers with vdr_in_max at its ceiling; '
+                         'no helper frames are read, since today\'s helper refuses a binding clamp')
     args = ap.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
 
     events = [json.loads(line) for line in (args.capture / 'events.jsonl').read_text().splitlines()]
     pairs = {e['frame']: e for e in events if e['kind'] == 'accepted_source_pair'}
     metas = {m['frame']: m for m in map(json.loads, (args.capture / 'metadata.jsonl').read_text().splitlines())}
+    if args.unclamped_capture:
+        result = {
+            'schema': 'plurx-fel-reference-clamp-v1',
+            'label': args.label,
+            'capture': {name: sha(args.capture / name) for name in ('bl.yuv', 'el.yuv', 'metadata.jsonl', 'events.jsonl')},
+            'unclamped_capture': {name: sha(args.unclamped_capture / name) for name in ('metadata.jsonl', 'events.jsonl')},
+            'helper': args.helper_report.read_text().strip().splitlines()[-1] if args.helper_report.exists() else None,
+            'oracle': 'tools/dv_processing/fel_reference_composer.h via diagnostics/fel_quality/fel_reference_compose.c',
+            'frames': measure_clamp(args, metas, pairs),
+        }
+        args.out.write_text(json.dumps(result, indent=1) + '\n')
+        return
+    if not args.helper_frames:
+        ap.error('--helper-frames is required unless --unclamped-capture is given')
     report = [json.loads(line) for line in args.helper_report.read_text().splitlines() if line.startswith('{')]
     helper_rpus = [r['rpu_sha256'] for r in report if r['kind'] == 'accepted_source_pair']
     rows = []

@@ -1,8 +1,8 @@
 # FEL reference composition — build plan
 
 **Status:** in progress — owner approved milestones 5.1–5.2 on 2026-11-24;
-5.1 built (section 8); 5.2 measured on real titles with a **go** result
-(section 9), synthetic controls outstanding · **Written:** 2026-11-23 · **Owner:** Claude ·
+5.1 built (section 8); 5.2 measured on real titles and the synthetic
+controls with a **go** result (section 9) · **Written:** 2026-11-23 · **Owner:** Claude ·
 **Source baseline:** `bb2f165`
 
 Companion to [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) (the
@@ -281,6 +281,31 @@ sample (ΔE_ITP about 0.25 mean on its own).
 | *Michael* 5400 (0, 24) | 0.26–0.37 / 0.80–1.14 / 2.1–4.5 | 0.18 · 0.87–0.89 | 1.00–1.30 | 0.40–0.49 |
 | Private window b2-29, live action (0, 2) | 0.13–0.17 / 0.56–0.64 / 2.3–2.6 | 0.11–0.14 · 0.43–0.50 | 0.46–0.55 | 0.28–0.30 |
 | Private window b2-19, animation, MMR chroma (0, 2) | 0.08–0.10 / 0.44–0.50 / 1.1–1.2 | 0.01 · 0.35–0.36 | 0.31–0.38 | 0.16–0.17 |
+| Synthetic `valid` control, 64×64, EL at BL size (0, 5, 11) | 0.03 / 0.04 / 0.04 | — (all 10–100 nit) | 0.04 | 0.11 |
+
+The synthetic control's EL is already at BL size, so neither picture
+up-samples it; what remains of "filters" there is composing chroma after
+up-sampling (Cr RMS 0.07 code), and the rounding dominates (ΔE_ITP 0.10).
+The model of the renderer matches the helper on it to ΔE_ITP 0.03, as on
+the titles.
+
+**Clamp controls.** Today's helper refuses a bounded `vdr_in_max` before
+rendering, so these compare the reference with itself on byte-identical
+layers whose `vdr_in_max` is the 1048576 ceiling (the `valid` case).
+
+| Control (frames 0, 5, 11) | `vdr_in_max` | Samples changed by the clamp | Y change (12-bit code) mean / max | ΔE_ITP mean / max |
+|---|---|---|---|---|
+| `binding-max` (generator case) | 524288 | none | 0 / 0 | 0 / 0 |
+| `binding-tight` (measurement variant) | 4096 | all luma, no chroma | 5.4–10.3 / 7–14 | 1.1–2.1 / 1.4–2.9 |
+
+`binding-max` is refused for a clamp that cannot bind on this fixture: its
+largest residual is about 0.002 of range against a limit of 1/16. The
+`binding-tight` variant (the generator with that one constant changed, not
+committed) limits residuals to ±2 codes; the change follows
+(|d| − ½) × 0.98 − 2 codes, as clause 5.4.3.2 predicts. Chroma is
+unchanged because the fixture's chroma EL sits at its offset. This is the
+size of error that admitting a binding stream without the clamp would
+make, and the case milestone 5.4 must render.
 
 **Decision: go.** Every title exceeds the mean (0.01) and maximum (0.1)
 ΔE_ITP floors on the filters alone, and *Michael* and b2-29 also exceed
@@ -298,5 +323,4 @@ as clause 5.4.3.3 does.
   `vdr_in_max` cannot bind); two could not be captured by
   `capture_layers` (packet timing) and are not measured.
 - Limits: measured on macOS (MoltenVK, Homebrew libplacebo 7.387), not
-  the worker's pinned build; two frames per title. The synthetic controls
-  are not yet measured.
+  the worker's pinned build; two frames per title, three per control.
