@@ -1614,11 +1614,13 @@ fn k06_durable_activation_settlement_keeps_original_phase_and_refuses_next_submi
 /// on the host take a port before the voter binds it. The voter serves on the
 /// config's sockets instead; the HTTP socket only reserves the origin, so the
 /// caller keeps it for as long as the node is published under it.
-fn owned_singleton_config(data_dir: &std::path::Path) -> (Config, std::net::TcpListener) {
+fn owned_singleton_config(
+    data_dir: &std::path::Path,
+) -> (crate::config::Config, std::net::TcpListener) {
     let http = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP origin");
     let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
     let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
-    let mut config = Config::default();
+    let mut config = crate::config::Config::default();
     config.storage.data_dir = data_dir.into();
     config.server.bind = http.local_addr().expect("owned HTTP address");
     config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
@@ -1652,7 +1654,6 @@ fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture()
 
 async fn delayed_activation_settlement_fixture(direct_phase: bool) {
     use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
-    use crate::config::Config;
 
     struct SingletonObserver;
     impl StartupClockObserver for SingletonObserver {
@@ -2311,7 +2312,6 @@ fn k06_aged_committed_learner_clock_response_keeps_other_routes_live_only() {
 
 async fn aged_committed_learner_clock_response_fixture() {
     use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
-    use crate::config::Config;
     use std::borrow::Cow;
 
     struct SingletonObserver;
