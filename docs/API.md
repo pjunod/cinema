@@ -2036,7 +2036,16 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
   current, generation-matching `effective_processing` report; they clear with
   it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources. A
   tone-mapped SDR play has no `active` badges, but its `details` still say what
-  the source carries and that none of it reaches an SDR picture. A replacement session never inherits its predecessor's; it
+  the source carries and that none of it reaches an SDR picture.
+  `dv_metadata` (omitted for a non-DV source, and for a processed HDR10 or
+  SDR delivery, whose rows ride `effective_processing`) is the Playback info
+  `Dolby Vision metadata` row: `{in_file: {levels, cm_version, text},
+  applied: {levels: [{level, partial?}], text}, left_for_display: {levels,
+  delivered?, text}}`. Clients render each sub-row's `text` in that order
+  (`tests/playback/playback-info-fields.json`). `in_file.levels` is `null`
+  and its text `Unavailable` until the title's levels are recorded
+  (`plurx_dv_levels_v1`); `left_for_display.delivered` is `hdr10` or `sdr`
+  when the delivery carries no Dolby Vision metadata. A replacement session never inherits its predecessor's; it
   carries its own, in its create response and in the `prepare` control action
   that announces it. The route comes from the selected processing plan, so a
   processed-HDR10 play is described as one before its first window report.
@@ -2346,6 +2355,20 @@ the same completed-processing report as Start. Its `generation` is the current
 playback incarnation, and the report applies only to the delivered HDR10
 selection. Clients clear a previous report when an accepted response omits it;
 saved Developer preferences alone do not establish applied processing.
+A processed HDR10 or SDR report also carries the Playback info rows that
+describe it, built by the session owner and cleared with the report:
+`dv_metadata` (as in `enhancement`, with `applied` naming L1 for a display
+mapping and the grade's trim level, L8 on CM v4.0 or L2 on CM v2.9, marked
+`partial` when only some shots were trimmed) and `display_target`:
+`{reported_peak: {nits, source}|null, reported_peak_text, state:
+{state: "targeted", mapped_nits} | {state: "already_fits", bucket_nits} |
+{state: "not_targeted", reason}, mapped_for_text, title_peak_nits,
+title_peak_text}`. The owner relays them in a second bounded private header
+(4096 bytes, ASCII with JSON escapes) beside the report, so an older
+ingress still parses the report; during a mixed-version upgrade such an
+ingress passes the extra header through to the client unread, and clients
+ignore it. A current ingress removes it and attaches the rows only to a
+report it accepted for the current generation.
 `gpu_decoded: true` says the window's source pictures were decoded on the GPU
 (VA-API); it is omitted for a software decode, including the helper's own
 fallback when the node's device cannot decode HEVC Main10 or the renderer

@@ -562,6 +562,16 @@ pub fn title_peak_nits(stats: DvTitleStats) -> Option<u32> {
     Some(pq_nits(stats.max_l1_pq?).round() as u32)
 }
 
+/// Whether the policy's "title already fits" decline holds for this HDR
+/// bucket: the same comparison [`DvDisplayTarget::for_title`] makes, so a
+/// reporter can state it without re-deciding or reading the note's words.
+pub fn title_fits_display(stats: DvTitleStats, bucket_nits: u32) -> bool {
+    stats.eligibility() == TitleEligibility::Eligible
+        && stats
+            .max_l1_pq
+            .is_some_and(|code| pq_nits(code) <= f64::from(bucket_nits))
+}
+
 /// ST 2084 inverse EOTF of absolute nits (the helper's `dm_pq_oetf`).
 fn pq_code_f64(nits: f64) -> f64 {
     let p = (nits / 10000.0).powf(2610.0 / 16384.0);

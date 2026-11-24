@@ -627,6 +627,7 @@ fn direct_enhancement(
     file: &MediaFile,
     decision: &Decision,
     delivery: &DeliveryPlan,
+    levels: Option<&plurx_core::scan::dv_levels::DvTitleLevels>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
     let profile = file
@@ -651,6 +652,7 @@ fn direct_enhancement(
         hdr_processing_enabled: None,
         fel_reencode_enabled: None,
         decline_reason: None,
+        levels,
     })
 }
 
@@ -2887,7 +2889,12 @@ async fn decision_for_file(
         }
     });
     Ok(DecisionResponse {
-        enhancement: direct_enhancement(&file, &decision, &delivery),
+        enhancement: direct_enhancement(
+            &file,
+            &decision,
+            &delivery,
+            plurx_core::scan::dv_levels::title_levels_from_probe(probe_json.as_deref()).as_ref(),
+        ),
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,

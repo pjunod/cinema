@@ -372,6 +372,21 @@ impl VodServe {
         session_id: &str,
         incarnation_id: &str,
     ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        self.dv_effective_report_with_display(session_id, incarnation_id)
+            .await
+            .map(|(report, _)| report)
+    }
+
+    /// The current report with the session's display-target facts, read from
+    /// the same runtime under the same fences, for the Playback info rows.
+    pub(crate) async fn dv_effective_report_with_display(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<(
+        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+        crate::vodserve::DvReportDisplay,
+    )> {
         #[cfg(target_os = "linux")]
         {
             let publication = self.session_rendition(session_id).await?;
@@ -401,7 +416,15 @@ impl VodServe {
             }
             // No await follows this final allowance check: a seek processed
             // during the owner lookup cannot return a previously cloned report.
-            runtime.effective_report(plan, incarnation_id, &owner.incarnation)
+            let report = runtime.effective_report(plan, incarnation_id, &owner.incarnation)?;
+            Some((
+                report,
+                crate::vodserve::DvReportDisplay {
+                    file_id: rendition.recipe.file.id,
+                    display: runtime.display.clone(),
+                    note: runtime.display_target_note.clone(),
+                },
+            ))
         }
         #[cfg(not(target_os = "linux"))]
         {

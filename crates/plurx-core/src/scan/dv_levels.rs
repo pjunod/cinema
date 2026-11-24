@@ -114,6 +114,12 @@ impl DvLevelsRecord {
     }
 }
 
+/// The recorded levels in a probe document, for a reporter; `None` when the
+/// pass has not read the title, could not, or the record is malformed.
+pub fn title_levels_from_probe(document: Option<&str>) -> Option<DvTitleLevels> {
+    DvLevelsRecord::from_probe_json(document?)?.title_levels()
+}
+
 /// Folds every RPU of a title into the level set.
 #[derive(Debug, Default)]
 pub struct DvLevelsAccumulator {
@@ -193,35 +199,32 @@ impl AnnexBSplitter {
     /// Feeds bytes; calls `nal` for every NAL unit completed by them. A NAL
     /// longer than `max_held` is dropped as it streams (an RPU never is one),
     /// so a huge slice cannot grow the buffer without bound.
-    pub fn push(&mut self, mut bytes: &[u8], max_held: usize, nal: &mut impl FnMut(&[u8])) {
-        while !bytes.is_empty() {
-            let base = self.pending.len().saturating_sub(3);
-            self.pending.extend_from_slice(bytes);
-            bytes = &[];
-            let mut search = base;
-            loop {
-                let Some(offset) = find_start_code(&self.pending[search..]) else {
-                    break;
-                };
-                let code_at = search + offset;
-                if self.started {
-                    emit(&self.pending[..code_at], nal);
-                }
-                self.pending.drain(..code_at + 3);
-                self.started = true;
-                search = 0;
+    pub fn push(&mut self, bytes: &[u8], max_held: usize, nal: &mut impl FnMut(&[u8])) {
+        if bytes.is_empty() {
+            return;
+        }
+        // A start code may straddle the previous read and this one.
+        let mut search = self.pending.len().saturating_sub(3);
+        self.pending.extend_from_slice(bytes);
+        while let Some(offset) = find_start_code(&self.pending[search..]) {
+            let code_at = search + offset;
+            if self.started {
+                emit(&self.pending[..code_at], nal);
             }
-            if !self.started {
-                // Garbage before the first start code: keep only a possible
-                // partial start code.
-                let keep = self.pending.len().min(2);
-                self.pending.drain(..self.pending.len() - keep);
-            } else if self.pending.len() > max_held {
-                // Not an RPU; keep the tail that may begin the next start code.
-                let keep = 2;
-                self.pending.drain(..self.pending.len() - keep);
-                self.started = false;
-            }
+            self.pending.drain(..code_at + 3);
+            self.started = true;
+            search = 0;
+        }
+        if !self.started {
+            // Garbage before the first start code: keep only a possible
+            // partial start code.
+            let keep = self.pending.len().min(2);
+            self.pending.drain(..self.pending.len() - keep);
+        } else if self.pending.len() > max_held {
+            // Not an RPU; keep the tail that may begin the next start code.
+            let keep = 2;
+            self.pending.drain(..self.pending.len() - keep);
+            self.started = false;
         }
     }
 

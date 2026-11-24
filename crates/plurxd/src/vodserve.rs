@@ -861,6 +861,17 @@ impl ProcessingActivity {
     }
 }
 
+/// The session's display-target facts beside its current processing report:
+/// what the client reported and what the policy concluded, for the Playback
+/// info `Display target` row. Observation only.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct DvReportDisplay {
+    pub(crate) file_id: i64,
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) note: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DisplayTargetActivity {
     pub reported_peak_nits: Option<i64>,

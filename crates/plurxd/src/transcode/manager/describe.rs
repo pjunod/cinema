@@ -22,6 +22,21 @@ impl TranscodeManager {
         Some((facts, guard))
     }
 
+    /// The VOD rendition's report with its display-target facts. A native
+    /// split serves a reconstructed 8.1, which no display target applies to.
+    pub(crate) async fn dv_effective_report_with_display(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<(
+        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+        crate::vodserve::DvReportDisplay,
+    )> {
+        self.vod
+            .dv_effective_report_with_display(session_id, incarnation_id)
+            .await
+    }
+
     pub(crate) async fn dv_effective_report(
         &self,
         session_id: &str,
