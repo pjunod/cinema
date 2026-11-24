@@ -2011,6 +2011,48 @@ async fn sharing_source_a_stuck_producer_retires_its_owner_and_a_slow_one_does_n
     fixture.shutdown().await;
 }
 
+/// A real copy's drive loop charges memory as it goes (each step checks the
+/// charge covers its hold), and a finished copy returns all of it, though
+/// its production stays up for its viewers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_a_real_copy_charges_what_it_holds() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::RangeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let session = LiveSourceSession::start(&fixture, false).await;
+    session
+        .assert_live(&fixture, "Status of the live copy")
+        .await;
+    let owned = live_source_owner(&fixture).await;
+    let production = owned
+        .actor
+        .growing_backing()
+        .expect("growing copy")
+        .production
+        .clone();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !production.files.lock().await.complete() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the fixture copy finishes");
+    // A finished copy holds nothing: its charge goes back to the pool,
+    // though the production that served it lives on for its viewers.
+    let pool = fixture.state.transcode.admissions().copy_memory();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while production.memory_for_test().0.is_some() || pool.usage().0 != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the finished copy releases its charge");
+    let (_, peak) = production.memory_for_test();
+    assert!(peak > 0, "the copy was charged while it ran");
+    session.stop().await;
+    fixture.shutdown().await;
+}
+
 /// A direct owner answers Status like a growing one: a refusal that passes
 /// (its open bodies full, a ledger the Store cannot answer for) is a retry
 /// and keeps the owner; a refusal that does not (its file replaced) retires
@@ -5832,4 +5874,86 @@ async fn actual_source_unclocked_start() {
         .expect("server joined")
         .expect("server drained");
     fixture.shutdown().await;
+}
+
+/// The receiver relays exactly the codes in `SOURCE_START_REFUSAL_CODES`: the
+/// list is every typed 422 a Source Start answers and nothing else. The match
+/// is exhaustive, so a new failure must be placed; a stale entry fails the
+/// set equality.
+#[test]
+fn every_typed_source_start_refusal_is_relayable() {
+    use SourceStartFailure as F;
+    fn every() -> [F; 15] {
+        // Compile-time completeness: adding a variant breaks this match.
+        let _ = |failure: F| match failure {
+            F::Unavailable
+            | F::NotYet
+            | F::RescanRequired
+            | F::CopyTargetExceeded
+            | F::CopyInitContractChanged
+            | F::CopyClockUnknown
+            | F::CopySyncUnverified
+            | F::CopyInputLimit
+            | F::CopyOutputSkew
+            | F::Capacity
+            | F::Conflict
+            | F::Unresolved
+            | F::Unsupported
+            | F::Deadline
+            | F::RetargetUnassigned => (),
+        };
+        [
+            F::Unavailable,
+            F::NotYet,
+            F::RescanRequired,
+            F::CopyTargetExceeded,
+            F::CopyInitContractChanged,
+            F::CopyClockUnknown,
+            F::CopySyncUnverified,
+            F::CopyInputLimit,
+            F::CopyOutputSkew,
+            F::Capacity,
+            F::Conflict,
+            F::Unresolved,
+            F::Unsupported,
+            F::Deadline,
+            F::RetargetUnassigned,
+        ]
+    }
+    let answered: std::collections::BTreeSet<&str> = every()
+        .into_iter()
+        .filter_map(|failure| match failure.response() {
+            ApiError::Typed {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                ..
+            } => Some(code),
+            _ => None,
+        })
+        .collect();
+    let listed: std::collections::BTreeSet<&str> =
+        super::SOURCE_START_REFUSAL_CODES.iter().copied().collect();
+    assert_eq!(answered, listed);
+    assert_eq!(listed.len(), super::SOURCE_START_REFUSAL_CODES.len());
+}
+
+/// Avatar 6751 (2026-11-23): the viewer was told `copy_sync_unverified` for a
+/// copy whose fragments outgrew the copy's input hold. The receiver relays a
+/// Source Start refusal's code as it is, so the code must be the cause.
+#[test]
+fn a_copy_input_limit_reaches_the_receiver_as_its_own_code() {
+    let answer =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::CopyInputLimit)
+            .response();
+    assert!(
+        matches!(
+            answer,
+            ApiError::Typed {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "copy_range_input_limit",
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
 }

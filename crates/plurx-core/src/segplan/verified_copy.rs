@@ -296,6 +296,12 @@ impl VerifiedCopyKernel {
 
     /// Accept only terminal audio-only AV flushes after verified video. Any
     /// later video pair is refused; this is not an interleaved-audio API.
+    /// AV bytes pending before the next cut. A cut clones them once more
+    /// while it merges the segment.
+    pub fn pending_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
     pub fn push_audio_only(&mut self, av: Fragment) -> Result<(), VerifiedCopyError> {
         if self.failed {
             return Err(VerifiedCopyError::Failed);

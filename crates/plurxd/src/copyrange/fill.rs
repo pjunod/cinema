@@ -69,7 +69,12 @@ fn failure(reason: String) -> CopyGapFillError {
         | "copy_sync_unverified"
         | "copy_fill_landed_late"
         // The muxer wrote a second init: the decoder contract changed.
-        | "copy_init_contract_changed" => CopyGapFillError::Refused(reason),
+        | "copy_init_contract_changed"
+        // The source's fragments outgrow the copy's in-memory pairing hold.
+        | "copy_range_input_limit"
+        // The child's output pipes fell out of step: its protocol, not this
+        // attempt.
+        | "copy_observation_skew" => CopyGapFillError::Refused(reason),
         // The held object changed after the phase resolved it.
         "source changed after cluster index resolution" => {
             CopyGapFillError::Contradicted(reason)
@@ -165,12 +170,21 @@ where
     // Before the head is read, so a wait discards no work. As the rest of
     // this fill, the wait has no deadline of its own: it ends when the memory
     // is free or the phase is lost. Live copies are served first.
+    let charge = crate::copyrange::admission_charge(
+        file.size,
+        file.duration_ms,
+        fill.recipe.tracks(file).audio_bits_per_second,
+    );
     let memory = tokio::select! {
         memory = fill.copy_memory.acquire(
-            crate::copyrange::COPY_HOLD_BYTES,
+            charge,
             crate::admission::CopyPriority::Background,
             tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600),
-        ) => memory.ok_or_else(|| failed("copy_memory_unavailable".into()))?,
+        ) => Arc::new(memory.map_err(|refusal| match refusal {
+            // More than this node can hold even alone: a property of the file.
+            crate::admission::CopyMemoryRefusal::OverCeiling => failed("copy_range_input_limit".into()),
+            crate::admission::CopyMemoryRefusal::Busy => failed("copy_memory_unavailable".into()),
+        })?),
         () = fill.stop.cancelled() => return Err(failed("copy_range_cancelled".into())),
     };
     let census = run_source_census(
@@ -265,7 +279,16 @@ where
                 event=pipes.next()=>event.ok_or("copy_output_readers_lost")?,
             };
             let eof = pipes.all_eof();
-            batch.apply(mux.feed(event)?)?;
+            // No stall rule judges a gap fill, so its memory wait is not
+            // mirrored; the fill's phase stop ends that wait.
+            let (events, _) = mux
+                .step(event, fill.stop, &super::meter::HoldMirror::default())
+                .await?;
+            let cut = super::observed::cuts(&events);
+            // The batch keeps only rows and inspections (bounded by
+            // max_rows); the segment's media is dropped with `events`.
+            batch.apply(events)?;
+            mux.after_apply(cut).await;
             if reached(fill.gap, &batch.rows) {
                 return Ok(FillEnd::NextObservedRow);
             }
@@ -335,4 +358,25 @@ where
         row_inspections,
         promotion: contract.promotion().clone(),
     })
+}
+
+#[cfg(test)]
+mod failure_tests {
+    /// A source whose fragments outgrow the pairing hold refuses every
+    /// repeat of the same generation: a gap fill must not retry it each phase.
+    #[test]
+    fn an_input_limit_is_refused_not_retried() {
+        assert!(matches!(
+            super::failure("copy_range_input_limit".into()),
+            super::CopyGapFillError::Refused(_)
+        ));
+        assert!(matches!(
+            super::failure("copy_observation_skew".into()),
+            super::CopyGapFillError::Refused(_)
+        ));
+        assert!(matches!(
+            super::failure("copy_output_readers_lost".into()),
+            super::CopyGapFillError::Failed(_)
+        ));
+    }
 }

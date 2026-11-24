@@ -20,20 +20,93 @@ use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
-pub(super) const MAX_HELD: usize = 96 * 1024 * 1024;
-/// What one copy charges against the node's copy memory budget: the most its
-/// observed mux may hold. Five disjoint holds are each capped at
-/// [`MAX_HELD`] independently, so the bound is their sum:
+/// What a copy is charged when it is admitted, before any fragment of it is
+/// seen: the verified copy kernel's time-bounded holds, its pending AV and
+/// that AV's merge clone at a cut, for one segment of the file's own rate
+/// (size over duration, so audio is included). A segment never spans more
+/// than 16 s of video and is cut at [`COPY_SEGMENT_MAX_BYTES`] where it can
+/// be. The fragment holds join as fragments arrive ([`ObservedCopyMux::need_for`]).
 ///
-/// 1. `queued_bytes`: pipe bytes not yet framed, and whole canonical and AV
-///    fragments waiting for their pair;
-/// 2. the AV reader's buffer of its in-progress fragment;
-/// 3. the observed-range assembler's in-progress canonical fragment;
-/// 4. the verified copy kernel's pending AV fragments before a cut;
-/// 5. the kernel's split clone when it emits a segment.
-pub(crate) const COPY_HOLD_BYTES: u64 = 5 * MAX_HELD as u64;
+/// [`COPY_SEGMENT_MAX_BYTES`]: plurx_core::transcode::COPY_SEGMENT_MAX_BYTES
+pub(crate) fn admission_charge(
+    file_size: i64,
+    duration_ms: Option<i64>,
+    audio_bits_per_second: u32,
+) -> u64 {
+    segment_window(file_size, duration_ms, audio_bits_per_second).saturating_mul(2)
+}
+/// The longest a segment may span, in seconds: a single fragment longer is
+/// `copy_target_exceeded`.
+pub(crate) const SEGMENT_STRICT_MAX_SECONDS: u32 = 16;
+/// The bytes of one longest segment of the file at its own rate, capped at
+/// the segment byte ceiling. A size or duration that cannot describe the
+/// file is unknown, and a full segment is assumed: not positive, or a rate
+/// below the copy's own audio track's, which the file carries in full (as a
+/// file scanned while it was still growing reports).
+fn segment_window(file_size: i64, duration_ms: Option<i64>, audio_bits_per_second: u32) -> u64 {
+    let segment_max = plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
+    match (
+        u64::try_from(file_size).ok().filter(|size| *size > 0),
+        duration_ms
+            .and_then(|ms| u64::try_from(ms).ok())
+            .filter(|ms| *ms > 0),
+    ) {
+        (Some(size), Some(ms))
+            if u128::from(size) * 8 * 1000 / u128::from(ms)
+                >= u128::from(audio_bits_per_second) =>
+        {
+            let sixteen =
+                u128::from(size) * u128::from(SEGMENT_STRICT_MAX_SECONDS) * 1000 / u128::from(ms);
+            u64::try_from(sixteen).unwrap_or(u64::MAX).min(segment_max)
+        }
+        _ => segment_max,
+    }
+}
+/// The pairs one child may have in flight on one pipe beyond the other: a
+/// protocol bound on skew, not a memory bound.
 const MAX_FRAGMENTS: usize = 8;
+/// What one held packet inspection costs: the record and its digest string.
+const INSPECTION_BYTES: usize = std::mem::size_of::<PacketInspection>() + 64;
+/// What one row inspection costs: the record, its configuration digest and
+/// its hex mastering-display payload (24 bytes as 48 hex characters).
+const ROW_INSPECTION_BYTES: usize = std::mem::size_of::<CopyRowInspection>() + 64 + 48;
 const MAX_PACKETS: usize = 131072;
+
+/// Each hold the mux has, in bytes, or in records for inspections. The two
+/// inits it keeps are a few kilobytes and not counted.
+#[derive(Clone, Copy, Debug, Default)]
+struct HeldParts {
+    /// Pipe bytes not yet framed and fragments waiting for their pair.
+    queued: usize,
+    /// The AV reader's in-progress fragment.
+    av_reader: usize,
+    /// The assembler's framing and its fragment waiting for a clock.
+    assembler: usize,
+    /// The kernel's pending AV before a cut; a cut clones it once more.
+    kernel_pending: usize,
+    /// Packet inspections held for rows not yet cut.
+    inspections: usize,
+    /// Row inspections attached to rows awaiting their segment.
+    rows: usize,
+}
+impl HeldParts {
+    fn figure(self) -> u64 {
+        self.queued
+            .saturating_add(self.av_reader)
+            .saturating_add(self.assembler)
+            .saturating_add(self.kernel_pending.saturating_mul(2))
+            .saturating_add(self.inspections.saturating_mul(INSPECTION_BYTES))
+            .saturating_add(self.rows.saturating_mul(ROW_INSPECTION_BYTES)) as u64
+    }
+}
+
+/// Whether `events` carry a cut: a segment whose media the caller holds
+/// until it is committed.
+pub(crate) fn cuts(events: &[CopyMuxEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, CopyMuxEvent::Segment(_)))
+}
 
 pub(crate) struct ObservedCopySegment {
     pub(crate) segment: VerifiedCopySegment,
@@ -84,9 +157,14 @@ pub(crate) struct ObservedCopyMux {
     failed: bool,
     /// The most this mux has held at once, for the production meter.
     peak_held: Arc<std::sync::atomic::AtomicUsize>,
+    /// The largest fragment seen on either pipe.
+    largest_fragment: usize,
+    /// What this node can hold at all: no single hold may pass it.
+    ceiling: usize,
     /// This copy's charge against the node's copy memory budget, returned
-    /// when the mux is dropped, however the copy ends.
-    _memory: crate::admission::CopyMemoryPermit,
+    /// when the last holder (the mux or its drive loop) drops it, however
+    /// the copy ends.
+    memory: Arc<crate::admission::CopyMemoryPermit>,
 }
 impl ObservedCopyMux {
     pub(crate) fn new(
@@ -96,17 +174,20 @@ impl ObservedCopyMux {
         tracks: TrackDurations,
         retain_parameter_sets: bool,
         inspect_hevc: bool,
-        memory: crate::admission::CopyMemoryPermit,
+        memory: Arc<crate::admission::CopyMemoryPermit>,
     ) -> Result<Self, String> {
         let mut av_reader = FragmentReader::new();
         av_reader.reject_reinitialization();
+        // No single hold may exceed what this node can hold at all; the copy
+        // as a whole is held to its permit by its drive loop.
+        let ceiling = usize::try_from(memory.ceiling()).unwrap_or(usize::MAX);
         Ok(Self {
             contract,
             assembler: ObservedRangeAssembler::new(
                 origin,
                 canonical_title_start,
                 MAX_PACKETS,
-                MAX_HELD,
+                ceiling,
             )
             .map_err(|_| "copy_observation_limit".to_owned())?,
             av_reader,
@@ -136,24 +217,180 @@ impl ObservedCopyMux {
             clock_marked: false,
             failed: false,
             peak_held: Arc::default(),
-            _memory: memory,
+            largest_fragment: 0,
+            ceiling,
+            memory,
         })
     }
-    /// What this copy charged against the node's copy memory budget.
-    pub(crate) fn charged_bytes(&self) -> u64 {
-        self._memory.bytes()
+    /// The copy's charge, which its drive loop resizes to [`Self::need_for`].
+    pub(crate) fn memory(&self) -> Arc<crate::admission::CopyMemoryPermit> {
+        Arc::clone(&self.memory)
+    }
+    /// Every byte this mux holds now: pipe bytes not yet framed and the
+    /// fragments waiting for their pair; the AV reader's in-progress
+    /// fragment; the assembler's framing and its fragment waiting for a
+    /// clock; the kernel's pending AV and its merge clone at a cut; and the
+    /// held packet inspections.
+    pub(crate) fn held(&self) -> u64 {
+        HeldParts {
+            queued: self.queued_bytes,
+            av_reader: self.av_reader.buffered(),
+            assembler: self.assembler.held_bytes(),
+            kernel_pending: self
+                .kernel
+                .as_ref()
+                .map_or(0, |kernel| kernel.pending_bytes()),
+            inspections: self.inspected.len(),
+            rows: self.row_inspections.len(),
+        }
+        .figure()
+    }
+    /// What this mux may hold once it accepts `event`: what it holds now,
+    /// the event's bytes, and the transient copies its next step can make,
+    /// at most two of the largest fragment seen (a reader's copy of a unit
+    /// out of its buffer, or the conversion of a popped pair's twins; never
+    /// both at once).
+    pub(crate) fn need_for(&self, event: &CopyPipeEvent) -> u64 {
+        let (kind, bytes) = match event {
+            CopyPipeEvent::Data(kind, bytes) => (Some(*kind), bytes.len()),
+            _ => (None, 0),
+        };
+        // The largest fragment this event can complete, counted before it is
+        // framed: the AV reader's fragment or the assembler's, with this
+        // event's bytes, if larger than any seen.
+        let framing = match kind {
+            Some(CopyPipeKind::Av) => self.av_reader.buffered().saturating_add(bytes),
+            // A canonical chunk, or a clock line that releases the
+            // fragment its unframed backlog completes.
+            Some(CopyPipeKind::Canonical | CopyPipeKind::Clock) => self
+                .assembler
+                .held_bytes()
+                .saturating_add(self.pending_media_bytes())
+                .saturating_add(if kind == Some(CopyPipeKind::Canonical) {
+                    bytes
+                } else {
+                    0
+                }),
+            _ => 0,
+        };
+        let largest = self.largest_fragment.max(framing) as u64;
+        self.held()
+            .saturating_add(bytes as u64)
+            .saturating_add(largest.saturating_mul(2))
+    }
+    fn pending_media_bytes(&self) -> usize {
+        self.pending_media
+            .iter()
+            .map(|(bytes, at)| bytes.len().saturating_sub(*at))
+            .sum()
+    }
+    /// Fit this copy's charge to `event`, then feed it: the one step both
+    /// drive loops take per event. The caller applies the returned events,
+    /// then calls [`Self::after_apply`]. Also returns how long the fit
+    /// waited for memory, which `waiting` mirrors while it lasts.
+    pub(crate) async fn step(
+        &mut self,
+        event: CopyPipeEvent,
+        stop: &tokio_util::sync::CancellationToken,
+        waiting: &super::meter::HoldMirror,
+    ) -> Result<(Vec<CopyMuxEvent>, std::time::Duration), String> {
+        let waited = self.fit(&event, stop, waiting).await?;
+        let events = self.feed(event)?;
+        self.covers(&events);
+        Ok((events, waited))
+    }
+    /// After the events of a step are applied (a cut's segment committed and
+    /// dropped), return what the copy no longer holds.
+    pub(crate) async fn after_apply(&self, cut: bool) {
+        if cut {
+            self.settle().await;
+        }
+    }
+    /// The charge covers everything held now and the segments about to be
+    /// applied: a step whose charge fell short charged too late or returned
+    /// memory too early.
+    fn covers(&self, events: &[CopyMuxEvent]) {
+        let segments: u64 = events
+            .iter()
+            .map(|event| match event {
+                CopyMuxEvent::Segment(segment) => segment.segment.media.bytes.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        debug_assert!(
+            self.memory.bytes() >= self.held().saturating_add(segments),
+            "copy memory charge {} below its hold {} and segments {}",
+            self.memory.bytes(),
+            self.held(),
+            segments
+        );
     }
     /// The most this mux has held at once, readable after it is consumed.
     pub(crate) fn peak_held(&self) -> Arc<std::sync::atomic::AtomicUsize> {
         Arc::clone(&self.peak_held)
     }
-    /// Peak of the holds the mux itself sees (1 and 2 of
-    /// [`COPY_HOLD_BYTES`]); the kernel's and assembler's are bounded by
-    /// their own caps.
+    /// Fit this copy's charge to what accepting `event` needs, before it is
+    /// fed, and return how long that waited. Growth waits (its drive loop
+    /// reads no pipe meanwhile, so the child blocks on all of them together)
+    /// while the node's total would pass its memory, and a background copy
+    /// also waits for the budget ([`crate::admission::CopyMemoryPermit::resize`]),
+    /// until there is room or `stop` ends it. More than this node can hold
+    /// even alone ends the copy as too large for it.
+    ///
+    /// `waiting` is set for as long as the growth waits, so the copy's stall
+    /// rule judges that wait as its own cause, never as a stuck producer.
+    /// Growth granted at once is not a wait and leaves it untouched.
+    pub(crate) async fn fit(
+        &self,
+        event: &CopyPipeEvent,
+        stop: &tokio_util::sync::CancellationToken,
+        waiting: &super::meter::HoldMirror,
+    ) -> Result<std::time::Duration, String> {
+        let need = self.need_for(event);
+        if need <= self.memory.bytes() {
+            return Ok(std::time::Duration::ZERO);
+        }
+        let refused = |_| "copy_range_input_limit".to_owned();
+        let grow = self.memory.resize(need);
+        tokio::pin!(grow);
+        let first = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(grow.as_mut(), cx))
+        })
+        .await;
+        if let std::task::Poll::Ready(grown) = first {
+            return grown.map(|()| std::time::Duration::ZERO).map_err(refused);
+        }
+        struct Waiting<'a>(&'a super::meter::HoldMirror);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        waiting.set(true);
+        let _waiting = Waiting(waiting);
+        let began = tokio::time::Instant::now();
+        tokio::select! {biased;
+            () = stop.cancelled() => Err("copy_range_cancelled".to_owned()),
+            grown = &mut grow => grown.map(|()| began.elapsed()).map_err(refused),
+        }
+    }
+    /// After a cut's segment has been committed and dropped, return what
+    /// the copy no longer holds to the pool. Called while the segment is
+    /// still alive, it would hand memory still in use to another copy.
+    pub(crate) async fn settle(&self) {
+        let floor = self
+            .held()
+            .saturating_add((self.largest_fragment as u64).saturating_mul(2));
+        if floor < self.memory.bytes() {
+            // Shrinking never waits and never fails.
+            let _ = self.memory.resize(floor).await;
+        }
+    }
     fn note_held(&self) {
-        let held = self.queued_bytes.saturating_add(self.av_reader.buffered());
-        self.peak_held
-            .fetch_max(held, std::sync::atomic::Ordering::Relaxed);
+        self.peak_held.fetch_max(
+            usize::try_from(self.held()).unwrap_or(usize::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     /// Errors latch. A returned segment was checked in full; an earlier good
     /// prefix never gives credit to a later fragment or another seek.
@@ -172,9 +409,12 @@ impl ObservedCopyMux {
             CopyPipeEvent::Failed(kind, error) => return Err(format!("{error}: {kind:?}")),
             CopyPipeEvent::Data(kind, bytes) => match kind {
                 CopyPipeKind::Av => {
-                    if self.av_eof
-                        || self.av_reader.buffered().saturating_add(bytes.len()) > MAX_HELD
-                    {
+                    // Data after its own end is a pipe protocol fault, not a
+                    // fact about the source's size.
+                    if self.av_eof {
+                        return Err("copy_observation_closed".into());
+                    }
+                    if self.av_reader.buffered().saturating_add(bytes.len()) > self.ceiling {
                         return Err("copy_range_input_limit".into());
                     }
                     self.av_reader.push(&bytes);
@@ -267,7 +507,7 @@ impl ObservedCopyMux {
             .queued_bytes
             .checked_add(bytes)
             .ok_or("copy_range_input_limit")?;
-        if self.queued_bytes > MAX_HELD {
+        if self.queued_bytes > self.ceiling {
             return Err("copy_range_input_limit".into());
         }
         self.note_held();
@@ -276,8 +516,11 @@ impl ObservedCopyMux {
     fn hold_fragment(&mut self, bytes: usize) -> Result<(), String> {
         self.hold_bytes(bytes)?;
         self.queued_fragments += 1;
+        self.largest_fragment = self.largest_fragment.max(bytes);
+        // One pipe this far ahead of the other is a protocol fault of the
+        // child's outputs, not a fact about the source's size.
         if self.queued_fragments > MAX_FRAGMENTS {
-            return Err("copy_range_input_limit".into());
+            return Err("copy_observation_skew".into());
         }
         Ok(())
     }
@@ -396,7 +639,7 @@ impl ObservedCopyMux {
             plurx_core::transcode::COPY_SEGMENT_MAX_SECS,
             scale,
         )
-        .with_strict_max_seconds(16, scale);
+        .with_strict_max_seconds(SEGMENT_STRICT_MAX_SECONDS, scale);
         self.kernel = Some(
             VerifiedCopyKernel::new(
                 (*canonical).clone(),
@@ -404,8 +647,8 @@ impl ObservedCopyMux {
                 policy,
                 self.tracks,
                 self.retain_parameter_sets,
-                MAX_HELD,
-                MAX_HELD,
+                self.ceiling,
+                self.ceiling,
             )
             .map_err(|error| format!("copy_kernel_init:{error:?}"))?,
         );
@@ -642,5 +885,352 @@ fn observation_error(error: plurx_core::segplan::observed_range::ObservationErro
         ObservationError::InitContractChanged => "copy_init_contract_changed".into(),
         ObservationError::Clock => "copy_clock_unknown".into(),
         _ => "copy_canonical_observation_failed".into(),
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::{admission_charge, CopyMuxEvent, ObservedCopyMux};
+    use crate::copyrange::meter::HoldMirror;
+    /// A copy's audio track rate, as the recipe reserves for AAC.
+    const AUDIO: u32 = 256_000;
+    use crate::admission::{CopyMemoryPool, CopyPriority};
+    use crate::copyrange::pipes::{CopyPipeEvent, CopyPipeKind};
+    use plurx_core::fmp4::{FragmentReader, Unit};
+    use std::sync::Arc;
+
+    const AUTHORED: &[u8] =
+        include_bytes!("../../../plurx-core/tests/fixtures/dv-runtime/authored.mp4");
+
+    /// The fixture's init bytes and its one fragment's bytes.
+    fn authored() -> (
+        Vec<u8>,
+        Vec<u8>,
+        plurx_core::fmp4::Init,
+        plurx_core::fmp4::Fragment,
+    ) {
+        let mut reader = FragmentReader::new();
+        reader.push(AUTHORED);
+        let (mut init, mut fragment) = (None, None);
+        while let Some(unit) = reader.next_unit().expect("authored MP4 parses") {
+            match unit {
+                Unit::Init(value) => init = Some(value),
+                Unit::Fragment(value) => fragment = Some(value),
+                Unit::Trailer => {}
+            }
+        }
+        let (init, fragment) = (init.expect("init"), fragment.expect("fragment"));
+        (init.bytes.clone(), fragment.bytes.clone(), init, fragment)
+    }
+
+    async fn mux() -> ObservedCopyMux {
+        let pool = CopyMemoryPool::new(1 << 30);
+        let memory = pool
+            .acquire(1, CopyPriority::Live, tokio::time::Instant::now())
+            .await
+            .expect("memory");
+        mux_with(Arc::new(memory)).await
+    }
+
+    async fn mux_with(memory: Arc<crate::admission::CopyMemoryPermit>) -> ObservedCopyMux {
+        let (_, _, init, fragment) = authored();
+        let mut file = crate::copy_normalization::tests::non_dolby_file();
+        file.size = AUTHORED.len() as i64;
+        let contract = Arc::new(
+            crate::copy_normalization::CopyNormalizationContract::from_head(
+                &file,
+                plurx_core::transcode::CopyVideoOptions::new(false, false),
+                &init,
+                &fragment,
+            )
+            .expect("contract"),
+        );
+        ObservedCopyMux::new(
+            contract,
+            plurx_core::segplan::ranges::SourceTimestamp {
+                dts: 0,
+                time_base_num: 1,
+                time_base_den: 1000,
+            },
+            0,
+            plurx_core::segplan::TrackDurations {
+                video_ms: 125,
+                audio_ms: 0,
+                audio_bits_per_second: 0,
+            },
+            false,
+            false,
+            memory,
+        )
+        .expect("mux")
+    }
+
+    /// A copy is admitted for one segment of the file's own rate, twice
+    /// (the kernel's pending AV and its merge clone), never more than two
+    /// byte-capped segments, and two full segments when the rate is unknown.
+    #[test]
+    fn a_copy_is_admitted_for_its_files_rate() {
+        let segment_max = plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
+        // 1 MB/s: 16 MB per 16 s.
+        assert_eq!(
+            admission_charge(100_000_000, Some(100_000), AUDIO),
+            32_000_000
+        );
+        // 70 MB/s (a 4K remux): capped at the segment byte ceiling.
+        assert_eq!(
+            admission_charge(7_000_000_000, Some(100_000), AUDIO),
+            2 * segment_max
+        );
+        assert_eq!(admission_charge(100, None, AUDIO), 2 * segment_max);
+        assert_eq!(admission_charge(100, Some(0), AUDIO), 2 * segment_max);
+    }
+
+    /// The held figure counts every hold the mux has: here the AV pipe's
+    /// framed fragment waiting for its pair, then the canonical pipe's bytes
+    /// not yet framed. What accepting the next event needs adds its bytes
+    /// and two of the largest fragment seen, for the transient copies.
+    #[tokio::test]
+    async fn the_held_figure_counts_every_hold() {
+        let (init, fragment, _, framed) = authored();
+        let mut mux = mux().await;
+        assert_eq!(mux.held(), 0);
+        mux.feed(CopyPipeEvent::Data(CopyPipeKind::Av, init.clone()))
+            .expect("AV init");
+        mux.feed(CopyPipeEvent::Data(CopyPipeKind::Av, fragment.clone()))
+            .expect("AV fragment");
+        assert_eq!(mux.held(), framed.len() as u64, "the unpaired AV fragment");
+        let half = fragment[..fragment.len() / 2].to_vec();
+        let next = CopyPipeEvent::Data(CopyPipeKind::Canonical, half.clone());
+        assert_eq!(
+            mux.need_for(&next),
+            framed.len() as u64 + half.len() as u64 + 2 * framed.len() as u64
+        );
+        let events = mux
+            .feed(CopyPipeEvent::Data(CopyPipeKind::Canonical, init))
+            .expect("canonical init");
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, CopyMuxEvent::Segment(_))));
+        mux.feed(next).expect("half a canonical fragment");
+        assert!(
+            mux.held() >= framed.len() as u64 + half.len() as u64,
+            "the canonical bytes being framed are held too"
+        );
+    }
+
+    /// Before an event is fed, the copy's charge is fitted to what it needs:
+    /// a live copy grows at once; a background copy that does not fit waits
+    /// (no pipe is read meanwhile), and its phase's stop ends that wait.
+    #[tokio::test(start_paused = true)]
+    async fn an_event_is_fed_only_once_its_memory_is_charged() {
+        let (init, _, _, _) = authored();
+        let event = CopyPipeEvent::Data(CopyPipeKind::Av, init.clone());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let live = mux().await;
+        live.fit(&event, &stop, &HoldMirror::default())
+            .await
+            .expect("a live copy grows at once");
+        assert!(live.memory().bytes() >= init.len() as u64);
+
+        let pool = CopyMemoryPool::with_ceiling(100, 1 << 40);
+        let fill = pool
+            .acquire(1, CopyPriority::Background, tokio::time::Instant::now())
+            .await
+            .expect("an empty pool grants");
+        let _viewer = pool
+            .acquire(99, CopyPriority::Live, tokio::time::Instant::now())
+            .await
+            .expect("the viewer fits");
+        let background = mux_with(Arc::new(fill)).await;
+        let stopping = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            stopping.cancel();
+        });
+        let began = tokio::time::Instant::now();
+        // Bounded: a wait that ignored its stop would hang here.
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                background.fit(&event, &stop, &HoldMirror::default())
+            )
+            .await
+            .expect("the stop ends the wait"),
+            Err("copy_range_cancelled".to_owned()),
+            "it waited for memory until its phase stopped"
+        );
+        assert_eq!(began.elapsed(), std::time::Duration::from_secs(5));
+    }
+
+    /// A live copy whose growth would pass the node's total waits for
+    /// another copy to end. The wait is mirrored for exactly as long as it
+    /// lasts (so the stall rule can excuse it) and its length is returned;
+    /// growth granted at once leaves the mirror untouched.
+    #[tokio::test(start_paused = true)]
+    async fn a_live_wait_at_the_node_total_is_mirrored_and_timed() {
+        let (init, _, _, _) = authored();
+        let event = CopyPipeEvent::Data(CopyPipeKind::Av, init.clone());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let waiting = HoldMirror::default();
+        let quiet = mux().await;
+        assert_eq!(
+            quiet.fit(&event, &stop, &waiting).await,
+            Ok(std::time::Duration::ZERO)
+        );
+        let untouched = waiting.mark();
+        assert!(!waiting.held_since(untouched), "granted at once is no wait");
+
+        let ceiling = 1 << 20;
+        let pool = CopyMemoryPool::with_ceiling(1 << 30, ceiling);
+        let other = pool
+            .acquire(ceiling - 1, CopyPriority::Live, tokio::time::Instant::now())
+            .await
+            .expect("the other copy");
+        let live = mux_with(Arc::new(
+            pool.acquire(1, CopyPriority::Live, tokio::time::Instant::now())
+                .await
+                .expect("an over-budget live arrival within the node"),
+        ))
+        .await;
+        let mark = waiting.mark();
+        let ending = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+            drop(other);
+        });
+        let fitting = live.fit(&event, &stop, &waiting);
+        tokio::pin!(fitting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut fitting)
+                .await
+                .is_err(),
+            "the node's total cannot take it yet"
+        );
+        assert!(waiting.is_held(), "mirrored while it waits");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(30), fitting)
+                .await
+                .expect("the other copy's ending relieves it"),
+            Ok(std::time::Duration::from_secs(7))
+        );
+        assert!(!waiting.is_held(), "cleared once granted");
+        assert!(waiting.held_since(mark), "a wait since the mark is visible");
+        ending.await.expect("ending");
+    }
+
+    /// After a cut, the charge returns to what the copy still holds; a fit
+    /// that would pass the node's memory ends the copy as too large.
+    #[tokio::test]
+    async fn a_charge_settles_and_never_passes_the_node() {
+        let (init, _, _, _) = authored();
+        let pool = CopyMemoryPool::with_ceiling(1 << 30, 1 << 20);
+        let memory = Arc::new(
+            pool.acquire(1 << 19, CopyPriority::Live, tokio::time::Instant::now())
+                .await
+                .expect("memory"),
+        );
+        let mux = mux_with(Arc::clone(&memory)).await;
+        mux.settle().await;
+        assert!(memory.bytes() < 1 << 19, "an idle mux keeps only its floor");
+        let huge = CopyPipeEvent::Data(CopyPipeKind::Av, vec![0; 2 << 20]);
+        let stop = tokio_util::sync::CancellationToken::new();
+        assert_eq!(
+            mux.fit(&huge, &stop, &HoldMirror::default()).await,
+            Err("copy_range_input_limit".to_owned())
+        );
+        let small = CopyPipeEvent::Data(CopyPipeKind::Av, init);
+        mux.fit(&small, &stop, &HoldMirror::default())
+            .await
+            .expect("within the node");
+    }
+
+    /// The held figure is every hold: dropping any term from it fails here.
+    #[test]
+    fn the_held_figure_sums_every_hold() {
+        let one = |part: &str| {
+            let mut parts = super::HeldParts::default();
+            match part {
+                "queued" => parts.queued = 1000,
+                "av_reader" => parts.av_reader = 1000,
+                "assembler" => parts.assembler = 1000,
+                "kernel" => parts.kernel_pending = 1000,
+                "inspections" => parts.inspections = 10,
+                "rows" => parts.rows = 10,
+                _ => unreachable!(),
+            }
+            parts.figure()
+        };
+        assert_eq!(one("queued"), 1000);
+        assert_eq!(one("av_reader"), 1000);
+        assert_eq!(one("assembler"), 1000);
+        assert_eq!(one("kernel"), 2000, "the pending AV and its merge clone");
+        assert_eq!(one("inspections"), 10 * super::INSPECTION_BYTES as u64);
+        assert_eq!(one("rows"), 10 * super::ROW_INSPECTION_BYTES as u64);
+    }
+
+    /// Before a fragment is framed, the transient copies it will cost are
+    /// already charged: the event that completes a larger fragment than any
+    /// seen needs two of it.
+    #[tokio::test]
+    async fn a_larger_fragment_is_charged_before_it_is_framed() {
+        let (init, fragment, _, _) = authored();
+        let mut mux = mux().await;
+        mux.feed(CopyPipeEvent::Data(CopyPipeKind::Av, init))
+            .expect("AV init");
+        let event = CopyPipeEvent::Data(CopyPipeKind::Av, fragment.clone());
+        assert!(mux.need_for(&event) >= 3 * fragment.len() as u64);
+    }
+
+    /// A clock line can release the framed fragment and frame the next from
+    /// the canonical backlog: that backlog is charged as framing before the
+    /// clock is fed.
+    #[tokio::test]
+    async fn a_clock_is_charged_for_the_backlog_it_releases() {
+        let (init, fragment, _, _) = authored();
+        let mut mux = mux().await;
+        for bytes in [init, fragment.clone(), fragment.clone()] {
+            mux.feed(CopyPipeEvent::Data(CopyPipeKind::Canonical, bytes))
+                .expect("canonical");
+        }
+        let clock = CopyPipeEvent::Data(CopyPipeKind::Clock, Vec::new());
+        assert!(
+            mux.need_for(&clock) >= mux.held() + 2 * 2 * fragment.len() as u64,
+            "two fragments' backlog: {} over {}",
+            mux.need_for(&clock),
+            mux.held()
+        );
+    }
+
+    /// A zero or implausible size is not a rate: such a file is admitted as
+    /// unknown, for two full segments.
+    #[test]
+    fn an_unknown_or_implausible_size_is_not_a_zero_charge() {
+        let full = 2 * plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64;
+        assert_eq!(admission_charge(0, Some(100_000), AUDIO), full);
+        assert_eq!(admission_charge(-5, Some(100_000), AUDIO), full);
+        // 100 bytes over 100 s, as a file scanned while still growing reports.
+        assert_eq!(admission_charge(100, Some(100_000), AUDIO), full);
+        // The floor is the copy's own audio rate: 500 kb/s is a rate beside
+        // 256 kb/s audio, and below the 640 kb/s audio a passthrough carries.
+        let rate = 500_000 / 8 * 100;
+        assert!(admission_charge(rate, Some(100_000), 256_000) < full);
+        assert_eq!(admission_charge(rate, Some(100_000), 640_000), full);
+    }
+
+    /// One pipe far ahead of the other is the child's protocol fault, named
+    /// as such, never "too large".
+    #[tokio::test]
+    async fn skew_between_pipes_has_its_own_code() {
+        let (init, fragment, _, _) = authored();
+        let mut mux = mux().await;
+        mux.feed(CopyPipeEvent::Data(CopyPipeKind::Av, init))
+            .expect("AV init");
+        let mut refused = None;
+        for _ in 0..16 {
+            if let Err(error) = mux.feed(CopyPipeEvent::Data(CopyPipeKind::Av, fragment.clone())) {
+                refused = Some(error);
+                break;
+            }
+        }
+        assert_eq!(refused.as_deref(), Some("copy_observation_skew"));
     }
 }

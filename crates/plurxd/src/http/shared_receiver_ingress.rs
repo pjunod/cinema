@@ -63,6 +63,8 @@ fn actor_error(error: ReceiverStartError) -> ApiError {
             StatusCode::UNPROCESSABLE_ENTITY,
             super::shared_source_playback::SHARING_START_DOLBY_VISION_UNSUPPORTED,
         ),
+        // The Source's own refusal of the title, relayed as it is.
+        ReceiverStartError::SourceRefused(code) => (StatusCode::UNPROCESSABLE_ENTITY, code),
         ReceiverStartError::Conflict => (StatusCode::CONFLICT, "sharing_start_conflict"),
         ReceiverStartError::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
         ReceiverStartError::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
@@ -319,6 +321,24 @@ mod tests {
         sharing_catalogue_details::FileRevision, store::sharing_catalogue::ReceiverCatalogueScope,
     };
     use tower::ServiceExt;
+    /// The viewer is answered with the Source's own refusal of the title, not
+    /// this receiver's "unresolved".
+    #[test]
+    fn a_source_refusal_of_the_title_reaches_the_viewer_as_its_code() {
+        let answer = actor_error(ReceiverStartError::SourceRefused("copy_range_input_limit"));
+        assert!(
+            matches!(
+                answer,
+                ApiError::Typed {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: "copy_range_input_limit",
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+    }
+
     fn request() -> Value {
         serde_json::json!({"playback_id":"actual-client-instance","request_id":Uuid::new_v4(),"start":17,"copy":true,"height":1080,"quality_auto":false,"presentation":"vod","transport":"native","subtitle":null,"audio":1,"audio_offset_ms":250,"block_budget_secs":12,"preserve_dolby_vision":false,"hdr10":false,"native_subtitles":true,"previous_session_id":Uuid::new_v4(),"reopen_reason":"stall","control_sequence":9,"caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})
     }

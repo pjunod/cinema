@@ -31,11 +31,19 @@ mod meter;
 #[cfg(unix)]
 mod production;
 #[cfg(unix)]
-pub(crate) use observed::COPY_HOLD_BYTES;
+pub(crate) use observed::admission_charge;
 #[cfg(unix)]
 pub(crate) use production::{CommitWaiter, CopyRangeProduction, DeadlineEnd};
 
+/// The source read a sparse-cue title lands within before its landing is
+/// verified, unchanged from before copies were charged by what they hold.
 #[cfg(unix)]
-pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES: u64 = observed::MAX_HELD as u64
+const SEEK_LANDING_READ_BYTES: u64 = 96 * 1024 * 1024;
+/// What a seeked generation may read from its source before its landing is
+/// verified: a source-read allowance, not a memory figure. It equals the
+/// allowance before copies were charged by what they hold: the landing read,
+/// one segment and the census.
+#[cfg(unix)]
+pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES: u64 = SEEK_LANDING_READ_BYTES
     + plurx_core::transcode::COPY_SEGMENT_MAX_BYTES as u64
     + census::MAX_CENSUS_SOURCE_BYTES;

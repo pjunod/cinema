@@ -903,10 +903,15 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
           intent:playbackSurfaceIntent(PLAYER),
           title:"Playback could not prepare.",detail:error.message,actions:["retry"]});
       }else{
+        // The sharing host refused the file itself for a copy: a retry meets
+        // the same refusal. Offer the conversion instead; the viewer chooses.
+        const copyRefused=error&&(error.code==="copy_range_input_limit"||error.code==="copy_target_exceeded"||error.code==="copy_observation_skew");
+        const convertible=copyRefused&&PLAYER&&PLAYER.method!=="transcode";
+        if(convertible)PLAYER.surfaceTranscodeReason="stall-manual";
         stopPlayerForExhaustion();
         raisePlaybackSurface("owner_stopped",{context:"start",player_stopped:true,
           title:"Playback could not prepare.",detail:error.message,
-          actions:["retry","close"]});
+          actions:convertible?["force_transcode","close"]:["retry","close"]});
       }
     }
   };

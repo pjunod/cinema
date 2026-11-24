@@ -30,18 +30,58 @@ pub(super) fn landing_failure(
     seek_bootstrap: &crate::source_input::SourceSeekBootstrap,
     error: String,
 ) -> String {
-    if !seek_bootstrap.is_verified()
+    landing_failure_code(seek_bootstrap.is_verified(), error)
+}
+/// [`landing_failure`]'s decision. `copy_range_input_limit` names its own
+/// cause: the observed mux's in-memory hold for pairing whole canonical and
+/// AV fragments ran out. That is a fact about the copy's output, read from
+/// the child, not a symptom of the bootstrap allowance on source reads, so a
+/// high-bitrate source refused by it is never reported as an unverified
+/// landing.
+fn landing_failure_code(verified: bool, error: String) -> String {
+    if !verified
         && !matches!(
             error.as_str(),
             "copy_target_exceeded"
                 | "copy_init_contract_changed"
                 | "copy_clock_unknown"
                 | "copy_range_cancelled"
+                | "copy_range_input_limit"
+                | "copy_observation_skew"
         )
     {
         "copy_sync_unverified".to_owned()
     } else {
         error
+    }
+}
+
+#[cfg(test)]
+mod landing_failure_tests {
+    use super::landing_failure_code;
+
+    /// Avatar 6751 (2026-11-23): a restart's range ran out of the mux's
+    /// input hold on 70 MB 4K fragments and was reported to the viewer as
+    /// an unverified landing. A failure that names its own cause keeps it
+    /// before the landing is verified; any other is the unverified landing.
+    #[test]
+    fn an_input_limit_is_never_reported_as_an_unverified_landing() {
+        assert_eq!(
+            landing_failure_code(false, "copy_range_input_limit".into()),
+            "copy_range_input_limit"
+        );
+        assert_eq!(
+            landing_failure_code(false, "copy_observation_skew".into()),
+            "copy_observation_skew"
+        );
+        assert_eq!(
+            landing_failure_code(false, "copy_output_readers_lost".into()),
+            "copy_sync_unverified"
+        );
+        assert_eq!(
+            landing_failure_code(true, "copy_output_readers_lost".into()),
+            "copy_output_readers_lost"
+        );
     }
 }
 
@@ -124,8 +164,24 @@ pub(crate) struct CopyRangeProduction {
     stall: ProductionStall,
     seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     wanted_ms: i64,
+    /// The most this copy was charged. The charge itself belongs to the mux
+    /// alone, so it returns to the pool the moment the mux is dropped, when
+    /// `run` ends however it ends; the production only reads its peak.
+    memory_peak: Arc<std::sync::atomic::AtomicU64>,
+    /// The charge, without keeping it alive: a test can see it is gone.
+    #[cfg(test)]
+    memory: std::sync::Weak<crate::admission::CopyMemoryPermit>,
 }
 impl CopyRangeProduction {
+    /// The copy's memory charge now (`None` once released) and its peak,
+    /// for a test of the drive loop's fit, settle and release.
+    #[cfg(test)]
+    pub(crate) fn memory_for_test(&self) -> (Option<u64>, u64) {
+        (
+            self.memory.upgrade().map(|memory| memory.bytes()),
+            self.memory_peak.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
     /// Must be retained by the actual serving actor until wait_stopped joins
     /// every physical operation. HTTP waiter cancellation does not own it.
     #[allow(clippy::too_many_arguments)]
@@ -141,7 +197,13 @@ impl CopyRangeProduction {
         seek_bootstrap: crate::source_input::SourceSeekBootstrap,
     ) -> Arc<Self> {
         let publisher = files.publisher();
+        let memory_peak = mux.memory().peak_handle();
+        #[cfg(test)]
+        let memory = Arc::downgrade(&mux.memory());
         let production = Arc::new(Self {
+            memory_peak,
+            #[cfg(test)]
+            memory,
             files: AsyncMutex::new(files),
             changed: Notify::new(),
             publisher,
@@ -461,7 +523,6 @@ impl CopyRangeProduction {
             plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
         ));
         let peak_held = mux.peak_held();
-        let charged = mux.charged_bytes();
         let observed=async{
             loop {
                 let pipes=running.pipes.as_mut().ok_or("copy_output_readers_missing")?;
@@ -474,9 +535,16 @@ impl CopyRangeProduction {
                 meter.child(waiting.elapsed());
                 let eof=pipes.all_eof();
                 let converting=tokio::time::Instant::now();
-                let events=mux.feed(event)?;
-                meter.convert(converting.elapsed());
+                // Growth waits here only while the node's total would pass
+                // its memory; the stall rule excuses that wait as its own.
+                let (events,memory)=mux.step(event,&self.stop,self.stall.memory_wait()).await?;
+                let cut=super::observed::cuts(&events);
+                meter.memory(memory);
+                meter.convert(converting.elapsed().saturating_sub(memory));
+                if memory>=target{meter.waited_for_memory(memory);}
                 self.apply(events,&census,canonical_title_start,&mut meter).await?;
+                // Only once the cut's segment is committed and dropped.
+                mux.after_apply(cut).await;
                 if eof{break;}
             }
             running.slot.request_registered_completion(&running.registration).await.map_err(|_|"copy_reap_unavailable".to_owned())?;
@@ -516,7 +584,8 @@ impl CopyRangeProduction {
             tokio::time::Instant::now(),
             &result,
             peak_held.load(std::sync::atomic::Ordering::Relaxed),
-            charged,
+            // The copy's peak charge: what the pool gave it at most.
+            self.memory_peak.load(std::sync::atomic::Ordering::SeqCst),
         );
         *self.outcome.lock().expect("copy range outcome") = Some(result);
         self.changed.notify_waiters();
@@ -652,6 +721,25 @@ mod commit_wait_tests {
         assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Stalled));
         producer.commit();
         assert_eq!(request(&producer, 3).await, Err(DeadlineEnd::Slow));
+    }
+
+    /// A copy waiting for node memory (other copies hold it) commits nothing,
+    /// and that is not a stall, whether the wait began before the request or
+    /// during it; once it no longer waits, a request that sees no commit is.
+    #[tokio::test(start_paused = true)]
+    async fn a_copy_waiting_for_node_memory_is_not_stuck() {
+        let producer = Producer::default();
+        producer.commit();
+        producer.stall.memory_wait().set(true);
+        assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Slow));
+        producer.stall.memory_wait().set(false);
+        let waiter = CommitWaiter::begin(&producer, tokio::time::Instant::now() + WINDOW).await;
+        producer.stall.memory_wait().set(true);
+        producer.stall.memory_wait().set(false);
+        let changed = producer.changed.notified();
+        tokio::pin!(changed);
+        assert_eq!(waiter.changed(changed).await, Err(DeadlineEnd::Slow));
+        assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Stalled));
     }
 
     /// A copy that finished or stopped committed nothing too, and is not
