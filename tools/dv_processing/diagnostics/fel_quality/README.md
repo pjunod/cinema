@@ -35,6 +35,8 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `coding_loss_readout.py` | Portable per-arm readout of the iso-rate coding-loss arms and the protocols' accept rules, including the held-out stack rule. |
 | `grain_ratio.py` | Report-only grain proxy: high-pass luma energy of the decode over the encoder input on 1–100 nit blocks. |
 | `rpu_refit_eval.py` | RPU re-fit: fits single-layer 8.1 mapping curves (luma polynomial, chroma MMR; the safe monotone, continuous, ridge-regularised form is what ships) to the FEL composition on the untouched BL and scores them, plus the parsed-back curves of real RPUs, through the frozen four models. |
+| `fel_reference_compose.c` | Runs the ETSI GS CCM 001 composer reference (`fel_reference_composer.h`) on one frame of a layer capture; writes the 12-bit 4:2:0 picture and, optionally, the unrounded `v + r` sums. |
+| `fel_reference_measure.py` | Milestone 5.2 of the FEL reference composition plan: the helper's rgb48 render against the reference by luminance band, split into filter and rounding parts, with a go/stop input. |
 | `compare_composed.py` | Checks `segment_decode_render --dump-composed` (the production F+ composition and lattice) against the frozen `sample_codes`/`composition12` on the layer captures; exact equality or failure. |
 | `segment_decode_render --export-composed-topleft` | Writes one 48-frame CPU Model B TopLeft 4:2:0 raw export and a clock-, RPU-, and frame-hash JSONL sidecar for the admitted Michael source domain. |
 | `verify_topleft_export.py` | Binds the exact source, bundle, capture and sidecar, independently checks source color and every output code in relative frames 0 and 24, and verifies all 48 frame clocks and hashes. |

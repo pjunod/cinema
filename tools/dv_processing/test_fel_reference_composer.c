@@ -270,7 +270,8 @@ static void test_compose_picture(void) {
   struct frc_picture bl = {{{by, 4, 4, 4}, {bu, 2, 2, 2}, {bv, 2, 2, 2}}};
   struct frc_picture el = {{{ey, 2, 2, 2}, {eu, 1, 1, 1}, {ev, 1, 1, 1}}};
   uint16_t oy[16], ou[4], ov[4];
-  struct frc_output out = {{oy, ou, ov}, {4, 2, 2}};
+  int32_t sy[16], su[4], sv[4];
+  struct frc_output out = {{oy, ou, ov}, {4, 2, 2}, {sy, su, sv}};
   struct frc_params p = identity_params();
   // EL at the NLQ offset: zero residual, so h = (64 s + 8) >> 4 = 4 s.
   for (int k = 0; k < 4; k++)
@@ -289,6 +290,9 @@ static void test_compose_picture(void) {
   assert(frc_compose(&p, &bl, &el, &out) == NULL);
   for (int k = 0; k < 16; k++)
     assert(oy[k] == 4 * by[k] + 1);
+  // The unrounded sum is v + r = 64 s + 8 before clause 5.4.3.3's rounding.
+  for (int k = 0; k < 16; k++)
+    assert(sy[k] == 64 * by[k] + 8);
   for (int k = 0; k < 4; k++)
     assert(ou[k] == 4 * bu[k] + 1 && ov[k] == 4 * bv[k] + 1);
   // MMR on Cb at chroma (0, 0) with coefficient 1.0 on s0 only: the

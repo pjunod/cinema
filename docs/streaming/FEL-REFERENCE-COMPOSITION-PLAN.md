@@ -1,7 +1,8 @@
 # FEL reference composition — build plan
 
 **Status:** in progress — owner approved milestones 5.1–5.2 on 2026-11-24;
-5.1 built (section 8), 5.2 next · **Written:** 2026-11-23 · **Owner:** Claude ·
+5.1 built (section 8); 5.2 measured on real titles with a **go** result
+(section 9), synthetic controls outstanding · **Written:** 2026-11-23 · **Owner:** Claude ·
 **Source baseline:** `bb2f165`
 
 Companion to [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) (the
@@ -240,8 +241,62 @@ capture later disagrees.
   other and records it beside the measurement.
 - **R10. Out of scope.** A BT.1886 base layer (14-bit reconstruction and
   clause 5.5's conversion) is refused; Profile 7 BL is PQ.
+- **R11. Chroma siting.** Annex B.3's vertical EL chroma filter (¼, ¾)
+  assumes chroma midway between rows, and clause 5.4.2.3.3's MMR
+  down-sampling averages two rows; the measured streams signal top-left
+  siting. The oracle follows the text as written, which puts its EL chroma
+  ⅛ of an EL chroma row from the renderer's top-left sampling.
 
 The risk in section 6 about an erratum in one MMR index was checked against
 the text alone: the term table in 5.4.2.3.3 is internally consistent (each
 second- and third-order term is a product of lower ones), so no erratum
 reading was needed. CB1 was not consulted.
+
+## 9. Measurement and decision (milestone 5.2)
+
+Tooling: `diagnostics/fel_quality/fel_reference_compose.c` runs the oracle
+on a layer capture; `fel_reference_measure.py` compares it with the
+helper's own `pq-bilinear-rgb48-v1` render of the same window, bound frame
+by frame by RPU hash. Both pictures go through one display path (bilinear
+sampling at the stream's siting, then the RPU's `ycc_to_rgb`). Today's
+YCbCr codes come from the helper's output through the inverse of that
+matrix. A CPU model of the renderer confirms its sampling phases and the
+display path to ΔE_ITP 0.04 mean. Result:
+`diagnostics/fel_quality/results/fel-reference-measure-20261124.json`.
+
+**Where the renderer samples.** Fitted against its own output: BL chroma
+co-sited (top-left, as signalled); the EL co-sited horizontally and
+centre-aligned vertically. That is Annex B's phase, so today and the
+reference read the EL at the same positions and differ in filter taps,
+in composing chroma after rather than before up-sampling, and in rounding.
+
+**Two separable differences.** "Filters" compares the helper with the
+reference's unrounded sum `v + r`; "rounding" is clause 5.4.3.3 alone,
+which rounds the half-code residuals of these titles' NLQ (slope 2048,
+threshold 0) up, so the renderer sits 0.5 code low on every residual
+sample (ΔE_ITP about 0.25 mean on its own).
+
+| Title (frames) | Filters: ΔE_ITP mean / p99 / max | Filters, < 0.1 nit: ΔE mean · Y RMS | Filters: Y RMS (code) | Total ΔE mean |
+|---|---|---|---|---|
+| *Michael* 5400 (0, 24) | 0.26–0.37 / 0.80–1.14 / 2.1–4.5 | 0.18 · 0.87–0.89 | 1.00–1.30 | 0.40–0.49 |
+| Private window b2-29, live action (0, 2) | 0.13–0.17 / 0.56–0.64 / 2.3–2.6 | 0.11–0.14 · 0.43–0.50 | 0.46–0.55 | 0.28–0.30 |
+| Private window b2-19, animation, MMR chroma (0, 2) | 0.08–0.10 / 0.44–0.50 / 1.1–1.2 | 0.01 · 0.35–0.36 | 0.31–0.38 | 0.16–0.17 |
+
+**Decision: go.** Every title exceeds the mean (0.01) and maximum (0.1)
+ΔE_ITP floors on the filters alone, and *Michael* and b2-29 also exceed
+the 0.5-code band RMS. Milestone 5.3 should reproduce the specified
+filters, compose before chroma up-sampling and round to `hdr_bit_depth`
+as clause 5.4.3.3 does.
+
+**Also found.**
+
+- The GPU's bilinear weights are not exact: 4–11 % of pixels round the
+  resampled EL one code away from exact arithmetic (one 12-bit code after
+  LINEAR_DZ). Today's output therefore differs by a code between GPUs; an
+  integer composition stage removes that.
+- All four Profile 7 windows on hand were FEL and admitted (their
+  `vdr_in_max` cannot bind); two could not be captured by
+  `capture_layers` (packet timing) and are not measured.
+- Limits: measured on macOS (MoltenVK, Homebrew libplacebo 7.387), not
+  the worker's pinned build; two frames per title. The synthetic controls
+  are not yet measured.

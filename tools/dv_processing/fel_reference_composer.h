@@ -341,6 +341,10 @@ struct frc_picture {
 struct frc_output {
   uint16_t *data[3];
   ptrdiff_t stride[3];  // in samples; planes are the BL plane sizes
+  // Optional, for measurement only: when set, also receives v + r, the
+  // 16-bit-domain sum before clause 5.4.3.3 adds the rounding term, shifts
+  // to hdr_bit_depth and clamps. Same strides as data.
+  int32_t *unrounded[3];
 };
 
 // Composes one picture (clause 5.4). The EL may be NULL only when
@@ -423,6 +427,9 @@ static inline const char *frc_compose(const struct frc_params *p,
           r = frc_nlq_linear_dz(p, c, e[c][(ptrdiff_t)j * e_stride[c] + i]);
         out->data[c][(ptrdiff_t)j * out->stride[c] + i] =
             frc_reconstruct(p, v, r);
+        if (out->unrounded[c])
+          out->unrounded[c][(ptrdiff_t)j * out->stride[c] + i] =
+              p->disable_residual ? v : v + r;
       }
     }
   }
