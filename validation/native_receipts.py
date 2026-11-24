@@ -104,7 +104,8 @@ BUILD_SPECS = {
     # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
     # fingerprints and case compatibility. Resource, script, or flag changes
     # require a newly reviewed boundary, not counter normalization.
-    'clients/apple/project.yml': 'a7bc734f070f8001c1b8063ad1dcfac35e3448dec2f0bf24378e59abadb7ca7d',
+    # release: v0.9.0 changes only MARKETING_VERSION "0.8.0" -> "0.9.0".
+    'clients/apple/project.yml': '4bffefdd493a84aff0a7dadf4b3a61cc199d3466bfaa2fe7f6a8baac6dde793e',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -143,7 +144,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "6727fdbb3e7cc765438b8978b8e3268785b9df1ea874b6affcd696e650af30a1"
+APPLE_PROJECT_SHAPE = "3277b13012ad9a56dd2f7543a1478e3a93ae526613a16ae6ae9fbcfb492d74c6"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 
