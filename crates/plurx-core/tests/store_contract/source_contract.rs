@@ -100,7 +100,8 @@ impl SourceContractCluster {
             let mut joined_config = one_voter_config(&directory);
             joined_config.cluster.advertise_host = "localhost".into();
             // The startup observer serves this node's clock on the socket.
-            let clock = std::net::TcpListener::bind("127.0.0.1:0").expect("distinct clock listener");
+            let clock =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("distinct clock listener");
             joined_config.server.bind = clock.local_addr().expect("clock listener address");
             joined_config.cluster.join_token_file = path;
             self.uncertain_selection_roots.push(directory.clone());

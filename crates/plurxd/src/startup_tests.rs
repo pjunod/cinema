@@ -431,8 +431,9 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
             .expect("SQLite source"),
     );
-    let source_owner = Arc::new(StartupObservationHttp::from_std_listener(source_http)
-            .expect("owned HTTP socket"));
+    let source_owner = Arc::new(
+        StartupObservationHttp::from_std_listener(source_http).expect("owned HTTP socket"),
+    );
     let source = select_daemon_store_observing(
         &source_config,
         Some(&crate::cluster::StartupClockAdapter(source_owner.as_ref())),
@@ -494,8 +495,9 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
     let token_path = joining_root.path().join("join.token");
     std::fs::write(&token_path, format!("{}\n", token.token)).expect("test token");
     joining_config.cluster.join_token_file = token_path.clone();
-    let joining_owner = Arc::new(StartupObservationHttp::from_std_listener(joining_http)
-            .expect("owned HTTP socket"));
+    let joining_owner = Arc::new(
+        StartupObservationHttp::from_std_listener(joining_http).expect("owned HTTP socket"),
+    );
     let observed = Arc::new(AtomicBool::new(false));
     let standing = Arc::new(std::sync::Mutex::new(None));
     let observer = AuditObserver {

@@ -33,7 +33,6 @@ mod causal_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-
     fn clock_app(
         manager: MembershipManager,
         node: String,
@@ -155,8 +154,10 @@ mod causal_tests {
             plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
                 .expect("schema"),
         );
-        let startup = Arc::new(crate::StartupObservationHttp::from_std_listener(source_http)
-            .expect("owned HTTP socket"));
+        let startup = Arc::new(
+            crate::StartupObservationHttp::from_std_listener(source_http)
+                .expect("owned HTTP socket"),
+        );
         let selected = select_daemon_store_observing(
             &source_config,
             Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
@@ -289,9 +290,7 @@ mod causal_tests {
             learner_id.clone(),
             learner_observer.clone(),
         );
-        learner_socket
-            .set_nonblocking(true)
-            .expect("learner HTTP");
+        learner_socket.set_nonblocking(true).expect("learner HTTP");
         let learner_listener =
             tokio::net::TcpListener::from_std(learner_socket).expect("learner HTTP");
         let learner_http = {

@@ -86,8 +86,7 @@ async fn build_receiver_fixture(
     config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     let startup_clock = advertised_http.map(|listener| {
         Arc::new(
-            crate::StartupObservationHttp::from_listener(listener)
-                .expect("advertised HTTP socket"),
+            crate::StartupObservationHttp::from_listener(listener).expect("advertised HTTP socket"),
         )
     });
     let mut selected = if let Some(clock) = &startup_clock {

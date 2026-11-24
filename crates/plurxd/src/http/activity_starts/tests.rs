@@ -395,7 +395,6 @@ mod fleet {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     use std::path::PathBuf;
 
-
     /// A learner admitted through the production token-file join.
     async fn join_learner(
         leader: &plurx_core::cluster::membership::MembershipManager,
@@ -415,8 +414,10 @@ mod fleet {
             .expect("owned learner token file");
         let (mut learner_config, learner_http) = crate::owned_loopback_config(root.path());
         learner_config.cluster.join_token_file = token_path;
-        let startup = Arc::new(crate::StartupObservationHttp::from_std_listener(learner_http)
-            .expect("owned HTTP socket"));
+        let startup = Arc::new(
+            crate::StartupObservationHttp::from_std_listener(learner_http)
+                .expect("owned HTTP socket"),
+        );
         let selected = tokio::time::timeout(
             Duration::from_secs(45),
             Box::pin(select_daemon_store_observing(
@@ -478,8 +479,10 @@ mod fleet {
             plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
                 .expect("schema"),
         );
-        let startup = Arc::new(crate::StartupObservationHttp::from_std_listener(source_http)
-            .expect("owned HTTP socket"));
+        let startup = Arc::new(
+            crate::StartupObservationHttp::from_std_listener(source_http)
+                .expect("owned HTTP socket"),
+        );
         let selected = select_daemon_store_observing(
             &source_config,
             Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
