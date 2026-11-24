@@ -1,7 +1,7 @@
 # FEL reference composition — build plan
 
-**Status:** proposed — not started; awaiting owner go-ahead for milestones 1–2
-(measurement only) · **Written:** 2026-11-23 · **Owner:** Claude ·
+**Status:** in progress — owner approved milestones 5.1–5.2 on 2026-11-24;
+5.1 built (section 8), 5.2 next · **Written:** 2026-11-23 · **Owner:** Claude ·
 **Source baseline:** `bb2f165`
 
 Companion to [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) (the
@@ -174,3 +174,74 @@ scheduling.
 - `E-C599053EB8` — F+ qualification and PR #1565. Milestone 5.5 re-scores
   against it and must not run while its trials are in flight.
 - `E-AEFB11302B` — `rog_hdr_dv` upstream work. Milestone 5.6 lands there.
+
+## 8. Specification clause map (milestone 5.1)
+
+The oracle is [`fel_reference_composer.h`](../../tools/dv_processing/fel_reference_composer.h);
+its hand-computed vectors are
+[`test_fel_reference_composer.c`](../../tools/dv_processing/test_fel_reference_composer.c),
+run by `tools/dv_processing/test_metadata.py`
+(`test_fel_reference_composer_vectors`, under the undefined-behaviour
+sanitizer). Source: ETSI GS CCM 001 V1.1.1 (2017-02), the free ETSI
+publication; the PDF is not committed.
+
+| Stage | Clause | Function | Vectors cover |
+|---|---|---|---|
+| Arithmetic shift | 3.2.2 | `frc_asr` | negative values floor |
+| Pivot values | 5.3.2 `Assign_pivot_values` | `frc_assign_pivot_values` | running sum |
+| Pivot index | 5.4.2.2 | `frc_pivot_index` | each boundary, top pivot (R2) |
+| Polynomial mapping | 5.4.2.3.2 | `frc_map_polynomial` | linear, quadratic, negative and 16-bit clamps, pivot clamp, 8-bit BL |
+| MMR luma down-sampling | 5.4.2.3.3 | `frc_downsample_luma` | interior and replicated edge (R1) |
+| MMR mapping | 5.4.2.3.3 | `frc_map_mmr` | each order's cross term, a square term, per-component pivot clamp, largest legal coefficients (R6) |
+| NLQ_LINEAR_DZ and the `hdr_in_max` (`vdr_in_max`) clamp | 5.4.3.2 | `frc_nlq_linear_dz` | dead centre, ±1 code, range ends, threshold, binding clamp inside the code range, floor of negatives, 8-bit EL |
+| Reconstruction | 5.4.3.3 | `frc_reconstruct` | half-up rounding, both clamps, `disable_residual_flag`, 10-bit output |
+| EL vertical up-sampling, luma and chroma | Annex B.3 | `frc_el_up_vertical` | step response, overshoot (R4), chroma phase |
+| EL horizontal up-sampling | Annex B.2, B.3 | `frc_el_up_horizontal` | even copy, odd taps, undershoot clip |
+| Whole picture | 5.4, Annex B.3 | `frc_compose` | zero and constant residual, MMR at a chroma site, refusals |
+
+**Readings where the text is ambiguous.** Each is one edit if a certified
+capture later disagrees.
+
+- **R1. Down-sampling index order.** Clause 5.4.2.3.3 writes
+  s\*<sub>i,j</sub> from s<sub>2i±1,2j</sub> and s<sub>2i±1,2j+1</sub> without
+  naming which index is horizontal. Read as *i* horizontal: a [1 2 1]
+  horizontal tap on two rows, averaged, which is chroma co-sited
+  horizontally and midway vertically. That is the siting Annex B.3's 1/4–3/4
+  vertical chroma filter implies.
+- **R2. Index past the last piece.** Clause 5.4.2.2 returns
+  `num_pivots_minus2 + 1` for a sample at or above the top pivot, which names
+  no coefficients. The mapping clamps such a sample to the top pivot, so the
+  last piece is used.
+- **R3. Resampling is informative.** Clause 4 note 1 makes resampling
+  non-normative; Annex B is "a reference implementation". The oracle uses
+  Annex B for a half-resolution EL because the helper admits only RPUs with
+  `el_spatial_resampling_filter_flag` set and no explicit filter. The
+  oracle does not cover the BL resampling of Annex B.2 (Profile 7 BL is full
+  resolution).
+- **R4. EL overshoot.** Annex B clips filter output to 0..0xFFFF, not to
+  the EL code range, so an up-sampled EL code can exceed 2<sup>EL_bit_depth</sup>−1
+  before dequantisation. Kept as written.
+- **R5. Denominator range.** Clause 5.3.2 says `EL_bit_depth + 5` to 32;
+  Annex A says 0 to 23. The oracle accepts 5.3.2's range (its lower bound
+  keeps clause 5.4.3.2's final shift nonnegative). The admitted subset's 23
+  satisfies both.
+- **R6. Register width.** No clause states one. The largest coefficients
+  the syntax allows overflow a 64-bit MMR sum (22 terms of up to 2<sup>59</sup>), so
+  the oracle sums in 128 bits; every other intermediate fits 64 bits exactly.
+- **R7. Typography.** Two expressions have an unbalanced parenthesis
+  (`RR = (R << …` in 5.4.3.2, `v = (rr >> …` in 5.4.2.3.3), read with the
+  only balanced meaning. `rr <<= 1` on a negative `rr` is a two's-complement
+  left shift (3.2.2), implemented as a multiply.
+- **R8. MMR order.** Clause 5.4.2.3.3 lists `MMR_order` as 0 to 3;
+  clause 5.3.3.3 bounds `mmr_order_minus1` to 0..2. The oracle takes 1 to 3.
+- **R9. RPU names.** CCM 001 names `hdr_in_max` and `hdr_bit_depth`; the
+  Profile 7 RPU carries `vdr_in_max` and `vdr_bit_depth`. Clause 5.3.1 lets
+  the parameters come "by other means"; the 5.2 adapter maps one to the
+  other and records it beside the measurement.
+- **R10. Out of scope.** A BT.1886 base layer (14-bit reconstruction and
+  clause 5.5's conversion) is refused; Profile 7 BL is PQ.
+
+The risk in section 6 about an erratum in one MMR index was checked against
+the text alone: the term table in 5.4.2.3.3 is internally consistent (each
+second- and third-order term is a product of lower ones), so no erratum
+reading was needed. CB1 was not consulted.
