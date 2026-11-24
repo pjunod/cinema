@@ -785,6 +785,71 @@ async fn terminal_tombstone_replays_410_for_the_retention_window_then_releases()
     );
 }
 
+/// A closing finite role cannot drain its client-slot partition while its own
+/// terminal records live, so it releases them before the replay window ends.
+/// Only that rendition's finished, durably non-live records leave.
+#[tokio::test(start_paused = true)]
+async fn closing_rendition_releases_its_own_non_live_terminal_records_before_retention() {
+    let base = crate::test_tempdir().expect("base");
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let serve = local_serve(base.path().to_path_buf(), store.clone());
+    let rendition = synthetic_rendition(base.path()).await;
+    let key = rendition.key.clone();
+
+    let ended_id = uuid::Uuid::new_v4().to_string();
+    activate_ended_route(store.as_ref(), &ended_id, &uuid::Uuid::new_v4().to_string()).await;
+    insert_finished_terminal_session(&serve, &ended_id, Arc::clone(&rendition)).await;
+
+    let active_id = uuid::Uuid::new_v4().to_string();
+    activate_control_route(store.as_ref(), &active_id, &uuid::Uuid::new_v4().to_string()).await;
+    insert_finished_terminal_session(&serve, &active_id, Arc::clone(&rendition)).await;
+
+    let running_id = uuid::Uuid::new_v4().to_string();
+    activate_ended_route(store.as_ref(), &running_id, &uuid::Uuid::new_v4().to_string()).await;
+    insert_terminal_session(
+        &serve,
+        &running_id,
+        Arc::clone(&rendition),
+        Arc::new(TerminalCleanup::new()),
+    )
+    .await;
+
+    let other_id = uuid::Uuid::new_v4().to_string();
+    activate_ended_route(store.as_ref(), &other_id, &uuid::Uuid::new_v4().to_string()).await;
+    insert_finished_terminal_session(&serve, &other_id, Arc::clone(&rendition)).await;
+    serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut(&other_id)
+        .expect("other terminal session")
+        .rendition_key = format!("{key}-other");
+
+    // Ordinary maintenance keeps every record inside the replay window.
+    serve.maintain().await;
+    assert_eq!(serve.shared.sessions.lock().await.len(), 4);
+
+    serve.shared.release_terminal_records(Some(&key)).await;
+    let sessions = serve.shared.sessions.lock().await;
+    assert!(
+        !sessions.contains_key(&ended_id),
+        "the closing rendition's finished non-live record is released"
+    );
+    assert!(
+        sessions.contains_key(&active_id),
+        "an active durable route is retained"
+    );
+    assert!(
+        sessions.contains_key(&running_id),
+        "an unfinished cleanup keeps its record"
+    );
+    assert!(
+        sessions.contains_key(&other_id),
+        "another rendition's record keeps its replay window"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn terminal_graphs_compact_immediately_and_route_eviction_is_fair_and_fail_closed() {
     const ENDED_COUNT: usize = TERMINAL_ROUTE_CONFIRM_BATCH * 2 + 3;

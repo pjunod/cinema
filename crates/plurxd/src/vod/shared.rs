@@ -1134,6 +1134,103 @@ impl Shared {
         .is_some_and(|route| route.as_ref().is_none_or(|route| route.state != "active"))
     }
 
+    /// Release terminal response-owner records whose cleanup has finished,
+    /// whose acknowledgement window has closed, and whose capability a fresh
+    /// durable read proves non-live. The Store keeps the terminal reason, so
+    /// a later control or release still answers from the durable route.
+    ///
+    /// Without a rendition this is the maintenance pass: only records whose
+    /// late-410 retention window has expired, one bounded rotating batch per
+    /// call. With a rendition key, that rendition's finite role is closing:
+    /// its records still hold client slots in the role's allocation
+    /// partition, so the role can neither drain nor refund while they live.
+    /// They are released without waiting for the retention timer, the same
+    /// step the ordinary shutdown finalizer takes before S waits.
+    pub(super) async fn release_terminal_records(&self, closing_rendition: Option<&str>) {
+        let eligible = |session: &Session, cleanup: &Arc<TerminalCleanup>| {
+            session.tombstone.is_some()
+                && cleanup.is_finished()
+                && session.terminal_replay_expired()
+                && match closing_rendition {
+                    Some(key) => session.rendition_key == key,
+                    None => cleanup.retention_expired(),
+                }
+        };
+        let mut candidates = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    let cleanup = session.terminal_cleanup.as_ref()?;
+                    eligible(session, cleanup).then(|| TerminalEvictionCandidate {
+                        session_id: session_id.clone(),
+                        lifecycle: Arc::clone(&session.lifecycle),
+                        incarnation: Arc::clone(&session.incarnation),
+                        cleanup: Arc::clone(cleanup),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        // Confirm one bounded, fair batch per maintenance tick. A Store
+        // timeout therefore costs at most one timeout interval instead of one
+        // interval per fanout wave, while rotating the start prevents a
+        // consistently bad route from pinning every candidate behind it. A
+        // closing rendition confirms all of its own records.
+        if closing_rendition.is_none() && !candidates.is_empty() {
+            candidates.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+            let start = self
+                .terminal_eviction_cursor
+                .fetch_add(TERMINAL_ROUTE_CONFIRM_BATCH as u64, Relaxed)
+                as usize
+                % candidates.len();
+            candidates.rotate_left(start);
+            candidates.truncate(TERMINAL_ROUTE_CONFIRM_BATCH);
+        }
+        // Store I/O stays outside both the per-id lifecycle gate and the
+        // node-wide session registry lock.
+        let confirmed = futures_util::stream::iter(candidates.into_iter().map(|candidate| async {
+            self.terminal_route_durably_non_live(&candidate.session_id)
+                .await
+                .then_some(candidate)
+        }))
+        .buffer_unordered(TERMINAL_ROUTE_CONFIRM_FANOUT)
+        .filter_map(std::future::ready)
+        .collect::<Vec<_>>()
+        .await;
+        for candidate in confirmed {
+            let _lifecycle = candidate.lifecycle.lock().await;
+            let removed = {
+                let mut sessions = self.sessions.lock().await;
+                let exact_terminal = sessions.get(&candidate.session_id).is_some_and(|session| {
+                    Arc::ptr_eq(&session.lifecycle, &candidate.lifecycle)
+                        && Arc::ptr_eq(&session.incarnation, &candidate.incarnation)
+                        && session.terminal_cleanup.as_ref().is_some_and(|cleanup| {
+                            Arc::ptr_eq(cleanup, &candidate.cleanup) && eligible(session, cleanup)
+                        })
+                });
+                if exact_terminal {
+                    if let Some(session) = sessions.get(&candidate.session_id) {
+                        session.invalidate_observational_attachment();
+                    }
+                    sessions.remove(&candidate.session_id)
+                } else {
+                    None
+                }
+            };
+            // Drop the record, and with it any finite client slots, outside
+            // the registry lock.
+            if removed.is_some() {
+                drop(removed);
+                tracing::debug!(
+                    target: "plurxd::vodserve",
+                    session = %session_log_id(&candidate.session_id),
+                    closing_rendition = closing_rendition.is_some(),
+                    "released a VOD terminal response-owner tombstone"
+                );
+            }
+        }
+    }
+
     pub(super) fn session_lifecycle(&self, session_id: &str) -> Arc<Mutex<()>> {
         let mut lifecycles = self
             .session_lifecycles
@@ -3144,6 +3241,9 @@ impl Shared {
                 let Some(output) = output else {
                     return Err("original finite output is missing".into());
                 };
+                // This rendition's terminal records still hold client slots in
+                // the partition the wait below drains.
+                self.release_terminal_records(Some(key)).await;
                 let first = (Instant::now() + Duration::from_secs(3)).min(deadline);
                 if output.wait_allocations_release(first).await.is_err() {
                     let survivor = rich_weak.as_ref().and_then(Weak::upgrade);
@@ -3344,6 +3444,9 @@ impl Shared {
                 let Some(output) = output else {
                     return;
                 };
+                // This rendition's terminal records still hold client slots in
+                // the partition the wait below drains.
+                self.release_terminal_records(Some(key)).await;
                 if let Err(error) = output.wait_allocations_release(deadline).await {
                     tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                         %error, "finite metadata or response remains live; cleanup retained");
