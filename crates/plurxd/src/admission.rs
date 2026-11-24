@@ -1602,8 +1602,10 @@ pub fn software_budget() -> usize {
 /// past the budget if it must be: a paused copy could free memory only by
 /// reading more, so a viewer would stall behind another copy's steady hold.
 /// Background growth waits (backpressure) behind every live waiter, unless
-/// it is the pool's only holder. Nothing grows past the node's own memory
-/// (`ceiling`): a copy that would is too large for this node.
+/// it is the pool's only holder. Growth of either kind waits while the
+/// node's total would pass its own memory (`ceiling`), which other copies'
+/// ending relieves; only a copy over the ceiling even alone is too large for
+/// this node.
 #[derive(Debug)]
 pub struct CopyMemoryPool {
     state: Mutex<CopyMemoryState>,

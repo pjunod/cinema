@@ -279,7 +279,11 @@ where
                 event=pipes.next()=>event.ok_or("copy_output_readers_lost")?,
             };
             let eof = pipes.all_eof();
-            let events = mux.step(event, fill.stop).await?;
+            // No stall rule judges a gap fill, so its memory wait is not
+            // mirrored; the fill's phase stop ends that wait.
+            let (events, _) = mux
+                .step(event, fill.stop, &super::meter::HoldMirror::default())
+                .await?;
             let cut = super::observed::cuts(&events);
             // The batch keeps only rows and inspections (bounded by
             // max_rows); the segment's media is dropped with `events`.

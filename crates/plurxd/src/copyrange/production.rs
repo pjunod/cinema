@@ -535,10 +535,13 @@ impl CopyRangeProduction {
                 meter.child(waiting.elapsed());
                 let eof=pipes.all_eof();
                 let converting=tokio::time::Instant::now();
-                // A live copy's growth is granted at once: it never waits here.
-                let events=mux.step(event,&self.stop).await?;
+                // Growth waits here only while the node's total would pass
+                // its memory; the stall rule excuses that wait as its own.
+                let (events,memory)=mux.step(event,&self.stop,self.stall.memory_wait()).await?;
                 let cut=super::observed::cuts(&events);
-                meter.convert(converting.elapsed());
+                meter.memory(memory);
+                meter.convert(converting.elapsed().saturating_sub(memory));
+                if memory>=target{meter.waited_for_memory(memory);}
                 self.apply(events,&census,canonical_title_start,&mut meter).await?;
                 // Only once the cut's segment is committed and dropped.
                 mux.after_apply(cut).await;
@@ -718,6 +721,25 @@ mod commit_wait_tests {
         assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Stalled));
         producer.commit();
         assert_eq!(request(&producer, 3).await, Err(DeadlineEnd::Slow));
+    }
+
+    /// A copy waiting for node memory (other copies hold it) commits nothing,
+    /// and that is not a stall, whether the wait began before the request or
+    /// during it; once it no longer waits, a request that sees no commit is.
+    #[tokio::test(start_paused = true)]
+    async fn a_copy_waiting_for_node_memory_is_not_stuck() {
+        let producer = Producer::default();
+        producer.commit();
+        producer.stall.memory_wait().set(true);
+        assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Slow));
+        producer.stall.memory_wait().set(false);
+        let waiter = CommitWaiter::begin(&producer, tokio::time::Instant::now() + WINDOW).await;
+        producer.stall.memory_wait().set(true);
+        producer.stall.memory_wait().set(false);
+        let changed = producer.changed.notified();
+        tokio::pin!(changed);
+        assert_eq!(waiter.changed(changed).await, Err(DeadlineEnd::Slow));
+        assert_eq!(request(&producer, 2).await, Err(DeadlineEnd::Stalled));
     }
 
     /// A copy that finished or stopped committed nothing too, and is not

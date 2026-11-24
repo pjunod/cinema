@@ -286,16 +286,18 @@ impl ObservedCopyMux {
     }
     /// Fit this copy's charge to `event`, then feed it: the one step both
     /// drive loops take per event. The caller applies the returned events,
-    /// then calls [`Self::after_apply`].
+    /// then calls [`Self::after_apply`]. Also returns how long the fit
+    /// waited for memory, which `waiting` mirrors while it lasts.
     pub(crate) async fn step(
         &mut self,
         event: CopyPipeEvent,
         stop: &tokio_util::sync::CancellationToken,
-    ) -> Result<Vec<CopyMuxEvent>, String> {
-        self.fit(&event, stop).await?;
+        waiting: &super::meter::HoldMirror,
+    ) -> Result<(Vec<CopyMuxEvent>, std::time::Duration), String> {
+        let waited = self.fit(&event, stop, waiting).await?;
         let events = self.feed(event)?;
         self.covers(&events);
-        Ok(events)
+        Ok((events, waited))
     }
     /// After the events of a step are applied (a cut's segment committed and
     /// dropped), return what the copy no longer holds.
@@ -328,28 +330,48 @@ impl ObservedCopyMux {
         Arc::clone(&self.peak_held)
     }
     /// Fit this copy's charge to what accepting `event` needs, before it is
-    /// fed. A live copy is granted at once; a background copy waits here
-    /// (its drive loop reads no pipe meanwhile, so the child blocks on all
-    /// of them together) until the budget has room or `stop` ends it. More
-    /// than this node can hold ends the copy as too large for it.
+    /// fed, and return how long that waited. Growth waits (its drive loop
+    /// reads no pipe meanwhile, so the child blocks on all of them together)
+    /// while the node's total would pass its memory, and a background copy
+    /// also waits for the budget ([`crate::admission::CopyMemoryPermit::resize`]),
+    /// until there is room or `stop` ends it. More than this node can hold
+    /// even alone ends the copy as too large for it.
     ///
-    /// No stall rule judges a background copy today (only live copies, which
-    /// never wait here, have one). A stall rule added for gap fills must
-    /// treat this wait as a cause of its own, never as a stuck producer.
+    /// `waiting` is set for as long as the growth waits, so the copy's stall
+    /// rule judges that wait as its own cause, never as a stuck producer.
+    /// Growth granted at once is not a wait and leaves it untouched.
     pub(crate) async fn fit(
         &self,
         event: &CopyPipeEvent,
         stop: &tokio_util::sync::CancellationToken,
-    ) -> Result<(), String> {
+        waiting: &super::meter::HoldMirror,
+    ) -> Result<std::time::Duration, String> {
         let need = self.need_for(event);
         if need <= self.memory.bytes() {
-            return Ok(());
+            return Ok(std::time::Duration::ZERO);
         }
+        let refused = |_| "copy_range_input_limit".to_owned();
+        let grow = self.memory.resize(need);
+        tokio::pin!(grow);
+        let first = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(grow.as_mut(), cx))
+        })
+        .await;
+        if let std::task::Poll::Ready(grown) = first {
+            return grown.map(|()| std::time::Duration::ZERO).map_err(refused);
+        }
+        struct Waiting<'a>(&'a super::meter::HoldMirror);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        waiting.set(true);
+        let _waiting = Waiting(waiting);
+        let began = tokio::time::Instant::now();
         tokio::select! {biased;
             () = stop.cancelled() => Err("copy_range_cancelled".to_owned()),
-            grown = self.memory.resize(need) => {
-                grown.map_err(|_| "copy_range_input_limit".to_owned())
-            }
+            grown = &mut grow => grown.map(|()| began.elapsed()).map_err(refused),
         }
     }
     /// After a cut's segment has been committed and dropped, return what
@@ -869,6 +891,7 @@ fn observation_error(error: plurx_core::segplan::observed_range::ObservationErro
 #[cfg(test)]
 mod hold_tests {
     use super::{admission_charge, CopyMuxEvent, ObservedCopyMux};
+    use crate::copyrange::meter::HoldMirror;
     /// A copy's audio track rate, as the recipe reserves for AAC.
     const AUDIO: u32 = 256_000;
     use crate::admission::{CopyMemoryPool, CopyPriority};
@@ -1004,7 +1027,7 @@ mod hold_tests {
         let event = CopyPipeEvent::Data(CopyPipeKind::Av, init.clone());
         let stop = tokio_util::sync::CancellationToken::new();
         let live = mux().await;
-        live.fit(&event, &stop)
+        live.fit(&event, &stop, &HoldMirror::default())
             .await
             .expect("a live copy grows at once");
         assert!(live.memory().bytes() >= init.len() as u64);
@@ -1029,7 +1052,7 @@ mod hold_tests {
         assert_eq!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                background.fit(&event, &stop)
+                background.fit(&event, &stop, &HoldMirror::default())
             )
             .await
             .expect("the stop ends the wait"),
@@ -1037,6 +1060,61 @@ mod hold_tests {
             "it waited for memory until its phase stopped"
         );
         assert_eq!(began.elapsed(), std::time::Duration::from_secs(5));
+    }
+
+    /// A live copy whose growth would pass the node's total waits for
+    /// another copy to end. The wait is mirrored for exactly as long as it
+    /// lasts (so the stall rule can excuse it) and its length is returned;
+    /// growth granted at once leaves the mirror untouched.
+    #[tokio::test(start_paused = true)]
+    async fn a_live_wait_at_the_node_total_is_mirrored_and_timed() {
+        let (init, _, _, _) = authored();
+        let event = CopyPipeEvent::Data(CopyPipeKind::Av, init.clone());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let waiting = HoldMirror::default();
+        let quiet = mux().await;
+        assert_eq!(
+            quiet.fit(&event, &stop, &waiting).await,
+            Ok(std::time::Duration::ZERO)
+        );
+        let untouched = waiting.mark();
+        assert!(!waiting.held_since(untouched), "granted at once is no wait");
+
+        let ceiling = 1 << 20;
+        let pool = CopyMemoryPool::with_ceiling(1 << 30, ceiling);
+        let other = pool
+            .acquire(ceiling - 1, CopyPriority::Live, tokio::time::Instant::now())
+            .await
+            .expect("the other copy");
+        let live = mux_with(Arc::new(
+            pool.acquire(1, CopyPriority::Live, tokio::time::Instant::now())
+                .await
+                .expect("an over-budget live arrival within the node"),
+        ))
+        .await;
+        let mark = waiting.mark();
+        let ending = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+            drop(other);
+        });
+        let fitting = live.fit(&event, &stop, &waiting);
+        tokio::pin!(fitting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut fitting)
+                .await
+                .is_err(),
+            "the node's total cannot take it yet"
+        );
+        assert!(waiting.is_held(), "mirrored while it waits");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(30), fitting)
+                .await
+                .expect("the other copy's ending relieves it"),
+            Ok(std::time::Duration::from_secs(7))
+        );
+        assert!(!waiting.is_held(), "cleared once granted");
+        assert!(waiting.held_since(mark), "a wait since the mark is visible");
+        ending.await.expect("ending");
     }
 
     /// After a cut, the charge returns to what the copy still holds; a fit
@@ -1056,11 +1134,13 @@ mod hold_tests {
         let huge = CopyPipeEvent::Data(CopyPipeKind::Av, vec![0; 2 << 20]);
         let stop = tokio_util::sync::CancellationToken::new();
         assert_eq!(
-            mux.fit(&huge, &stop).await,
+            mux.fit(&huge, &stop, &HoldMirror::default()).await,
             Err("copy_range_input_limit".to_owned())
         );
         let small = CopyPipeEvent::Data(CopyPipeKind::Av, init);
-        mux.fit(&small, &stop).await.expect("within the node");
+        mux.fit(&small, &stop, &HoldMirror::default())
+            .await
+            .expect("within the node");
     }
 
     /// The held figure is every hold: dropping any term from it fails here.
