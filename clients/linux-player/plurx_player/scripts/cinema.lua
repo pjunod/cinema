@@ -346,26 +346,21 @@ local function playback_info()
     local methods={direct='Direct play',remux='Remux',transcode='Transcode'}
     local transports={progressive='Progressive file · range requests',hls='Segmented HLS'}
     local sessions={none='No server-side session',live='Live HLS session',vod='VOD HLS session'}
-    row('Method',methods[facts.mode])
-    row('Transport',transports[facts.transport])
-    row('Session',sessions[facts.session])
-    local state
-    if prop('eof-reached')==true then state='Ended'
-    elseif prop('paused-for-cache')==true then state='Buffering'
-    elseif prop('pause')==true then state='Paused'
-    elseif prop('pause')==false and prop('idle-active')==false then state='Playing' end
-    row('Player state',state)
-    local total=duration()
-    row('Position',number(prop('time-pos')) and (time(position())..' / '..
-        (number(total) and total>0 and time(total) or 'Unavailable')) or nil)
+    -- Three groups, as in the other clients. Input: what the file and stream
+    -- are, as the source facts and mpv's decoded-stream observations report.
+    -- Processing: how the server and this device handled it (method, transport,
+    -- session, Dolby Vision mapper, enhancements and the server's metadata and
+    -- display-target rows, renderer, decoder, decoded audio). Output: what
+    -- reaches the screen and speakers, and playback state and rates.
+    -- Headings are plain text lines.
+    local function heading(name) r[#r+1]={text=name} end
+    local view=snapshot()
+    local source=view.source
+    heading('Input')
+    row('Source dynamic range',joined(observed(source.hdr_format) or RANGE_SHORT[source_range(source) or ''],
+        source.dv_el_present==true and 'enhancement layer present' or nil))
     row('Stream format',joined(observed(prop('video-format')),observed(prop('video-codec'))))
     row('Stream frame (mpv decoder)',dimensions(decoded,'w','h'))
-    row('Player window size',dimensions(osd,'w','h'))
-    if number(osd.w) and number(osd.h) and number(osd.ml) and number(osd.mr)
-            and number(osd.mt) and number(osd.mb) then
-        row('Video display area',dimensions({w=osd.w-osd.ml-osd.mr,
-            h=osd.h-osd.mt-osd.mb},'w','h'))
-    else row('Video display area') end
     row('Pixel format',joined(observed(p.pixelformat),observed(p['hw-pixelformat'])))
     local range
     local sdr={srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
@@ -375,13 +370,15 @@ local function playback_info()
     elseif sdr[p.gamma] then range='SDR (mpv transfer)' end
     row('Dynamic range',range)
     row('Input color',joined(observed(p.primaries),observed(p.gamma),observed(p.colormatrix),observed(p['colorlevels'])))
-    row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
-    row('VO target peak',number(target['max-luma']) and target['max-luma']>0
-        and measurement(target['max-luma'],'%.0f nits') or nil)
-    local view=snapshot()
-    local source=view.source
-    row('Source dynamic range',joined(observed(source.hdr_format) or RANGE_SHORT[source_range(source) or ''],
-        source.dv_el_present==true and 'enhancement layer present' or nil))
+    local selected
+    for _,track in ipairs(prop('track-list',{})) do
+        if track.type=='audio' and track.selected then selected=track; break end
+    end
+    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang)))
+    heading('Processing')
+    row('Method',methods[facts.mode])
+    row('Transport',transports[facts.transport])
+    row('Session',sessions[facts.session])
     row('Dolby Vision mapper',observed((view.renderer or {}).label))
     local active,details,order=enhancement_state(view)
     if #order==0 then
@@ -394,20 +391,48 @@ local function playback_info()
             end
         end
     end
+    -- The server's two rows, already validated by the launcher; an absent row
+    -- is omitted rather than shown as Unavailable.
+    local provenance=type(view.facts.provenance)=='table' and view.facts.provenance or {}
+    for _,spec in ipairs({{'dv_metadata','Dolby Vision metadata'},{'display_target','Display target'}}) do
+        local item=provenance[spec[1]]
+        if type(item)=='table' and type(item.value)=='string' then
+            row(spec[2],item.value)
+            for _,sub in ipairs(table_of(item.rows)) do
+                if type(sub)=='table' and type(sub.label)=='string' and type(sub.text)=='string' then
+                    for _,line in ipairs(wrapped(sub.label..': '..sub.text,columns)) do r[#r+1]={text=line} end
+                end
+            end
+        end
+    end
     row('Renderer',joined(observed(prop('current-vo')),observed(prop('current-gpu-context'))))
     local hw=observed(prop('hwdec-current'))
     row('Decoder',hw=='no' and 'Software (mpv)' or hw)
+    row('Decoded audio',audio_format(table_prop('audio-params')))
+    heading('Output')
+    local state
+    if prop('eof-reached')==true then state='Ended'
+    elseif prop('paused-for-cache')==true then state='Buffering'
+    elseif prop('pause')==true then state='Paused'
+    elseif prop('pause')==false and prop('idle-active')==false then state='Playing' end
+    row('Player state',state)
+    local total=duration()
+    row('Position',number(prop('time-pos')) and (time(position())..' / '..
+        (number(total) and total>0 and time(total) or 'Unavailable')) or nil)
+    row('Player window size',dimensions(osd,'w','h'))
+    if number(osd.w) and number(osd.h) and number(osd.ml) and number(osd.mr)
+            and number(osd.mt) and number(osd.mb) then
+        row('Video display area',dimensions({w=osd.w-osd.ml-osd.mr,
+            h=osd.h-osd.mt-osd.mb},'w','h'))
+    else row('Video display area') end
+    row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
+    row('VO target peak',number(target['max-luma']) and target['max-luma']>0
+        and measurement(target['max-luma'],'%.0f nits') or nil)
+    row('Device audio output',joined(observed(prop('current-ao')),audio_format(table_prop('audio-out-params'))))
     row('Frame rate (estimated)',measurement(prop('estimated-vf-fps'),'%.2f fps'))
-    row('Video bitrate (packets)',bitrate(prop('video-bitrate')))
     row('Dropped frames (renderer)',measurement(prop('frame-drop-count'),'%.0f'))
     row('Dropped frames (decoder)',measurement(prop('decoder-frame-drop-count'),'%.0f'))
-    local selected
-    for _,track in ipairs(prop('track-list',{})) do
-        if track.type=='audio' and track.selected then selected=track; break end
-    end
-    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang)))
-    row('Decoded audio',audio_format(table_prop('audio-params')))
-    row('Device audio output',joined(observed(prop('current-ao')),audio_format(table_prop('audio-out-params'))))
+    row('Video bitrate (packets)',bitrate(prop('video-bitrate')))
     row('Audio bitrate (packets)',bitrate(prop('audio-bitrate')))
     -- mpv keeps decoding while a script runs: capture once before checking,
     -- since a property may disappear between requests during reattachment.
