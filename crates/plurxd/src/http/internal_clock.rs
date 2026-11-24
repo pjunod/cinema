@@ -210,7 +210,10 @@ mod causal_tests {
         let learner_listeners = learner_config
             .cluster
             .listeners
-            .lend(learner_config.cluster.raft_bind, learner_config.cluster.api_bind)
+            .lend(
+                learner_config.cluster.raft_bind,
+                learner_config.cluster.api_bind,
+            )
             .expect("lend the learner's sockets")
             .map(|owned| hiqlite::NodeListeners {
                 raft: owned.raft,
