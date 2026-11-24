@@ -7565,3 +7565,60 @@ async fn the_artwork_sweep_stamps_a_season_when_tmdb_has_no_poster() {
     assert_eq!(show_hits.load(Ordering::SeqCst), 0);
     assert_eq!(season_hits.load(Ordering::SeqCst), 1);
 }
+
+/// An admin reanalyze while another node runs the probe repair, or on a node
+/// without a vote, is refused with that reason, never as a storage failure.
+#[tokio::test]
+async fn reanalyze_reports_a_held_or_ineligible_probe_repair_as_typed_refusals() {
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let artwork = tempfile::tempdir().expect("artwork");
+    let manager = |node: &str, authority: Arc<dyn ClusterJobAuthority>| {
+        Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            node.to_owned(),
+            authority,
+        ))
+    };
+    let holder = manager(
+        "holder",
+        Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+    );
+    let caller = manager(
+        "caller",
+        Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+    );
+    let lease = holder
+        .acquire_job("repair:probe".to_owned())
+        .await
+        .expect("lease")
+        .expect("the holder takes the probe-repair lease");
+
+    match caller.reanalyze_files(&[]).await {
+        Err(ReprobeError::Busy {
+            owner_node_id,
+            held_here,
+        }) => {
+            assert_eq!(owner_node_id, "holder");
+            assert!(!held_here, "another node holds it");
+        }
+        Err(other) => panic!("a held lease must be Busy, got {other:?}"),
+        Ok(_) => panic!("a held lease must not run a second probe repair"),
+    }
+    let learner = manager("learner", MovableJobAuthority::learner());
+    assert!(
+        matches!(
+            learner.reanalyze_files(&[]).await,
+            Err(ReprobeError::NotEligible)
+        ),
+        "a node without a vote is ineligible, not busy"
+    );
+
+    lease.release().await.expect("release");
+    let report = caller
+        .reanalyze_files(&[])
+        .await
+        .expect("a free lease runs the pass");
+    assert_eq!(report.attempted, 0);
+}

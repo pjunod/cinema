@@ -2955,7 +2955,9 @@ async fn build_real_source_start_fixture(
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
-    drop((raft, api));
+    // Keep the bound sockets: the voter serves on them, so no other socket
+    // can take either port before it starts.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     let startup_clock = advertised_http.map(|listener| {
         Arc::new(
             crate::StartupObservationHttp::from_listener(listener)
