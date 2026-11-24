@@ -118,7 +118,18 @@ fn native_fel_resume_requires_one_unambiguous_copy_video_stream() {
         |streams| native_copy_video_index(&serde_json::json!({"streams": streams}).to_string());
     assert_eq!(select(vec![audio.clone(), video.clone()]), Some(2));
     assert_eq!(select(vec![audio.clone(), cover.clone()]), None);
-    assert_eq!(select(vec![audio, cover, video]), None);
+    // A cover ahead of the picture is what `0:v:0` maps: refused.
+    assert_eq!(select(vec![audio.clone(), cover, video.clone()]), None);
+    // An MKV poster attachment after the picture (Breaking Dawn Part 1 on
+    // nynuc, stream 45) leaves `0:v:0` on the picture: the resume keeps it.
+    let poster = serde_json::json!({
+        "index": 45, "codec_type": "video", "codec_name": "mjpeg",
+        "disposition": {"attached_pic": 1}
+    });
+    assert_eq!(select(vec![audio.clone(), video.clone(), poster]), Some(2));
+    // Two real video tracks stay ambiguous.
+    let second = serde_json::json!({"index": 3, "codec_type": "video"});
+    assert_eq!(select(vec![audio, video, second]), None);
 }
 
 #[cfg(target_os = "linux")]

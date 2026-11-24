@@ -2793,32 +2793,31 @@ impl TranscodeManager {
     }
 }
 
-// The rolling FFmpeg command maps v:0. Use the catalogue's selected
-// absolute index only if that stream is the single video in the held plan.
+// The rolling FFmpeg command maps `0:v:0`, which counts attached pictures as
+// video. Answer that stream's absolute index only when it is the one picture
+// stream in the held plan. An MKV poster attachment *after* the picture (an
+// MJPEG `attached_pic`) does not change what `0:v:0` selects, so it must not
+// refuse the resume. A cover placed before the picture would make `0:v:0` the
+// cover, and a second real video track is ambiguous, so both are still refused.
 #[cfg(target_os = "linux")]
 pub(super) fn native_copy_video_index(probe: &str) -> Option<u32> {
     let document: serde_json::Value = serde_json::from_str(probe).ok()?;
-    let mut videos = document
+    let mapped = crate::decode_facts::absolute_video_ordinal(&document, 0)?;
+    let mut pictures = document
         .get("streams")?
         .as_array()?
         .iter()
         .filter(|stream| {
             stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                && stream
+                    .get("disposition")
+                    .and_then(|value| value.get("attached_pic"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+                    == 0
         });
-    let video = videos.next()?;
-    if videos.next().is_some() {
-        return None;
-    }
-    if video
-        .get("disposition")
-        .and_then(|value| value.get("attached_pic"))
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-        != 0
-    {
-        return None;
-    }
-    u32::try_from(video.get("index")?.as_u64()?).ok()
+    let picture = u32::try_from(pictures.next()?.get("index")?.as_u64()?).ok()?;
+    (pictures.next().is_none() && picture == mapped).then_some(picture)
 }
 
 fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
