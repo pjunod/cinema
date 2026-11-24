@@ -762,7 +762,11 @@ impl NodeResourceRuntime {
                 }
                 resume_change(&self.journal, role, member, deadline)?;
                 retry_transition(role, &self.journal, member, deadline)?;
+                let timer = Instant::now();
                 self.finish_transition(bundle_id, role).await?;
+                tracing::debug!(target: "plurx_core::adaptive_resources",
+                    elapsed_ms = timer.elapsed().as_millis(),
+                    "finite native cleanup transition committed");
             }
             if empty_cancel {
                 let budget_closed = role
@@ -873,7 +877,11 @@ impl NodeResourceRuntime {
                 }
                 resume_change(&self.journal, role, member, deadline)?;
                 retry_transition(role, &self.journal, member, deadline)?;
+                let timer = Instant::now();
                 self.finish_transition(bundle_id, role).await?;
+                tracing::debug!(target: "plurx_core::adaptive_resources",
+                    elapsed_ms = timer.elapsed().as_millis(),
+                    "finite native cleanup transition committed");
             }
             let bootstrap = role
                 .bootstrap
@@ -955,7 +963,12 @@ impl NodeResourceRuntime {
             else {
                 return Err(OperationError::State);
             };
+            let timer = Instant::now();
+            let output = matches!(io.operation, CleanupOperation::Output(_));
             io.cell.join_registered().await?;
+            tracing::debug!(target: "plurx_core::adaptive_resources", output,
+                elapsed_ms = timer.elapsed().as_millis(),
+                "finite native cleanup io joined");
             io.joined = true;
             return Ok(());
         }
