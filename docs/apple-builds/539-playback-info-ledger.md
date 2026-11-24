@@ -1,6 +1,5 @@
 # Anchor playback information as a top-right ledger
 
-Build: 81
 Issue: #539
 
 Mini, Standard, and Debug playback information uses a stable top-right,

@@ -3,8 +3,7 @@
 **Status:** live. Owner: `scripts/paperwork`. Added 2026-10-17.
 
 Most CI failures on a pull request here are not about code. A doc was added
-without its index row, a client change shipped without a release-counter
-bump, a real host name slipped into the tree, a `fix(` commit had no
+without its index row, a real host name slipped into the tree, a `fix(` commit had no
 `Regression-Test:` line. Each is a rule with a test behind it, and each used
 to be learned by failing a lane 15–40 minutes after pushing — after the
 compile fan-out had already been spent.
@@ -28,8 +27,6 @@ failures; they never execute a publisher with a persistent credential:
 
 | Rule | The fix it applies |
 |---|---|
-| Apple release counter | `make apple-build-bump` above the merge target (every generated surface, the branch's fragments) |
-| Android release counter | `versionCode` one above the merge target's, and the README status line's build |
 | Real host names | `scripts/scrub-infra-names --write`, kept only in Markdown files |
 | Missing index row | a row in `docs/<area>/README.md` with the doc's `# ` title and its `**Status:**` word (`open` if none); improve the wording later if you like |
 
@@ -76,12 +73,14 @@ and `--body` inputs keep their existing precedence; no fields are truncated.
 |---|---|---|
 | Every governed file maps to a functionality point | `scripts/validate lint` | map the file in `validation/points.toml` |
 | A `fix(`/`perf(` commit carries `Regression-Test: <path>::<test>` in the PR description | `validation.regression_field` (locally a reminder; in CI against the description) | add the line; whoever merges copies it into the landing commit (`--landing-lines`) |
-| Client changes raise the Apple and Android release counters | `validation.mobile_versions` (changed-from the merge base) | `make apple-build-bump`; raise Android `versionCode` and its README status line |
+| Both marketing versions equal the workspace version; no build number is stored (`CURRENT_PROJECT_VERSION` stays `1`, `versionCode` comes from `scripts/build-number`) | `validation.mobile_versions` | fix the version; never bump a build number — it is derived at build time |
 | Every doc under `docs/` has an index row; no reference names a missing `docs/` path | `test_docs_index` | add the row to the doc's folder index in the same commit |
 | The tree names no real host, address, home or SSH user | `test_infra_names` | `scripts/scrub-infra-names --write`, or an allow-list row with its reason |
 | `docs/API.md` lists every route | `test_api_doc_routes` | add or delete the route entry |
-| Build claims are generated, not hand-edited | `test_apple_build_claims`, `test_mobile_build_claims` | `make apple-build-bump`; a user-visible change also gets a `docs/apple-builds/` fragment |
-| `STATUS.md` stays short and indexes what moved out | `test_status_page_shape` | move the oldest sections per [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) §3.4 |
+| No status line or Apple note quotes a build number | `test_apple_build_claims`, `test_mobile_build_claims` | remove the number (status lines name `scripts/build-number`); a user-visible Apple change gets a `docs/apple-builds/<issue>-<slug>.md` fragment with an `Issue:` line and no `Build:` line |
+| A PR into `main` carries `Changelog: <Section> — <entry>` lines (or `Changelog: none`) in its description, and never edits `CHANGELOG.md` outside a release cut | `validation.changelog_field` via `check_changelog` | add the lines to the description; `scripts/release-cut` writes `CHANGELOG.md` from the landing commits |
+| `STATUS.md` and new `tests/client-fixes.toml` rows change only through their folders | `scripts/fold` via `check_folded_pages` | edit your effort's `status.d/<date>-<slug>.md`; put a new fix row in `tests/client-fixes.d/<id>.toml`. The fold workflow rewrites the pages after merge |
+| `STATUS.md`, as folded from `status.d/`, stays short and indexes what moved out | `test_status_page_shape` | retire the oldest `status.d/` entries per [status.d/README.md](../../status.d/README.md) |
 | No status page calls a merged PR open | `test_status_pr_claims` | update the quoted prose |
 | Doc `**Status:**` headers make possible claims | `test_doc_status_audit` | correct the header |
 | Every Node web test is in a lane | `test_web_test_inventory` | add the file to `make web-unit-check` |

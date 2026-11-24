@@ -842,6 +842,14 @@ impl TranscodeManager {
         held_source: Option<&crate::fragment_index_cluster::SourceFence>,
     ) -> Option<crate::vodserve::retained::MeasuredCandidateCostProof> {
         let mut resolved = request.clone();
+        // A proof needs the actual audio delivery. Without a resolved one it
+        // is derived from the client's audio claim, and with neither no proof
+        // can exist, so answer before reading the source row: a caps-v2
+        // client that sends no audio sinks would otherwise pay one Authority
+        // `get_file` per catalog rung for an answer that is always `None`.
+        if resolved.audio_delivery.is_none() && request.audio_claim.is_none() {
+            return None;
+        }
         let file = if held_source.is_none() || resolved.audio_delivery.is_none() {
             Some(self.store.get_file(request.file_id).await.ok()??)
         } else {

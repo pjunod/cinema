@@ -1,6 +1,5 @@
 # Say when Skip Credits is estimated
 
-Build: 83
 Issue: #351
 
 Skip Credits now distinguishes a duration estimate from a chapter-derived

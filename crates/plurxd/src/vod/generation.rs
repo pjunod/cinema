@@ -224,38 +224,72 @@ async fn spawn_generation_with_input(
     // A family may retain this reservation through several generations, but
     // only the exact unreaped process may use it. Refuse a duplicate launch
     // before opening inputs or spawning a second producer under one credit.
+    // A DV window run may already have started this window's encoder under
+    // the family's one worker claim; the generation then shares that claim
+    // instead of taking a second. Any other run holding it is killed and
+    // settled first, so an unrelated seek claims the reservation as before.
+    #[cfg(target_os = "linux")]
+    let mut run_claim: Option<std::sync::Arc<crate::vodencode::EncodeWorkerPermit>> = None;
     let permit = match permit {
-        Some(reservation) => match rendition
-            .retained_admission
-            .bind(reservation)
-            .try_claim_worker()
-        {
-            Some(worker) => {
-                #[cfg(target_os = "linux")]
-                if let Some(encoding) = recipe
+        Some(reservation) => {
+            let bound = rendition.retained_admission.bind(reservation);
+            #[cfg(target_os = "linux")]
+            let claimed = match bound.clone().try_claim_worker() {
+                Some(worker) => Some(worker),
+                None => match recipe
                     .encoding
                     .as_ref()
-                    .filter(|encoding| encoding.dv_runtime.is_some())
+                    .and_then(|encoding| encoding.dv_runtime.as_ref())
                 {
-                    encoding.begin_processed_window(
-                        rendition.gen_epoch.load(Relaxed),
-                        at,
-                        &worker.reservation(),
-                    );
+                    Some(runtime) => match runtime.window_run.claim_for(at, &bound).await {
+                        Some(claim) => {
+                            if let Some(encoding) = recipe.encoding.as_ref() {
+                                encoding.begin_processed_window(
+                                    rendition.gen_epoch.load(Relaxed),
+                                    at,
+                                    &claim.reservation(),
+                                );
+                            }
+                            run_claim = Some(claim);
+                            None
+                        }
+                        None => bound.try_claim_worker(),
+                    },
+                    None => None,
+                },
+            };
+            #[cfg(not(target_os = "linux"))]
+            let claimed = bound.try_claim_worker();
+            match claimed {
+                Some(worker) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(encoding) = recipe
+                        .encoding
+                        .as_ref()
+                        .filter(|encoding| encoding.dv_runtime.is_some())
+                    {
+                        encoding.begin_processed_window(
+                            rendition.gen_epoch.load(Relaxed),
+                            at,
+                            &worker.reservation(),
+                        );
+                    }
+                    Some(worker)
                 }
-                Some(worker)
-            }
-            None => {
-                if !generation_current().await {
+                #[cfg(target_os = "linux")]
+                None if run_claim.is_some() => None,
+                None => {
+                    if !generation_current().await {
+                        return;
+                    }
+                    fail(
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        "the producer reservation still belongs to an unreaped worker".to_owned(),
+                    );
                     return;
                 }
-                fail(
-                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                    "the producer reservation still belongs to an unreaped worker".to_owned(),
-                );
-                return;
             }
-        },
+        }
         None => None,
     };
     if !generation_current().await {
@@ -428,6 +462,13 @@ async fn spawn_generation_with_input(
             // this original interval new report authority.
             report_revision = 0;
             drop(permit);
+            // The window is already prepared: a run's encoder pre-started for
+            // it is not needed. Ending the run kills and reaps it; the next
+            // claim waits for that.
+            if run_claim.is_some() {
+                runtime.end_window_run();
+            }
+            drop(run_claim);
             rendition
                 .source_owners
                 .registered(&source_dispatch, &prepared.registration);
@@ -447,16 +488,20 @@ async fn spawn_generation_with_input(
                 ))
             }
         } else {
-            let Some(worker) = permit else {
-                if !generation_current().await {
+            let admission = match (permit, run_claim) {
+                (Some(worker), _) => crate::dv_segment::SegmentAdmission::Retained(worker),
+                (None, Some(claim)) => crate::dv_segment::SegmentAdmission::RunShared(claim),
+                (None, None) => {
+                    if !generation_current().await {
+                        return;
+                    }
+                    runtime.refuse_episode();
+                    fail(
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        "DV graph has no retained admission".into(),
+                    );
                     return;
                 }
-                runtime.refuse_episode();
-                fail(
-                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                    "DV graph has no retained admission".into(),
-                );
-                return;
             };
             let owners = Arc::clone(rendition);
             let hook = Box::new(
@@ -487,7 +532,7 @@ async fn spawn_generation_with_input(
                     encoding.grid,
                     entry,
                     &encoding.executable.path,
-                    crate::dv_segment::SegmentAdmission::Retained(worker),
+                    admission,
                     Arc::clone(&rendition.slot),
                     processed_original
                         .map_or_else(tokio_util::sync::CancellationToken::new, |root| {

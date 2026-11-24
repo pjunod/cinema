@@ -24,6 +24,9 @@ const SHARED_DECISION=(()=>{
       // re-encode, still answers this; every other Dolby Vision title plays.
       sharing_start_dolby_vision_unsupported:"The sharing host cannot prepare this Dolby Vision title yet.",
       sharing_decision_unavailable:"The sharing host could not determine how to play this file.",
+      // A busy host past the decision's wait: stopped with Try again, never a
+      // "still starting" surface, because nothing retries a decision itself.
+      sharing_decision_busy:"The sharing host is busy. Try again shortly.",
       // A local create's retryable "not yet" codes, which B answers only to a
       // Start that sent its start clock.
       startup_timeout:"The sharing host is still preparing this stream.",

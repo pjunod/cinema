@@ -501,30 +501,45 @@ impl CopyPicturePipe {
         }
     }
 
+    /// Bind the rolling child's first fragment to its source pictures, or
+    /// say which part of the binding was missing.
     async fn observe(
         &mut self,
         init: &Init,
         fragment: &fmp4::Fragment,
-    ) -> Option<RollingCopySourceClock> {
-        let count = fragment.track(init.video()?.id)?.sample_count();
-        if !(2..=COPY_PICTURE_LIMIT).contains(&count)
-            || fragment.len() > plurx_core::transcode::COPY_SEGMENT_MAX_BYTES
-        {
-            return None;
+    ) -> Result<RollingCopySourceClock, &'static str> {
+        let count = init
+            .video()
+            .and_then(|video| fragment.track(video.id))
+            .map(|track| track.sample_count())
+            .ok_or("resume_clock_no_video_track")?;
+        if !(2..=COPY_PICTURE_LIMIT).contains(&count) {
+            return Err("resume_clock_sample_count");
+        }
+        if fragment.len() > plurx_core::transcode::COPY_SEGMENT_MAX_BYTES {
+            return Err("resume_clock_fragment_too_large");
         }
         let observations = tokio::time::timeout(std::time::Duration::from_millis(50), async {
             let mut observations = Vec::with_capacity(count);
             for _ in 0..count {
-                observations.push(self.observations.recv().await?);
+                observations.push(
+                    self.observations
+                        .recv()
+                        .await
+                        .ok_or("resume_clock_pipe_closed")?,
+                );
             }
-            Some(observations)
+            Ok::<_, &'static str>(observations)
         })
         .await
-        .ok()??;
+        .map_err(|_| "resume_clock_records_late")??;
         let clock = fmp4::video_splice::observe_copy_picture_clock(fragment, init, &observations)
-            .inspect_err(|error| tracing::debug!(%error, "native splice copy clock declined"))
-            .ok()?;
-        Some(RollingCopySourceClock {
+            .map_err(|error| {
+            tracing::info!(target: "plurxd::copyseg", %error, samples = count,
+                    "native splice copy clock did not match the copied pictures");
+            "resume_clock_mismatch"
+        })?;
+        Ok(RollingCopySourceClock {
             version: self.version.clone(),
             attempt: self.attempt,
             absolute_video_index: self.absolute_video_index,
@@ -571,6 +586,50 @@ async fn native_copy_picture_clock_binds_before_pipe_eof() {
     assert_eq!(witness.attempt, 12);
     assert_eq!(witness.absolute_video_index, 3);
     drop(write);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[tokio::test]
+async fn native_copy_picture_clock_names_why_it_could_not_bind() {
+    let mut reader = FragmentReader::new();
+    reader.push(include_bytes!(
+        "../../plurx-core/tests/fixtures/dv-runtime/authored-with-aac.mp4"
+    ));
+    let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+        panic!("missing fixture init");
+    };
+    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+        panic!("missing fixture fragment");
+    };
+    // The side output ends before one record per copied picture arrived.
+    let (read, write) = tokio::net::UnixStream::pair().expect("fixture picture pipe");
+    drop(write);
+    let mut clock = CopyPicturePipe::spawn("fixture-source".into(), 12, 3, read);
+    assert_eq!(
+        clock.observe(&init, &fragment).await.err(),
+        Some("resume_clock_pipe_closed")
+    );
+    // An open side output that never writes is late, not closed.
+    let (read, _write) = tokio::net::UnixStream::pair().expect("fixture picture pipe");
+    let mut clock = CopyPicturePipe::spawn("fixture-source".into(), 12, 3, read);
+    assert_eq!(
+        clock.observe(&init, &fragment).await.err(),
+        Some("resume_clock_records_late")
+    );
+    // The writer's decline is the layout's recorded reason, once, and it does
+    // not decide the layout: the resumed split still owns its FEL processing
+    // until the master chooses, so no hidden successor can start meanwhile.
+    let split = NativeSplitInventory::with_startup_budget(100).require_resume_clock();
+    split.decline_unselected("resume_clock_records_late", Some("s-fixture"));
+    split.decline_unselected("enhancement_layer_not_full", Some("s-fixture"));
+    assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
+    assert!(split.owns_fel_processing(), "the layout is still undecided");
+    assert!(split.choose(Some((0, 0))).is_none());
+    assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
+    assert!(
+        !split.owns_fel_processing(),
+        "the master chose the ordinary mux"
+    );
 }
 
 #[derive(Default)]
@@ -843,6 +902,25 @@ impl NativeSplitInventory {
         });
         let ids = enabled.then(|| self.init_ids.get().cloned()).flatten();
         (ids, decided_here)
+    }
+
+    /// The writer is abandoning the split before the master chose a layout:
+    /// record why, once, so the layout line and this log name the cause. The
+    /// layout itself stays undecided, so a resumed split keeps owning its FEL
+    /// processing until the master chooses, exactly as before.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn decline_unselected(&self, reason: &'static str, session: Option<&str>) {
+        if self.chosen.get() == Some(&true) {
+            return;
+        }
+        if self.declined.set(reason).is_ok() {
+            tracing::info!(
+                target: "plurxd::copyseg",
+                session = ?session,
+                reason,
+                "native split layout declined before selection"
+            );
+        }
     }
 
     /// The reason the ordinary mux was selected, once that is decided.
@@ -1539,12 +1617,16 @@ impl CopyPublicationSink for SessionDir {
         };
         let clock = match self.picture_clock.take() {
             Some(mut pipe) => pipe.observe(init, fragment).await,
-            None => None,
+            None => Err("resume_clock_pipe_missing"),
         };
-        if let Some(clock) = clock {
-            let _ = split.source_clock.set(clock);
-        } else {
-            self.split_inventory = None;
+        match clock {
+            Ok(clock) => {
+                let _ = split.source_clock.set(clock);
+            }
+            Err(reason) => {
+                split.decline_unselected(reason, self.diagnostic_session.as_deref());
+                self.split_inventory = None;
+            }
         }
     }
 
@@ -1554,6 +1636,12 @@ impl CopyPublicationSink for SessionDir {
         layer: plurx_core::transcode::dvconvert::EnhancementLayer,
     ) {
         if layer != plurx_core::transcode::dvconvert::EnhancementLayer::Full {
+            if let Some(split) = self.split_inventory.as_ref() {
+                split.decline_unselected(
+                    "enhancement_layer_not_full",
+                    self.diagnostic_session.as_deref(),
+                );
+            }
             self.split_inventory = None;
         }
     }

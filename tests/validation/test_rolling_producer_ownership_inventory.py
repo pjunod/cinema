@@ -5,11 +5,12 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from validation.rust_modules import module_source, split_children
+from validation.rust_modules import module_segments, module_source, split_children
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tests/playback/rolling-producer-owners.toml"
+MAX_LEADING_COMMENT_LINES = 15
 RAW_STRING_START = re.compile(r'(?:br|rb|r)(#*)"')
 TURBOFISH_START = re.compile(r"::\s*<")
 CHAR_LITERAL = re.compile(
@@ -214,33 +215,52 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
             for module_root in cls.module_roots
             for path in sorted((ROOT / module_root).rglob("*.rs"))
         )
-        cls.module_source = "\n".join(
-            path.read_text(encoding="utf-8") for path in cls.module_paths
-        )
-        cls.module_structural_source = rust_structural_source(cls.module_source)
+        cls.module_file_text = {
+            cls.relative(path): path.read_text(encoding="utf-8")
+            for path in cls.module_paths
+        }
+        cls.module_file_structural = {
+            relative: rust_structural_source(text)
+            for relative, text in cls.module_file_text.items()
+        }
+        cls.scope_cache: dict[str, list[tuple[str, str]]] = {}
+
+    @staticmethod
+    def relative(path: Path) -> str:
+        return path.resolve().relative_to(ROOT.resolve()).as_posix()
 
     @classmethod
-    def read_scope(cls, relative_path: str) -> str:
-        """Read one scope path: a single file, or every `*.rs` under a directory.
+    def read_scope(cls, relative_path: str) -> list[tuple[str, str]]:
+        """Read one scope path as `(repository-relative file, text)` segments.
 
-        A file is read with its S-14 split children expanded in place
-        (`validation.rust_modules`). A directory skips the files `source`
-        already expanded, so a row whose `also_in` names the directory those
-        children live in counts each occurrence once.
+        A file is read with its S-14 split children expanded
+        (`validation.rust_modules`), and each child's text is attributed to the
+        child's own path, not to the parent. A directory is every `*.rs` under
+        it, skipping the files `source` already expanded, so a row whose
+        `also_in` names the directory those children live in counts each
+        occurrence once.
         """
 
+        cached = cls.scope_cache.get(relative_path)
+        if cached is not None:
+            return cached
         path = ROOT / relative_path
         if path.is_dir():
-            return "\n".join(
-                child.read_text(encoding="utf-8")
+            segments = [
+                (cls.relative(child), child.read_text(encoding="utf-8"))
                 for child in sorted(path.rglob("*.rs"))
                 if child.resolve() not in cls.source_children
-            )
-        return module_source(path)
+            ]
+        else:
+            segments = [
+                (cls.relative(file), text) for file, text in module_segments(path)
+            ]
+        cls.scope_cache[relative_path] = segments
+        return segments
 
     @classmethod
-    def symbol_scope(cls, row: dict) -> tuple[str, str]:
-        """Return the text a `[[symbols]]` row counts and the name of that scope.
+    def symbol_scope(cls, row: dict) -> tuple[list[tuple[str, str]], str]:
+        """Return the segments a `[[symbols]]` row counts and the name of that scope.
 
         A row counts `source`. A row that also carries `also_in` counts the paths
         it names alongside `source`, so an occurrence that moved out of `source`
@@ -248,7 +268,92 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         """
 
         paths = [cls.catalog["source"], *row.get("also_in", ())]
-        return "\n".join(cls.read_scope(path) for path in paths), " and ".join(paths)
+        segments = [seg for path in paths for seg in cls.read_scope(path)]
+        return segments, " and ".join(paths)
+
+    @staticmethod
+    def count_by_file(
+        pattern: re.Pattern[str], texts: "list[tuple[str, str]] | dict[str, str]"
+    ) -> dict[str, int]:
+        """Nonzero per-file match counts, keyed by repository-relative path."""
+
+        items = texts.items() if isinstance(texts, dict) else texts
+        counts: dict[str, int] = {}
+        for relative, text in items:
+            found = len(pattern.findall(text))
+            if found:
+                counts[relative] = counts.get(relative, 0) + found
+        return counts
+
+    def assert_file_counts(
+        self, row: dict, actual: dict[str, int], scope_name: str, hint: str
+    ) -> None:
+        """Compare a row's reviewed `occurrences` table with the scan, per file."""
+
+        expected = row["occurrences"]
+        problems = []
+        for relative in sorted(set(expected) | set(actual)):
+            want = expected.get(relative, 0)
+            got = actual.get(relative, 0)
+            if want == got:
+                continue
+            if want == 0:
+                action = (
+                    f"add the line `\"{relative}\" = {got}` under "
+                    f"[{row['id']}] occurrences"
+                )
+            elif got == 0:
+                action = f"remove the `\"{relative}\"` line (it no longer matches)"
+            else:
+                action = f"update the `\"{relative}\"` line to {got}"
+            problems.append(
+                f"{relative}: expected {want}, actual {got}; {action}"
+            )
+        self.assertFalse(
+            problems,
+            f"{row['id']} changed in {scope_name}; {hint}. Update only the "
+            "named file's line in tests/playback/rolling-producer-owners.toml "
+            "and put the reason in the pull request description:\n  "
+            + "\n  ".join(problems),
+        )
+
+    def assert_occurrence_table(self, row: dict) -> None:
+        """An `occurrences` table is sorted, nonzero, and names existing files."""
+
+        table = row["occurrences"]
+        self.assertIsInstance(table, dict)
+        self.assertEqual(
+            list(table),
+            sorted(table),
+            f"{row['id']} occurrences keys must be sorted",
+        )
+        for relative, count in table.items():
+            self.assertIsInstance(count, int)
+            self.assertGreater(
+                count,
+                0,
+                f"{row['id']} lists {relative} with no occurrences; remove the line",
+            )
+            self.assertTrue(
+                (ROOT / relative).is_file(),
+                f"{row['id']} names a missing file {relative}",
+            )
+
+    def test_manifest_leading_comment_block_stays_short(self) -> None:
+        lines = MANIFEST.read_text(encoding="utf-8").splitlines()
+        leading = 0
+        for line in lines:
+            if line.startswith("#") or not line.strip():
+                leading += 1
+            else:
+                break
+        self.assertLessEqual(
+            leading,
+            MAX_LEADING_COMMENT_LINES,
+            "the manifest's leading comment block must stay a short header; "
+            "put the reason for a count change in the pull request description, "
+            "not in a new paragraph at the top of the file",
+        )
 
     def test_catalog_has_unique_complete_rows(self) -> None:
         self.assertEqual(self.catalog.get("version"), 1)
@@ -362,7 +467,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         symbol_keys = {
             "id",
             "pattern",
-            "expected_occurrences",
+            "occurrences",
             "kind",
             "replacement",
         }
@@ -370,7 +475,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         for row in symbols:
             with self.subTest(symbol=row["id"]):
                 self.assertEqual(symbol_keys, set(row) - {"also_in"})
-                self.assertGreater(row["expected_occurrences"], 0)
+                self.assertGreater(len(row["occurrences"]), 0)
+                self.assert_occurrence_table(row)
                 self.assertTrue(row["replacement"].strip())
                 if "also_in" in row:
                     self.assertTrue(
@@ -391,17 +497,13 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
 
         for row in module_symbols:
             with self.subTest(module_symbol=row["id"]):
-                self.assertEqual(
-                    {"id", "pattern", "expected_occurrences"}, set(row)
-                )
-                self.assertGreaterEqual(row["expected_occurrences"], 0)
+                self.assertEqual({"id", "pattern", "occurrences"}, set(row))
+                self.assert_occurrence_table(row)
 
         for row in module_structures:
             with self.subTest(module_structure=row["id"]):
-                self.assertEqual(
-                    {"id", "pattern", "expected_occurrences"}, set(row)
-                )
-                self.assertGreaterEqual(row["expected_occurrences"], 0)
+                self.assertEqual({"id", "pattern", "occurrences"}, set(row))
+                self.assert_occurrence_table(row)
 
         for row in contract_cases:
             with self.subTest(contract_case=row["id"]):
@@ -436,13 +538,12 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     pattern = re.compile(row["pattern"])
                 except re.error as error:
                     self.fail(f"invalid pattern for {row['id']}: {error}")
-                scope, scope_name = self.symbol_scope(row)
-                actual = len(pattern.findall(scope))
-                self.assertEqual(
-                    actual,
-                    row["expected_occurrences"],
-                    f"{row['id']} changed in {scope_name}; update the "
-                    "source and ownership ledger together",
+                segments, scope_name = self.symbol_scope(row)
+                self.assert_file_counts(
+                    row,
+                    self.count_by_file(pattern, segments),
+                    scope_name,
+                    "update the source and ownership ledger together",
                 )
 
     def test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts(self) -> None:
@@ -452,12 +553,10 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     pattern = re.compile(row["pattern"])
                 except re.error as error:
                     self.fail(f"invalid module pattern for {row['id']}: {error}")
-                actual = len(pattern.findall(self.module_source))
-                self.assertEqual(
-                    actual,
-                    row["expected_occurrences"],
-                    f"{row['id']} changed anywhere under "
-                    f"{', '.join(self.module_roots)}; "
+                self.assert_file_counts(
+                    row,
+                    self.count_by_file(pattern, self.module_file_text),
+                    f"the files under {', '.join(self.module_roots)}",
                     "update the module-wide owner allowlist in the same reviewed change",
                 )
 
@@ -468,19 +567,27 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     pattern = re.compile(row["pattern"])
                 except re.error as error:
                     self.fail(f"invalid structural pattern for {row['id']}: {error}")
-                actual = len(pattern.findall(self.module_structural_source))
+                counts = self.count_by_file(pattern, self.module_file_structural)
                 if row["id"] == "low-level-process-start":
-                    actual -= self.reviewed_containment_starts(pattern)
-                self.assertEqual(
-                    actual,
-                    row["expected_occurrences"],
-                    f"{row['id']} changed anywhere under "
-                    f"{', '.join(self.module_roots)}; "
+                    # Each pinned call site is reviewed; only unowned starts count.
+                    for relative, reviewed in self.reviewed_containment_starts(
+                        pattern
+                    ).items():
+                        remaining = counts.get(relative, 0) - reviewed
+                        if remaining:
+                            counts[relative] = remaining
+                        else:
+                            counts.pop(relative, None)
+                self.assert_file_counts(
+                    row,
+                    counts,
+                    f"the files under {', '.join(self.module_roots)}",
                     "new task, timer, process, or alias shapes require an explicit "
                     "ownership review and allowlist update",
                 )
 
-    def reviewed_containment_starts(self, pattern: re.Pattern) -> int:
+    def reviewed_containment_starts(self, pattern: re.Pattern) -> dict[str, int]:
+        """Reviewed fixture and launch starts, per repository-relative file."""
         path = ROOT / "crates/plurx-core/src/process/contained_launch.rs"
         header = (
             '    #[test]\n'
@@ -531,7 +638,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
             launch,
         )
         self.assertEqual(len(pattern.findall(rust_structural_source(launch))), 1)
-        return 5
+        return {self.relative(path): 4, self.relative(launch_path): 1}
 
     def test_promised_syntax_forms_hit_structural_sentinels(self) -> None:
         patterns = {

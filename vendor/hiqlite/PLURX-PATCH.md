@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty-five patches for clustered deployments. An
+Apache-2.0. Plurx carries thirty-six patches for clustered deployments. An
 upstream release can retire the eleven generic bugs and the one dependency-only
-constraint; it cannot retire the twenty-three Plurx policies:
+constraint; it cannot retire the twenty-four Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -46,6 +46,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 33 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
 | 34 | Dead-core teardown releases the SQL writer and a failed build's files without panicking | generic bug | pending M6 | Upstream release shuts its SQL writer down whatever the WAL's shutdown returns, maps a closed writer channel to an error in `shutdown` and `build_snapshot`, and removes a failed build's temporary image. |
 | 35 | Bounded passive DB AppendEntries timing observations | plurx policy | — | Never; Plurx needs bounded source/term/endpoint-scoped passive observations. An equivalent upstream mechanism may replace this implementation after the same contracts pass. |
+| 36 | `NodeConfig::listeners`: serve on caller-owned Raft and API sockets | plurx policy | — | Never; Plurx's cluster fixtures own their ports for a config's lifetime and lend one socket to every voter generation they start. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -657,12 +658,26 @@ patch description remains the historical/local contract; row 19 stays
   the WAL writer is `hiqlite-wal` row 7. First written for the transaction
   arm in `f39353af2` and `8e2a8cb64` (#1261).
   Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
+- `NodeConfig::listeners` takes Raft and API listeners the caller already
+  bound. Upstream binds `listen_addr_*` with the node's roster port inside
+  `start_node`, so a caller that chooses a port first has to drop its socket
+  and hope nothing else takes the port before the vendor binds it — and on a
+  busy test host something does (hosted run 8904 lost `127.0.0.1:36959` to
+  another socket). With the field set, startup serves on those sockets and
+  never binds the address itself; it refuses a listener whose address is not
+  the one it would have bound, so a socket cannot serve a port the roster
+  does not advertise. Plurx's test fixtures own their cluster sockets and
+  lend each voter generation a duplicate; production leaves it `None`,
+  which keeps upstream's bind. Unit tests:
+  `an_owned_listener_is_served_without_binding_its_address_again`,
+  `an_owned_listener_on_another_address_is_refused`.
+  Files: `src/config.rs`, `src/config_toml.rs`, `src/start.rs`, `src/lib.rs`.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28, 32 and 34: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30, 31, 33 and 35) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30, 31, 33, 35 and 36) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

@@ -4467,6 +4467,22 @@ impl JobManager {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
     }
 
+    /// [`Self::acquire_job`], reporting why a lease was not taken, for a caller
+    /// that answers a person rather than skipping quietly.
+    pub(crate) async fn claim_job(
+        &self,
+        resource: String,
+    ) -> Result<crate::job_lease::ClusterJobClaim, StoreError> {
+        crate::job_lease::claim_cluster_job(
+            &self.coordinator,
+            self.job_authority.as_ref(),
+            resource,
+            crate::job_lease::JOB_LEASE_TTL,
+            crate::job_lease::JOB_LEASE_HEARTBEAT,
+        )
+        .await
+    }
+
     /// [`Self::acquire_job`] with an explicit TTL and heartbeat: the same gate
     /// and the same lease, for a job whose failover test shortens them.
     pub(crate) async fn acquire_job_with_policy(
@@ -6753,19 +6769,27 @@ impl JobManager {
     pub async fn reanalyze_files(
         &self,
         files: &[plurx_core::domain::MediaFile],
-    ) -> Result<plurx_core::scan::ReprobeReport, StoreError> {
-        let Some(lease) = self.acquire_job("repair:probe".to_owned()).await? else {
-            return Err(StoreError::Task(
-                "probe repair pass is active on another cluster node".to_owned(),
-            ));
+    ) -> Result<plurx_core::scan::ReprobeReport, ReprobeError> {
+        let lease = match self.claim_job("repair:probe".to_owned()).await? {
+            crate::job_lease::ClusterJobClaim::Acquired(lease) => lease,
+            crate::job_lease::ClusterJobClaim::NotEligible => {
+                return Err(ReprobeError::NotEligible)
+            }
+            crate::job_lease::ClusterJobClaim::Held { owner_node_id } => {
+                let held_here = owner_node_id == self.coordinator.node_id();
+                return Err(ReprobeError::Busy {
+                    owner_node_id,
+                    held_here,
+                });
+            }
         };
         let lost = lease.loss_token();
         let publisher = lease.publisher(self.store.as_ref());
         let result = tokio::select! {
-            result = scan::reprobe_files_with_publication(&publisher, files) => result,
-            () = lost.cancelled() => Err(StoreError::Task(
-                "cluster probe-repair lease was lost".to_owned(),
-            )),
+            result = scan::reprobe_files_with_publication(&publisher, files) => {
+                result.map_err(ReprobeError::Store)
+            }
+            () = lost.cancelled() => Err(ReprobeError::LeaseLost),
         };
         drop(publisher);
         let _ = lease.release().await;
@@ -14562,3 +14586,31 @@ mod tests;
 #[cfg(test)]
 #[path = "state/backfill_tests.rs"]
 mod backfill_tests;
+
+/// Why an admin probe repair (`POST /items/{id}/reanalyze`) produced no
+/// report. The first three are the cluster's ordinary rules, not faults, so
+/// the HTTP layer answers each with a typed refusal rather than a 500.
+#[derive(Debug)]
+pub enum ReprobeError {
+    /// This node cannot take cluster-wide leases right now: it is not a
+    /// committed voter, is entering maintenance, or cannot read committed
+    /// membership this moment. A learner is refused before the handler, so
+    /// what reaches here is usually transient.
+    NotEligible,
+    /// A node holds the cluster-wide probe-repair lease: another one, or this
+    /// one (`held_here`) for a scheduled pass or a concurrent request.
+    Busy {
+        owner_node_id: String,
+        held_here: bool,
+    },
+    /// This node lost the lease before the pass finished. Files already
+    /// re-probed stay published; the report for the rest was not produced.
+    LeaseLost,
+    Store(StoreError),
+}
+
+impl From<StoreError> for ReprobeError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}

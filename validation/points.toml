@@ -85,7 +85,7 @@ timeout_seconds = 30
 
 [[checks]]
 id = "mobile-version"
-title = "Changed mobile apps advance their store build numbers"
+title = "Mobile marketing versions track the workspace; build numbers are derived, never stored"
 command = "python3 -m validation.mobile_versions"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["git", "python3"]
@@ -1639,9 +1639,10 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "mobile.versioning"
 title = "Mobile release versioning"
-contract = "Shipped Apple and Android changes advance their store build counters, both marketing versions track the workspace release, and every copy of the Apple build number is generated from project.yml rather than written by hand."
+contract = "Both apps take one store build number derived at build time from main's first-parent history by scripts/build-number, none is stored in source or mirrored in documents, and both marketing versions track the workspace release."
 paths = [
   "Cargo.toml",
+  "scripts/build-number",
   "clients/apple/README.md",
   "clients/apple/Sources/**",
   "clients/apple/Resources/**",
@@ -1830,6 +1831,7 @@ paths = [
   "scripts/pre-commit",
   "scripts/pre-push",
   "scripts/paperwork",
+  "scripts/fold",
   "scripts/paperwork-fix",
   "validation/pr_event.py",
   "scripts/outline",
@@ -1860,6 +1862,7 @@ paths = [
   "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
+  "tests/client-fixes.d/**",
   "tests/validation/**",
   "validation/**",
 ]

@@ -1,6 +1,5 @@
 # Give Live TV the proportions the web page has
 
-Build: 146
 Issue: #267
 
 Live TV on Apple TV was sized by the platform's semantic text styles, which

@@ -105,6 +105,7 @@ impl RuntimeRecipe {
         following: &[plurx_core::segplan::PlanEntry],
         grid: plurx_core::transcode::VodFrameGrid,
         original_settlement: Option<(&std::sync::atomic::AtomicBool, &mut bool)>,
+        next_encoder: Option<(u32, Vec<String>)>,
     ) -> Result<WindowOutcome<PrivateWindow>, String> {
         // An original preparation proves its native settlement window by
         // window, and a run would outlive that proof (as it would a
@@ -123,17 +124,33 @@ impl RuntimeRecipe {
         let window = request.window.ok_or("processed window has no bounds")?;
         let key = crate::dv_segment::request_key(&request)?;
         let frames = request.request.shape.max_frames;
+        // What the run needs to start the next window's encoder the moment
+        // this window's is reaped.
+        let prestart = next_encoder.map(|(at, encoder_args)| crate::dv_segment::PreStartRequest {
+            at,
+            encoder_args,
+            encoder: request.request.encoder.clone(),
+            runtime_cache: request.request.runtime_cache.clone(),
+            mode: request.mode,
+            decode: request.decode,
+            wait: self.preparation_budget,
+        });
         // An end requested while this window runs is honoured when it returns.
         let ends = self.window_run.ends();
         let (mut held, run) = self.window_run.take().await;
         if let Some(mut run) = run {
-            let continued = run.continues(&window, frames, &key, &request.request.admission)
-                && run
-                    .ready(
-                        &request.request.cancel,
-                        request.request.preparation_deadline,
-                    )
-                    .await?;
+            let continued = run.continues(
+                &window,
+                frames,
+                &key,
+                &request.request.admission,
+                &request.request.encoder_args,
+            ) && run
+                .ready(
+                    &request.request.cancel,
+                    request.request.preparation_deadline,
+                )
+                .await?;
             if continued {
                 let outcome = run_private_window(
                     request,
@@ -144,6 +161,9 @@ impl RuntimeRecipe {
                 .await
                 .map(|(outcome, _)| outcome);
                 if keeps_run(&outcome, run.has_more()) {
+                    if let Some(prestart) = prestart {
+                        run.prestart(prestart);
+                    }
                     run.rest(self.preparation_budget);
                     self.window_run.store(&mut held, run, ends).await;
                 } else {
@@ -154,10 +174,7 @@ impl RuntimeRecipe {
             run.kill().await;
         }
         let later = self.run_later_windows(entry, following, grid);
-        let reservation = match &request.request.admission {
-            crate::dv_segment::SegmentAdmission::Retained(worker) => Some(worker.reservation()),
-            crate::dv_segment::SegmentAdmission::Owned(_) => None,
-        };
+        let reservation = request.request.admission.reservation();
         // A background caller returns its job and source claim when its
         // window returns; a run would outlive both, so it renders singly.
         let launch = match reservation {
@@ -187,8 +204,11 @@ impl RuntimeRecipe {
                 Ok((outcome, run)) => (Ok(outcome), run),
                 Err(cause) => (Err(cause), None),
             };
-        if let Some(run) = run {
+        if let Some(mut run) = run {
             if keeps_run(&outcome, run.has_more()) {
+                if let Some(prestart) = prestart {
+                    run.prestart(prestart);
+                }
                 run.rest(self.preparation_budget);
                 self.window_run.store(&mut held, run, ends).await;
             } else {

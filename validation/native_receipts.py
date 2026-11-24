@@ -90,14 +90,21 @@ BUILD_SPECS = {
     # the web-unit-check recipe (a Node playback-lab observer test); no native
     # recipe changes.
     # #1866 changes only cluster-wal-check's exact `snapshot_metrics` hiqlite
-    # test count from 13 to 17 (four landed snapshot recovery contracts); no
-    # native recipe changes.
-    'Makefile': '9088e3ed9a502671d5d78b2d41a0db169ff30158e00827c915c8b613a95147cd',
-    # Reviewed raw project spec at build 300. Counter-only variants may enter
-    # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
-    # still bind fingerprints and case compatibility. Resource, script, or flag
-    # changes require a newly reviewed boundary, not counter normalization.
-    'clients/apple/project.yml': 'e7d701cd716173e28559d4f4104f0c38046ba48ecbb992878c5fe3747f94bce7',
+    # test count from 13 to 17 (four landed snapshot recovery contracts).
+    # Derived build numbers remove only the `apple-build-bump` target, reword
+    # the paperwork help and comment, and make android-release hand the
+    # host-derived build number to Gradle as a project property; no native
+    # recipe changes.
+    'Makefile': '7d7b9cb5a429c7c185cb7d8cb23c5b42b60bee749c6097a071b469659b163e7a',
+    # Reviewed raw project spec with derived build numbers: the placeholder
+    # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
+    # targets, and one "Stamp derived build number" post-build phase each,
+    # which runs scripts/build-number (an input below) and sets CFBundleVersion
+    # in the built Info.plist. Placeholder-only variants may enter the reviewed
+    # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
+    # fingerprints and case compatibility. Resource, script, or flag changes
+    # require a newly reviewed boundary, not counter normalization.
+    'clients/apple/project.yml': 'a7bc734f070f8001c1b8063ad1dcfac35e3448dec2f0bf24378e59abadb7ca7d',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -110,7 +117,7 @@ FAMILY_SPECS = {
     'desktop_macos': ['Makefile', 'clients/server-tray/macos/Package.swift', 'clients/server-tray/macos/build'],
 }
 INPUTS = {
-    'tv_navigation': COMMON + ['clients/apple/**', 'scripts/apple-tv-navigation-test',
+    'tv_navigation': COMMON + ['clients/apple/**', 'scripts/apple-tv-navigation-test', 'scripts/build-number',
         'validation/apple_simulator_runtime.py',
         *APPLE_EXTERNAL_INPUTS],
     'desktop_macos': COMMON + ['clients/server-tray/macos/**', 'LICENSE', 'VERSION', 'Cargo.toml',
@@ -136,7 +143,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "d5eda692d7c4691cc20926ec85c87ec65cbc60122c6b638853d6cbd57b645c5b"
+APPLE_PROJECT_SHAPE = "6727fdbb3e7cc765438b8978b8e3268785b9df1ea874b6affcd696e650af30a1"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 

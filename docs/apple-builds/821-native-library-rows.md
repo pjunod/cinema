@@ -3,7 +3,6 @@
 **Status:** built — merged in [PR #823](http://forge.lan:3000/noirr/plurx/pulls/823);
 physical-device deployment is not claimed.
 
-Build: 209
 Issue: #821
 
 Movies, shows, and other collections now default to horizontal rows grouped

@@ -91,7 +91,7 @@ pub use crate::transport_status::{
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::{client::Client, error::Error};
 #[cfg(any(feature = "sqlite", feature = "cache"))]
-pub use config::{NodeConfig, RaftConfig, RateLimitConfig};
+pub use config::{NodeConfig, NodeListeners, RaftConfig, RateLimitConfig};
 #[cfg(feature = "sqlite")]
 pub use query::cust_types::VecText;
 
