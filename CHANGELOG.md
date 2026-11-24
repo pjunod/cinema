@@ -8,13 +8,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
-<!-- New entries no longer go here. Each pull request's entries live in its description's
+<!-- Do not edit this section. Each pull request's entries live in its description's
 `Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
-from the landing commits into the dated section. The entries below were written by hand
-before that and are released with the next cut. -->
+from the landing commits into the dated section below. -->
+
+## [0.9.0] — 2026-11-24
+<!-- changelog-through: 681167543c42d197ff732d1dc0a79c544e61c672 -->
 
 ### Added
-
 - Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
 - A shared title's Source copy now says where its time goes. Each published
   segment logs one `Source copy segment published` line (incarnation, range,
@@ -78,8 +79,108 @@ before that and are released with the next cut. -->
   when reading the mapper line, and a failed control exchange keeps the
   current processing report instead of clearing it.
 
-### Changed
 
+- **Custom tags and tag-driven Home rows.** Put your own household or private tags on movies and shows, filter and select by them in any library, search with `tag:name`, review suggested matches from TMDB keywords, and build Home rows from tags. Every Home row (Watchlist and Favorites included) can be reordered or hidden with Customize Home; admins can set a household default and grant tag management to other users. Tags never leave the server through Jellyfin, Plex or shared libraries.
+
+- Optional, explicit Curator household login connections with independent local
+  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
+  household-only grants on standalone and replicated storage. Cinema credentials,
+  administrator permissions and watch history stay in Cinema.
+
+- `/metrics` attributes the daemon's steady-state replicated reads and writes
+  by the method that issued them.
+  `plurx_background_store_operations_by_method_total{class,method}` counts
+  those made outside an HTTP request (background loops, timers, workers),
+  which before were in `plurx_store_operations_total` with no method; a
+  request's split now joins its route group when the request and every task
+  it spawned in its scope have finished, so a dropped request is no longer
+  lost. The cluster membership manager's quorum reads, local reads, writes
+  and watermarks, and the 2 Hz quorum watermark sampler, which reached no
+  metric at all, now go through a counted client: they are in
+  `plurx_store_operations_total` and the request or background split, and the
+  manager's by issuing function in
+  `plurx_cluster_membership_operations_by_method_total{class,method}`.
+  Start-up schema installation, the start-up catch-up watermark and Hiqlite's
+  own Raft traffic stay uncounted. Per-route numbers such as
+  `plurx_http_store_reads_total` now include the membership reads a request
+  makes (peer authorization, `media_peers`, `activity_peers`).
+
+- Each cluster node keeps a lock-free account of what its own replica has
+  applied, and Settings → Developer shows an advisory Applied view card with
+  the node's replica proof, image state and view reads. `/metrics` adds the
+  route-read baseline by site, applied-view reads and reloads, table changes
+  and read-pool wait (playback-start E1a).
+- Settings that only choose how to serve or present a request are read from
+  the node's own replica when it can prove that replica current, instead of
+  a quorum read per request: the playback request path and the polled
+  Settings, System, Features and Developer pages. A node that saves a
+  setting reads it back from quorum until its replica has applied the save;
+  other nodes see it within about a second. Planning, encoder admission,
+  background workers, the save response, fences, auth, membership, ownership
+  and pre-mutation reads stay quorum reads (playback-start E1b).
+- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
+  files left a folder (a Re-match). Such a request probes exactly its expected
+  and removed paths, walks nothing else and never becomes a full scan; each
+  removed path is reported `gone` (its file record removed, and the item too
+  when that was its last file), `unknown`, `present` or `retained`. A missing
+  removed path is not `path_unreadable`; an unreadable chain or an empty mount
+  point is, and removes nothing. The connection test advertises
+  `"features": ["removed_paths"]`.
+- Offload: when Curator deletes a title's files to free disk, plurx keeps the
+  item, its metadata and its watch history, greyed out with an Offloaded badge.
+  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
+  connection test lists `offload`), an item is flagged `offloaded` only when no
+  file is left, and no prune ever deletes one. Library lists take
+  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
+  in the web, Apple and Android clients); search always includes them, flagged.
+  An administrator's **Get it back** asks Curator for the title again
+  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
+  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
+  kept item by the request's ids and clear the flag. Deploy every cinema node
+  before Curator sends offload. [Contract](docs/INTEGRATION.md).
+- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
+  say which media files left a folder (a Re-match). Such a request probes
+  exactly its expected and removed paths, walks nothing else, never becomes a
+  full scan and is a job of its own that no walking request joins. Each removed
+  path is reported `gone` (file records removed, `item_ids` listed, the items
+  too when that left them empty), `unknown`, `present` (with a `reason`:
+  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
+  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
+  removed while an expected file is not placed. A missing removed path is not
+  `path_unreadable`; an unreadable chain, an empty mount point or a nested
+  mount on another filesystem is, and removes nothing. The connection test
+  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
+  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
+
+- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
+  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
+  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
+  the result), `expected_files` (probed whatever the size+mtime cache says, and
+  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
+  `missing`), and `probe_paths` (a connection test answering which library
+  roots plurx can see, without scanning).
+- The key that created a scan request may read it with `scan:trigger` alone;
+  the record carries `waiting_on` and the per-file `files`, and reports
+  `running` while a worker holds it.
+- Targeted scan requests run as their own job, claimed ahead of a pending full
+  scan with a probe admission (no heavy-lane permit) and never concurrently
+  with a running one; Activity shows what a waiting one is waiting on.
+- Activity labels a targeted library job "targeted scan" rather than "library
+  scan".
+- New libraries scan every six hours by default. Existing libraries keep their
+  schedule; a library at Never shows what that costs and offers a one-click
+  "Enable 6-hourly reconcile".
+- Shared-library stream monitors and serving-read admission share one
+  advisory member-floor answer instead of each proving quorum: a ready answer
+  serves for up to five seconds, a not-ready one only the callers already
+  waiting on it, and a read survives the caller that gave up on it.
+- Shared-library monitors look again only when a table their authority rests
+  on changes on this replica, when the serving fence moves, or (receiver)
+  when the lease or the original login lapses, at most once a second, instead
+  of every second; an idle shared stream costs no authority reads. Stores
+  without an applied mark keep the one-second look.
+
+### Changed
 - Settings → Cluster is one page without folds or tabs: a six-cell status strip
   (state, leader, nodes reachable, replication, build, rolling restart), alerts
   only when something needs action, a nodes table whose rows open a drawer with
@@ -94,9 +195,10 @@ before that and are released with the next cut. -->
   keeps the join-token form, the log controls and unsaved settings. The nodes
   table reflows into labelled cards whenever its card is too narrow for it.
   Settings, endpoints and permissions are unchanged.
+- **Pull requests no longer conflict on shared bookkeeping files.** A changelog entry lives in the pull request description as `Changelog:` lines and `scripts/release-cut` writes `CHANGELOG.md` from the merge commits; `STATUS.md` and new client-fix rows come from per-PR files folded after merge; the census counts per file.
+- **Apple and Android build numbers are derived at build time** by `scripts/build-number` (the first-parent commit count of main), so client pull requests no longer raise a build counter. Build numbers jump from 310/210 to about 1955 and keep rising with every merge.
 
 ### Removed
-
 - The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,
   its repository skill, AGENTS.md section, fast-lane lint and docs) is retired.
   In the 224 merges after it landed, 17 touched its seven covered files and only
@@ -104,6 +206,12 @@ before that and are released with the next cut. -->
   and its evaluation never ran (the study PR #1262 is closed unmerged).
 
 ### Fixed
+- Apple TV settings keep each setting name visible beside its selected value,
+  including Playback, Appearance and Live TV choices.
+
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
 
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
@@ -634,108 +742,24 @@ before that and are released with the next cut. -->
   published. A scanner failure on readable input stays `title_scan_failed`
   and now records the exit status and the end of the scanner's stderr,
   redacted, instead of a bare "scan failed".
-
-### Added
-
-- **Custom tags and tag-driven Home rows.** Put your own household or private tags on movies and shows, filter and select by them in any library, search with `tag:name`, review suggested matches from TMDB keywords, and build Home rows from tags. Every Home row (Watchlist and Favorites included) can be reordered or hidden with Customize Home; admins can set a household default and grant tag management to other users. Tags never leave the server through Jellyfin, Plex or shared libraries.
-
-- Optional, explicit Curator household login connections with independent local
-  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
-  household-only grants on standalone and replicated storage. Cinema credentials,
-  administrator permissions and watch history stay in Cinema.
-
-- `/metrics` attributes the daemon's steady-state replicated reads and writes
-  by the method that issued them.
-  `plurx_background_store_operations_by_method_total{class,method}` counts
-  those made outside an HTTP request (background loops, timers, workers),
-  which before were in `plurx_store_operations_total` with no method; a
-  request's split now joins its route group when the request and every task
-  it spawned in its scope have finished, so a dropped request is no longer
-  lost. The cluster membership manager's quorum reads, local reads, writes
-  and watermarks, and the 2 Hz quorum watermark sampler, which reached no
-  metric at all, now go through a counted client: they are in
-  `plurx_store_operations_total` and the request or background split, and the
-  manager's by issuing function in
-  `plurx_cluster_membership_operations_by_method_total{class,method}`.
-  Start-up schema installation, the start-up catch-up watermark and Hiqlite's
-  own Raft traffic stay uncounted. Per-route numbers such as
-  `plurx_http_store_reads_total` now include the membership reads a request
-  makes (peer authorization, `media_peers`, `activity_peers`).
-
-- Each cluster node keeps a lock-free account of what its own replica has
-  applied, and Settings → Developer shows an advisory Applied view card with
-  the node's replica proof, image state and view reads. `/metrics` adds the
-  route-read baseline by site, applied-view reads and reloads, table changes
-  and read-pool wait (playback-start E1a).
-- Settings that only choose how to serve or present a request are read from
-  the node's own replica when it can prove that replica current, instead of
-  a quorum read per request: the playback request path and the polled
-  Settings, System, Features and Developer pages. A node that saves a
-  setting reads it back from quorum until its replica has applied the save;
-  other nodes see it within about a second. Planning, encoder admission,
-  background workers, the save response, fences, auth, membership, ownership
-  and pre-mutation reads stay quorum reads (playback-start E1b).
-- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
-  files left a folder (a Re-match). Such a request probes exactly its expected
-  and removed paths, walks nothing else and never becomes a full scan; each
-  removed path is reported `gone` (its file record removed, and the item too
-  when that was its last file), `unknown`, `present` or `retained`. A missing
-  removed path is not `path_unreadable`; an unreadable chain or an empty mount
-  point is, and removes nothing. The connection test advertises
-  `"features": ["removed_paths"]`.
-- Offload: when Curator deletes a title's files to free disk, plurx keeps the
-  item, its metadata and its watch history, greyed out with an Offloaded badge.
-  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
-  connection test lists `offload`), an item is flagged `offloaded` only when no
-  file is left, and no prune ever deletes one. Library lists take
-  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
-  in the web, Apple and Android clients); search always includes them, flagged.
-  An administrator's **Get it back** asks Curator for the title again
-  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
-  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
-  kept item by the request's ids and clear the flag. Deploy every cinema node
-  before Curator sends offload. [Contract](docs/INTEGRATION.md).
-- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
-  say which media files left a folder (a Re-match). Such a request probes
-  exactly its expected and removed paths, walks nothing else, never becomes a
-  full scan and is a job of its own that no walking request joins. Each removed
-  path is reported `gone` (file records removed, `item_ids` listed, the items
-  too when that left them empty), `unknown`, `present` (with a `reason`:
-  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
-  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
-  removed while an expected file is not placed. A missing removed path is not
-  `path_unreadable`; an unreadable chain, an empty mount point or a nested
-  mount on another filesystem is, and removes nothing. The connection test
-  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
-  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
-
-- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
-  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
-  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
-  the result), `expected_files` (probed whatever the size+mtime cache says, and
-  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
-  `missing`), and `probe_paths` (a connection test answering which library
-  roots plurx can see, without scanning).
-- The key that created a scan request may read it with `scan:trigger` alone;
-  the record carries `waiting_on` and the per-file `files`, and reports
-  `running` while a worker holds it.
-- Targeted scan requests run as their own job, claimed ahead of a pending full
-  scan with a probe admission (no heavy-lane permit) and never concurrently
-  with a running one; Activity shows what a waiting one is waiting on.
-- Activity labels a targeted library job "targeted scan" rather than "library
-  scan".
-- New libraries scan every six hours by default. Existing libraries keep their
-  schedule; a library at Never shows what that costs and offers a one-click
-  "Enable 6-hourly reconcile".
-- Shared-library stream monitors and serving-read admission share one
-  advisory member-floor answer instead of each proving quorum: a ready answer
-  serves for up to five seconds, a not-ready one only the callers already
-  waiting on it, and a read survives the caller that gave up on it.
-- Shared-library monitors look again only when a table their authority rests
-  on changes on this replica, when the serving fence moves, or (receiver)
-  when the lease or the original login lapses, at most once a second, instead
-  of every second; an idle shared stream costs no authority reads. Stores
-  without an applied mark keep the one-second look.
+- **A shared copy refused for its size now says so.** A high-bitrate source
+  whose keyframe spans outgrow the copy's in-memory pairing hold (4K
+  Dolby Vision remuxes with 70 MB fragments) was refused with
+  `copy_sync_unverified` when it restarted mid-title, as if its seek landing
+  had failed. It now answers `copy_range_input_limit` (422), in the log and to
+  the client. Serving such sources is a separate change.
+- **A busy sharing host is waited for, not reported as a failure.** When the Source or its relay answered a shared decision with "busy, retry in N seconds", the receiver treated it as final, and the viewer saw "the sharing host could not determine how to play this file". The receiver now waits out the Source's interval and asks again, up to three times with growing waits and jitter, within the decision's existing 15 s budget. If the host is still busy after that, the viewer is told so and offered Try again. Catalogue, library and asset reads still answer immediately, but a busy host now reaches the viewer as their typed "busy" answer, not as "unavailable". The Source's own decision and body capacity limits now say how long to wait.
+- Reanalyze on an item no longer answers 500 when the cluster's
+  probe repair cannot run there. Another node holding the probe-repair lease is a
+  typed 503 `probe_repair_busy` naming that node, with `Retry-After: 30`. Losing
+  the lease mid-pass is `probe_repair_interrupted`, with `Retry-After: 5`. A node
+  that cannot take cluster-wide leases at that moment (entering maintenance, or
+  unable to read committed membership) is `probe_repair_not_eligible`, with
+  `Retry-After: 5`. That case used to claim the pass was running on another node
+  even when nothing was running anywhere.
+- A shared title no longer fails to start with "shared start is unavailable" when the Source server is busy preparing its first segment.
+- A Dolby Vision FEL playback in Profile 8.1 keeps its FEL, RPU and DYN badges once the server's processing report arrives, and no longer shows a false "Tone mapping" badge.
+- A resumed native Dolby Vision copy that abandons its split layout now logs why: a missing or late source picture clock, a clock that does not match, or a non-full enhancement layer.
 
 ## [0.8.0] — 2026-10-29
 
@@ -859,13 +883,6 @@ before that and are released with the next cut. -->
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
-
-- Apple TV settings keep each setting name visible beside its selected value,
-  including Playback, Appearance and Live TV choices.
-
-- Playback cache admission reconciles concurrent cancelled writes instead of
-  failing a video producer as disk-full while capacity remains, preventing
-  repeated Apple TV buffering and stream retries.
 
 - **HTTP app addresses forward to HTTPS while it is active.** Temporary,
   non-cached redirects preserve the requested path, query, method and body,
@@ -4479,8 +4496,9 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.8.0
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.0
+[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...000300ccfcd98b7b3a2221d7031420cd99748bfd
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8

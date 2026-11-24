@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
-    MARKETING_VERSION: "0.8.0"
+    MARKETING_VERSION: "0.9.0"
     # A fixed development placeholder, never bumped. The real build number is
     # derived from Git history by scripts/build-number and written into each
     # built app's Info.plist by the "Stamp derived build number" phase below;
