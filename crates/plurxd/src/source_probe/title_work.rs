@@ -506,7 +506,7 @@ impl TitleTask {
         }
         probe_preempts(
             state,
-            &self.job_id,
+            Some(&self.job_id),
             &self.probe_pipeline,
             &mut self.probe_after,
         )
@@ -523,9 +523,12 @@ impl TitleTask {
 /// `job_id` (a title scan or an F+ fit). Scheduler checks only locally
 /// readable, compatible, live ordinary work; durable SQL excludes stale
 /// coordinators and other resource blockers.
+/// Whether a locally runnable ordinary probe should take the lane. `job_id`
+/// is the running title or F+ job, whose priority the store compares; work
+/// without a job row (the DV levels pass) yields to any runnable probe.
 pub(super) async fn probe_preempts(
     state: &AppState,
-    job_id: &str,
+    job_id: Option<&str>,
     probe_pipeline: &str,
     probe_after: &mut Option<CandidateCursor>,
 ) -> Result<bool, StoreError> {
@@ -575,6 +578,9 @@ pub(super) async fn probe_preempts(
         {
             continue;
         }
+        let Some(job_id) = job_id else {
+            return Ok(true);
+        };
         if state
             .store
             .probe_can_preempt_title(&job.id, job_id, &state.node_id, now)

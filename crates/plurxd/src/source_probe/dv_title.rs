@@ -54,7 +54,7 @@ pub(super) enum SourceRead {
 }
 
 #[cfg(unix)]
-fn source_read(input: Option<&SourceInput>) -> SourceRead {
+pub(super) fn source_read(input: Option<&SourceInput>) -> SourceRead {
     match input {
         Some(input) if input.source_physical_read_failed() => SourceRead::StorageFailed,
         Some(input) if input.source_read_failed() => SourceRead::Interrupted,
@@ -67,7 +67,7 @@ fn source_read(input: Option<&SourceInput>) -> SourceRead {
 /// capability URL redacted.
 const STDERR_TAIL_BYTES: usize = 512;
 
-fn stderr_tail(stderr: &[u8]) -> String {
+pub(super) fn stderr_tail(stderr: &[u8]) -> String {
     let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
     let line = String::from_utf8_lossy(&stderr[start..])
         .split_whitespace()
