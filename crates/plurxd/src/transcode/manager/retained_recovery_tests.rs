@@ -120,8 +120,9 @@ fn native_fel_resume_requires_one_unambiguous_copy_video_stream() {
     assert_eq!(select(vec![audio.clone(), cover.clone()]), None);
     // A cover ahead of the picture is what `0:v:0` maps: refused.
     assert_eq!(select(vec![audio.clone(), cover, video.clone()]), None);
-    // An MKV poster attachment after the picture (Breaking Dawn Part 1 on
-    // nynuc, stream 45) leaves `0:v:0` on the picture: the resume keeps it.
+    // An MKV poster attachment after the picture (a library remux with an
+    // MJPEG poster at stream 45) leaves `0:v:0` on the picture: the resume
+    // keeps it.
     let poster = serde_json::json!({
         "index": 45, "codec_type": "video", "codec_name": "mjpeg",
         "disposition": {"attached_pic": 1}
