@@ -1107,7 +1107,19 @@ impl NetworkStreaming {
                                 error!("client ack for RaftStreamResponse missing");
                             }
                             Some(ack) => {
-                                if ack.send(Ok(resp.payload)).is_err() {
+                                // Plurx patch 37: `PreVoteUnsupported` is this task's own local
+                                // answer. Read from a socket it would count as a grant the peer
+                                // never gave, so it is refused.
+                                let payload = match resp.payload {
+                                    RaftStreamResponsePayload::PreVoteUnsupported => {
+                                        Err(Error::BadRequest(
+                                            "peer sent the local-only PreVoteUnsupported answer"
+                                                .into(),
+                                        ))
+                                    }
+                                    payload => Ok(payload),
+                                };
+                                if ack.send(payload).is_err() {
                                     error!("sending back stream response from raft server");
                                 }
                             }
@@ -2873,69 +2885,138 @@ mod tests {
         (factory, node, accepted_rx, server)
     }
 
-    /// Plurx patch 37: a current server. It advertises pre-vote on its upgrade response, answers
-    /// every `PreVoteDB` with a refusal, and every `AppendDB` with `Success`.
+    /// Plurx patch 37: what a test Raft server answers to `PreVoteDB`.
+    #[cfg(feature = "sqlite")]
+    fn refuse_pre_vote(request: VoteRequest<u64>) -> RaftStreamResponsePayload {
+        RaftStreamResponsePayload::PreVoteDB(Ok(VoteResponse::new(
+            Vote::new_committed(5, 2),
+            request.last_log_id,
+            false,
+        )))
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn send_local_only_answer(_: VoteRequest<u64>) -> RaftStreamResponsePayload {
+        RaftStreamResponsePayload::PreVoteUnsupported
+    }
+
+    /// Authenticates, counts the socket, then answers `AppendDB` with `Success` and `PreVoteDB`
+    /// with `pre_vote`. With `close_on_first_frame` it closes the socket instead of answering.
+    #[cfg(feature = "sqlite")]
+    async fn serve_test_raft_socket(
+        socket: fastwebsockets::upgrade::UpgradeFut,
+        state: ReconnectServerState,
+        close_on_first_frame: bool,
+        pre_vote: fn(VoteRequest<u64>) -> RaftStreamResponsePayload,
+    ) {
+        let mut socket = socket.await.expect("upgrade pre-vote test WebSocket");
+        socket.set_auto_close(true);
+        crate::network::handshake::HandshakeSecret::server(&mut socket, b"test-secret")
+            .await
+            .expect("authenticate pre-vote test WebSocket");
+        let sequence = state
+            .connection_sequence
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        let _ = state.accepted.send_async(sequence).await;
+        while let Ok(frame) = socket.read_frame().await {
+            match frame.opcode {
+                OpCode::Binary => {
+                    if close_on_first_frame {
+                        let _ = socket.write_frame(Frame::close(1000, b"restarting")).await;
+                        break;
+                    }
+                    let request: RaftStreamRequest =
+                        deserialize(&frame.payload).expect("decode test Raft request");
+                    let (request_id, payload) = match request {
+                        RaftStreamRequest::AppendDB((request_id, _)) => (
+                            request_id,
+                            RaftStreamResponsePayload::AppendDB(Ok(AppendEntriesResponse::Success)),
+                        ),
+                        RaftStreamRequest::PreVoteDB((request_id, request)) => {
+                            (request_id, pre_vote(request))
+                        }
+                        _ => continue,
+                    };
+                    let bytes = serialize(&RaftStreamResponse {
+                        request_id,
+                        payload,
+                    })
+                    .expect("encode test Raft response");
+                    if socket
+                        .write_frame(Frame::binary(Payload::Owned(bytes)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                OpCode::Close => break,
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn advertise<B>(response: &mut axum::http::Response<B>) {
+        response.headers_mut().insert(
+            crate::network::raft_server::RAFT_PRE_VOTE_HEADER,
+            axum::http::HeaderValue::from_static(crate::network::raft_server::RAFT_PRE_VOTE_V1),
+        );
+    }
+
+    /// Plurx patch 37: a current server that refuses every pre-vote.
     #[cfg(feature = "sqlite")]
     async fn pre_vote_answering_raft_server(
         State(state): State<ReconnectServerState>,
         ws: fastwebsockets::upgrade::IncomingUpgrade,
     ) -> Result<impl IntoResponse, Error> {
         let (mut response, socket) = ws.upgrade()?;
-        response.headers_mut().insert(
-            crate::network::raft_server::RAFT_PRE_VOTE_HEADER,
-            axum::http::HeaderValue::from_static(crate::network::raft_server::RAFT_PRE_VOTE_V1),
-        );
-        tokio::spawn(async move {
-            let mut socket = socket.await.expect("upgrade pre-vote test WebSocket");
-            socket.set_auto_close(true);
-            crate::network::handshake::HandshakeSecret::server(&mut socket, b"test-secret")
-                .await
-                .expect("authenticate pre-vote test WebSocket");
-            let sequence = state
-                .connection_sequence
-                .fetch_add(1, Ordering::AcqRel)
-                .saturating_add(1);
-            let _ = state.accepted.send_async(sequence).await;
-            while let Ok(frame) = socket.read_frame().await {
-                match frame.opcode {
-                    OpCode::Binary => {
-                        let request: RaftStreamRequest =
-                            deserialize(&frame.payload).expect("decode test Raft request");
-                        let (request_id, payload) = match request {
-                            RaftStreamRequest::AppendDB((request_id, _)) => (
-                                request_id,
-                                RaftStreamResponsePayload::AppendDB(Ok(
-                                    AppendEntriesResponse::Success,
-                                )),
-                            ),
-                            RaftStreamRequest::PreVoteDB((request_id, request)) => (
-                                request_id,
-                                RaftStreamResponsePayload::PreVoteDB(Ok(VoteResponse::new(
-                                    Vote::new_committed(5, 2),
-                                    request.last_log_id,
-                                    false,
-                                ))),
-                            ),
-                            _ => continue,
-                        };
-                        let bytes = serialize(&RaftStreamResponse {
-                            request_id,
-                            payload,
-                        })
-                        .expect("encode test Raft response");
-                        if socket
-                            .write_frame(Frame::binary(Payload::Owned(bytes)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    OpCode::Close => break,
-                    _ => {}
-                }
-            }
-        });
+        advertise(&mut response);
+        tokio::spawn(serve_test_raft_socket(
+            socket,
+            state,
+            false,
+            refuse_pre_vote,
+        ));
+        Ok(response)
+    }
+
+    /// Plurx patch 37: a peer that sends the client's local-only answer over the wire.
+    #[cfg(feature = "sqlite")]
+    async fn local_only_answer_raft_server(
+        State(state): State<ReconnectServerState>,
+        ws: fastwebsockets::upgrade::IncomingUpgrade,
+    ) -> Result<impl IntoResponse, Error> {
+        let (mut response, socket) = ws.upgrade()?;
+        advertise(&mut response);
+        tokio::spawn(serve_test_raft_socket(
+            socket,
+            state,
+            false,
+            send_local_only_answer,
+        ));
+        Ok(response)
+    }
+
+    /// Plurx patch 37, rolling upgrade: the first socket is an older server that restarts on the
+    /// first frame it reads; every later socket is a current server.
+    #[cfg(feature = "sqlite")]
+    async fn upgrading_raft_server(
+        State(state): State<ReconnectServerState>,
+        ws: fastwebsockets::upgrade::IncomingUpgrade,
+    ) -> Result<impl IntoResponse, Error> {
+        let older = state.connection_sequence.load(Ordering::Acquire) == 0;
+        let (mut response, socket) = ws.upgrade()?;
+        if !older {
+            advertise(&mut response);
+        }
+        tokio::spawn(serve_test_raft_socket(
+            socket,
+            state,
+            older,
+            refuse_pre_vote,
+        ));
         Ok(response)
     }
 
@@ -3001,13 +3082,9 @@ mod tests {
         )
         .await;
 
-        let answer = <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::pre_vote(
-            &mut client,
-            pre_vote_request(),
-            RPCOption::new(Duration::from_secs(2)),
-        )
-        .await
-        .expect("a pre-vote to an older server is answered locally");
+        let answer = pre_vote_of(&mut client)
+            .await
+            .expect("a pre-vote to an older server is answered locally");
         assert!(answer.is_none());
 
         let append = client
@@ -3037,14 +3114,10 @@ mod tests {
         )
         .await;
 
-        let answer = <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::pre_vote(
-            &mut client,
-            pre_vote_request(),
-            RPCOption::new(Duration::from_secs(2)),
-        )
-        .await
-        .expect("answered pre-vote")
-        .expect("the server answers pre-vote");
+        let answer = pre_vote_of(&mut client)
+            .await
+            .expect("answered pre-vote")
+            .expect("the server answers pre-vote");
         assert!(!answer.vote_granted);
         assert_eq!(Vote::new_committed(5, 2), answer.vote);
 
@@ -3055,6 +3128,112 @@ mod tests {
         assert!(matches!(append, AppendEntriesResponse::Success));
         assert_eq!(accepted_rx.try_recv().expect("one socket"), 1);
         assert!(accepted_rx.try_recv().is_err(), "no reconnect");
+
+        drop(client);
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn pre_vote_of(
+        client: &mut NetworkConnectionStreaming,
+    ) -> Result<Option<VoteResponse<NodeId>>, RPCError<NodeId, Node, RaftError<NodeId>>> {
+        <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::pre_vote(
+            client,
+            pre_vote_request(),
+            RPCOption::new(Duration::from_secs(2)),
+        )
+        .await
+    }
+
+    /// Plurx patch 37: the client's local answer is never accepted from a socket, where it would
+    /// count as a grant the peer did not give.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_local_only_answer_read_from_a_socket_is_refused() {
+        let (mut factory, node, _accepted_rx, server) =
+            serve_raft_route(local_only_answer_raft_server).await;
+        let mut client = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+
+        assert!(pre_vote_of(&mut client).await.is_err());
+
+        drop(client);
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// Plurx patch 37: a peer that cannot be reached gives no answer, which is no grant.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_unreachable_peer_gives_no_pre_vote_answer() {
+        let (mut factory, mut node, _accepted_rx, server) = answering_fixture().await;
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a port to close");
+        node.addr_raft = closed.local_addr().expect("closed port").to_string();
+        drop(closed);
+        let mut client = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+
+        assert!(pre_vote_of(&mut client).await.is_err());
+
+        drop(client);
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// Plurx patch 37, rolling upgrade: the capability belongs to a socket. While the peer is an
+    /// older server, pre-vote is answered locally; after it restarts as a current server, the
+    /// reconnected socket carries the pre-vote and the peer's own refusal returns.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_reconnect_renegotiates_pre_vote() {
+        let (mut factory, node, accepted_rx, server) =
+            serve_raft_route(upgrading_raft_server).await;
+        let mut client = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+
+        assert!(
+            pre_vote_of(&mut client)
+                .await
+                .expect("older peer")
+                .is_none()
+        );
+        assert_eq!(accepted_rx.recv_async().await.expect("first socket"), 1);
+
+        // The older server restarts on this append; the client reconnects to the current one.
+        let _ = client
+            .append_entries(empty_append(), RPCOption::new(Duration::from_secs(2)))
+            .await;
+        let mut answer = None;
+        for _ in 0..50 {
+            match pre_vote_of(&mut client).await {
+                Ok(Some(resp)) => {
+                    answer = Some(resp);
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let answer = answer.expect("the current server answers pre-vote itself");
+        assert!(!answer.vote_granted);
+        assert!(accepted_rx.try_recv().expect("second socket") >= 2);
 
         drop(client);
         drop(factory);

@@ -135,7 +135,8 @@ where C: RaftTypeConfig
     }
 
     /// A pre-vote answer arrived. `resp` is `None` when the target cannot answer pre-vote (an older
-    /// peer); that counts as a grant so an older peer never blocks an election it would allow.
+    /// peer); that counts as a grant so an older peer never blocks an election it would allow,
+    /// except from the committed leader this node last followed (see below).
     pub(crate) fn handle_pre_vote_resp(
         &mut self,
         target: C::NodeId,
@@ -161,13 +162,31 @@ where C: RaftTypeConfig
         }
 
         let granted = match &resp {
-            None => true,
+            // The leader this node last followed cannot speak for itself on an older version; a
+            // live leader would refuse, so its silence is not a grant. A truly dead leader is
+            // unreachable and answers nothing either way.
+            None => !(round.base_vote.is_committed() && round.base_vote.leader_id().voted_for() == Some(target.clone())),
             Some(resp) => resp.vote_granted,
         };
         if !granted {
             if let Some(resp) = &resp {
                 if resp.last_log_id.as_ref() > self.state.last_log_id() {
                     self.set_greater_log();
+                }
+
+                // A peer that is already past this node's term (it ran a campaign this node never
+                // saw) refuses every proposal at the old term, and pre-vote alone never raises the
+                // term. Adopt the higher vote, non-committed, exactly as a rejected real vote does
+                // in `handle_vote_resp`; the next round then proposes past it. This cannot depose
+                // a healthy leader: a leader's or a leased follower's refusal carries the committed
+                // vote this node already holds, which is never greater.
+                let mut higher = resp.vote.clone();
+                higher.committed = false;
+                if &higher > self.state.vote_ref() {
+                    tracing::info!(higher = display(&higher), "pre-vote refused by a peer at a higher term: adopting it");
+                    self.pre_vote = None;
+                    let _ = self.vote_handler().update_vote(&higher);
+                    return;
                 }
             }
             tracing::info!(target = display(&target), "pre-vote rejected");

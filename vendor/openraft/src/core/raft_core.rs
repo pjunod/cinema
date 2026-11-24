@@ -1332,7 +1332,17 @@ where
                     proposed_vote = display(&sender_vote),
                     "received Notify::PreVoteResponse"
                 );
-                self.engine.handle_pre_vote_resp(target, sender_vote, resp);
+                // The tick checks these before a round starts; they may change while it is in
+                // flight (Hiqlite patch 30 disables elections on a node that is handing off for
+                // shutdown), and a round must not elect a node that may no longer campaign.
+                let may_elect = self.runtime_config.enable_elect.load(Ordering::Relaxed)
+                    && self.engine.state.membership_state.effective().is_voter(&self.id);
+                if may_elect {
+                    self.engine.handle_pre_vote_resp(target, sender_vote, resp);
+                } else {
+                    tracing::info!("elections are disabled or this node is no longer a voter: ending the pre-vote round");
+                    self.engine.pre_vote = None;
+                }
             }
 
             Notify::HigherVote {

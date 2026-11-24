@@ -3,7 +3,7 @@
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
 Apache-2.0. Plurx carries thirty-seven patches for clustered deployments. An
 upstream release can retire the eleven generic bugs and the one dependency-only
-constraint; it cannot retire the twenty-four Plurx policies:
+constraint; it cannot retire the twenty-five Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -682,9 +682,9 @@ patch description remains the historical/local contract; row 19 stays
   its WebSocket upgrade response, and the client's connection task writes a
   pre-vote only on a socket whose response carried it. On any other socket it
   answers locally with `PreVoteUnsupported`, which is never written to a
-  socket. OpenRaft counts that answer as a grant, so an older peer never
-  blocks an election. A reconnect renegotiates, and a connection failure is
-  no grant. `try_connect` keeps its signature for the API client;
+  socket; one read from a socket is refused. OpenRaft counts that answer as
+  a grant, so an older peer never blocks an election. A reconnect
+  renegotiates, and a connection failure is no grant. `try_connect` keeps its signature for the API client;
   `try_connect_negotiated` also returns the flag. The OpenRaft half is
   `vendor/openraft/PLURX-PATCH.md`.
   `Cargo.toml` patches `openraft` to that vendored copy, as it does

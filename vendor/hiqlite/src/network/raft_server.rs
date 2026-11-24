@@ -992,6 +992,36 @@ mod tests {
         assert_eq!(8, tag(&RaftStreamResponsePayload::PreVoteUnsupported));
     }
 
+    /// Plurx patch 37: the real Raft stream handlers advertise pre-vote and dispatch it to
+    /// `Raft::pre_vote` for both groups. The transport tests use their own test servers, so
+    /// without this, dropping either half would fail nothing.
+    #[test]
+    fn both_raft_stream_handlers_advertise_and_answer_pre_vote() {
+        let source = include_str!("raft_server.rs");
+        let section = |start: &str, end: &str| {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("{start} not found"));
+            let rest = &source[from..];
+            &rest[..rest
+                .find(end)
+                .unwrap_or_else(|| panic!("{end} not found after {start}"))]
+        };
+        for (handler, next) in [
+            ("pub async fn stream_cache(", "pub async fn stream_sqlite("),
+            ("pub async fn stream_sqlite(", "async fn handle_socket("),
+        ] {
+            let body = section(handler, next);
+            assert!(
+                body.contains("advertise_pre_vote(&mut response);"),
+                "{handler} must advertise pre-vote"
+            );
+        }
+        let dispatch = section("async fn execute_raft_request(", "\n}\n");
+        assert!(dispatch.contains("state.raft_db.raft.pre_vote(request)"));
+        assert!(dispatch.contains("state.raft_cache.raft.pre_vote(request)"));
+    }
+
     /// Plurx patch 37: only the exact v1 value advertises pre-vote.
     #[test]
     fn only_the_exact_header_value_advertises_pre_vote() {

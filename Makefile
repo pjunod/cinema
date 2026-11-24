@@ -282,7 +282,23 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::an_advertising_server_answers_the_pre_vote_itself \
 	  --lib -- --exact
-	PLURX_EXPECT_TEST_COUNT=10 $(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml \
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::both_raft_stream_handlers_advertise_and_answer_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_local_only_answer_read_from_a_socket_is_refused \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_unreachable_peer_gives_no_pre_vote_answer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_reconnect_renegotiates_pre_vote \
+	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=14 $(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml \
 	  --features serde engine::tests::pre_vote_test:: --lib
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \

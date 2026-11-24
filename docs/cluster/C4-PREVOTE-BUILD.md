@@ -51,15 +51,24 @@ OpenRaft 0.9.25 is vendored at `vendor/openraft` with a `PLURX-PATCH.md`. The pa
    engine calls `elect()` unchanged.
 4. **Pacing.** A failed round changes no state, so it cannot reset the vote timer. The next round
    starts only after one more election timeout from the previous round's start.
-5. **Unchanged paths:**
+5. **A peer past this term.** Pre-vote alone never raises the term, so a node behind a peer that
+   ran a campaign it never saw would propose the old term forever, and two survivors could refuse
+   each other indefinitely. A refusal whose vote is greater than the local vote is therefore
+   adopted, non-committed, exactly as a refused real vote is (`handle_vote_resp`); the next round
+   proposes past it. A leader's or leased follower's refusal carries the committed vote the stalled
+   voter already holds, which is never greater, so the C4 deposition cannot return this way.
+6. **Elections disabled mid-round.** A round in flight ends without electing once elections are
+   disabled (Hiqlite patch 30, shutdown handoff) or the node stops being a voter.
+7. **Unchanged paths:**
    - a single voter elects at once;
    - `Trigger::elect`, used by Hiqlite patch 4 and C2 shutdown handoff to elect a chosen successor,
      still calls `elect()` directly;
    - the vote and append RPCs, and leader-lease rules, do not change.
-6. **Network:** `RaftNetwork::pre_vote` is added with a default that reports *unsupported*. An
+8. **Network:** `RaftNetwork::pre_vote` is added with a default that reports *unsupported*. An
    unsupported or unreachable peer is handled differently:
    - *Unsupported* (it cannot answer) counts as a grant, as upstream 0.10 does for mixed versions,
-     so an old peer never blocks a needed election.
+     so an old peer never blocks a needed election. The one exception is the committed leader this
+     node last followed: alive, it would refuse, so its silence is not a grant.
    - *Unreachable* or timed out counts as no grant, as for a vote.
 
 ## 3. Wire compatibility (Hiqlite)

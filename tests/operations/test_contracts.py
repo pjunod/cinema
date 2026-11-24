@@ -3057,6 +3057,10 @@ assert.equal(context.ACT_TIMER, null);
             "only_the_exact_header_value_advertises_pre_vote",
             "an_older_server_never_receives_a_pre_vote_and_keeps_its_stream",
             "an_advertising_server_answers_the_pre_vote_itself",
+            "both_raft_stream_handlers_advertise_and_answer_pre_vote",
+            "a_local_only_answer_read_from_a_socket_is_refused",
+            "an_unreachable_peer_gives_no_pre_vote_answer",
+            "a_reconnect_renegotiates_pre_vote",
             "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
             "shutdown_reports_running_work_without_cancelling_it",
             "cancelled_shutdown_wait_retains_the_executor_handle",
@@ -3304,7 +3308,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--lib -- --exact", openraft_command)
         pre_vote = [command for command in wal_commands if "engine::tests::pre_vote_test::" in command]
         self.assertEqual(len(pre_vote), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", pre_vote[0])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=14", pre_vote[0])
         self.assertIn("--manifest-path vendor/openraft/Cargo.toml", pre_vote[0])
         snapshot_metrics = [
             command

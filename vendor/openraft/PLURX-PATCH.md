@@ -31,15 +31,20 @@ it shows exactly this patch.
     changes, for example when a live leader's heartbeat arrives mid-round.
   - A failed round cannot reset the vote timer, so rounds are paced by one election timeout from
     the previous round's start.
+  - A refusal at a higher term is adopted, non-committed, as a refused real vote is, so two
+    survivors behind a lost campaign cannot refuse each other forever.
+  - A round in flight ends without electing once elections are disabled or the node stops being a
+    voter.
 - **What stays the same:**
   - a single voter elects at once;
   - `Trigger::elect` (Hiqlite patch 4, the C2 shutdown handoff) still calls `elect()` directly;
   - the vote and append RPCs, leader lease, timers and storage format are unchanged.
 - **Network.** `RaftNetwork::pre_vote` returns `Ok(None)` by default, meaning the target cannot
-  answer pre-vote, and that counts as a grant so an older peer never blocks an election. A
-  timeout or transport error is no grant. Hiqlite patch 37 negotiates the RPC per Raft stream.
+  answer pre-vote, and that counts as a grant so an older peer never blocks an election, except
+  from the committed leader this node last followed. A timeout or transport error is no grant. Hiqlite patch 37 negotiates the RPC per Raft stream.
 - Unit tests: `engine::tests::pre_vote_test` (the measured stall, stale rounds, peer checks, quorum
-  and joint quorum, unsupported peers, pacing, triggered elections).
+  and joint quorum, unsupported peers, pacing, triggered elections, higher-term adoption, the
+  greater-log delay, and source checks that the tick and the response handler are wired).
 
 Files: `src/engine/pre_vote.rs`, `src/engine/tests/pre_vote_test.rs`, `src/engine/mod.rs`,
 `src/engine/engine_impl.rs`, `src/engine/command.rs`, `src/engine/engine_output.rs`,
