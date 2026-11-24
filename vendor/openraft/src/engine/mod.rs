@@ -33,6 +33,7 @@ mod engine_config;
 mod engine_impl;
 mod engine_output;
 mod log_id_list;
+mod pre_vote;
 
 pub(crate) mod handler;
 pub(crate) mod time_state;
@@ -46,6 +47,7 @@ mod tests {
     mod initialize_test;
     mod install_full_snapshot_test;
     mod log_id_list_test;
+    mod pre_vote_test;
     mod startup_test;
     mod trigger_purge_log_test;
 }

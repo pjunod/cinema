@@ -16,6 +16,7 @@ failures.
 |---|---|---|
 | [CLUSTER-TIMING-BOUNDED-FIXES.md](CLUSTER-TIMING-BOUNDED-FIXES.md) | How delayed activation consumes one lease and optional reconciliation cannot starve renewal. | built |
 | [VOTER-TIMING-OBSERVATION-BUILD.md](VOTER-TIMING-OBSERVATION-BUILD.md) | Passive voter timing instrumentation, bounded collection and limits. | open |
+| [C4-PREVOTE-BUILD.md](C4-PREVOTE-BUILD.md) | C4 remedy from measured voter stalls: OpenRaft pre-vote, so a stalled voter cannot depose a healthy leader; negotiated per Raft stream. | open |
 | [CLUSTER-CATALOGUE-SNAPSHOT-BUILD.md](CLUSTER-CATALOGUE-SNAPSHOT-BUILD.md) | How complete source-bound peer catalogue descriptions are reused without caching execution authority. | built |
 | [CLUSTER-WATCH-BUILD.md](CLUSTER-WATCH-BUILD.md) | General table-change watch contract and consumer migration. | built |
 | [OPENRAFT-010-EVALUATION.md](OPENRAFT-010-EVALUATION.md) | Which native 0.10 mechanisms can replace fork patches 4, 6 and 28, and what exact 0.9.25 source proves about starved voters. | open |

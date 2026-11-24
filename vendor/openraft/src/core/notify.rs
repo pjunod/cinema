@@ -19,6 +19,16 @@ where C: RaftTypeConfig
         sender_vote: Vote<C::NodeId>,
     },
 
+    /// Plurx patch: an answer to a pre-vote round. `resp` is `None` when the target cannot answer
+    /// pre-vote.
+    PreVoteResponse {
+        target: C::NodeId,
+        resp: Option<VoteResponse<C::NodeId>>,
+
+        /// The vote the pre-vote round proposed.
+        sender_vote: Vote<C::NodeId>,
+    },
+
     /// Seen a higher `vote`.
     HigherVote {
         /// The ID of the target node from which the new term was observed.
@@ -68,6 +78,14 @@ where C: RaftTypeConfig
                 sender_vote: vote,
             } => {
                 format!("VoteResponse: from: {}: {}, res-vote: {}", target, resp.summary(), vote)
+            }
+            Self::PreVoteResponse {
+                target,
+                resp,
+                sender_vote: vote,
+            } => {
+                let resp = resp.as_ref().map(|r| r.summary()).unwrap_or_else(|| "unsupported".to_string());
+                format!("PreVoteResponse: from: {}: {}, proposed-vote: {}", target, resp, vote)
             }
             Self::HigherVote {
                 ref target,

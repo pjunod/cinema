@@ -3053,6 +3053,10 @@ assert.equal(context.ACT_TIMER, null);
             "raft_transport_debug_logging_exposes_only_bounded_metadata",
             "production_api_reader_reports_malformed_frames",
             "silent_peer_cannot_hold_the_server_handshake_open",
+            "pre_vote_variants_follow_every_deployed_raft_stream_ordinal",
+            "only_the_exact_header_value_advertises_pre_vote",
+            "an_older_server_never_receives_a_pre_vote_and_keeps_its_stream",
+            "an_advertising_server_answers_the_pre_vote_itself",
             "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
             "shutdown_reports_running_work_without_cancelling_it",
             "cancelled_shutdown_wait_retains_the_executor_handle",
@@ -3292,15 +3296,16 @@ assert.equal(context.ACT_TIMER, null);
         matching = [command for command in wal_commands if openraft_test in command]
         self.assertEqual(len(matching), 1)
         openraft_command = matching[0]
+        # OpenRaft is vendored (C4 pre-vote), so its regressions run from the tree.
         self.assertIn(
-            "cargo metadata --locked --manifest-path vendor/hiqlite/Cargo.toml",
-            openraft_command,
+            "cargo test --locked --manifest-path vendor/openraft/Cargo.toml", openraft_command
         )
-        self.assertIn('p["version"] == "0.9.25"', openraft_command)
-        self.assertIn("cargo test --locked", openraft_command)
-        self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
         self.assertIn("--features generic-snapshot-data", openraft_command)
         self.assertIn("--lib -- --exact", openraft_command)
+        pre_vote = [command for command in wal_commands if "engine::tests::pre_vote_test::" in command]
+        self.assertEqual(len(pre_vote), 1)
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", pre_vote[0])
+        self.assertIn("--manifest-path vendor/openraft/Cargo.toml", pre_vote[0])
         snapshot_metrics = [
             command
             for command in wal_commands

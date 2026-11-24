@@ -1122,6 +1122,60 @@ where
         }
     }
 
+    /// Plurx patch: send a pre-vote to every other voter. A timeout or transport error yields no
+    /// answer, which is no grant; an unsupported peer answers `None`, which is a grant.
+    async fn spawn_parallel_pre_vote_requests(&mut self, vote_req: &VoteRequest<C::NodeId>) {
+        let members = self.engine.state.membership_state.effective().voter_ids();
+        let vote = vote_req.vote.clone();
+
+        for target in members {
+            if target == self.id {
+                continue;
+            }
+
+            let req = vote_req.clone();
+            // Safe unwrap(): target must be in membership
+            let target_node = self.engine.state.membership_state.effective().get_node(&target).unwrap().clone();
+            let mut client = self.network.new_client(target.clone(), &target_node).await;
+
+            let tx = self.tx_notify.clone();
+            let ttl = Duration::from_millis(self.config.election_timeout_min);
+            let option = RPCOption::new(ttl);
+
+            // False positive lint warning(`non-binding `let` on a future`): https://github.com/rust-lang/rust-clippy/issues/9932
+            #[allow(clippy::let_underscore_future)]
+            let _ = C::AsyncRuntime::spawn(
+                {
+                    let target = target.clone();
+                    let vote = vote.clone();
+
+                    async move {
+                        match C::AsyncRuntime::timeout(ttl, client.pre_vote(req, option)).await {
+                            Ok(Ok(resp)) => {
+                                let _ = tx.send(Notify::PreVoteResponse {
+                                    target,
+                                    resp,
+                                    sender_vote: vote,
+                                });
+                            }
+                            Ok(Err(err)) => {
+                                tracing::warn!({error=%err, target=display(&target)}, "while requesting pre-vote")
+                            }
+                            Err(_timeout) => {
+                                tracing::warn!(target = display(&target), "pre-vote request timed out")
+                            }
+                        }
+                    }
+                }
+                .instrument(tracing::debug_span!(
+                    parent: &Span::current(),
+                    "send_pre_vote_req",
+                    target = display(&target)
+                )),
+            );
+        }
+    }
+
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) fn handle_vote_request(&mut self, req: VoteRequest<C::NodeId>, tx: VoteTx<C>) {
         tracing::info!(req = display(req.summary()), func = func_name!());
@@ -1163,6 +1217,15 @@ where
                 );
 
                 self.handle_vote_request(rpc, tx);
+            }
+            RaftMsg::RequestPreVote { rpc, tx } => {
+                tracing::info!(pre_vote_request = display(&rpc), "received RaftMsg::RequestPreVote");
+
+                let resp = self.engine.handle_pre_vote_req(&rpc);
+                self.engine.output.push_command(Command::Respond {
+                    when: None,
+                    resp: Respond::new(Ok(resp), tx),
+                });
             }
             RaftMsg::BeginReceivingSnapshot { tx } => {
                 self.engine.handle_begin_receiving_snapshot(tx);
@@ -1257,6 +1320,19 @@ where
                 if self.does_vote_match(&sender_vote, "VoteResponse") {
                     self.engine.handle_vote_resp(target, resp);
                 }
+            }
+
+            Notify::PreVoteResponse {
+                target,
+                resp,
+                sender_vote,
+            } => {
+                tracing::info!(
+                    target = display(&target),
+                    proposed_vote = display(&sender_vote),
+                    "received Notify::PreVoteResponse"
+                );
+                self.engine.handle_pre_vote_resp(target, sender_vote, resp);
             }
 
             Notify::HigherVote {
@@ -1499,11 +1575,18 @@ where
             tracing::info!("election timeout passed, check if it is a voter for election");
         }
 
-        // Every time elect, reset this flag.
-        self.engine.reset_greater_log();
+        // Plurx patch: a single voter elects at once; otherwise ask the voters first (pre-vote), so a
+        // voter whose timer expired only because it was stalled cannot raise the term.
+        if self.engine.state.membership_state.effective().voter_ids().count() == 1 {
+            // Every time elect, reset this flag.
+            self.engine.reset_greater_log();
 
-        tracing::info!("do trigger election");
-        self.engine.elect();
+            tracing::info!("do trigger election");
+            self.engine.elect();
+        } else {
+            tracing::info!("election timeout passed: pre-vote");
+            self.engine.handle_election_timeout();
+        }
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1685,6 +1768,9 @@ where
             }
             Command::SendVote { vote_req } => {
                 self.spawn_parallel_vote_requests(&vote_req).await;
+            }
+            Command::SendPreVote { vote_req } => {
+                self.spawn_parallel_pre_vote_requests(&vote_req).await;
             }
             Command::ReplicateCommitted { committed } => {
                 for node in self.replications.values() {

@@ -420,6 +420,17 @@ where C: RaftTypeConfig
         self.inner.call_core(RaftMsg::RequestVote { rpc, tx }, rx).await
     }
 
+    /// Plurx patch: answer a PreVote RPC: whether this node would grant `rpc.vote` now.
+    ///
+    /// Unlike [`Raft::vote`] it never changes the vote, the election timer or the log.
+    #[tracing::instrument(level = "debug", skip(self, rpc))]
+    pub async fn pre_vote(&self, rpc: VoteRequest<C::NodeId>) -> Result<VoteResponse<C::NodeId>, RaftError<C::NodeId>> {
+        tracing::info!(rpc = display(rpc.summary()), "Raft::pre_vote()");
+
+        let (tx, rx) = C::AsyncRuntime::oneshot();
+        self.inner.call_core(RaftMsg::RequestPreVote { rpc, tx }, rx).await
+    }
+
     /// Get the latest snapshot from the state machine.
     ///
     /// It returns error only when `RaftCore` fails to serve the request, e.g., Encountering a

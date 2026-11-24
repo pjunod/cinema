@@ -79,6 +79,22 @@ where C: RaftTypeConfig
         option: RPCOption,
     ) -> Result<VoteResponse<C::NodeId>, RPCError<C::NodeId, C::Node, RaftError<C::NodeId>>>;
 
+    /// Plurx patch: send a PreVote RPC to the target.
+    ///
+    /// The target answers whether it would grant `rpc.vote` without changing any state. Return
+    /// `Ok(None)` when the target cannot answer pre-vote (it runs a version without it); the
+    /// candidate then counts it as a grant, so an older peer never blocks an election. The default
+    /// implementation reports exactly that, which keeps the 0.9.25 behaviour for networks that do
+    /// not implement it.
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<C::NodeId>,
+        option: RPCOption,
+    ) -> Result<Option<VoteResponse<C::NodeId>>, RPCError<C::NodeId, C::Node, RaftError<C::NodeId>>> {
+        let _ = (rpc, option);
+        Ok(None)
+    }
+
     /// Send a complete Snapshot to the target.
     ///
     /// This method is responsible to fragment the snapshot and send it to the target node.

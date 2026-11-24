@@ -53,6 +53,12 @@ where C: RaftTypeConfig
         tx: VoteTx<C>,
     },
 
+    /// Plurx patch: answer whether this node would grant `rpc.vote`, changing nothing.
+    RequestPreVote {
+        rpc: VoteRequest<C::NodeId>,
+        tx: VoteTx<C>,
+    },
+
     InstallFullSnapshot {
         vote: Vote<C::NodeId>,
         snapshot: Snapshot<C>,
@@ -112,6 +118,9 @@ where C: RaftTypeConfig
             }
             RaftMsg::RequestVote { rpc, .. } => {
                 format!("RequestVote: {}", rpc.summary())
+            }
+            RaftMsg::RequestPreVote { rpc, .. } => {
+                format!("RequestPreVote: {}", rpc.summary())
             }
             RaftMsg::BeginReceivingSnapshot { .. } => "BeginReceivingSnapshot".to_string(),
             RaftMsg::InstallFullSnapshot { vote, snapshot, .. } => {

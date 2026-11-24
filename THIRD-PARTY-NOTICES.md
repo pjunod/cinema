@@ -14,7 +14,7 @@ license notices are identified below. ffmpeg is invoked rather than linked
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 624 source-bearing crates in the root workspace · license fields
+the work. 623 source-bearing crates in the root workspace · license fields
 verified 2026-10-29; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
@@ -131,22 +131,25 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Eight crates are vendored under `vendor/` rather than pulled from crates.io.
+Nine crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
 |---|---|---|---|---|
 | `gemm-common` | 0.19.0 | MIT | Sarah Ek · [sarah-ek/gemm](https://github.com/sarah-ek/gemm) | [four function-local ARM FP16 requirements](vendor/gemm-common/PLURX-PATCH.md) |
-| `hiqlite` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [23 clustering patches](vendor/hiqlite/PLURX-PATCH.md) |
+| `hiqlite` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [37 clustering patches](vendor/hiqlite/PLURX-PATCH.md) |
 | `hiqlite-wal` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [3 restart-recovery patches and 1 K-06 startup patch](vendor/hiqlite-wal/PLURX-PATCH.md) |
 | `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195 and four unreferenced edges dropped](vendor/s3-simple/PLURX-PATCH.md) |
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
 | `dolby_vision` | 3.4.0 | MIT | quietvoid · [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) | [five refusals where a malformed RPU allocated or panicked](vendor/dolby_vision/PLURX-PATCH.md) |
 | `bitvec_helpers` | 4.0.2 | MIT | quietvoid · [quietvoid/bitvec_helpers](https://github.com/quietvoid/bitvec_helpers) | [two Exp-Golomb overflows refused](vendor/bitvec_helpers/PLURX-PATCH.md) |
 | `ksni` | 0.3.6 | Unlicense | iovxw · [iovxw/ksni](https://github.com/iovxw/ksni) | [consistent D-Bus menu item IDs](vendor/ksni/PLURX-PATCH.md) |
+| `openraft` | 0.9.25 | MIT OR Apache-2.0 (redistributed under Apache-2.0) | Databend Labs · [databendlabs/openraft](https://github.com/databendlabs/openraft) | [negotiated pre-vote: a stalled voter cannot depose a healthy leader](vendor/openraft/PLURX-PATCH.md) |
 
 Each directory retains its upstream license text; `ksni` uses
-[UNLICENSE](vendor/ksni/UNLICENSE).
+[UNLICENSE](vendor/ksni/UNLICENSE). The `openraft` crates.io package ships no
+license file, so its directory carries the Apache-2.0 text it is redistributed
+under as [LICENSE-APACHE](vendor/openraft/LICENSE-APACHE).
 
 `s3-simple` is vendored but is not part of the default resolution: plurx
 builds hiqlite without `backup`/`s3`, so it reaches no shipped binary and
@@ -154,7 +157,7 @@ carries no row in the resolved-dependency table below. It is attributed here
 because the repository redistributes the modified source. See
 [vendor/s3-simple/PLURX-PATCH.md](vendor/s3-simple/PLURX-PATCH.md).
 
-For the three Apache-2.0 crates, §4(b) asks that modified files carry
+For the Apache-2.0 crates (including `openraft` as redistributed here), §4(b) asks that modified files carry
 prominent notices of the change. `PLURX-PATCH.md` records every change at the
 directory level, which is how the patches are kept reviewable against
 upstream; it is not a per-file annotation. `rust_decimal` is MIT, where no
@@ -164,7 +167,7 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-624 source-bearing crates resolve into a plurx build, excluding the ten
+623 source-bearing crates resolve into a plurx build, excluding the ten
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
 passkey validation; the other selected license terms are permissive:
@@ -179,7 +182,7 @@ binding crates and are not bundled in `plurx-desktop`. See the
 
 | License expression | Crates |
 |---|---:|
-| `MIT OR Apache-2.0` | 295 |
+| `MIT OR Apache-2.0` | 294 |
 | `MIT` | 147 |
 | `Apache-2.0 OR MIT` | 42 |
 | `Apache-2.0 WITH LLVM-exception` | 28 |
@@ -252,7 +255,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (624)</summary>
+<summary>Full crate list (623)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -581,7 +584,6 @@ but they are not covered by the table above.
 | `onig` | 6.5.3 | MIT |
 | `onig_sys` | 69.9.3 | MIT |
 | `opaque-debug` | 0.3.1 | MIT OR Apache-2.0 |
-| `openraft` | 0.9.25 | MIT OR Apache-2.0 |
 | `openraft-macros` | 0.9.25 | MIT OR Apache-2.0 |
 | `openssl` | 0.10.81 | Apache-2.0 |
 | `openssl-macros` | 0.1.1 | MIT/Apache-2.0 |

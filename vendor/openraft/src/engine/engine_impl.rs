@@ -10,6 +10,7 @@ use crate::display_ext::DisplayInstantExt;
 use crate::display_ext::DisplayOptionExt;
 use crate::display_ext::DisplaySlice;
 use crate::engine::engine_config::EngineConfig;
+use crate::engine::pre_vote::PreVoteRound;
 use crate::engine::handler::establish_handler::EstablishHandler;
 use crate::engine::handler::following_handler::FollowingHandler;
 use crate::engine::handler::leader_handler::LeaderHandler;
@@ -90,6 +91,9 @@ where C: RaftTypeConfig
     /// without losing leadership status.
     pub(crate) candidate: CandidateState<C>,
 
+    /// Plurx patch: the pre-vote round in flight, if any. See `engine/pre_vote.rs`.
+    pub(crate) pre_vote: Option<PreVoteRound<C>>,
+
     /// Output entry for the runtime.
     pub(crate) output: EngineOutput<C>,
 }
@@ -107,6 +111,7 @@ where C: RaftTypeConfig
             seen_greater_log: false,
             leader: None,
             candidate: None,
+            pre_vote: None,
             output: EngineOutput::new(4096),
         }
     }
@@ -224,6 +229,9 @@ where C: RaftTypeConfig
             "elect() requires leadership to be relinquished: leader.vote({})",
             self.leader.as_ref().map(|l| l.vote.to_string()).unwrap_or_default()
         );
+
+        // Plurx patch: any election, timer-driven or triggered, ends a pre-vote round.
+        self.pre_vote = None;
 
         let new_term = self.state.vote.leader_id().term + 1;
         let new_vote = Vote::new(new_term, self.config.id.clone());

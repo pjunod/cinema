@@ -19,6 +19,7 @@ exclude = [
     "vendor/gemm-common",
     "vendor/hiqlite",
     "vendor/hiqlite-wal",
+    "vendor/openraft",
     "vendor/rust_decimal",
     "vendor/s3-simple",
 ]
@@ -195,6 +196,10 @@ dolby_vision = { path = "vendor/dolby_vision" }
 bitvec_helpers = { path = "vendor/bitvec_helpers" }
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
+# OpenRaft 0.9.25 with authenticated, negotiated pre-vote, so a voter that
+# stalled cannot depose a healthy leader (audit C4/R1). See
+# vendor/openraft/PLURX-PATCH.md and docs/cluster/C4-PREVOTE-BUILD.md.
+openraft = { path = "vendor/openraft" }
 rust_decimal = { path = "vendor/rust_decimal" }
 
 # Keep GetGroupProperties IDs consistent with layout/click IDs after refresh.
