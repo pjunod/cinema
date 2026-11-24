@@ -72,7 +72,7 @@ file and scanner refuse the same way on every read. The job therefore fails
 once as `title_scan_refused` while the source and the scanner are unchanged.
 That settles the demand for the probe revision and scanner digest, and a
 changed file or a new scanner re-opens it. Examples are an untagged Matroska
-track with no independent endpoint, a timeline gap or a corrupt packet. Any
+track with no independent endpoint or a timeline gap. Any
 other scanner failure is charged as `title_scan_failed`: an environment
 refusal, an unknown reason, a signal or a deadline. Both carry the exit
 status and redacted stderr in the reason.

@@ -1117,6 +1117,8 @@ fn title_content_refusal_is_a_verdict_and_environment_refusals_are_not() {
         (256, "DV title scan refused: source open\n"),
         (256, "DV title scan refused: complete demux EOF\n"),
         (256, "DV title scan refused: bounded demux buffer\n"),
+        (256, "DV title scan refused: corrupt demux packet\n"),
+        (256, "DV title scan refused: selected HEVC video\n"),
         (
             256,
             "DV title scan refused: held regular title source or private source capability\n",
@@ -1299,15 +1301,10 @@ async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_
         Some("title_source_read_failed")
     );
 
-    // A content refusal of clean, unchanged input is a verdict: the job fails
-    // now, with attempts to spare, instead of rereading the whole title.
-    let fourth_at = bounded.not_before_ms;
-    let fourth = claimed(
-        store
-            .claim_job(claim(bounded.revision, fourth_at))
-            .await
-            .expect("fourth claim"),
-    );
+    // A content refusal of clean, unchanged input is a verdict: it fails the
+    // job now instead of rereading the whole title. What that does to a
+    // dv_title_scan job and its demand is pinned on every store backend by
+    // title_scan_refusal_settles_the_demand_until_the_source_or_scanner_changes.
     let verdict = scan_failure_settlement(
         &TitleScanError::Refused(
             "complete-title DV scan refused (exit status: 1; stderr: DV title scan refused: \
@@ -1315,20 +1312,12 @@ async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_
                 .into(),
         ),
         &id,
-        fourth.failed_attempts,
+        bounded.failed_attempts,
     );
-    assert!(matches!(verdict, JobSettlement::Fail { .. }));
-    assert!(store
-        .settle_job(settle(fourth.token.expect("token"), verdict, fourth_at))
-        .await
-        .expect("verdict"));
-    let settled = store.background_job(&id).await.expect("read").expect("job");
-    assert_eq!(settled.state, JobState::Failed, "a verdict is not retried");
-    assert!(settled.failed_attempts < settled.attempt_limit);
-    assert_eq!(
-        settled.last_error_code.as_deref(),
-        Some("title_scan_refused")
-    );
+    assert!(matches!(
+        verdict,
+        JobSettlement::Fail { ref error_code } if error_code == "title_scan_refused"
+    ));
 }
 
 #[tokio::test]

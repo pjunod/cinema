@@ -48,8 +48,12 @@ impl std::fmt::Display for TitleScanError {
 /// Refusals left out are about the environment, not the content: the source
 /// capability, I/O and demux setup, allocation, usage, the RPU timeline
 /// sidecar, `source open`, `complete demux EOF` (a direct read's I/O error
-/// surfaces there) and `aggregate output`. They, and any reason a newer
-/// scanner adds, keep the charged retry.
+/// surfaces there) and `aggregate output`. Two more classes are left out:
+/// `corrupt demux packet` is set by libavformat on a short sample read, which
+/// a scanner-side loopback failure causes without the bridge seeing one; and
+/// `selected stream exists` and `selected HEVC video` judge the stream index
+/// the daemon chose, which neither the probe revision nor the scanner digest
+/// covers. They, and any reason a newer scanner adds, keep the charged retry.
 pub(super) const CONTENT_REFUSALS: &[&str] = &[
     "a PPS lets slices withhold pictures from output",
     "bounded access-unit NAL count",
@@ -66,10 +70,7 @@ pub(super) const CONTENT_REFUSALS: &[&str] = &[
     "complete configuration array",
     "complete configuration NAL length",
     "configuration NAL inside its record",
-    "selected stream exists",
-    "selected HEVC video",
     "bounded picture size",
-    "corrupt demux packet",
     "complete declared frame coverage",
     "contiguous decoded title coverage",
     "observed declared video origin",
