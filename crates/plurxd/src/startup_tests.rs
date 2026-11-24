@@ -312,24 +312,6 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         FinalizeJoinRequest, MembershipManager, RedeemJoinRequest,
     };
     use plurx_core::cluster::migration::select_daemon_store_observing;
-    fn config(root: &std::path::Path) -> Config {
-        let listeners: Vec<_> = (0..3)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("port"))
-            .collect();
-        let addresses: Vec<_> = listeners
-            .iter()
-            .map(|listener| listener.local_addr().expect("address"))
-            .collect();
-        let mut config = Config::default();
-        config.storage.data_dir = root.into();
-        config.server.bind = addresses[0];
-        config.cluster.raft_bind = addresses[1];
-        config.cluster.api_bind = addresses[2];
-        config.cluster.advertise_host = "localhost".into();
-        config.cluster.join_url = format!("http://{}", config.server.bind);
-        config.cluster.artwork_url = config.cluster.join_url.clone();
-        config
-    }
     async fn redeem(
         State(manager): State<MembershipManager>,
         Json(request): Json<RedeemJoinRequest>,
@@ -444,12 +426,13 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         }
     }
     let source_root = crate::test_tempdir().expect("source");
-    let source_config = config(source_root.path());
+    let (source_config, source_http) = crate::owned_loopback_config(source_root.path());
     drop(
         plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
             .expect("SQLite source"),
     );
-    let source_owner = Arc::new(StartupObservationHttp::new(source_config.server.bind));
+    let source_owner = Arc::new(StartupObservationHttp::from_std_listener(source_http)
+            .expect("owned HTTP socket"));
     let source = select_daemon_store_observing(
         &source_config,
         Some(&crate::cluster::StartupClockAdapter(source_owner.as_ref())),
@@ -507,11 +490,12 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         .await
         .expect("voter intent");
     let joining_root = crate::test_tempdir().expect("joiner");
-    let mut joining_config = config(joining_root.path());
+    let (mut joining_config, joining_http) = crate::owned_loopback_config(joining_root.path());
     let token_path = joining_root.path().join("join.token");
     std::fs::write(&token_path, format!("{}\n", token.token)).expect("test token");
     joining_config.cluster.join_token_file = token_path.clone();
-    let joining_owner = Arc::new(StartupObservationHttp::new(joining_config.server.bind));
+    let joining_owner = Arc::new(StartupObservationHttp::from_std_listener(joining_http)
+            .expect("owned HTTP socket"));
     let observed = Arc::new(AtomicBool::new(false));
     let standing = Arc::new(std::sync::Mutex::new(None));
     let observer = AuditObserver {
@@ -2739,8 +2723,12 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
         drop(reservation);
         let mut plain_socket = Some(plain_socket);
         let observer = if observed {
-            drop(plain_socket.take());
-            let owner = Arc::new(StartupObservationHttp::new(plain_address));
+            let owner = Arc::new(
+                StartupObservationHttp::from_listener(
+                    plain_socket.take().expect("plain HTTP socket"),
+                )
+                .expect("owned HTTP socket"),
+            );
             crate::cluster::StartupClock::start(
                 &*owner,
                 crate::cluster::startup_clock(

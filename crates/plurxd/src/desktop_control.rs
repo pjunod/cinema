@@ -1335,28 +1335,17 @@ mod tests {
                     .expect("desktop control fixture");
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("desktop control fixture");
-            let listeners: Vec<_> = (0..3)
-                .map(|_| {
-                    std::net::TcpListener::bind("127.0.0.1:0").expect("desktop control fixture")
-                })
-                .collect();
-            let addresses: Vec<_> = listeners
-                .iter()
-                .map(|listener| listener.local_addr().expect("desktop control fixture"))
-                .collect();
-            let mut config = plurx_core::config::Config::default();
-            config.storage.data_dir = root.path().join("data");
-            std::fs::create_dir_all(&config.storage.data_dir).expect("desktop control fixture");
-            config.server.bind = addresses[0];
-            config.cluster.raft_bind = addresses[1];
-            config.cluster.api_bind = addresses[2];
-            config.cluster.advertise_host = "localhost".into();
-            drop(listeners);
+            let data_dir = root.path().join("data");
+            std::fs::create_dir_all(&data_dir).expect("desktop control fixture");
+            let (config, http) = crate::owned_loopback_config(&data_dir);
             drop(
                 plurx_core::store::SqliteStore::open(&config.storage.data_dir.join("plurx.db"))
                     .expect("desktop control fixture"),
             );
-            let observation = Arc::new(crate::StartupObservationHttp::new(config.server.bind));
+            let observation = Arc::new(
+                crate::StartupObservationHttp::from_std_listener(http)
+                    .expect("desktop control fixture"),
+            );
             let selected = plurx_core::cluster::migration::select_daemon_store_observing(
                 &config,
                 Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),

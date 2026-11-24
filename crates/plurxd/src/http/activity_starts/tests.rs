@@ -392,28 +392,9 @@ mod fleet {
     use axum::extract::DefaultBodyLimit;
     use futures_util::FutureExt;
     use plurx_core::cluster::migration::{select_daemon_store_observing, SelectedStore};
-    use plurx_core::config::Config;
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     use std::path::PathBuf;
 
-    fn config(root: &std::path::Path) -> Config {
-        let held: Vec<_> = (0..3)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
-            .collect();
-        let addresses: Vec<_> = held
-            .iter()
-            .map(|socket| socket.local_addr().expect("owned fixture invariant"))
-            .collect();
-        let mut config = Config::default();
-        config.storage.data_dir = root.into();
-        config.server.bind = addresses[0];
-        config.cluster.raft_bind = addresses[1];
-        config.cluster.api_bind = addresses[2];
-        config.cluster.advertise_host = "localhost".into();
-        config.cluster.join_url = format!("http://{}", addresses[0]);
-        config.cluster.artwork_url = config.cluster.join_url.clone();
-        config
-    }
 
     /// A learner admitted through the production token-file join.
     async fn join_learner(
@@ -432,11 +413,10 @@ mod fleet {
         tokio::fs::write(&token_path, format!("{}\n", token.token))
             .await
             .expect("owned learner token file");
-        let mut learner_config = config(root.path());
+        let (mut learner_config, learner_http) = crate::owned_loopback_config(root.path());
         learner_config.cluster.join_token_file = token_path;
-        let startup = Arc::new(crate::StartupObservationHttp::new(
-            learner_config.server.bind,
-        ));
+        let startup = Arc::new(crate::StartupObservationHttp::from_std_listener(learner_http)
+            .expect("owned HTTP socket"));
         let selected = tokio::time::timeout(
             Duration::from_secs(45),
             Box::pin(select_daemon_store_observing(
@@ -493,14 +473,13 @@ mod fleet {
 
     async fn fleet_fixture() {
         let source_root = crate::test_tempdir().expect("owned leader root");
-        let source_config = config(source_root.path());
+        let (source_config, source_http) = crate::owned_loopback_config(source_root.path());
         drop(
             plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
                 .expect("schema"),
         );
-        let startup = Arc::new(crate::StartupObservationHttp::new(
-            source_config.server.bind,
-        ));
+        let startup = Arc::new(crate::StartupObservationHttp::from_std_listener(source_http)
+            .expect("owned HTTP socket"));
         let selected = select_daemon_store_observing(
             &source_config,
             Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
