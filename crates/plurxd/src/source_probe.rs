@@ -6,6 +6,8 @@ mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod levels_work;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod refit_work;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod title_work;
@@ -152,6 +154,13 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut refit: Option<refit_work::RefitTask> = None;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut refit_after = 0;
+    // The DV levels pass is the lowest-priority occupant of the same lane: it
+    // starts only when neither a title scan nor an F+ fit does, and yields to
+    // all of them and to ordinary probes.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut levels: Option<levels_work::LevelsTask> = None;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut levels_after = 0;
     #[cfg(target_os = "linux")]
     let mut live_title_after = 0;
     loop {
@@ -162,6 +171,10 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(work) = refit.take() {
+                work.stop().await;
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(work) = levels.take() {
                 work.stop().await;
             }
             return;
@@ -217,6 +230,24 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Err(error) => tracing::warn!(%error,"F+ priority observation unavailable"),
             }
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(work) = levels.as_mut() {
+            // A title scan or F+ fit that started this tick takes the lane,
+            // as does any locally runnable ordinary probe.
+            let yield_now = title.is_some()
+                || refit.is_some()
+                || work.should_yield(&state).await.unwrap_or_else(|error| {
+                    tracing::warn!(%error, "DV levels priority observation unavailable");
+                    false
+                });
+            if yield_now {
+                if let Some(work) = levels.take() {
+                    work.stop().await;
+                }
+                cursor = None;
+                yielded = true;
+            }
+        }
         // The most recent native title uses the same ordinary admission but
         // must not wait for the general probe cursor to finish a library pass.
         #[cfg(target_os = "linux")]
@@ -237,7 +268,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let ordinary_idle = title.is_none() && refit.is_none();
+        let ordinary_idle = title.is_none() && refit.is_none() && levels.is_none();
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let ordinary_idle = true;
         let published = if ordinary_idle {
@@ -255,6 +286,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if title.is_none()
             && refit.is_none()
+            && levels.is_none()
             && cursor.is_none()
             && !yielded
             && !published
@@ -279,6 +311,12 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     Err(error) => tracing::warn!(%error, "F+ demand unavailable"),
                 }
             }
+            if title.is_none() && refit.is_none() {
+                match levels_work::LevelsTask::start(&state, &mut levels_after).await {
+                    Ok(work) => levels = work,
+                    Err(error) => tracing::warn!(%error, "DV levels demand unavailable"),
+                }
+            }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -294,6 +332,12 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     None => std::future::pending().await,
                 }
             };
+            let levels_poll = async {
+                match levels.as_mut() {
+                    Some(work) => work.work.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
             // Viewer admission (and its wake hint) exists only on Linux.
             #[cfg(target_os = "linux")]
             let viewer_wake = state.jobs.title_viewer_wake.notified();
@@ -304,6 +348,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 () = viewer_wake => {},
                 _ = title_poll => { title = None; },
                 _ = refit_poll => { refit = None; },
+                _ = levels_poll => { levels = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
             }
         }

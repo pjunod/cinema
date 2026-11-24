@@ -7,6 +7,7 @@
 //! reason — a scan should not thrash a NAS.
 
 pub mod containment;
+pub mod dv_levels;
 pub mod dv_title;
 pub mod exif;
 pub mod home;

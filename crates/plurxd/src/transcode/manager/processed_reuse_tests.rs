@@ -774,6 +774,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -803,6 +804,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
             file_id,
             range,
             profile,
+            None,
         )
         .await
         .expect("fresh enhancement from the actual primed owner");
@@ -826,6 +828,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                     wrong_file,
                     wrong_range,
                     wrong_profile,
+                    None,
                 )
                 .await
                 .is_none(),
@@ -848,6 +851,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -874,6 +878,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),

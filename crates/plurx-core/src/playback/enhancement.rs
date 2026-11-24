@@ -40,6 +40,12 @@ pub struct PlaybackEnhancement {
     /// generation (they clear on seek, fallback or replacement with it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requires_effective_processing: bool,
+    /// The `Dolby Vision metadata` row of a delivery the server does not
+    /// process. A processed delivery's row describes its current processing
+    /// report, so it travels with that report (`effective_processing`), not
+    /// here, and this is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv_metadata: Option<super::dv_provenance::DvMetadataRows>,
 }
 
 impl PlaybackEnhancement {
@@ -61,6 +67,10 @@ impl PlaybackEnhancement {
             seen.push(detail.badge);
         }
         self.details.len() <= 3
+            && self
+                .dv_metadata
+                .as_ref()
+                .is_none_or(super::dv_provenance::DvMetadataRows::is_well_formed)
             && self
                 .details
                 .iter()
@@ -125,6 +135,9 @@ pub struct EnhancementFacts<'a> {
     pub fel_reencode_enabled: Option<bool>,
     /// Why processing was declined for this play, when it was.
     pub decline_reason: Option<&'a str>,
+    /// The title's recorded display-metadata levels (`plurx_dv_levels_v1`);
+    /// `None` until the levels pass has read it.
+    pub levels: Option<&'a crate::scan::dv_levels::DvTitleLevels>,
 }
 
 fn detail(badge: EnhancementBadge, active: bool, text: impl Into<String>) -> EnhancementDetail {
@@ -320,10 +333,16 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         .filter(|detail| detail.active)
         .map(|detail| detail.badge)
         .collect();
+    let dv_metadata = if requires_effective_processing {
+        None
+    } else {
+        super::dv_provenance::dv_metadata_rows(&facts.route, facts.levels)
+    };
     Some(PlaybackEnhancement {
         active,
         details,
         requires_effective_processing,
+        dv_metadata,
     })
 }
 
@@ -340,6 +359,7 @@ mod tests {
             hdr_processing_enabled: Some(true),
             fel_reencode_enabled: Some(false),
             decline_reason: None,
+            levels: None,
         }
     }
 
@@ -357,6 +377,7 @@ mod tests {
                 hdr_processing_enabled: Some(true),
                 fel_reencode_enabled: None,
                 decline_reason: None,
+                levels: None,
             })
             .expect("DV source");
             assert!(enhancement.requires_effective_processing);

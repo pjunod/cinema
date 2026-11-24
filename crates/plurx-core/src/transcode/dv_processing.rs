@@ -13,9 +13,9 @@ use crate::domain::DolbyVisionFacts;
 
 mod display_target;
 pub use display_target::{
-    display_target_max_cll, DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice,
-    DvDisplayTargetDecline, DvMasterMetadata, DvSourceMastering, DISPLAY_TARGET_BUCKETS,
-    DISPLAY_TARGET_METHOD,
+    display_target_max_cll, title_fits_display, title_peak_nits, DvDisplayManagement,
+    DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline, DvMasterMetadata,
+    DvSourceMastering, DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
 };
 
 fn encoder_token(encoder: Encoder) -> &'static str {
@@ -105,8 +105,52 @@ pub struct DvEffectiveProcessingReport {
     /// they were decoded in software.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     gpu_decoded: bool,
+    /// Public projection only: the Playback info rows that describe this
+    /// report, attached by the node answering the client. Never part of the
+    /// owner wire ([`Self::owner_wire_json`]), which older ingress nodes parse
+    /// with `deny_unknown_fields`.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    rows: Option<crate::playback::dv_provenance::DvProcessingRows>,
 }
 impl DvEffectiveProcessingReport {
+    /// The bounded owner-to-ingress relay: the report without public rows.
+    pub fn owner_wire_json(&self) -> String {
+        let mut wire = self.clone();
+        wire.rows = None;
+        serde_json::to_string(&wire).expect("bounded processing report")
+    }
+    /// Attach the rows for the client response.
+    pub fn with_rows(
+        mut self,
+        rows: Option<crate::playback::dv_provenance::DvProcessingRows>,
+    ) -> Self {
+        self.rows = rows;
+        self
+    }
+    pub fn rows(&self) -> Option<&crate::playback::dv_provenance::DvProcessingRows> {
+        self.rows.as_ref()
+    }
+    /// The delivery route these facts describe, for the rows.
+    pub fn enhancement_route(&self) -> crate::playback::enhancement::EnhancementRoute {
+        use crate::playback::enhancement::EnhancementRoute;
+        if self.sdr_processed {
+            EnhancementRoute::ProcessedSdr {
+                fel_contributed: self.fel_contributed,
+                display_target: self.display_target_nits(),
+                creative_trims: self.creative_trims(),
+            }
+        } else if self.profile81_reconstructed {
+            EnhancementRoute::ReconstructedProfile81 {
+                fel_contributed: self.fel_contributed,
+            }
+        } else {
+            EnhancementRoute::ProcessedHdr10 {
+                fel_contributed: self.fel_contributed,
+                display_target: self.display_target_nits(),
+                creative_trims: self.creative_trims(),
+            }
+        }
+    }
     /// Whether the full enhancement layer's residual is in the served picture.
     pub fn sdr_processed(&self) -> bool {
         self.sdr_processed
@@ -209,6 +253,7 @@ impl DvEffectiveProcessingReport {
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
+            rows: None,
         })
     }
 }
@@ -2907,6 +2952,7 @@ impl DvProcessingReceipt {
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
+            rows: None,
         }))
     }
 

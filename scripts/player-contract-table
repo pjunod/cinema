@@ -243,8 +243,8 @@ function renderInfoBlock(fields) {
     for (const f of rows) {
       const cells = modes.map((m) => (f.modes.includes(m) ? "✓" : "–"));
       const placement = f.placement === "notes" ? "notes" : "grid";
-      const avail = f.available_on ? f.available_on.join(" · ") : "all";
-      const note = [f.always ? "always shown" : "", f.note || ""].filter(Boolean).join(" ");
+      const avail = f.available_on ? f.available_on.join(" · ") || "none yet" : "all";
+      const note = [f.always ? "always shown" : "", f.sub_rows ? `Sub-rows: ${f.sub_rows.join(" · ")}.` : "", f.note || ""].filter(Boolean).join(" ");
       out.push(`| \`${f.label}\` | ${cells.join(" | ")} | ${f.format} | ${placement} | ${avail} | ${note} |`);
     }
   }

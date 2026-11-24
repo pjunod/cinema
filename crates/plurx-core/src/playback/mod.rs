@@ -18,6 +18,7 @@ pub mod candidate;
 pub mod caps;
 pub mod continuous_quality;
 pub mod desired;
+pub mod dv_provenance;
 pub mod enhancement;
 pub mod geometry;
 pub mod intent;

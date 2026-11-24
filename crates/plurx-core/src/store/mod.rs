@@ -3933,6 +3933,25 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         report_json: &str,
     ) -> Result<bool, StoreError>;
+    /// Graft the Dolby Vision levels record (`scan::dv_levels`) onto a file's
+    /// stored probe JSON under `PROBE_FIELD`, fenced to the measured size and
+    /// mtime like the other probe-document grafts. Writes nothing else and
+    /// answers `false` when the fence or the probe is gone; a probe republish
+    /// replaces the document and so drops the record.
+    async fn merge_file_probe_dv_levels(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        record: &crate::scan::dv_levels::DvLevelsRecord,
+    ) -> Result<bool, StoreError>;
+    /// One page, by id, of Dolby Vision HEVC sources (the title-scan
+    /// eligibility predicate) whose probe document carries no levels record.
+    async fn files_missing_dv_levels(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MediaFile>, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —

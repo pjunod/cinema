@@ -4175,6 +4175,54 @@ impl MediaStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn merge_file_probe_dv_levels(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        record: &crate::scan::dv_levels::DvLevelsRecord,
+    ) -> Result<bool, StoreError> {
+        let record = serde_json::to_string(record)
+            .map_err(|error| StoreError::Task(format!("encode DV levels record: {error}")))?;
+        let changed = self
+            .client()
+            .execute(
+                "merge_file_probe_dv_levels",
+                "UPDATE files \
+                    SET probe_json = json_set(probe_json, '$.plurx_dv_levels_v1', json($1)) \
+                  WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
+                params!(record, file_id, size, mtime),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
+    async fn files_missing_dv_levels(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MediaFile>, StoreError> {
+        files(
+            self.client()
+                .query_consistent_map::<FileRow, _>(
+                    "files_missing_dv_levels",
+                    format!(
+                        "SELECT {FILE_COLS} FROM files \
+                          WHERE video_codec = 'hevc' AND dv_profile IN (5,7,8) \
+                            AND dv_rpu_present = 1 \
+                            AND probe_json IS NOT NULL \
+                            AND json_type(probe_json, '$.plurx_dv_levels_v1') IS NULL \
+                            AND id > $1 \
+                          ORDER BY id LIMIT $2"
+                    ),
+                    params!(after_id, limit.max(0)),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
     async fn files_missing_probe(
         &self,
         library_id: Option<i64>,
