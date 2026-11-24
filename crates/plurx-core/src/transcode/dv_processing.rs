@@ -13,9 +13,9 @@ use crate::domain::DolbyVisionFacts;
 
 mod display_target;
 pub use display_target::{
-    display_target_max_cll, DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice,
-    DvDisplayTargetDecline, DvMasterMetadata, DvSourceMastering, DISPLAY_TARGET_BUCKETS,
-    DISPLAY_TARGET_METHOD,
+    display_target_max_cll, title_peak_nits, DvDisplayManagement, DvDisplayTarget,
+    DvDisplayTargetChoice, DvDisplayTargetDecline, DvMasterMetadata, DvSourceMastering,
+    DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
 };
 
 fn encoder_token(encoder: Encoder) -> &'static str {

@@ -552,6 +552,16 @@ pub fn display_target_max_cll(nits: u32) -> u16 {
     export_max_cll(f64::from(nits))
 }
 
+/// The scanned L1 maximum of an eligible title, in whole nits, for the
+/// Playback info `Title peak` row. `None` when the scan cannot qualify the
+/// title, so a partial scan's maximum is never shown as the title's.
+pub fn title_peak_nits(stats: DvTitleStats) -> Option<u32> {
+    if stats.eligibility() != TitleEligibility::Eligible {
+        return None;
+    }
+    Some(pq_nits(stats.max_l1_pq?).round() as u32)
+}
+
 /// ST 2084 inverse EOTF of absolute nits (the helper's `dm_pq_oetf`).
 fn pq_code_f64(nits: f64) -> f64 {
     let p = (nits / 10000.0).powf(2610.0 / 16384.0);
