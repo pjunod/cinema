@@ -205,6 +205,17 @@ mod causal_tests {
             .map(hiqlite::Node::from)
             .collect();
         nodes.push(hiqlite::Node::from(&local));
+        // The learner starts directly, not through store selection, so it
+        // borrows the config's sockets itself instead of binding their ports.
+        let learner_listeners = learner_config
+            .cluster
+            .listeners
+            .lend(learner_config.cluster.raft_bind, learner_config.cluster.api_bind)
+            .expect("lend the learner's sockets")
+            .map(|owned| hiqlite::NodeListeners {
+                raft: owned.raft,
+                api: owned.api,
+            });
         let learner_client = tokio::time::timeout(
             Duration::from_secs(45),
             Box::pin(hiqlite::start_node_for_clock_observation(
@@ -213,6 +224,7 @@ mod causal_tests {
                     nodes,
                     listen_addr_api: Cow::Borrowed("127.0.0.1"),
                     listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                    listeners: learner_listeners,
                     data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
                     filename_db: Cow::Borrowed("clock-causal.db"),
                     secret_raft: payload.secrets().raft.clone(),

@@ -2886,9 +2886,11 @@ fn readdress_directory_swap_recovers_both_crash_boundaries() {
         .exists());
 }
 
-/// A loopback address for a peer this test never starts: nothing in the
-/// process binds it, so whatever connects to it is refused. Each address is
-/// distinct within the process, so two such peers never share an identity.
+/// A loopback address for a peer this test never starts, used only as that
+/// peer's identity. Each address is distinct from every other one this
+/// returns, but the port goes back to the ephemeral pool, so a later bind
+/// anywhere on the host may be given it: never connect to it expecting a
+/// refusal.
 /// A node the test does start owns its sockets instead, through
 /// [`membership_test_config`] and [`owned_http_origin`].
 #[cfg(feature = "hiqlite-store")]

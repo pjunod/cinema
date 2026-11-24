@@ -2722,6 +2722,9 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
             .await
             .expect("reserve TLS port");
         let tls_address = reservation.local_addr().expect("TLS address");
+        // Released on purpose, unlike the HTTP socket: the observation phase
+        // must refuse TLS connections, and the TLS server binds by address.
+        // Another socket can still take the port before that bind.
         drop(reservation);
         let mut plain_socket = Some(plain_socket);
         let observer = if observed {

@@ -19031,10 +19031,12 @@ impl ContractNodeSockets {
         let raft_fd = self.raft.as_raw_fd();
         let api_fd = self.api.as_raw_fd();
         // SAFETY: the closure runs in the forked child before exec and only
-        // calls fcntl, which is async-signal-safe, on descriptors that are
-        // open there because `&self` keeps both listeners alive until the
-        // spawn returns. It clears FD_CLOEXEC in the child's own descriptor
-        // table, which does not touch the parent's flags.
+        // calls fcntl, which is async-signal-safe. It clears FD_CLOEXEC in the
+        // child's own descriptor table, which does not touch the parent's
+        // flags. The descriptors must still be open when `command` spawns:
+        // every caller keeps these sockets alive until `spawn` returns, and a
+        // caller that dropped them first would hand the child closed or
+        // reused descriptor numbers.
         unsafe {
             command.pre_exec(move || {
                 for fd in [raft_fd, api_fd] {
