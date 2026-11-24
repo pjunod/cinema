@@ -98,7 +98,10 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 37),
+    // The claim's entry read answers its request row and whether the
+    // playback already exists in one read, so a reopen skips a write and a
+    // re-read; `request_row` keeps its other callers.
+    ("hiqlite_sessions.rs", 38),
     ("hiqlite_sharing.rs", 1),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),

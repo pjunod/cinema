@@ -1024,12 +1024,13 @@ fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
         scanner_verdict(output(0, b"{}", b""), SourceRead::Clean).expect("aggregate"),
         b"{}".to_vec()
     );
-    // A genuine refusal keeps its exit status and the end of stderr.
+    // A failure that names no content refusal keeps its exit status and the
+    // end of stderr, and stays a charged, retried failure.
     let long = format!("{}\nfatal: no RPU in frame 9\n", "noise ".repeat(400));
     let Err(TitleScanError::Failed(reason)) =
         scanner_verdict(output(256, b"", long.as_bytes()), SourceRead::Clean)
     else {
-        panic!("a non-zero exit over readable input is a file verdict");
+        panic!("a non-zero exit without a content refusal is not a verdict");
     };
     assert!(reason.contains("exit status: 1"), "{reason}");
     assert!(reason.contains("fatal: no RPU in frame 9"), "{reason}");
@@ -1074,6 +1075,96 @@ fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
         scanner_verdict(Err(std::io::Error::other("deadline")), SourceRead::Clean),
         Err(TitleScanError::Failed(reason)) if reason.contains("deadline")
     ));
+}
+
+/// Production refusals seen on the fleet after #1856: only the scanner's
+/// exit-1 refusal line naming a content check over clean reads is a verdict.
+#[test]
+fn title_content_refusal_is_a_verdict_and_environment_refusals_are_not() {
+    use super::super::dv_title::{scanner_verdict, SourceRead};
+    use std::os::unix::process::ExitStatusExt;
+    let output = |raw: i32, stderr: &str| {
+        Ok(plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    };
+    let endpoint =
+        "DV title scan refused: independent complete selected-video endpoint unavailable\n";
+    let Err(TitleScanError::Refused(reason)) =
+        scanner_verdict(output(256, endpoint), SourceRead::Clean)
+    else {
+        panic!("an untagged Matroska endpoint refusal is a verdict on the bytes");
+    };
+    assert!(reason.contains("exit status: 1"), "{reason}");
+    assert!(reason.contains("endpoint unavailable"), "{reason}");
+    // A demuxer warning before the refusal line does not hide it.
+    assert!(matches!(
+        scanner_verdict(
+            output(
+                256,
+                "[matroska,webm @ 0x5bec3b432040] File ended prematurely\n\
+                 DV title scan refused: contiguous decoded title coverage\n"
+            ),
+            SourceRead::Clean
+        ),
+        Err(TitleScanError::Refused(_))
+    ));
+    // Environment refusals, unknown reasons, prefixes of a listed reason,
+    // other exit codes and signals all keep the charged retry.
+    for (raw, stderr) in [
+        (256, "DV title scan refused: source open\n"),
+        (256, "DV title scan refused: complete demux EOF\n"),
+        (256, "DV title scan refused: bounded demux buffer\n"),
+        (256, "DV title scan refused: corrupt demux packet\n"),
+        (256, "DV title scan refused: selected HEVC video\n"),
+        (
+            256,
+            "DV title scan refused: held regular title source or private source capability\n",
+        ),
+        (
+            256,
+            "DV title scan refused: a reason a newer scanner adds\n",
+        ),
+        (256, "DV title scan refused: complete selected video\n"),
+        (512, endpoint),
+        (9, endpoint),
+    ] {
+        assert!(
+            matches!(
+                scanner_verdict(output(raw, stderr), SourceRead::Clean),
+                Err(TitleScanError::Failed(_))
+            ),
+            "{raw} {stderr}"
+        );
+    }
+    // A failed served read still outranks a content refusal.
+    assert!(matches!(
+        scanner_verdict(output(256, endpoint), SourceRead::StorageFailed),
+        Err(TitleScanError::SourceReadFailed(_))
+    ));
+    assert!(matches!(
+        scanner_verdict(output(256, endpoint), SourceRead::Interrupted),
+        Err(TitleScanError::SourceInterrupted(_))
+    ));
+}
+
+/// Every listed verdict is a refusal the scanner can actually print, so the
+/// list cannot drift from `scan_title.c` without failing here.
+#[test]
+fn title_content_refusals_name_scanner_checks() {
+    let scanner = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/dv_processing/scan_title.c"
+    ))
+    .expect("scanner source");
+    for reason in super::super::dv_title::CONTENT_REFUSALS {
+        assert!(
+            scanner.contains(&format!("\"{reason}\");")),
+            "{reason} is not a scan_title.c refusal"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1209,6 +1300,24 @@ async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_
         bounded.last_error_code.as_deref(),
         Some("title_source_read_failed")
     );
+
+    // A content refusal of clean, unchanged input is a verdict: it fails the
+    // job now instead of rereading the whole title. What that does to a
+    // dv_title_scan job and its demand is pinned on every store backend by
+    // title_scan_refusal_settles_the_demand_until_the_source_or_scanner_changes.
+    let verdict = scan_failure_settlement(
+        &TitleScanError::Refused(
+            "complete-title DV scan refused (exit status: 1; stderr: DV title scan refused: \
+             independent complete selected-video endpoint unavailable)"
+                .into(),
+        ),
+        &id,
+        bounded.failed_attempts,
+    );
+    assert!(matches!(
+        verdict,
+        JobSettlement::Fail { ref error_code } if error_code == "title_scan_refused"
+    ));
 }
 
 #[tokio::test]
