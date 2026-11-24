@@ -1041,12 +1041,17 @@ impl NativeSplitInventory {
         self.declined.get().copied()
     }
 
+    /// Whether this session's FEL upgrade belongs to the native splice rather
+    /// than to a prepared successor. A prepared or resumed native start owns
+    /// it while the master has not yet chosen a layout, so no successor starts
+    /// beside a splice that may still be selected. Once the master settles on
+    /// the ordinary mux the splice can never run, and the successor is the
+    /// session's only route to FEL: keeping ownership then would decline every
+    /// upgrade and strand the viewer without FEL.
     pub(crate) fn owns_fel_processing(&self) -> bool {
         #[cfg(target_os = "linux")]
-        if self.compare_prepared_head || (self.resume_clock_required && self.chosen.get().is_none())
+        if self.chosen.get().is_none() && (self.compare_prepared_head || self.resume_clock_required)
         {
-            // A prepared native start has chosen a single media element.
-            // Losing split activation must not start a hidden successor.
             return true;
         }
         self.active_ids().is_some()
@@ -1514,9 +1519,11 @@ impl SessionDir {
                     self.split_author = Some(author);
                 }
                 Err(error) => {
-                    // The master then finds no split initialization and
-                    // records `split_init_unavailable`.
-                    self.split_inventory = None;
+                    // Settle the layout with this cause, so the master names
+                    // it rather than the generic `split_init_unavailable`.
+                    if let Some(inventory) = self.split_inventory.take() {
+                        inventory.settle("split_init_unsplittable");
+                    }
                     tracing::info!(
                         target: "plurxd::copyseg",
                         %error,
@@ -2503,7 +2510,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn prepared_native_fel_keeps_the_single_session_when_split_activation_fails() {
+    fn prepared_native_fel_leaves_the_successor_open_once_the_split_is_lost() {
         let unprepared = super::NativeSplitInventory::with_startup_budget(100);
         assert!(unprepared.choose(None).is_none());
         assert!(!unprepared.owns_fel_processing());
@@ -2511,8 +2518,31 @@ mod tests {
         let prepared =
             super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
         prepared.decline_prepared_head();
-        assert!(prepared.choose(None).is_none());
+        // Undecided: the splice may still be chosen, so no successor yet.
         assert!(prepared.owns_fel_processing());
+        assert!(prepared.choose(None).is_none());
+        // The master chose the ordinary mux: the splice can never run, so the
+        // upgrade must be free to stage a successor instead of declining.
+        assert!(!prepared.owns_fel_processing());
+
+        // A chosen split keeps ownership.
+        let selected =
+            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        let ids = selected.seed_for_http_test(2);
+        assert_eq!(selected.choose(Some((0, 1))), Some(ids));
+        assert!(selected.owns_fel_processing());
+
+        // A writer that cannot split the copy's initialization settles the
+        // layout with that cause before the master asks.
+        let unsplittable =
+            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        assert_eq!(unsplittable.settle("split_init_unsplittable"), (None, true));
+        assert!(unsplittable.choose(Some((0, 1))).is_none());
+        assert_eq!(
+            unsplittable.decline_reason(),
+            Some("split_init_unsplittable")
+        );
+        assert!(!unsplittable.owns_fel_processing());
     }
 
     #[cfg(target_os = "linux")]
