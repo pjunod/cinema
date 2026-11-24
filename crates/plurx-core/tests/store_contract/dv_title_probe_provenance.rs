@@ -2,8 +2,8 @@
 use super::super::{acquired, for_each_backend, for_each_strandable_backend, StrandedFieldOrder};
 use super::{active, bound, demand, enqueue, probe, publication, reprobe, seed};
 use plurx_core::{
-    domain::MediaFile,
-    scan::dv_title::PROBE_FIELD,
+    domain::{MediaFile, ProbeResult},
+    scan::{dv_levels::DvLevelsRecord, dv_title::PROBE_FIELD},
     store::{background_jobs::*, background_jobs_probe::*, Store},
 };
 use std::sync::Arc;
@@ -13,8 +13,24 @@ enum Decoration {
     Chapters,
     Hevc,
     Encoding,
+    DvLevels,
 }
-const DECORATIONS: [Decoration; 3] = [Decoration::Chapters, Decoration::Hevc, Decoration::Encoding];
+const DECORATIONS: [Decoration; 4] = [
+    Decoration::Chapters,
+    Decoration::Hevc,
+    Decoration::Encoding,
+    Decoration::DvLevels,
+];
+
+fn levels_record(top_level: u8) -> DvLevelsRecord {
+    DvLevelsRecord::Recorded {
+        schema: 1,
+        levels: vec![1, top_level],
+        cm_v40: false,
+        rpus: 4,
+        unparsed: 0,
+    }
+}
 
 async fn decorate(store: &Arc<dyn Store>, file: &MediaFile, kind: Decoration, value: i32) {
     let body = format!(r#"{{"witness":{value}}}"#);
@@ -31,6 +47,15 @@ async fn decorate(store: &Arc<dyn Store>, file: &MediaFile, kind: Decoration, va
             .merge_file_probe_content_encoding(file.id, file.size, file.mtime, &body)
             .await
             .expect("encoding graft")),
+        Decoration::DvLevels => assert!(store
+            .merge_file_probe_dv_levels(
+                file.id,
+                file.size,
+                file.mtime,
+                &levels_record(2 + value as u8)
+            )
+            .await
+            .expect("DV levels graft")),
     }
 }
 async fn aggregate(store: &Arc<dyn Store>, file: i64) -> serde_json::Value {
@@ -430,4 +455,151 @@ async fn title_command_probe_application_rotates_only_on_admitted_ordinary_publi
         assert!(demand(&store, file.id, &scanner).await.probe_revision > fresh.probe_revision);
     })
     .await;
+}
+
+async fn probe_text(store: &Arc<dyn Store>, file: i64) -> String {
+    store
+        .get_file_probe_json(file)
+        .await
+        .expect("probe")
+        .expect("probe")
+}
+
+fn missing_ids(page: &[MediaFile]) -> Vec<i64> {
+    page.iter().map(|f| f.id).collect()
+}
+
+#[tokio::test]
+async fn dv_levels_graft_is_source_fenced_and_dropped_by_a_probe_republish() {
+    for_each_backend(|store, backend| async move {
+        let file = seed(&store, "dv-levels-graft").await;
+        let record = levels_record(3);
+        let before = probe_text(&store, file.id).await;
+        assert!(DvLevelsRecord::from_probe_json(&before).is_none());
+
+        for (id, size, mtime) in [
+            (file.id, file.size + 1, file.mtime),
+            (file.id, file.size, file.mtime + 1),
+            (i64::MAX, file.size, file.mtime),
+        ] {
+            assert!(
+                !store
+                    .merge_file_probe_dv_levels(id, size, mtime, &record)
+                    .await
+                    .expect("fenced graft"),
+                "{backend}: stale or absent source is refused"
+            );
+        }
+        assert_eq!(
+            probe_text(&store, file.id).await,
+            before,
+            "{backend}: refused writes leave the probe untouched"
+        );
+
+        assert!(store
+            .merge_file_probe_dv_levels(file.id, file.size, file.mtime, &record)
+            .await
+            .expect("current graft"));
+        let after = probe_text(&store, file.id).await;
+        assert_eq!(
+            DvLevelsRecord::from_probe_json(&after),
+            Some(record.clone())
+        );
+        let mut expected: serde_json::Value = serde_json::from_str(&before).expect("before");
+        expected["plurx_dv_levels_v1"] = serde_json::to_value(&record).expect("record");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&after).expect("after"),
+            expected,
+            "{backend}: only the levels member changes"
+        );
+        let grafted = store.get_file(file.id).await.expect("file").expect("file");
+        assert_eq!(
+            (
+                grafted.size,
+                grafted.mtime,
+                &grafted.path,
+                grafted.scanned_at
+            ),
+            (file.size, file.mtime, &file.path, file.scanned_at),
+            "{backend}: no file column moves"
+        );
+
+        reprobe(&store, &file).await;
+        assert!(
+            DvLevelsRecord::from_probe_json(&probe_text(&store, file.id).await).is_none(),
+            "{backend}: an ordinary probe republish drops the record"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dv_levels_selection_pages_only_ungrafted_dolby_vision_hevc_sources() {
+    for_each_backend(|store, backend| async move {
+        let first = seed(&store, "dv-levels-page-a").await;
+        let second = seed(&store, "dv-levels-page-b").await;
+        // An h264 source and an unprobed file are never eligible.
+        let plain = seed(&store, "dv-levels-page-plain").await;
+        store
+            .upsert_file(
+                plain.item_id,
+                plain.path.to_str().expect("path"),
+                plain.size,
+                plain.mtime,
+                &ProbeResult {
+                    video_codec: Some("h264".into()),
+                    raw_json: Some(r#"{"streams":[]}"#.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("plain probe");
+        let unprobed = seed_unprobed(&store, "dv-levels-page-unprobed").await;
+
+        let all = store.files_missing_dv_levels(0, 100).await.expect("page");
+        assert_eq!(
+            missing_ids(&all),
+            vec![first.id, second.id],
+            "{backend}: eligible files only, by id"
+        );
+        assert!(!missing_ids(&all).contains(&plain.id));
+        assert!(!missing_ids(&all).contains(&unprobed));
+        let page = store.files_missing_dv_levels(0, 1).await.expect("limit");
+        assert_eq!(missing_ids(&page), vec![first.id], "{backend}: limit");
+        let rest = store
+            .files_missing_dv_levels(first.id, 100)
+            .await
+            .expect("after");
+        assert_eq!(missing_ids(&rest), vec![second.id], "{backend}: after_id");
+
+        let scanner = "a".repeat(64);
+        let demand_before = demand(&store, first.id, &scanner).await;
+        assert!(store
+            .merge_file_probe_dv_levels(first.id, first.size, first.mtime, &levels_record(3))
+            .await
+            .expect("graft"));
+        let remaining = store.files_missing_dv_levels(0, 100).await.expect("page");
+        assert_eq!(
+            missing_ids(&remaining),
+            vec![second.id],
+            "{backend}: a grafted file leaves the selection"
+        );
+        let demand_after = demand(&store, first.id, &scanner).await;
+        assert_eq!(
+            demand_after.probe_revision, demand_before.probe_revision,
+            "{backend}: the graft does not disturb title demand"
+        );
+
+        reprobe(&store, &first).await;
+        assert_eq!(
+            missing_ids(&store.files_missing_dv_levels(0, 100).await.expect("page")),
+            vec![first.id, second.id],
+            "{backend}: a republish makes the file eligible again"
+        );
+    })
+    .await;
+}
+
+async fn seed_unprobed(store: &Arc<dyn Store>, name: &str) -> i64 {
+    super::super::seed_file(store, name).await.1
 }

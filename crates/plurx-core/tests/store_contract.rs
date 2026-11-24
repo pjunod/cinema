@@ -599,6 +599,8 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_hevc_parameter_sets",
     "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
+    "merge_file_probe_dv_levels",
+    "files_missing_dv_levels",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -21850,7 +21852,13 @@ fn contract_inventory_matches_every_store_method() {
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 638, "review the Store method count");
+    // 638 -> 640: `merge_file_probe_dv_levels` grafts the Dolby Vision levels
+    // record onto the measured probe revision and `files_missing_dv_levels`
+    // pages the DV sources still lacking it. Both are named in `MEDIA_METHODS`
+    // and covered on both backends by
+    // store_contract/dv_title_probe_provenance.rs (dv_levels_*).
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 640, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
