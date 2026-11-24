@@ -414,6 +414,24 @@ pub struct FileDto {
     /// bare string "Dolby Vision" and no profile at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dv_profile: Option<i64>,
+    /// The rest of the Dolby Vision configuration record: level, what a
+    /// non-DV player sees of the base layer (1/6 HDR10, 4 HLG, 2 SDR, 0
+    /// none), and whether a second (enhancement) layer exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_bl_compat_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_el_present: Option<bool>,
+    /// `fel` or `mel`, once the complete-title Dolby Vision scan found the
+    /// enhancement layer consistently one or the other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_el_kind: Option<&'static str>,
+    /// How this version plays on each of the caller's signed-in devices,
+    /// from the capabilities each last reported and the same decision Play
+    /// makes. Empty when no device has reported yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plays_on: Vec<PlaysOnDto>,
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,
@@ -650,6 +668,11 @@ impl FileDto {
             mastering_max_luminance: f.mastering_max_luminance,
             luminance_source: f.luminance_source,
             dv_profile: f.dolby_vision.profile,
+            dv_level: f.dolby_vision.level,
+            dv_bl_compat_id: f.dolby_vision.bl_compat_id,
+            dv_el_present: f.dolby_vision.el_present,
+            dv_el_kind: None,
+            plays_on: Vec::new(),
             bitrate: f.bitrate,
             audio_streams: f.audio_streams,
             subtitle_streams: f.subtitle_streams,
@@ -775,6 +798,34 @@ mod audiobook_tests {
     fn malformed_probe_has_no_chapters() {
         assert!(chapters_from_probe_json(Some("not json")).is_empty());
         assert!(chapters_from_probe_json(None).is_empty());
+    }
+}
+
+/// One device's line in a version's "how it plays" list.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaysOnDto {
+    /// The device's token prefix (`/me/devices` names it the same way).
+    pub id: String,
+    pub device: Option<String>,
+    pub client: Option<String>,
+    #[serde(flatten)]
+    pub outcome: plurx_core::playback::hdr_devices::PlaysOn,
+}
+
+/// What the complete-title Dolby Vision scan found about the enhancement
+/// layer: `fel` or `mel` when consistent across the title.
+pub fn dv_el_kind(raw_probe: Option<&str>) -> Option<plurx_core::scan::dv_title::TitleElKind> {
+    use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant};
+    match DvTitleStats::from_probe_json(raw_probe?)?.el_kind {
+        TitleConstant::Consistent(kind) => Some(kind),
+        _ => None,
+    }
+}
+
+pub fn el_kind_str(kind: plurx_core::scan::dv_title::TitleElKind) -> &'static str {
+    match kind {
+        plurx_core::scan::dv_title::TitleElKind::Fel => "fel",
+        plurx_core::scan::dv_title::TitleElKind::Mel => "mel",
     }
 }
 

@@ -2681,6 +2681,10 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// owed at all; the consistent read stays the only thing that decides.
     async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
+    /// Remove a setting. Removing an absent key is not an error. For records
+    /// whose subject went away — a device's capability record after its
+    /// login token was revoked — not for configuration, which is edited.
+    async fn delete_setting(&self, key: &str) -> Result<(), StoreError>;
     /// Insert an immutable setting value. Returns false when the key already
     /// exists and leaves the first committed value unchanged.
     async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError>;

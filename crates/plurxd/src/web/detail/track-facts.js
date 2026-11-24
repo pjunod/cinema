@@ -74,6 +74,26 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   }
   return `<dt>${label}</dt><dd>${chips}${note?`<div class="langnote">${esc(note)}</div>`:""}</dd>`;
 }
+// Dolby Vision, as the configuration record and the complete-title scan
+// measured it (Curator ADR 0026): "Profile 7 · FEL · level 6 · HDR10 base".
+const DV_BASE={0:"no base layer",1:"HDR10 base",2:"SDR base",4:"HLG base",6:"HDR10 base"};
+function dvFactsLine(f){
+  if(f.dv_profile==null) return "";
+  const el=f.dv_el_kind==="fel"?"FEL · full enhancement layer"
+    :f.dv_el_kind==="mel"?"MEL · minimal enhancement layer"
+    :f.dv_el_present?"enhancement layer, type not yet scanned":null;
+  return [`Profile ${f.dv_profile}`,el,f.dv_level!=null?`level ${f.dv_level}`:null,
+    f.dv_bl_compat_id!=null?(DV_BASE[f.dv_bl_compat_id]||`base ${f.dv_bl_compat_id}`):null].filter(Boolean).join(" · ");
+}
+// How this version plays on each of the account's devices, from what each
+// last reported and the decision Play makes. A fallback (base layer,
+// tone-map, dropped EL) reads as a caution rather than hiding it.
+function playsOnRow(f){
+  const rows=f.plays_on||[];
+  if(!rows.length) return "";
+  return `<dt>Plays on</dt><dd><ul class="plays-on">${rows.map(r=>
+    `<li class="${r.full_quality&&!r.el_dropped?"":"plays-caution"}"><span>${esc(r.device||r.client||"Device")}</span><span>${esc(r.label)}</span></li>`).join("")}</ul></dd>`;
+}
 function specBlock(f){
   const vid=[f.video_codec&&f.video_codec.toUpperCase(),(f.width&&f.height)?`${f.width}×${f.height}`:null,(f.hdr_format||f.hdr),f.bit_depth?`${f.bit_depth}-bit`:null,fmtMbps(f.bitrate)].filter(Boolean).join(" · ");
   const file=[f.container&&f.container.toUpperCase(),fmtSize(f.size),fmtDur(f.duration_ms)].filter(Boolean).join(" · ");
@@ -114,6 +134,8 @@ function specBlock(f){
   const analysis=analysisFileControl(f);
   const facts=`<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
+    ${dvFactsLine(f)?`<dt>Dolby Vision</dt><dd>${esc(dvFactsLine(f))}</dd>`:""}
+    ${playsOnRow(f)}
     ${audRow}
     ${subRow}
     ${hlsRow}

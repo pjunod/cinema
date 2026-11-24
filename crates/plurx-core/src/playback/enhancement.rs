@@ -175,11 +175,14 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         }
         EnhancementRoute::ConvertedProfile81 => {
             if has_el {
+                // Said outright (Curator ADR 0026 §7): a viewer who chose the
+                // FEL remux should read that this play drops its layer, not
+                // infer it from the RPU line.
                 details.push(detail(
                     Fel,
                     false,
                     format!(
-                        "FEL: {}",
+                        "FEL: {} — the enhancement layer is dropped and this plays as Profile 8.1",
                         not_used(facts.fel_reencode_enabled, "FEL re-encode")
                     ),
                 ));
@@ -435,6 +438,11 @@ mod tests {
             .expect("FEL row");
         assert!(!fel.active);
         assert!(fel.text.contains("FEL re-encode is off"), "{}", fel.text);
+        assert!(
+            fel.text.contains("enhancement layer is dropped"),
+            "{}",
+            fel.text
+        );
     }
 
     #[test]

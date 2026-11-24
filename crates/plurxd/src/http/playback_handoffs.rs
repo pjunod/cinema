@@ -415,6 +415,18 @@ pub async fn scoped_decision_post(
     body: Json<super::stream::DecisionBody>,
 ) -> Result<Json<super::stream::DecisionResponse>, ApiError> {
     principal.require_file(id)?;
+    // A signed-in device's capabilities, kept for the title page and for
+    // Curator. A handoff token is a borrowed screen, not a device of the
+    // account, so it is not recorded.
+    if principal.handoff.is_none() && body.caps.v == plurx_core::playback::DeviceCaps::VERSION {
+        super::playback_devices::record_device_caps(
+            &state,
+            principal.user.id,
+            &headers,
+            &body.caps,
+        )
+        .await;
+    }
     super::stream::decision_post(
         AuthUser(principal.user),
         state,

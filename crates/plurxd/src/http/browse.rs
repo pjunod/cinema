@@ -779,6 +779,33 @@ pub async fn item_detail(
     }
     let (coverage, statuses) =
         vod_index_coverage(&state, &files, &probes, &availability, have_dovi, convert).await?;
+    // How each version plays on this account's devices (Curator ADR 0026
+    // §7): the capabilities each device last reported, and the same pure
+    // decision Play makes on this node. A listing failure costs the lines,
+    // never the page.
+    let devices: Vec<(
+        super::playback_devices::PlaybackDeviceDto,
+        plurx_core::playback::DeviceProfile,
+    )> = if has_video {
+        super::playback_devices::devices_for(&state, Some(user.id))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(dto, record)| {
+                (
+                    dto,
+                    plurx_core::playback::DeviceProfile::from_caps_v2(&record.caps),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let render = if devices.is_empty() {
+        None
+    } else {
+        Some(super::stream::render_caps(&state).await)
+    };
     record_detail_projection(&statuses, probe_bytes);
     for ((f, observation), (raw_probe, coverage)) in files
         .into_iter()
@@ -787,7 +814,30 @@ pub async fn item_detail(
     {
         let path = f.path.clone();
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
+        let el_kind = if f.dolby_vision.el_present == Some(true) {
+            super::dto::dv_el_kind(raw_probe.as_deref())
+        } else {
+            None
+        };
+        let plays_on: Vec<super::dto::PlaysOnDto> = match &render {
+            Some(node) if f.video_codec.is_some() => devices
+                .iter()
+                .map(|(device, profile)| super::dto::PlaysOnDto {
+                    id: device.id.clone(),
+                    device: device.device.clone(),
+                    client: device.client.clone(),
+                    outcome: plurx_core::playback::hdr_devices::plays_on(
+                        &f,
+                        el_kind,
+                        &plurx_core::playback::decide(&f, profile, node),
+                    ),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
+        dto.dv_el_kind = el_kind.map(super::dto::el_kind_str);
+        dto.plays_on = plays_on;
         dto.available = observation.available();
         dto.availability = observation.state.as_str();
         dto.availability_observed_at_ms = observation.observed_at_ms;

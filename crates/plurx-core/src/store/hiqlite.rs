@@ -7299,6 +7299,16 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(rows.into_iter().next().map(|row| row.value))
     }
 
+    async fn delete_setting(&self, key: &str) -> Result<(), StoreError> {
+        self.execute_idempotent(
+            "delete_setting",
+            "DELETE FROM settings WHERE key = $1",
+            params!(key),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute_idempotent(

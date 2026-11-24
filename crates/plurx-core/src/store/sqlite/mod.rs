@@ -2500,6 +2500,15 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn delete_setting(&self, key: &str) -> Result<(), StoreError> {
+        let key = key.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();

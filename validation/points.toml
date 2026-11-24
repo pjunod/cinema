@@ -1232,6 +1232,8 @@ paths = [
   "crates/plurxd/src/media_sessions/**",
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/playback_devices.rs",
+  "crates/plurxd/src/http/tests/playback_devices.rs",
   "crates/plurxd/src/http/hls/**",
   "crates/plurxd/src/http/tests/public_copy_wire.rs",
   "crates/plurxd/src/web/playback-policy.js",
