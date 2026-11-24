@@ -1,6 +1,6 @@
 //! The two Playback info rows that say where a Dolby Vision picture's
-//! metadata went and what display the stream was mapped for
-//! (`docs/clients/PLAYBACK-INFO-DV-PROVENANCE-PLAN.md`):
+//! metadata went and what display the stream was mapped for (wire shape in
+//! `docs/API.md`, labels and order in `tests/playback/playback-info-fields.json`):
 //!
 //! ```text
 //!  Dolby Vision metadata   In the file           L1 · L2 · L5 · L6 · L8 · L9 · L11 (CM v4.0)
