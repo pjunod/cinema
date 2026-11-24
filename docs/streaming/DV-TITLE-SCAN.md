@@ -65,9 +65,17 @@ published. How the attempt settles depends on the failure. A read the source
 service withdrew (an exhausted pause, a revoked or unavailable budget) yields
 uncharged as `title_source_interrupted`, like a preemption. A storage failure (an
 I/O error or a short read) is charged as `title_source_read_failed`, so a bad
-sector ends at the attempt limit. A scanner that refuses readable input is
-charged as `title_scan_failed`, with its exit status and redacted stderr in
-the reason.
+sector ends at the attempt limit. A scanner that refuses the content of
+cleanly read input, naming one of the checks in `CONTENT_REFUSALS`
+(`source_probe/dv_title.rs`), has reached a verdict on those bytes. The same
+file and scanner refuse the same way on every read. The job therefore fails
+once as `title_scan_refused` while the source and the scanner are unchanged.
+That settles the demand for the probe revision and scanner digest, and a
+changed file or a new scanner re-opens it. Examples are an untagged Matroska
+track with no independent endpoint, a timeline gap or a corrupt packet. Any
+other scanner failure is charged as `title_scan_failed`: an environment
+refusal, an unknown reason, a signal or a deadline. Both carry the exit
+status and redacted stderr in the reason.
 
 ## Playback qualification precedes maintenance scanning
 
