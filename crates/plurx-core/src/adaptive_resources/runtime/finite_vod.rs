@@ -1591,6 +1591,7 @@ impl SoftwareVodOwner {
         deadline: Instant,
     ) -> Result<FiniteCloseTicket, FiniteVodError> {
         self.request_stop()?;
+        let timer = Instant::now();
         let accepted = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.runtime
@@ -1598,6 +1599,7 @@ impl SoftwareVodOwner {
         )
         .await
         .map_err(|_| OperationError::Deadline)??;
+        tracing::debug!(target: "plurx_core::adaptive_resources", stage = "acknowledged", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
         if accepted {
             self.runtime
                 .prepare_failed_finite_vod_close(&self.preparation, 0, deadline)
