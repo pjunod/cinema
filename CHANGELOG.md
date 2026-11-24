@@ -105,6 +105,13 @@ before that and are released with the next cut. -->
 
 ### Fixed
 
+- Apple TV settings keep each setting name visible beside its selected value,
+  including Playback, Appearance and Live TV choices.
+
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
+
 - Repeated quality discovery reuses complete peer catalogue descriptions for
   the same source, client request, endpoint and fresh peer advertisement.
   Refusals and partial answers remain uncached; selected-owner recipe and
@@ -859,13 +866,6 @@ before that and are released with the next cut. -->
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
-
-- Apple TV settings keep each setting name visible beside its selected value,
-  including Playback, Appearance and Live TV choices.
-
-- Playback cache admission reconciles concurrent cancelled writes instead of
-  failing a video producer as disk-full while capacity remains, preventing
-  repeated Apple TV buffering and stream retries.
 
 - **HTTP app addresses forward to HTTPS while it is active.** Temporary,
   non-cached redirects preserve the requested path, query, method and body,
