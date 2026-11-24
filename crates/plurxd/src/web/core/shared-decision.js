@@ -27,7 +27,7 @@ const SHARED_DECISION=(()=>{
       // The sharing host's own refusal of the title, relayed by this server.
       copy_range_input_limit:"This file's video is too large for the sharing host to stream as it is. Convert it to play.",
       copy_observation_skew:"The sharing host could not keep this file's audio and video in step to stream it as it is. Convert it to play.",
-      hevc_configuration_unsupported:"This file's HEVC video does not carry the decoder settings the sharing host needs to stream it as it is. Convert it to play.",
+      hevc_configuration_unsupported:"This file's HEVC video settings are ones the sharing host cannot stream as they are. Convert it to play.",
       copy_target_exceeded:"This file's keyframes are too far apart for the sharing host to stream it as it is. Convert it to play.",
       copy_clock_unknown:"The sharing host could not read this file's timing to stream it.",
       copy_sync_unverified:"The sharing host could not line up this file's audio and video at that position.",

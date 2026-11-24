@@ -466,17 +466,24 @@ impl ObservedCopyMux {
                         }
                         // A refused trace emits no more packets, so pairing
                         // would wait on them until the hold overflowed and
-                        // name the hold. The refusal is a fact about the
-                        // source's HEVC configuration (one complete
-                        // source-extradata VPS/SPS/PPS is the copy contract):
-                        // end here, as VOD does, with its typed code.
+                        // name the hold. End here instead. A refusal of the
+                        // source's own configuration (the copy contract is
+                        // one complete source-extradata VPS/SPS/PPS) is VOD's
+                        // typed code; a damaged read or a parser limit is
+                        // this attempt's inspection failure.
                         if let Some(reason) = trace.refusal() {
                             tracing::warn!(
                                 target: "plurxd::transcode",
                                 reason,
-                                "Source copy HEVC configuration refused"
+                                fault = trace.source_fault().unwrap_or("none"),
+                                "Source copy HEVC trace refused"
                             );
-                            return Err("hevc_configuration_unsupported".into());
+                            return Err(if trace.refused_configuration() {
+                                "hevc_configuration_unsupported"
+                            } else {
+                                "copy_hevc_inspection_failed"
+                            }
+                            .into());
                         }
                     }
                 }
@@ -1268,6 +1275,22 @@ mod hold_tests {
                 .err()
                 .as_deref(),
             Some("hevc_configuration_unsupported")
+        );
+    }
+
+    /// A trace that refused for a damaged read is this attempt's inspection
+    /// failure, never a verdict on the source's configuration.
+    #[tokio::test]
+    async fn a_damaged_hevc_trace_is_an_inspection_failure_not_a_configuration() {
+        let mut mux = mux().await;
+        mux.inspect_hevc = true;
+        mux.trace = Some(plurx_core::hevc_configuration::Trace::default());
+        let trace = b"[trace_headers @ 0x1] Failed to read unit 0 (type 33).\n".to_vec();
+        assert_eq!(
+            mux.feed(CopyPipeEvent::Data(CopyPipeKind::Diagnostic, trace))
+                .err()
+                .as_deref(),
+            Some("copy_hevc_inspection_failed")
         );
     }
 }
