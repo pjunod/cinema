@@ -245,14 +245,15 @@ impl SourceViewerActor {
                                 .round()
                                 .clamp(0.0, u32::MAX as f64) as u32
                         });
+                        // The published segment is immutable. Open it with the
+                        // range released: the renewal tick and the read bank
+                        // need this lock, and an open on a slow or hung share
+                        // must not hold them.
+                        let payload = files.payload.clone();
+                        let path = files.payload_path.join(name);
+                        drop(files);
                         let mut ready = custody
-                            .open_ready_child(
-                                &files.payload,
-                                &files.payload_path.join(name),
-                                name,
-                                &etag,
-                                &backing.delivery,
-                            )
+                            .open_ready_child(&payload, &path, name, &etag, &backing.delivery)
                             .await
                             .map_err(|_| pending)?;
                         ready.observed_media_duration_ms = duration;
@@ -273,11 +274,7 @@ impl SourceViewerActor {
                         if end == crate::copyrange::DeadlineEnd::Slow
                             && backing.production.is_holding()
                         {
-                            if let Err(error) = backing.production.reanchor_at_head().await {
-                                // The renewal tick's own read-bank refresh
-                                // ends a copy whose observer fails.
-                                tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.reanchor", %error, "Source growing copy could not re-anchor its read bank");
-                            }
+                            backing.production.reanchor_at_head();
                         }
                         return Err(
                             self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
@@ -621,13 +618,20 @@ impl TranscodeManager {
             )
             .ok_or(SourceWorkerError::Unavailable)?;
         *stage = "growing.head_dispatch";
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         *stage = "growing.head_input";
         let input = crate::source_input::SourceInput::open_foreground_held(
             request.clone(),
@@ -749,13 +753,20 @@ impl TranscodeManager {
             .args(&file, prepared.request().start_seconds)
             .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.primary_dispatch";
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         // The census Input and every reader are joined. Reopen independently
         // against the exact object before the primary operation gets a URL.
         *stage = "growing.primary_input";
@@ -1148,7 +1159,10 @@ impl TranscodeManager {
                 tokio::select! {
                     ()=state.shutdown.cancelled()=>break,
                     ()=retirement=>{},
-                    ()=physical=>{},
+                    // A viewer waited at a held head: apply its re-anchor now.
+                    ()=physical=>{
+                        if backing.production.reanchor_pending() && backing.production.refresh_read_bank().await.is_err() {break;}
+                    },
                     _=renewal.tick()=>{
                         #[cfg(test)]
                         owner.gate.ticked();

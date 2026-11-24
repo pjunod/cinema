@@ -2914,6 +2914,54 @@ fn membership_test_configs_do_not_reuse_released_ephemeral_ports() {
     assert_eq!(ports.len(), 128);
 }
 
+/// A fixture that reads a port from a listener and drops it can lose that
+/// port to any other socket before the voter binds it (hosted run 8904:
+/// `bind API listener 127.0.0.1:36959: Address already in use`). Fresh
+/// activation has a second such window, between its staging voter's shutdown
+/// and the active voter's bind. Owned listeners close both. The config holds
+/// its sockets throughout, so any generation that bound or probe-bound its
+/// address instead of serving the lent socket would fail with
+/// `Address already in use`; both must serve the lent sockets to activate.
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn fresh_activation_serves_both_generations_on_the_config_owned_listeners() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build owned-listener runtime")
+                .block_on(Box::pin(async {
+                    install_default_crypto_provider();
+                    let dir = tempfile::tempdir().expect("owned-listener data dir");
+                    let mut config = membership_test_config(dir.path());
+                    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft");
+                    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API");
+                    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+                    config.cluster.api_bind = api.local_addr().expect("owned API address");
+                    config.cluster.listeners = crate::config::ClusterListeners::owned(raft, api);
+                    drop(
+                        SqliteStore::open(&dir.path().join(SQLITE_FILENAME))
+                            .expect("source SQLite"),
+                    );
+
+                    let selected = Box::pin(startup_observer::select_applied_singleton(&config))
+                        .await
+                        .expect("activation serves on the owned listeners");
+                    selected
+                        .shutdown()
+                        .await
+                        .expect("owned-listener voter shutdown");
+                }));
+        })
+        .expect("spawn owned-listener thread")
+        .join()
+        .expect("owned-listener thread");
+}
+
 #[cfg(feature = "hiqlite-store")]
 fn membership_test_config(data_dir: &Path) -> Config {
     let mut config = Config::default();

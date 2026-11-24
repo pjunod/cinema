@@ -179,10 +179,24 @@ function playerEnhancement(p){
   if(!enhancement) return null;
   const report=playerEffectiveProcessing(p);
   if(report?.profile81_reconstructed===true){
-    return {...enhancement,active:['FEL'],details:[
+    // A Profile 8.1 reconstruction keeps the RPU in the delivered picture, so
+    // the server's DYN still holds. The current report decides FEL (always
+    // contributed in an accepted Profile 8.1 report) and RPU, the two things
+    // the server itself applied; nothing the picture carries is dropped.
+    // RPU means the server applied the RPU's polynomial/MMR reshaping, as the
+    // server defines the badge; a line is shown only if one applies or was claimed.
+    const reshaped=report.applied_operations.some(op=>op==='PolynomialReshape'||op==='MmrReshape');
+    const claimedRpu=enhancement.details.some(d=>d.badge==='RPU');
+    const details=[
       {badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the Dolby Vision Profile 8.1 picture'},
-      ...enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge))
-    ]};
+      ...(reshaped||claimedRpu?[{badge:'RPU',active:reshaped,text:reshaped
+        ?'RPU: reshaping applied by the server; the Profile 8.1 RPU travels with the picture'
+        :'RPU: no reshaping applied in this window'}]:[]),
+      ...enhancement.details.filter(d=>!['FEL','RPU'].includes(d.badge))];
+    const order=['FEL','RPU','DYN'];
+    details.sort((a,b)=>{const i=order.indexOf(a.badge),j=order.indexOf(b.badge);
+      return (i<0?order.length:i)-(j<0?order.length:j);});
+    return {...enhancement,active:details.filter(d=>d.active&&order.includes(d.badge)).map(d=>d.badge),details};
   }
   if(!enhancement.requires_effective_processing) return enhancement;
   if(!report) return null;
@@ -278,6 +292,9 @@ function playerToneMapping(p){
   if(p.sessionId&&h?.id===p.sessionId&&Number.isFinite(h.tone_map_peak_nits)
     &&h.tone_map_peak_nits>0&&['cll','mdcv','default'].includes(h.tone_map_peak_source)) return true;
   const report=playerEffectiveProcessing(p);
+  // A Dolby Vision carrier is never display targeted: every report names the
+  // reconstruction's own TargetMapping, and the display maps the picture.
+  if(report?.profile81_reconstructed===true) return false;
   return !!report?.applied_operations.some(op=>op==='TargetMapping'||
     (typeof op==='object'&&op?.DisplayTargetMapping));
 }
