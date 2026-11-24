@@ -48,6 +48,7 @@ fn landing_failure_code(verified: bool, error: String) -> String {
                 | "copy_range_cancelled"
                 | "copy_range_input_limit"
                 | "copy_observation_skew"
+                | "hevc_configuration_unsupported"
         )
     {
         "copy_sync_unverified".to_owned()
@@ -73,6 +74,10 @@ mod landing_failure_tests {
         assert_eq!(
             landing_failure_code(false, "copy_observation_skew".into()),
             "copy_observation_skew"
+        );
+        assert_eq!(
+            landing_failure_code(false, "hevc_configuration_unsupported".into()),
+            "hevc_configuration_unsupported"
         );
         assert_eq!(
             landing_failure_code(false, "copy_output_readers_lost".into()),

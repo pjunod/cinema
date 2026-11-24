@@ -319,6 +319,7 @@ pub(crate) const SOURCE_START_REFUSAL_CODES: &[&str] = &[
     "copy_sync_unverified",
     "copy_range_input_limit",
     "copy_observation_skew",
+    "hevc_configuration_unsupported",
     "sharing_start_unsupported",
 ];
 pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
@@ -334,6 +335,7 @@ enum SourceStartFailure {
     CopySyncUnverified,
     CopyInputLimit,
     CopyOutputSkew,
+    HevcConfigurationUnsupported,
     Capacity,
     Conflict,
     Unresolved,
@@ -1276,6 +1278,7 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
             E::CopySyncUnverified => Self::CopySyncUnverified,
             E::CopyInputLimit => Self::CopyInputLimit,
             E::CopyOutputSkew => Self::CopyOutputSkew,
+            E::HevcConfigurationUnsupported => Self::HevcConfigurationUnsupported,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1295,6 +1298,10 @@ impl SourceStartFailure {
             Self::CopySyncUnverified => (StatusCode::UNPROCESSABLE_ENTITY, "copy_sync_unverified"),
             Self::CopyInputLimit => (StatusCode::UNPROCESSABLE_ENTITY, "copy_range_input_limit"),
             Self::CopyOutputSkew => (StatusCode::UNPROCESSABLE_ENTITY, "copy_observation_skew"),
+            Self::HevcConfigurationUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "hevc_configuration_unsupported",
+            ),
             Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (

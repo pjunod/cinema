@@ -233,6 +233,13 @@ impl Trace {
         self.faults.fault
     }
 
+    /// The latched refusal, once any line refused the trace. Packets are no
+    /// longer emitted after it, so a streaming reader that waits for them
+    /// must end on this instead.
+    pub fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
+    }
+
     fn reject(&mut self, reason: &str) {
         if self.refusal.is_none() {
             self.refusal = Some(reason.to_owned());

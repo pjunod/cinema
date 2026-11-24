@@ -5883,7 +5883,7 @@ async fn actual_source_unclocked_start() {
 #[test]
 fn every_typed_source_start_refusal_is_relayable() {
     use SourceStartFailure as F;
-    fn every() -> [F; 15] {
+    fn every() -> [F; 16] {
         // Compile-time completeness: adding a variant breaks this match.
         let _ = |failure: F| match failure {
             F::Unavailable
@@ -5895,6 +5895,7 @@ fn every_typed_source_start_refusal_is_relayable() {
             | F::CopySyncUnverified
             | F::CopyInputLimit
             | F::CopyOutputSkew
+            | F::HevcConfigurationUnsupported
             | F::Capacity
             | F::Conflict
             | F::Unresolved
@@ -5912,6 +5913,7 @@ fn every_typed_source_start_refusal_is_relayable() {
             F::CopySyncUnverified,
             F::CopyInputLimit,
             F::CopyOutputSkew,
+            F::HevcConfigurationUnsupported,
             F::Capacity,
             F::Conflict,
             F::Unresolved,
