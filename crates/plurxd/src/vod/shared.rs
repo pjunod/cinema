@@ -3244,7 +3244,8 @@ impl Shared {
                 // This rendition's terminal records still hold client slots in
                 // the partition the wait below drains.
                 self.release_terminal_records(Some(key)).await;
-                let first = (Instant::now() + Duration::from_secs(3)).min(deadline);
+                let waited = Instant::now();
+                let first = (Instant::now() + Duration::from_millis(200)).min(deadline);
                 if output.wait_allocations_release(first).await.is_err() {
                     let survivor = rich_weak.as_ref().and_then(Weak::upgrade);
                     let readers = match survivor.as_ref() {
@@ -3262,6 +3263,8 @@ impl Shared {
                     .wait_allocations_release(deadline)
                     .await
                     .map_err(|error| error.to_string())?;
+                let allocations_ms = waited.elapsed().as_millis();
+                let terminating = Instant::now();
                 let ticket = if let Some(producer) = producer.as_ref() {
                     producer
                         .prepare_terminate(deadline)
@@ -3273,11 +3276,17 @@ impl Shared {
                         .await
                         .map_err(|error| error.to_string())?
                 };
+                let terminate_ms = terminating.elapsed().as_millis();
+                let installing = Instant::now();
                 // Core owns the exact ticket before any rich selector is
                 // cleared. Cancellation cannot drop the only original ticket.
                 port.install_ticket(work, ticket)
                     .await
                     .map_err(|error| error.to_string())?;
+                tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                    allocations_ms, terminate_ms,
+                    install_ms = installing.elapsed().as_millis(),
+                    "collected finite close stage timings");
                 if let Some(producer) = producer.as_ref() {
                     if let Some(compatibility) = producer.take_compatibility() {
                         *closing
