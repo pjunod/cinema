@@ -4,11 +4,30 @@ ARG PLURX_MEDIA_RUNTIME_REPOSITORY=ghcr.io/pjunod/cinema-media-runtime
 
 # Pinned by digest: `1-bookworm` floats, and what floats with it is this
 # image's Debian system libraries and its own rustup. The compiler is not
-# pinned here -- `COPY . .` below puts rust-toolchain.toml in the build
-# context and rustup honours it -- so this digest is the system-library
+# pinned here -- the toolchain layer below installs what rust-toolchain.toml
+# names -- so this digest is the system-library
 # pin, nothing more. `scripts/image-base-drift` prints this digest beside
 # the current upstream one; the weekly Rust dependency audit runs it.
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+WORKDIR /src
+# The pinned compiler is fetched here, in a layer keyed only on
+# rust-toolchain.toml, and never by the compile below. The base image's own
+# toolchain is whatever `1-bookworm` shipped; without this layer the first
+# `cargo` in the compile RUN saw rust-toolchain.toml name 1.97.1 plus
+# rustfmt/clippy, and rustup downloaded them from static.rust-lang.org inside
+# every build whose source changed (CI run 9051 failed on one network blip
+# there). BuildKit reuses this layer from the runner's persistent builder
+# (.github/actions/buildx-cache) until the toolchain file or the base digest
+# changes, so a source change no longer touches static.rust-lang.org at all.
+# It comes before every ARG and ENV below: those carry the commit (its SHA,
+# ref and time), and an instruction after a changed one misses the cache.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --profile minimal \
+    && rustc --version | grep -F "rustc $(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml) "
+# From here a missing toolchain or component is a build error, not a silent
+# download (rustup 1.28+). `COPY . .` re-copies the identical file, so the
+# toolchain installed above is the one every later cargo resolves.
+ENV RUSTUP_AUTO_INSTALL=0
 # `.git` is not in the build context (see .dockerignore), so the build script
 # can't derive the commit itself — CI passes it in, e.g.
 #   docker build --build-arg PLURX_BUILD_REF="$(git describe --tags --always --dirty)"
@@ -31,7 +50,6 @@ ARG TARGETARCH
 # passes `--build-arg CARGO_BUILD_JOBS=N` (ARG values reach RUN as environment).
 # CI does not build this stage; its compiles are bounded in the workflows.
 ARG CARGO_BUILD_JOBS
-WORKDIR /src
 COPY . .
 # The target dirs below are cache mounts that outlive any one checkout, and
 # cargo decides a path crate is fresh from file mtimes, not contents. A node

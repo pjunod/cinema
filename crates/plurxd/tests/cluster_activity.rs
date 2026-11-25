@@ -2919,6 +2919,12 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     //   and it takes the old maintain-then-claim path: one more claim read,
     //   the zero-row insert as one write, and one more layout read (30 -> 32,
     //   8 -> 9 writes). That is the fallback #1827 chose, not a defect here.
+    // - The claim now reads, with its request row, whether the playback has
+    //   a pointer or preparation, and a reopen goes straight to maintenance
+    //   and the ordinary insert: the zero-row guarded insert (one write and
+    //   its layout read) and the request re-read are gone (32 -> 30, 9 -> 8
+    //   writes; the claim's own split 2/0/2 -> 1/0/1). First-session shapes
+    //   are unchanged.
     // - With display-aware Auto always on, the caps-v2 create builds its
     //   quality catalog. It paid one `get_file` per rung, twice (catalog and
     //   link receipts), for a measured-cost proof that cannot exist without
@@ -2928,7 +2934,7 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // Layout reads exist only on this fixture's Legacy layout (see below).
     let expected: [(&str, (u64, u64, u64)); 5] = [
         ("first play, VOD index", (21, 1, 6)),
-        ("reopen, new position", (32, 1, 9)),
+        ("reopen, new position", (30, 1, 8)),
         ("Auto encode, VOD", (17, 1, 8)),
         ("index miss, rolling copy", (18, 1, 9)),
         ("caps-v2 Auto, intent", (19, 1, 8)),
@@ -3024,7 +3030,7 @@ async fn create_path_store_operations_are_pinned_per_shape() {
             &[
                 ("activate_media_session", (3, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (2, 0, 2)),
+                ("claim_media_session_request", (1, 0, 1)),
                 ("complete_media_session_handoff", (1, 0, 1)),
                 ("complete_media_session_terminal_projection", (1, 0, 1)),
                 ("copy_index_source_attestation", (1, 0, 0)),
@@ -3036,7 +3042,7 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("media_session_route_by_incarnation", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("session_layout", (13, 0, 0)),
+                ("session_layout", (12, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
             ],

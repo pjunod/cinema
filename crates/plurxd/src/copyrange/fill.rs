@@ -74,7 +74,8 @@ fn failure(reason: String) -> CopyGapFillError {
         | "copy_range_input_limit"
         // The child's output pipes fell out of step: its protocol, not this
         // attempt.
-        | "copy_observation_skew" => CopyGapFillError::Refused(reason),
+        | "copy_observation_skew"
+        | "hevc_configuration_unsupported" => CopyGapFillError::Refused(reason),
         // The held object changed after the phase resolved it.
         "source changed after cluster index resolution" => {
             CopyGapFillError::Contradicted(reason)

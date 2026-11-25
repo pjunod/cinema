@@ -14,6 +14,21 @@ const MAX_PARAMETER: usize = 65536;
 /// evidence; `parse` ignores the rest.
 const TRACE_PREFIX: &[u8] = b"[trace_headers @ ";
 
+/// Refusals that state a fact about the source's own HEVC configuration:
+/// every read of the same object meets them again. Every other refusal is a
+/// damaged read, a truncated stream or a parser limit.
+const MISSING_EXTRADATA_CONFIGURATION: &str =
+    "source extradata lacks a complete decoder configuration";
+const PARAMETER_SETS_CHANGE: &str = "HEVC parameter sets change; immutable copy is unsafe";
+const MULTILAYER_CONFIGURATION: &str = "multilayer HEVC configuration is not qualified for copy";
+const UNPROVED_SLICE_CONFIGURATION: &str = "slice references an unproved decoder configuration";
+const CONFIGURATION_REFUSALS: [&str; 4] = [
+    MISSING_EXTRADATA_CONFIGURATION,
+    PARAMETER_SETS_CHANGE,
+    MULTILAYER_CONFIGURATION,
+    UNPROVED_SLICE_CONFIGURATION,
+];
+
 /// FFmpeg messages that mean the pass read a damaged source and went on.
 /// `-xerror` used to turn each of them into a non-zero exit; the index argv no
 /// longer carries it, because the same flag also made the mp4 muxer's
@@ -233,6 +248,25 @@ impl Trace {
         self.faults.fault
     }
 
+    /// The latched refusal, once any line refused the trace. Packets are no
+    /// longer emitted after it, so a streaming reader that waits for them
+    /// must end on this instead.
+    pub fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
+    }
+
+    /// Whether the latched refusal is a fact about the source's HEVC
+    /// configuration, which another read would meet again, read from an
+    /// undamaged stream. A damaged read, a truncated stream or a parser
+    /// limit is not one.
+    pub fn refused_configuration(&self) -> bool {
+        self.faults.fault.is_none()
+            && self
+                .refusal
+                .as_deref()
+                .is_some_and(|reason| CONFIGURATION_REFUSALS.contains(&reason))
+    }
+
     fn reject(&mut self, reason: &str) {
         if self.refusal.is_none() {
             self.refusal = Some(reason.to_owned());
@@ -312,7 +346,7 @@ impl Trace {
                 self.reject("incomplete parameter-set trace");
             } else if let Some(previous) = &self.sets[kind] {
                 if previous != &self.fields {
-                    self.reject("HEVC parameter sets change; immutable copy is unsafe");
+                    self.reject(PARAMETER_SETS_CHANGE);
                 }
             } else {
                 self.sets[kind] = Some(std::mem::take(&mut self.fields));
@@ -339,7 +373,7 @@ impl Trace {
             self.end_section();
             if line.starts_with("Packet:") {
                 if self.sets.iter().any(Option::is_none) {
-                    self.reject("source extradata lacks a complete decoder configuration");
+                    self.reject(MISSING_EXTRADATA_CONFIGURATION);
                 }
                 self.close_packet();
                 if self.configuration_sha256.is_none()
@@ -406,7 +440,7 @@ impl Trace {
             return;
         };
         if (self.section.is_some() || self.slice) && name == "nuh_layer_id" && value != 0 {
-            self.reject("multilayer HEVC configuration is not qualified for copy");
+            self.reject(MULTILAYER_CONFIGURATION);
         }
         if let Some(kind) = self.section {
             if self.fields.len() + name.len() + 32 > MAX_PARAMETER {
@@ -433,7 +467,7 @@ impl Trace {
                 || self.parents[2] != self.ids[1]
                 || self.parents[1] != self.ids[0]
             {
-                self.reject("slice references an unproved decoder configuration");
+                self.reject(UNPROVED_SLICE_CONFIGURATION);
             }
             self.slice_reference = true;
             self.slices += 1;

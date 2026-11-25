@@ -469,6 +469,27 @@ impl ObservedCopyMux {
                         if inspected.len() > MAX_PACKETS {
                             return Err("copy_inspection_limit".into());
                         }
+                        // A refused trace emits no more packets, so pairing
+                        // would wait on them until the hold overflowed and
+                        // name the hold. End here instead. A refusal of the
+                        // source's own configuration (the copy contract is
+                        // one complete source-extradata VPS/SPS/PPS) is VOD's
+                        // typed code; a damaged read or a parser limit is
+                        // this attempt's inspection failure.
+                        if let Some(reason) = trace.refusal() {
+                            tracing::warn!(
+                                target: "plurxd::transcode",
+                                reason,
+                                fault = trace.source_fault().unwrap_or("none"),
+                                "Source copy HEVC trace refused"
+                            );
+                            return Err(if trace.refused_configuration() {
+                                "hevc_configuration_unsupported"
+                            } else {
+                                "copy_hevc_inspection_failed"
+                            }
+                            .into());
+                        }
                     }
                 }
             },
@@ -1329,5 +1350,44 @@ mod hold_tests {
             }
         }
         assert_eq!(refused.as_deref(), Some("copy_observation_skew"));
+    }
+
+    /// 3 Body Problem S01E01 (file 1421, 2026-11-23): its `hvcC` carries no
+    /// parameter sets (FFmpeg: "No parameter sets in the extradata"), so the
+    /// trace refuses at the first packet and emits none after. The mux waited
+    /// for them, queued nine unpaired fragments in 0.12 s of a real capture
+    /// and named its hold, `copy_range_input_limit`. The refusal is the
+    /// source's own and must end the copy as itself, at once.
+    #[tokio::test]
+    async fn a_refused_hevc_trace_ends_the_copy_as_unsupported_configuration() {
+        let mut mux = mux().await;
+        mux.inspect_hevc = true;
+        mux.trace = Some(plurx_core::hevc_configuration::Trace::default());
+        let trace = b"[trace_headers @ 0x1] Extradata\n\
+[hevc_mp4toannexb @ 0x2] No parameter sets in the extradata\n\
+[trace_headers @ 0x1] Packet: 2143 bytes, key frame, pts 0, dts 0, duration 41.\n"
+            .to_vec();
+        assert_eq!(
+            mux.feed(CopyPipeEvent::Data(CopyPipeKind::Diagnostic, trace))
+                .err()
+                .as_deref(),
+            Some("hevc_configuration_unsupported")
+        );
+    }
+
+    /// A trace that refused for a damaged read is this attempt's inspection
+    /// failure, never a verdict on the source's configuration.
+    #[tokio::test]
+    async fn a_damaged_hevc_trace_is_an_inspection_failure_not_a_configuration() {
+        let mut mux = mux().await;
+        mux.inspect_hevc = true;
+        mux.trace = Some(plurx_core::hevc_configuration::Trace::default());
+        let trace = b"[trace_headers @ 0x1] Failed to read unit 0 (type 33).\n".to_vec();
+        assert_eq!(
+            mux.feed(CopyPipeEvent::Data(CopyPipeKind::Diagnostic, trace))
+                .err()
+                .as_deref(),
+            Some("copy_hevc_inspection_failed")
+        );
     }
 }
