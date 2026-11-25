@@ -109,6 +109,12 @@ static inline const char *frc_params_check(const struct frc_params *p) {
     for (int i = 1; i < m->num_pivots; i++)
       if (m->pivot_value[i] < m->pivot_value[i - 1])
         return "pivot values must not decrease";
+    // A pivot is a BL code; outside 0..2^BL_bit_depth-1 the mapped sample,
+    // and so the 64-bit polynomial intermediates, would exceed the range
+    // that keeps them exact.
+    if (m->pivot_value[0] < 0 ||
+        m->pivot_value[m->num_pivots - 1] > (1 << p->bl_bit_depth) - 1)
+      return "pivot values outside 0..2^BL_bit_depth-1 (clause 5.3.2)";
     for (int k = 0; k < m->num_pivots - 1; k++) {
       const struct frc_piece *piece = &m->piece[k];
       if (piece->mapping_idc == FRC_MAPPING_POLYNOMIAL) {

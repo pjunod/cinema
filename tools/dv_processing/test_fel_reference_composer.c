@@ -318,6 +318,67 @@ static void test_compose_picture(void) {
     assert(oy[k] == 4 * by[k]);
 }
 
+static void test_params_check(void) {
+  struct frc_params p = identity_params();
+  assert(frc_params_check(&p) == NULL);
+  p.map[1].pivot_value[1] = 1024;  // one past the 10-bit BL range
+  assert(frc_params_check(&p) != NULL);
+  p = identity_params();
+  p.map[2].pivot_value[0] = -1;
+  assert(frc_params_check(&p) != NULL);
+}
+
+static void test_compose_el_routing(void) {
+  // 8x8 flat BL (v = 64 * 256 = 16384 everywhere) and a half-size EL whose
+  // planes each have their own structure, so the right filter must reach
+  // the right plane. Identity NLQ: r = 8 (2d - 1) for d = e - 512 > 0,
+  // -8 (2|d| - 1) for d < 0 (dq = (2d - 1) 2048, shifted by 23 - 5 - 10).
+  uint16_t by[64], bu[16], bv[16];
+  for (int k = 0; k < 64; k++)
+    by[k] = 256;
+  for (int k = 0; k < 16; k++)
+    bu[k] = bv[k] = 256;
+  // EL luma 4x4, rows 512 512 576 576; Cb 2x2, rows 512 576; Cr 2x2,
+  // columns 512 576.
+  uint16_t ey[16], eu[4] = {512, 512, 576, 576}, ev[4] = {512, 576, 512, 576};
+  for (int k = 0; k < 16; k++)
+    ey[k] = k < 8 ? 512 : 576;
+  struct frc_picture bl = {{{by, 8, 8, 8}, {bu, 4, 4, 4}, {bv, 4, 4, 4}}};
+  struct frc_picture el = {{{ey, 4, 4, 4}, {eu, 2, 2, 2}, {ev, 2, 2, 2}}};
+  uint16_t oy[64], ou[16], ov[16];
+  int32_t sy[64], su[16], sv[16];
+  struct frc_output out = {{oy, ou, ov}, {8, 4, 4}, {sy, su, sv}};
+  struct frc_params p = identity_params();
+  assert(frc_compose(&p, &bl, &el, &out) == NULL);
+  for (int x = 0; x < 8; x++) {
+    // Luma, 4-tap vertical (rows are constant, so horizontal keeps them):
+    // row 2 = (-3*512 + 29*512 + 111*512 - 9*576 + 64) >> 7 = 508, d = -4,
+    // r = -56; row 3 = (-9*512 + 111*512 + 29*576 - 3*576 + 64) >> 7 = 525,
+    // d = 13, r = 200; row 4 = (-3*512 + 29*512 + 111*576 - 9*576 + 64) >> 7
+    // = 563, d = 51, r = 808. (The chroma filter would give 512, 528, 560.)
+    assert(sy[2 * 8 + x] == 16384 - 56 && oy[2 * 8 + x] == 1021);
+    assert(sy[3 * 8 + x] == 16384 + 200 && oy[3 * 8 + x] == 1037);
+    assert(sy[4 * 8 + x] == 16384 + 808 && oy[4 * 8 + x] == 1075);
+  }
+  for (int x = 0; x < 4; x++) {
+    // Cb, (64, 192) vertical: row 1 = (192*512 + 64*576 + 128) >> 8 = 528,
+    // d = 16, r = 248; row 2 = (64*512 + 192*576 + 128) >> 8 = 560, d = 48,
+    // r = 760. (The luma filter would give 525 at row 1.)
+    assert(ou[x] == 1024);
+    assert(su[4 + x] == 16384 + 248 && ou[4 + x] == 1040);
+    assert(su[8 + x] == 16384 + 760 && ou[8 + x] == 1072);
+  }
+  for (int y = 0; y < 4; y++) {
+    // Cr, 8-tap horizontal on columns 512 576 (vertical keeps them):
+    // column 1 = (2048*512 + 2048*576 + 2048) >> 12 = 544, d = 32, r = 504;
+    // column 3 = (-408*512 + 4504*576 + 2048) >> 12 = 582, d = 70, r = 1112.
+    assert(ov[y * 4] == 1024);
+    assert(sv[y * 4 + 1] == 16384 + 504 && ov[y * 4 + 1] == 1056);
+    assert(sv[y * 4 + 2] == 16384 + 8 * 127 && ov[y * 4 + 2] == 1088);
+    assert(sv[y * 4 + 3] == 16384 + 1112 && ov[y * 4 + 3] == 1094);
+  }
+}
+
 int main(void) {
   test_shift_and_pivots();
   test_polynomial();
@@ -327,6 +388,8 @@ int main(void) {
   test_reconstruct();
   test_el_filters();
   test_compose_picture();
+  test_compose_el_routing();
+  test_params_check();
   puts("FEL reference composer: hand-computed vectors pass");
   return 0;
 }

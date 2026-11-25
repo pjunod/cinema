@@ -260,8 +260,13 @@ helper's own `pq-bilinear-rgb48-v1` render of the same window, bound frame
 by frame by RPU hash. Both pictures go through one display path (bilinear
 sampling at the stream's siting, then the RPU's `ycc_to_rgb`). Today's
 YCbCr codes come from the helper's output through the inverse of that
-matrix. A CPU model of the renderer confirms its sampling phases and the
-display path to ΔE_ITP 0.04 mean. Result:
+matrix, on pixels where neither picture clips (97 % on *Michael*, more
+than 99 % on b2-29 and the controls, 75 % on b2-19); the code-error
+figures cover those pixels and ΔE_ITP covers all of them. A CPU model of the renderer confirms its sampling phases and the
+display path to ΔE_ITP 0.03–0.04 mean on every polynomial-only input; it
+does not model MMR, so b2-19 relies on the phases confirmed elsewhere.
+The go rule is applied to the total difference; the filters-only figures
+below come from the result's decomposition block. Result:
 `diagnostics/fel_quality/results/fel-reference-measure-20261124.json`.
 
 **Where the renderer samples.** Fitted against its own output: BL chroma
@@ -273,8 +278,10 @@ in composing chroma after rather than before up-sampling, and in rounding.
 **Two separable differences.** "Filters" compares the helper with the
 reference's unrounded sum `v + r`; "rounding" is clause 5.4.3.3 alone,
 which rounds the half-code residuals of these titles' NLQ (slope 2048,
-threshold 0) up, so the renderer sits 0.5 code low on every residual
-sample (ΔE_ITP about 0.25 mean on its own).
+threshold 0) up, so the renderer sits low by up to half a code on
+residual samples (luma signed mean 0.50 code on *Michael* and the
+synthetic control, 0.46–0.48 on b2-29, 0.37–0.39 on b2-19), ΔE_ITP
+0.10–0.26 mean on its own.
 
 | Title (frames) | Filters: ΔE_ITP mean / p99 / max | Filters, < 0.1 nit: ΔE mean · Y RMS | Filters: Y RMS (code) | Total ΔE mean |
 |---|---|---|---|---|

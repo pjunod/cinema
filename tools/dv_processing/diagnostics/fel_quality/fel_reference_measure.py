@@ -12,9 +12,9 @@ ycc_to_rgb matrix and offset):
 - helper: the shipped renderer's actual output.
 - today:  a CPU model of that renderer's composition (every plane sampled
           bilinearly at full resolution, the EL code rounded, LINEAR_DZ in
-          real arithmetic, no clamp). It exists only to put today's
-          composition; it confirms the renderer's sampling phases and the
-          display path (the "validation" block). Today's YCbCr codes are
+          real arithmetic, no clamp). It is not the measured picture; it
+          confirms the renderer's sampling phases and the display path
+          (the "validation" block). Today's YCbCr codes are
           taken from the helper's output through the inverse display matrix.
 - reference: fel_reference_compose (ETSI GS CCM 001 integer composer,
           fel_reference_composer.h) at 4:2:0, then the same display path.
@@ -365,7 +365,7 @@ def main():
             'label': args.label,
             'capture': {name: sha(args.capture / name) for name in ('bl.yuv', 'el.yuv', 'metadata.jsonl', 'events.jsonl')},
             'unclamped_capture': {name: sha(args.unclamped_capture / name) for name in ('metadata.jsonl', 'events.jsonl')},
-            'helper': args.helper_report.read_text().strip().splitlines()[-1] if args.helper_report.exists() else None,
+            'helper': (args.helper_report.read_text().strip().splitlines() or [None])[-1],
             'oracle': 'tools/dv_processing/fel_reference_composer.h via diagnostics/fel_quality/fel_reference_compose.c',
             'frames': measure_clamp(args, metas, pairs),
         }
