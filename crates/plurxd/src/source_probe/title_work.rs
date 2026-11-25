@@ -186,6 +186,9 @@ impl TitleTask {
         if demands.is_empty() && dispatch == TitleDispatch::Maintenance {
             requalify_stale_fel_titles(state, &tools, &scanner).await;
         }
+        if demands.is_empty() && dispatch == TitleDispatch::Maintenance {
+            reopen_refit_titles_for_m7(state).await;
+        }
         for mut demand in demands {
             if let Some(after) = after.as_deref_mut() {
                 *after = demand.probe_revision;
@@ -673,6 +676,29 @@ async fn eligible_file(
         }
     }
     Ok(Some(file))
+}
+
+/// A title's M7 evaluation reads its F+ outcome when the title job runs, and
+/// ends there when that outcome fits nothing. A later fit (a new helper or
+/// fit identity) would then never reach M7. While no title work waits, reopen
+/// a bounded batch of titles fitted after they settled, each with a queued
+/// title job; the next maintenance turn runs them from their stored
+/// aggregate, without reading the source.
+async fn reopen_refit_titles_for_m7(state: &AppState) {
+    if state.m7_experiment_dir.is_none() {
+        return;
+    }
+    match state
+        .store
+        .reopen_dv_titles_refit_since(plurx_core::transcode::dv_refit::FIT_VERSION, 16, now_ms())
+        .await
+    {
+        Ok(titles) if !titles.is_empty() => {
+            tracing::info!(?titles, "reopened fitted F+ titles for their M7 evaluation");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "listing fitted F+ titles for M7"),
+    }
 }
 
 /// A renderer, recipe or encoder change leaves every FEL verdict measured

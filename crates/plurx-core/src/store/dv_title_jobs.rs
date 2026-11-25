@@ -851,6 +851,159 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')",
         .collect()
 }
 
+/// Reopen settled Profile 7 FEL titles whose current fitted F+ table was
+/// published after their title job last succeeded, each with a queued title
+/// job. Returns the titles reopened; one claimed or refit in between stays as
+/// it was.
+///
+/// The title job's M7 evaluation reads the title's F+ outcome when it runs.
+/// A title settled against a refused or identity table (or before any table)
+/// ends M7 there, and a later fit under a new helper or fit identity would
+/// otherwise never be evaluated: nothing else reopens a settled title. The
+/// reopen keeps the same generation, so the title job reuses its stored
+/// aggregate instead of reading the source again. The fit and the title scan
+/// share one title lane and do not overlap, so their settlement times order
+/// them; once the reopened job succeeds the title no longer qualifies. A
+/// failed or cancelled attempt at the generation is left alone, as for a
+/// recipe request.
+pub(super) async fn reopen_refit_superseded<T: QueueSql>(
+    store: &T,
+    fit_version: &str,
+    limit: u32,
+    now_ms: i64,
+) -> Result<Vec<i64>, StoreError> {
+    if !super::dv_refit_jobs::valid_fit_version(fit_version)
+        || limit == 0
+        || limit > 128
+        || now_ms < 0
+    {
+        return Err(StoreError::Task("invalid F+ title reopen".into()));
+    }
+    use super::background_jobs::{
+        enqueue_body, BackgroundJobStore, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL,
+    };
+    #[derive(Deserialize)]
+    struct Title {
+        file_id: i64,
+        revision: i64,
+        scanner_digest: String,
+        source_size: i64,
+        source_mtime: i64,
+    }
+    let candidates = format!(
+        "FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE d.terminal=1 AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ AND json_type(f.probe_json,'$.{field}')='object'
+ AND EXISTS(SELECT 1 FROM background_dv_refit_titles t
+  WHERE t.file_id=f.id AND t.superseded_at_ms IS NULL AND t.verdict='fitted'
+   AND t.fit_version=json_extract($1,'$.fit_version')
+   AND t.source_size=f.size AND t.source_mtime=f.mtime
+   AND t.created_at_ms>(SELECT max(job.updated_at_ms) FROM background_jobs job
+    WHERE job.kind='dv_title_scan' AND job.state='succeeded'
+     AND json_extract(job.payload_json,'$.file_id')=f.id
+     AND json_extract(job.payload_json,'$.probe_revision')=d.revision
+     AND json_extract(job.payload_json,'$.scanner_digest')=d.scanner_digest))
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('cancelling','cancelled','failed')
+  AND json_extract(job.payload_json,'$.probe_revision')=d.revision)
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=f.id)",
+        field = crate::scan::dv_title::PROBE_FIELD
+    );
+    let rows = store
+        .queue_sql(
+            format!(
+                "SELECT json_object('file_id',f.id,'revision',d.revision,'scanner_digest',d.scanner_digest,
+ 'source_size',f.size,'source_mtime',f.mtime) AS result_json {candidates}
+ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
+            ),
+            encode(&serde_json::json!({"fit_version": fit_version, "limit": limit}))?,
+            false,
+            true,
+        )
+        .await?;
+    let titles = rows
+        .iter()
+        .map(|row| decode::<Title>(row))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reopened = Vec::new();
+    for title in titles {
+        // The title's own request identity still names the settled job, whose
+        // receipt would answer a new request with it; the reopened attempt is
+        // a fresh request, enqueued in the same transaction that reopens it.
+        let request = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let now = now_ms;
+        let enqueue = EnqueueJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            payload: JobPayload::DvTitleScan {
+                file_id: title.file_id,
+                source_size: title.source_size,
+                source_mtime: title.source_mtime,
+                probe_revision: title.revision,
+                scanner_digest: title.scanner_digest.clone(),
+            },
+            dedupe_key: format!(
+                "dv-title-generation:{}:{}:{}",
+                title.file_id, title.revision, title.scanner_digest
+            ),
+            priority: 0,
+            not_before_ms: now,
+            now_ms: now,
+            request: JobRequest {
+                scope: "dv-title".into(),
+                request_id: request.clone(),
+                request_digest: request,
+                consumer_kind: "dv_title_scan".into(),
+                consumer_ref: title.file_id.to_string(),
+                target_node_id: None,
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        };
+        enqueue.validate()?;
+        let body = encode(&enqueue_body(store, &enqueue).await?)?;
+        let guard = encode(&serde_json::json!({
+            "fit_version": fit_version,
+            "file": title.file_id,
+            "revision": title.revision,
+            "job": enqueue.id,
+        }))?;
+        // Reopen under the same conditions as the read (a title claimed or
+        // refit since then stays settled), admit the attempt, and settle the
+        // title again if the attempt was not admitted.
+        store
+            .queue_transaction(vec![
+                (
+                    format!(
+                        "UPDATE dv_title_jobs_demand SET terminal=0
+WHERE revision IN (SELECT d.revision {candidates}
+ AND d.file_id=json_extract($1,'$.file') AND d.revision=json_extract($1,'$.revision'))"
+                    ),
+                    guard.clone(),
+                ),
+                (ENQUEUE_SQL.to_owned(), body),
+                (
+                    "UPDATE dv_title_jobs_demand SET terminal=1
+WHERE revision=json_extract($1,'$.revision') AND terminal=0
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')"
+                        .to_owned(),
+                    guard,
+                ),
+            ])
+            .await?;
+        if store.background_job(&enqueue.id).await?.is_some() {
+            reopened.push(title.file_id);
+        }
+    }
+    Ok(reopened)
+}
+
 /// How many titles hold a FEL verdict for `identity`, and how many of those
 /// admit reconstruction. Advisory (Developer tab) only. Walks the Dolby
 /// Vision title demand (one row per DV title) and reads each title's row by

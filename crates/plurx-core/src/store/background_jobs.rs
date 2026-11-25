@@ -3019,6 +3019,14 @@ pub trait BackgroundJobStore: Send + Sync {
     /// Settled FEL titles whose verdict another FEL identity measured.
     async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
         -> Result<Vec<i64>, StoreError>;
+    /// Reopen settled FEL titles fitted (under `fit_version`) after their
+    /// title job last succeeded, so their M7 evaluation sees the fit.
+    async fn reopen_dv_titles_refit_since(
+        &self,
+        fit_version: &str,
+        limit: u32,
+        now_ms: i64,
+    ) -> Result<Vec<i64>, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -4243,6 +4251,14 @@ LIMIT 1
         limit: u32,
     ) -> Result<Vec<i64>, StoreError> {
         super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
+    }
+    async fn reopen_dv_titles_refit_since(
+        &self,
+        fit_version: &str,
+        limit: u32,
+        now_ms: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        super::dv_title_jobs::reopen_refit_superseded(self, fit_version, limit, now_ms).await
     }
     async fn dv_title_demands_through(
         &self,

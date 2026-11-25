@@ -733,6 +733,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "request_dv_fel_head",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
+    // store_contract/dv_refit_jobs.rs: a fit after settlement reopens a title.
+    "reopen_dv_titles_refit_since",
     "dv_title_readiness",
     "dv_title_demands",
     "dv_title_demands_through",

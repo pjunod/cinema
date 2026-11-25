@@ -758,3 +758,146 @@ async fn a_refit_refusal_is_a_recorded_title_without_scenes() {
     })
     .await;
 }
+
+/// Run the reopened title job of `file` at its current generation and
+/// settle it at `now_ms`, as the title worker does with a stored aggregate.
+async fn resettle_title(store: &Arc<dyn Store>, file: &MediaFile, now_ms: i64) {
+    let scanner = "a".repeat(64);
+    let demand = store
+        .dv_title_demands(&scanner, 0, now_ms)
+        .await
+        .expect("title demand")
+        .into_iter()
+        .find(|d| d.file_id == file.id)
+        .expect("reopened title demand");
+    let stats = DvTitleStats::from_probe_json(&demand.probe_json).expect("stored aggregate");
+    let job_id = queued_attempt(store, file, now_ms).await;
+    let job = claim(store, &job_id, JobKind::DvTitleScan).await;
+    let published = store
+        .publish_dv_title_job(PublishTitleJob {
+            token: job.token.expect("token"),
+            output: TitleOutput {
+                file_id: file.id,
+                probe_revision: demand.probe_revision,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                scanner_digest: scanner,
+                stats,
+            },
+            now_ms,
+        })
+        .await
+        .expect("title facts");
+    assert!(matches!(published, JobPublishOutcome::Published { .. }));
+}
+
+/// The title job a reopen queued for `file`, as the title worker finds it.
+async fn queued_attempt(store: &Arc<dyn Store>, file: &MediaFile, now_ms: i64) -> String {
+    let demand = store
+        .dv_title_demands(&"a".repeat(64), 0, now_ms)
+        .await
+        .expect("title demand")
+        .into_iter()
+        .find(|d| d.file_id == file.id)
+        .expect("reopened title demand");
+    let id = demand.active_job_id.expect("a queued attempt");
+    let job = store.background_job(&id).await.expect("job").expect("job");
+    assert_eq!(job.state, JobState::Queued);
+    id
+}
+
+async fn title_settled(store: &Arc<dyn Store>, file: i64) -> bool {
+    store
+        .dv_title_demands(&"a".repeat(64), 0, now() + 60_000)
+        .await
+        .expect("title demand")
+        .into_iter()
+        .all(|d| d.file_id != file)
+}
+
+async fn reopen(store: &Arc<dyn Store>) -> Vec<i64> {
+    store
+        .reopen_dv_titles_refit_since(FIT_VERSION, 16, now())
+        .await
+        .expect("reopen")
+}
+
+#[tokio::test]
+async fn a_fit_published_after_the_title_settled_reopens_that_title_once() {
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "refit-reopen", true).await;
+        assert!(title_settled(&store, file.id).await, "{backend}: settled");
+        assert!(reopen(&store).await.is_empty(), "{backend}: no table");
+        assert!(store.reopen_dv_titles_refit_since(FIT_VERSION, 0, now()).await.is_err());
+        assert!(store
+            .reopen_dv_titles_refit_since("not a fit version", 16, now())
+            .await
+            .is_err());
+        // A later table that fits nothing leaves the title settled.
+        let base = now() + 1_000;
+        let found = demand(&store, file.id, &helper()).await.expect("demand");
+        let revision = found.probe_revision;
+        let job = attempt(&store, &found, &helper()).await;
+        let identity = table_rows(&file, &found, &helper(), 2, RefitVerdict::Identity, 0);
+        assert!(matches!(
+            publish_at(&store, &job, identity, base).await,
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(reopen(&store).await.is_empty(), "{backend}: identity table");
+        // A later helper's fitted table reopens the same generation once,
+        // with its stored aggregate, so the title job need not read it again.
+        let newer = "e".repeat(64);
+        let found = demand(&store, file.id, &newer).await.expect("new helper");
+        let job = attempt(&store, &found, &newer).await;
+        let fitted = table_rows(&file, &found, &newer, 3, RefitVerdict::Fitted, 1);
+        assert!(matches!(
+            publish_at(&store, &job, fitted, base + 1).await,
+            JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(reopen(&store).await, vec![file.id], "{backend}");
+        let reopened = store
+            .dv_title_demands(&"a".repeat(64), 0, base + 2)
+            .await
+            .expect("title demand")
+            .into_iter()
+            .find(|d| d.file_id == file.id)
+            .expect("reopened");
+        assert_eq!(reopened.probe_revision, revision, "{backend}: same generation");
+        assert!(DvTitleStats::from_probe_json(&reopened.probe_json).is_some());
+        assert!(reopen(&store).await.is_empty(), "{backend}: already open");
+        // Once the title job settles after the fit, the fit no longer reopens it.
+        resettle_title(&store, &file, base + 3).await;
+        assert!(title_settled(&store, file.id).await, "{backend}: settled again");
+        assert!(reopen(&store).await.is_empty(), "{backend}: settled after the fit");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_cancelled_title_attempt_is_not_reopened_by_a_later_fit() {
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "refit-reopen-cancelled", true).await;
+        let base = now() + 1_000;
+        let found = demand(&store, file.id, &helper()).await.expect("demand");
+        let job = attempt(&store, &found, &helper()).await;
+        let fitted = table_rows(&file, &found, &helper(), 3, RefitVerdict::Fitted, 0);
+        assert!(matches!(
+            publish_at(&store, &job, fitted, base).await,
+            JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(reopen(&store).await, vec![file.id], "{backend}");
+        // An administrator cancels the reopened attempt before it runs.
+        let job_id = queued_attempt(&store, &file, base + 1).await;
+        store
+            .cancel_job(CancelJob {
+                job_id,
+                now_ms: base + 2,
+            })
+            .await
+            .expect("cancel")
+            .expect("cancelled");
+        assert!(title_settled(&store, file.id).await, "{backend}: cancelled");
+        assert!(reopen(&store).await.is_empty(), "{backend}: cancelled generation");
+    })
+    .await;
+}
