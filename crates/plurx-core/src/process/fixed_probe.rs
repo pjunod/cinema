@@ -6039,15 +6039,18 @@ impl DecodeFactCache {
             let document_root = collected
                 .original_root
                 .ok_or(DecodeFactError::CacheInvariant)?;
+            // A logical refusal (unparseable document or facts) carries no
+            // document or key by design: report that refusal beside the
+            // original native close, not as a cache invariant violation.
+            let facts = match collected.facts {
+                Ok(facts) => facts,
+                Err(error) => return Ok((Err(error), document_root)),
+            };
             let Some(document) = collected.document else {
                 return Ok((Err(DecodeFactError::CacheInvariant), document_root));
             };
             let Some(key) = collected.key else {
                 return Ok((Err(DecodeFactError::CacheInvariant), document_root));
-            };
-            let facts = match collected.facts {
-                Ok(facts) => facts,
-                Err(error) => return Ok((Err(error), document_root)),
             };
             // The fixed P plan names exactly one document root. Additional
             // HEVC/interlace refinement roots have no prearmed owner here.
