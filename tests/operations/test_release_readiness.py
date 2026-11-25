@@ -177,8 +177,16 @@ class ReleaseReadinessCase(unittest.TestCase):
         self.assertEqual(readiness.MEMORY_GB, (8, 18))
         with self.assertRaisesRegex(ValueError, "8 or 18 GiB"):
             readiness.container_command("sha256:" + "a" * 64, ["true"], "test-release", memory_gb=16)
-        parser_default = inspect.signature(readiness.container_command).parameters["memory_gb"].default
-        self.assertEqual(parser_default, 18)
+        signature_default = inspect.signature(readiness.container_command).parameters["memory_gb"].default
+        self.assertEqual(signature_default, 18)
+        with patch.object(readiness, "build_image", return_value="sha256:" + "a" * 64), \
+                patch.object(readiness, "container_command", return_value=["docker", "run"]) as command, \
+                patch.object(readiness.signal, "signal"), \
+                patch.object(readiness, "run_owned", return_value=0), \
+                patch.object(readiness.subprocess, "run"):
+            self.assertEqual(readiness.main(["make", "release-check"]), 0)
+        self.assertEqual(command.call_args.kwargs["memory_gb"], 18, "the command-line default")
+        self.assertIn("RUST_MIN_STACK", readiness.FORWARD_ENV, "ci.yml:check's 8 MiB test threads")
 
     def test_the_dropped_uid_has_an_account_whose_home_is_home_before_any_drop(self):
         """Path.home() with HOME cleared reads the passwd entry; the image has none for the uid."""

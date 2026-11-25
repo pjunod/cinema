@@ -37,8 +37,13 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
+      # As ci.yml:check: debug source-actor futures need 8 MiB test threads
+      # (docs/ci/RUST-UNIT-FANOUT.md).
+      RUST_MIN_STACK: "8388608"
     # Includes the candidate-owned runtime build and complete strict sweep.
-    timeout-minutes: 180
+    # rust-gate-ci alone is ci.yml:check's suite (~175 min on this pool, run
+    # 7243), and the rest of the sweep took about 65 min in run 9325.
+    timeout-minutes: 300
     outputs:
       pending: ${{ steps.release.outputs.pending }}
       tag: ${{ steps.release.outputs.tag }}
