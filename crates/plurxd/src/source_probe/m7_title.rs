@@ -734,7 +734,8 @@ struct SourcePlan {
 
 /// Domain of the static-HDR observation digest when the ST 2086 values come
 /// from the held source's frames rather than the probe document's stream.
-const ST2086_FRAMES_DOMAIN: &[u8] = b"plurx-m7-st2086-frames-v1";
+/// v2 binds the validated values, not FFprobe's output bytes.
+const ST2086_FRAMES_DOMAIN: &[u8] = b"plurx-m7-st2086-frames-v2";
 const ST2086_FRAMES_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn selected_video_stream(
@@ -777,27 +778,83 @@ async fn undeclared_st2086_frames(
     held_source_st2086_frames(context, title, video_index)
         .await
         .map(Some)
-        .map_err(|error| EvaluationError::Deferred(format!("M7 source frame MDCV probe: {error}")))
+        .map_err(FrameProjectionError::into_evaluation)
+}
+
+/// Why the frame projection produced no observation.
+#[derive(Debug, PartialEq, Eq)]
+enum FrameProjectionError {
+    /// The projection did not run to completion over the unchanged held
+    /// source: launch, deadline, the source read or the source itself.
+    Transient(String),
+    /// FFprobe ran over the unchanged held source and refused it, or wrote
+    /// more than the projection's bound. The same source does it again.
+    Deterministic(String),
+}
+
+impl FrameProjectionError {
+    fn into_evaluation(self) -> EvaluationError {
+        match self {
+            Self::Transient(error) => {
+                EvaluationError::Deferred(format!("M7 source frame MDCV probe: {error}"))
+            }
+            Self::Deterministic(error) => {
+                EvaluationError::Unsupported(format!("M7 source frame MDCV probe: {error}"))
+            }
+        }
+    }
+}
+
+/// Classify a completed projection run: a signal is not FFprobe's verdict,
+/// an exit status and an oversized output are.
+fn frame_projection_verdict(
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+    stdout_len: usize,
+    limit: usize,
+) -> Result<(), FrameProjectionError> {
+    if !status.success() {
+        let message = format!(
+            "ffprobe exited {status}: {}",
+            String::from_utf8_lossy(stderr).trim()
+        );
+        return Err(if status.code().is_some() {
+            FrameProjectionError::Deterministic(message)
+        } else {
+            FrameProjectionError::Transient(message)
+        });
+    }
+    if stdout_len > limit {
+        return Err(FrameProjectionError::Deterministic(
+            "frame projection exceeded its output bound".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Run the exact `SourceFrames` FFprobe projection over the title's held
 /// source through the job's budgeted background input, as the M7 renderer
-/// observations read it. Stdout is bounded to the projection's limit; every
-/// failure (launch, timeout, exit, read, bound, drift) is transient.
+/// observations read it. Stdout is bounded to the projection's limit. A
+/// launch failure, the deadline, a failed source read or a changed source is
+/// transient; FFprobe's own refusal (an exit status) or an oversized output
+/// over the unchanged source is deterministic.
 async fn held_source_st2086_frames(
     context: &TitleContext<'_>,
     title: &HeldTitle,
     video_index: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, FrameProjectionError> {
     use plurx_core::process::{source_lifetime, ChildWork};
+    use FrameProjectionError::Transient;
     let (arguments, limit) = crate::decode_facts::source_frames_projection(video_index);
-    let held = SourceFence::clone_held(&title.source.handle, title.source.object_version())?;
+    let held = SourceFence::clone_held(&title.source.handle, title.source.object_version())
+        .map_err(Transient)?;
     let input = crate::source_input::SourceInput::open_background_held(
         held,
         "application/octet-stream",
         context.fence.source_budget(),
     )
-    .await?;
+    .await
+    .map_err(Transient)?;
     let mut command = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
     command.args(&arguments).arg(input.url());
     let output = source_lifetime::mediated(bounded::output_command_captured(
@@ -811,24 +868,17 @@ async fn held_source_st2086_frames(
     input
         .close_and_wait()
         .await
-        .map_err(|error| format!("joining source input: {error}"))?;
-    let output = output.map_err(string)?;
+        .map_err(|error| Transient(format!("joining source input: {error}")))?;
+    let output = output.map_err(|error| Transient(error.to_string()))?;
     if source_read_failed {
-        return Err("held source read failed".into());
-    }
-    if !output.status.success() {
-        return Err(format!(
-            "ffprobe exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    if output.stdout.len() > limit {
-        return Err("frame projection exceeded its output bound".into());
+        return Err(Transient("held source read failed".into()));
     }
     if !title.source.unchanged() {
-        return Err("held source changed during the frame projection".into());
+        return Err(Transient(
+            "held source changed during the frame projection".into(),
+        ));
     }
+    frame_projection_verdict(output.status, &output.stderr, output.stdout.len(), limit)?;
     Ok(output.stdout)
 }
 
@@ -837,9 +887,12 @@ async fn held_source_st2086_frames(
 /// A stream-declared MDCV keeps `source_observation_sha256 = probe_sha256`,
 /// so historical and stream-declared sources hash exactly as before. Values
 /// resolved from frames bind SHA-256 over a domain-separated, length-prefixed
-/// encoding of `ST2086_FRAMES_DOMAIN`, the 32-byte probe digest, and the exact
-/// FFprobe frame-projection stdout bytes: the recipe names both the document
-/// that declared no MDCV and the frame observation that supplied it.
+/// encoding of `ST2086_FRAMES_DOMAIN`, the 32-byte probe digest, and the
+/// validated ST 2086 values in a canonical encoding: the recipe names both
+/// the document that declared no MDCV and the values the frames supplied, so
+/// an FFprobe update that prints the same frames differently is the same
+/// observation. Output that is not JSON, or frames carrying no or conflicting
+/// MDCV, is the source's own and refuses it.
 fn static_hdr_authority(
     stream: &serde_json::Value,
     video_index: u32,
@@ -857,7 +910,9 @@ fn static_hdr_authority(
             None => {
                 let bytes = st2086_frames.ok_or_else(absent)?;
                 let frames: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
-                    EvaluationError::Deferred(format!("M7 source frame MDCV probe JSON: {error}"))
+                    EvaluationError::Unsupported(format!(
+                        "M7 source frame MDCV probe JSON: {error}"
+                    ))
                 })?;
                 let observed = crate::decode_facts::mastering::source_st2086_from_frames(
                     stream,
@@ -866,7 +921,7 @@ fn static_hdr_authority(
                 )
                 .map_err(EvaluationError::Unsupported)?
                 .ok_or_else(absent)?;
-                (observed, st2086_frames_observation(probe_sha256, bytes))
+                (observed, st2086_frames_observation(probe_sha256, observed))
             }
         };
     Ok(StaticHdr {
@@ -880,9 +935,22 @@ fn static_hdr_authority(
     })
 }
 
-fn st2086_frames_observation(probe_sha256: [u8; 32], frames: &[u8]) -> [u8; 32] {
+/// The canonical ST 2086 encoding is the eight chromaticity coordinates in
+/// `source_st2086`'s `primaries_rgbw` order (0.00002 units) as big-endian
+/// u16, then the maximum and minimum luminance (0.0001 cd/m2) as big-endian
+/// u32.
+fn st2086_frames_observation(
+    probe_sha256: [u8; 32],
+    (primaries_rgbw, max_1e4_nits, min_1e4_nits): ([u16; 8], u32, u32),
+) -> [u8; 32] {
+    let mut values = Vec::with_capacity(24);
+    for primary in primaries_rgbw {
+        values.extend_from_slice(&primary.to_be_bytes());
+    }
+    values.extend_from_slice(&max_1e4_nits.to_be_bytes());
+    values.extend_from_slice(&min_1e4_nits.to_be_bytes());
     let mut hash = Sha256::new();
-    for part in [ST2086_FRAMES_DOMAIN, &probe_sha256, frames] {
+    for part in [ST2086_FRAMES_DOMAIN, &probe_sha256, &values] {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part);
     }
@@ -1261,28 +1329,39 @@ mod tests {
             assert_eq!(hdr.max_cll_fall, None);
         }
 
-        // Frame-only MDCV binds the domain, the probe and the exact bytes.
+        // Frame-only MDCV binds the domain, the probe and the validated
+        // values in their canonical encoding, not FFprobe's bytes.
         let hdr = static_hdr_authority(&silent, 0, probe, Some(&frames)).unwrap();
         assert_eq!(
             (hdr.primaries_rgbw, hdr.max_1e4_nits, hdr.min_1e4_nits),
             (P3, 10_000_000, 1)
         );
+        let mut values = Vec::new();
+        for primary in P3 {
+            values.extend_from_slice(&primary.to_be_bytes());
+        }
+        values.extend_from_slice(&10_000_000_u32.to_be_bytes());
+        values.extend_from_slice(&1_u32.to_be_bytes());
         let mut expected = Sha256::new();
-        for part in [b"plurx-m7-st2086-frames-v1".as_slice(), &probe, &frames] {
+        for part in [b"plurx-m7-st2086-frames-v2".as_slice(), &probe, &values] {
             expected.update((part.len() as u64).to_be_bytes());
             expected.update(part);
         }
         let expected: [u8; 32] = expected.finalize().into();
         assert_eq!(hdr.source_observation_sha256, expected);
         assert_ne!(hdr.source_observation_sha256, probe);
-        let mut spaced = frames.clone();
+        // An FFprobe that prints the same frames differently (whitespace,
+        // key order, an extra field) observes the same values.
+        let mut spaced = serde_json::to_vec_pretty(&serde_json::json!({"frames":[
+            {"side_data_list":[eclipse_mdcv()],"stream_index":0,"pkt_pos":"1"}]}))
+        .unwrap();
         spaced.push(b'\n');
-        assert_ne!(
+        assert_eq!(
             static_hdr_authority(&silent, 0, probe, Some(&spaced))
                 .unwrap()
                 .source_observation_sha256,
             expected,
-            "another frame observation is another binding"
+            "the same values are the same binding across FFprobe output changes"
         );
         assert_ne!(
             static_hdr_authority(&silent, 0, [8; 32], Some(&frames))
@@ -1316,7 +1395,29 @@ mod tests {
         ));
         assert!(matches!(
             static_hdr_authority(&silent, 0, probe, Some(b"not json")),
-            Err(EvaluationError::Deferred(_))
+            Err(EvaluationError::Unsupported(message)) if message.contains("JSON")
+        ));
+    }
+
+    #[test]
+    fn frame_projection_refusals_are_unsupported_and_interruptions_defer() {
+        use std::os::unix::process::ExitStatusExt;
+        let exit = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+        let signal = |number: i32| std::process::ExitStatus::from_raw(number);
+        assert_eq!(frame_projection_verdict(exit(0), b"", 10, 10), Ok(()));
+        for (status, len) in [(exit(1), 0), (exit(0), 11)] {
+            let error = frame_projection_verdict(status, b"Invalid data", len, 10).unwrap_err();
+            assert!(matches!(error, FrameProjectionError::Deterministic(_)));
+            assert!(matches!(
+                error.into_evaluation(),
+                EvaluationError::Unsupported(message) if message.contains("frame MDCV probe")
+            ));
+        }
+        let killed = frame_projection_verdict(signal(9), b"", 0, 10).unwrap_err();
+        assert!(matches!(killed, FrameProjectionError::Transient(_)));
+        assert!(matches!(
+            FrameProjectionError::Transient("deadline".into()).into_evaluation(),
+            EvaluationError::Deferred(_)
         ));
     }
 
