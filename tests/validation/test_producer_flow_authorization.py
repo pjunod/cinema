@@ -24,35 +24,60 @@ CONTROL = ROOT / "crates/plurxd/src/playback_control.rs"
 FLOW_FN = "async fn apply_ahead_window("
 
 
+# A raw string may hold quotes (`r#"if test "$1""#`) and a char literal may be
+# one (`split_once('"')`); a masker that only knows `"..."` flips inside and
+# outside for the rest of the module after either.
+RAW_STRING_START = re.compile(r'(?:br|rb|r)(#*)"')
+CHAR_LITERAL = re.compile(
+    r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\})|[^\\'\r\n])'"
+)
+
+
 def strip_rust(source: str) -> str:
-    """Blank line comments and string literals, preserving offsets."""
+    """Blank line comments and string and char literals, preserving offsets."""
     out = list(source)
     index = 0
     length = len(source)
+
+    def blank(start: int, stop: int) -> None:
+        for at in range(start, stop):
+            if out[at] != "\n":
+                out[at] = " "
+
     while index < length:
         char = source[index]
         if char == "/" and source.startswith("//", index):
-            while index < length and source[index] != "\n":
-                out[index] = " "
-                index += 1
-        elif char == '"':
-            out[index] = " "
-            index += 1
-            while index < length:
-                if source[index] == "\\":
-                    out[index] = " "
-                    if index + 1 < length:
-                        out[index + 1] = " "
-                    index += 2
+            stop = source.find("\n", index)
+            stop = length if stop < 0 else stop
+            blank(index, stop)
+            index = stop
+            continue
+        raw = RAW_STRING_START.match(source, index)
+        if raw is not None and (index == 0 or not (source[index - 1].isalnum() or source[index - 1] == "_")):
+            close = source.find('"' + raw.group(1), raw.end())
+            stop = length if close < 0 else close + 1 + len(raw.group(1))
+            blank(index, stop)
+            index = stop
+            continue
+        if char == '"':
+            stop = index + 1
+            while stop < length:
+                if source[stop] == "\\":
+                    stop += 2
                     continue
-                if source[index] == '"':
-                    out[index] = " "
-                    index += 1
+                stop += 1
+                if source[stop - 1] == '"':
                     break
-                out[index] = " "
-                index += 1
-        else:
-            index += 1
+            blank(index, min(stop, length))
+            index = stop
+            continue
+        if char == "'":
+            literal = CHAR_LITERAL.match(source, index)
+            if literal is not None:
+                blank(index, literal.end())
+                index = literal.end()
+                continue
+        index += 1
     return "".join(out)
 
 
