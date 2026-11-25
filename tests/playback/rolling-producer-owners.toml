@@ -3174,6 +3174,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/source_probe/dv_refit.rs" = 2
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 6
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 1
+# DV levels pass: one spawn_blocking pipe fold, awaited by the lane after the
+# child exits; it reaches EOF when the stream copy is reaped.
+"crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/refit_work.rs" = 1
 "crates/plurxd/src/source_probe/refit_work_tests.rs" = 2
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 5
@@ -4690,6 +4693,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 "crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 1
 "crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 4
 "crates/plurxd/src/source_custody/recovery/tests.rs" = 3
+# DV levels pass: the lane future is boxed and owned by LevelsTask; stop()
+# cancels and awaits it, reaping the child before the lane is released.
+"crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 1
 "crates/plurxd/src/state.rs" = 1
 "crates/plurxd/src/subtitle_translation/installer.rs" = 1
@@ -7430,6 +7436,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 "crates/plurxd/src/source_probe/dv_refit.rs" = 3
 "crates/plurxd/src/source_probe/dv_title.rs" = 2
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 10
+# DV levels pass: the stream copy (production) and two fixture FFmpeg runs in
+# its own tests; the production child runs under the bounded owner.
+"crates/plurxd/src/source_probe/levels_work.rs" = 3
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 2
 "crates/plurxd/src/startup_tests.rs" = 2
 "crates/plurxd/src/state.rs" = 1
@@ -7667,6 +7676,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/source_probe/dv_refit.rs" = 2
 "crates/plurxd/src/source_probe/dv_title.rs" = 1
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 2
+# DV levels pass: the bounded stream copy and its source-lifetime mediation,
+# both awaited inside read_levels.
+"crates/plurxd/src/source_probe/levels_work.rs" = 2
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 2
 "crates/plurxd/src/startup_tests.rs" = 10
 "crates/plurxd/src/state.rs" = 1
@@ -8571,6 +8583,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 "crates/plurxd/src/source_custody/recovery/tests.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 3
+# DV levels pass: LevelsTask::stop cancels and awaits the owned read.
+"crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 3
 "crates/plurxd/src/startup_tests.rs" = 2
 "crates/plurxd/src/state.rs" = 3

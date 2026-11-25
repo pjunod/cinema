@@ -95,7 +95,9 @@ BUILD_SPECS = {
     # the paperwork help and comment, and make android-release hand the
     # host-derived build number to Gradle as a project property; no native
     # recipe changes.
-    'Makefile': '7d7b9cb5a429c7c185cb7d8cb23c5b42b60bee749c6097a071b469659b163e7a',
+    # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
+    # no native recipe changes.
+    'Makefile': '3beb074aa33342004aef2f5b2ecece597bd35abd2003ac54fdb7a71efacbef14',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
