@@ -2,7 +2,7 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
-/// The ROG, 2026-11-25: a host OOM killed file 206's metadata probe and the
+/// lab5, 2026-11-25: a host OOM killed file 206's metadata probe and the
 /// kill was recorded as a terminal refusal of that delivery route. A probe
 /// killed from outside is transient, as the index pipe already was; a probe
 /// that refuses the source is not.

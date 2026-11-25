@@ -1636,7 +1636,7 @@ mod tests {
         }
     }
 
-    /// The ROG, 2026-11-25: a host OOM killed a title's metadata probe, and
+    /// lab5, 2026-11-25: a host OOM killed a title's metadata probe, and
     /// revision 3 recorded the kill as a terminal process failure -- a
     /// permanent `vod_index_unavailable` for that delivery route. A probe
     /// failure carries no exit category; its words are the only trace.

@@ -2899,7 +2899,7 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
     );
 }
 
-/// A metadata probe killed from outside (the host OOM killer, on the ROG on
+/// A metadata probe killed from outside (the host OOM killer, on lab5 on
 /// 2026-11-25) reports an interruption, not a refusal of the source: the
 /// runner's own deadline and cancellation never reach an exit status.
 #[cfg(unix)]
