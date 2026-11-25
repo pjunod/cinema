@@ -3438,6 +3438,7 @@ mod principal_demand_tests {
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             control_sequence: None,
             file_id,
             playback_id: "shared-demand".to_owned(),

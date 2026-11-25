@@ -282,6 +282,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
         passive_vod: false,
         finite_bitrate_limit_bps: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
         file_id: file.id,
         playback_id: "reorder-cost".to_owned(),
@@ -2278,6 +2279,7 @@ mod tests {
             passive_vod: false,
             finite_bitrate_limit_bps: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: "durable".into(),
             quality_catalog: None,
@@ -3646,6 +3648,7 @@ mod tests {
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
+            accepted_processed_ask: None,
             candidate_context: Some(Box::new(
                 crate::transcode::TranscodeManager::candidate_context(&candidate),
             )),

@@ -725,6 +725,7 @@ impl CreateSession {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1566,6 +1567,25 @@ pub(super) async fn burn_would_discard_this_session_hdr(
 ///
 /// `None` only when the source row could not be loaded; there is nothing
 /// honest to say about a file we cannot see.
+/// The grade an ordinary start delivers, by the same rule its Start reports
+/// as `delivered_dynamic_range`: HDR10 only when that is what it sends.
+fn ordinary_delivered_grade(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> plurx_core::transcode::OutputGrade {
+    use plurx_core::transcode::OutputGrade;
+    let requested = if request.hdr10 {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    };
+    if session_delivered_dynamic_range(source, &request.kind, requested) == Some("hdr10") {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    }
+}
+
 pub(super) fn session_delivered_dynamic_range(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
@@ -2599,6 +2619,20 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .as_ref()
         .map(plurx_core::playback::DeviceProfile::from_caps_v2);
     let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
+    // A start without an Auto candidate (Original, or a manual rung) still
+    // reaches the post-first-frame processed upgrade. Its ask is what it was
+    // accepted with: these capabilities and the catalog query a candidate
+    // would have carried, frozen before the body is consumed.
+    let accepted_processed = if candidate_context.is_none() {
+        source.zip(body.caps.as_ref()).map(|(file, caps)| {
+            (
+                caps.clone(),
+                body.selection_catalog_request(file, caps, original_copy_scope),
+            )
+        })
+    } else {
+        None
+    };
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2645,6 +2679,19 @@ async fn resolve_plan_for_principal_with_local_evidence(
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
     reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
+    // Described after plan review, so the grade and route are the ones this
+    // start will actually run.
+    if let Some((caps, query)) = accepted_processed {
+        request.accepted_processed_ask = u32::try_from(height).ok().map(|target_height| {
+            Box::new(crate::transcode::ProcessedUpgradeAsk::accepted(
+                caps,
+                target_height,
+                ordinary_delivered_grade(source, &request),
+                matches!(request.kind, crate::transcode::SessionKind::Copy { .. }),
+                query,
+            ))
+        });
+    }
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
             Some(previous) => state.transcode.refit_platform_for_session(previous).await,
@@ -7173,51 +7220,22 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
-    let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
-        canonical_caps: Some(caps.clone()),
-        target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
-        // The grade of the ordinary output this Source will actually run —
-        // the resolved request's own shape, the same rule its Start reports
-        // as `delivered_dynamic_range` — not the separate planning decision,
-        // which may plan a transcode the resolved copy never performs.
-        grade: if session_delivered_dynamic_range(
-            Some(&file),
-            &resolved.request.kind,
-            if resolved.request.hdr10 {
-                plurx_core::transcode::OutputGrade::Hdr10
-            } else {
-                plurx_core::transcode::OutputGrade::Sdr
-            },
-        ) == Some("hdr10")
-        {
-            plurx_core::transcode::OutputGrade::Hdr10
-        } else {
-            plurx_core::transcode::OutputGrade::Sdr
-        },
-        names_processed: false,
-        route: resolved
-            .request
-            .candidate_context
-            .as_ref()
-            .map(|context| context.selected_candidate.route)
-            .unwrap_or(
-                if matches!(
-                    resolved.request.kind,
-                    crate::transcode::SessionKind::Copy { .. }
-                ) {
-                    plurx_core::playback::candidate::CandidateRoute::Remux
-                } else {
-                    plurx_core::playback::candidate::CandidateRoute::Encode
-                },
-            ),
-        average_bps: None,
-        peak_bps: None,
-        recipe_digest: [0; 32],
-        required_fel_qualification: None,
-        catalog_query: Some(processed_query),
-        display_target: None,
-        display_target_note: None,
-    };
+    // A shared copy has no Auto candidate context, so its ask is the one any
+    // start without a candidate derives — except that a Source's local Auto
+    // candidate, when it has one, still names the route it runs.
+    let mut processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk::accepted(
+        caps.clone(),
+        u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
+        ordinary_delivered_grade(Some(&file), &resolved.request),
+        matches!(
+            resolved.request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ),
+        processed_query,
+    );
+    if let Some(context) = resolved.request.candidate_context.as_ref() {
+        processed_upgrade_ask.route = context.selected_candidate.route;
+    }
     let destination = if processed_upgrade.is_some() {
         match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(
             &resolved.request,

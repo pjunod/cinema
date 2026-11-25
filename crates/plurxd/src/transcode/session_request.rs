@@ -717,6 +717,13 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
+    /// The processed-upgrade ask of a start without an Auto candidate
+    /// (Original or a manual rung), derived at create from its accepted
+    /// capabilities. An Auto start leaves it `None`: its candidate context
+    /// is the ask. Read both through [`SessionRequest::processed_upgrade_ask`].
+    /// Process-private, like the candidate context it stands in for.
+    #[serde(skip)]
+    pub(crate) accepted_processed_ask: Option<Box<super::ProcessedUpgradeAsk>>,
     /// The viewer's per-playback output-retention choice from the HTTP
     /// create (`CreateOverrides::retain_output`). `Some(false)` means this
     /// playback queues no complete-output preparation and does no rolling
@@ -1108,6 +1115,44 @@ impl SessionKind {
 }
 
 impl SessionRequest {
+    /// The one processed-upgrade ask for this request: its Auto candidate's,
+    /// or the accepted ask of a start that has none. `None` only for a start
+    /// that reported no capabilities, which no processed route can serve.
+    pub(crate) fn processed_upgrade_ask(&self) -> Option<super::ProcessedUpgradeAsk> {
+        self.candidate_context
+            .as_deref()
+            .map(super::ProcessedUpgradeAsk::from_candidate)
+            .or_else(|| self.accepted_processed_ask.as_deref().cloned())
+    }
+
+    /// The rendition height the processed ask describes, if there is one.
+    pub(crate) fn processed_ask_target_height(&self) -> Option<u32> {
+        self.candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.target_height)
+            .or_else(|| {
+                self.accepted_processed_ask
+                    .as_ref()
+                    .map(|ask| ask.target_height)
+            })
+    }
+
+    /// Record a completed FEL qualification on whichever ask this request
+    /// carries. `None` when it carries neither.
+    pub(crate) fn require_fel_qualification(
+        &mut self,
+        qualification: super::PendingFelQualification,
+    ) -> Option<()> {
+        if let Some(context) = self.candidate_context.as_mut() {
+            context.required_fel_qualification = Some(qualification);
+        } else {
+            self.accepted_processed_ask
+                .as_mut()?
+                .required_fel_qualification = Some(qualification);
+        }
+        Some(())
+    }
+
     /// Resolve legacy routes and explicit encoded destinations in one place so
     /// preflight and the completed-window runtime cannot disagree.
     pub(crate) fn dv_processing_route(

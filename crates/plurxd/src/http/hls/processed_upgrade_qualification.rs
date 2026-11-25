@@ -191,9 +191,7 @@ impl Check {
                 selection,
                 wait.intent
                     .request
-                    .candidate_context
-                    .as_ref()
-                    .map(|context| context.selected_candidate.target_height)
+                    .processed_ask_target_height()
                     .unwrap_or(wait.wait.request.output.height),
             )
         }) {
@@ -280,10 +278,7 @@ impl Check {
         }
         let mut intent = wait.intent.clone();
         let mut request = request;
-        request
-            .candidate_context
-            .as_mut()?
-            .required_fel_qualification = Some(wait.wait.clone());
+        request.require_fel_qualification(wait.wait.clone())?;
         intent.auto_policy = request.automatic;
         intent.request = request;
         let report = ProcessingSkip { generation: intent.incarnation_id.clone(),
@@ -351,9 +346,7 @@ pub(in crate::http::hls) fn note_accepted_control(
     let previous_target_height = check
         .intent
         .request
-        .candidate_context
-        .as_ref()
-        .map(|context| context.selected_candidate.target_height)
+        .processed_ask_target_height()
         .unwrap_or(0);
     let inputs = ControlInputs {
         route: route.clone(),

@@ -167,9 +167,7 @@ impl TranscodeManager {
         held_video_bps: Option<u64>,
     ) -> Result<transcode::EnhancementRateEnvelope, String> {
         let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate)
+            .processed_upgrade_ask()
             .ok_or("processed rate requires its current candidate context")?;
         Self::processed_enhancement_envelope_with_ask(
             snapshot,
@@ -401,9 +399,7 @@ impl TranscodeManager {
         height: i64,
     ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
         let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate)
+            .processed_upgrade_ask()
             .ok_or("processed trial context missing")?;
         Self::processed_qualification_input_with_ask(snapshot, request, height, &ask)
     }
@@ -1506,6 +1502,7 @@ impl TranscodeManager {
                 // This request probes a row while its catalog is still being
                 // built; it is not the dispatch request retaining that catalog.
                 quality_catalog: None,
+                accepted_processed_ask: None,
                 candidate_context: Some(Box::new(Self::candidate_context(candidate))),
                 file_id: file.id,
                 playback_id: String::new(),
@@ -5045,6 +5042,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: id,
             playback_id: "reorder".into(),
             request_id: Some("00000000-0000-4000-8000-0000000000f3".into()),
@@ -6000,6 +5998,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
+            accepted_processed_ask: None,
             candidate_context: Some(Box::new(context)),
             vod_only: false,
             passive_vod: false,

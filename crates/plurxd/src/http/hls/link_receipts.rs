@@ -1835,6 +1835,7 @@ mod tests {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: "typed-player".into(),
             request_id: None,

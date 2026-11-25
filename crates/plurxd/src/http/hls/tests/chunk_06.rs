@@ -4197,6 +4197,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -5867,6 +5868,83 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
     );
     assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+}
+
+/// A viewer on Original has no Auto candidate. Its converted Profile 7 copy
+/// must still reach the post-first-frame reconstruction, through the ask it
+/// was accepted with: without one the upgrade gates answered "no upgrade" in
+/// silence and only Auto plays were ever offered FEL (E-5C355069F5).
+#[tokio::test]
+async fn an_original_copy_without_a_candidate_is_offered_fel_reconstruction() {
+    use crate::transcode::{SessionKind, TranscodeManager};
+    use plurx_core::store::keys;
+    use plurx_core::transcode::dv_processing::DvDestination;
+    let mut file = dolby_vision_p7_file();
+    file.dolby_vision.el_present = Some(true);
+    file.dolby_vision.rpu_present = Some(true);
+    file.audio_streams = vec![plurx_core::domain::AudioStream {
+        index: 1, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+        channel_layout: Some("5.1".into()), language: None, title: None, default: true,
+    }];
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_height":2160}],
+        "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","audio":["aac","eac3"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
+    let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+        file: file.clone(), probe_json: None, settings: Default::default(),
+        generation: 1, item_title: None,
+    };
+    snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+    snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
+    // What the Android app sends on Original: a copy, not Auto, no rung.
+    let body = || CreateSession {
+        processed_upgrade: None, playback_id: "original-p81".into(), copy: Some(true),
+        quality_auto: Some(false), preserve_dolby_vision: Some(true),
+        caps: Some(caps.clone()), ..bare_create()
+    };
+    assert!(!body().candidate_auto_policy(), "Original is not Auto");
+    let review = || review_client_plan(&caps, None, &file, &capable_node(), true, false, NOW_MS);
+    assert!(review().convert_dolby_vision, "P7 converts to 8.1 for this client");
+    // The create path itself, not a hand-built request.
+    let state = resolver_state();
+    let resolved = resolve_plan(
+        PlanInputs {
+            snapshot: None, state: &state, user_id: 7, file_id: file.id, source: Some(&file),
+            network_prior: None, network_identity: None, incumbent_receipt: None,
+        },
+        Some(review()),
+        body(),
+    )
+    .await
+    .expect("Original copy plan");
+    assert!(!resolved.candidate_auto_policy, "Original stays out of Auto policy");
+    let request = resolved.request;
+    assert!(matches!(request.kind, SessionKind::Copy { convert_dolby_vision: true, .. }));
+    assert!(request.candidate_context.is_none(), "Original binds no candidate");
+    let ask = request.accepted_processed_ask.as_deref().expect("create derives the accepted ask");
+    assert_eq!(ask.route, plurx_core::playback::candidate::CandidateRoute::Remux);
+    assert_eq!(
+        ask.catalog_query.as_ref().and_then(|query| query.copy_contract).map(|contract| contract.2),
+        Some(true),
+        "the reviewed conversion scope, frozen before the body is consumed"
+    );
+    let mut bare = request.clone();
+    bare.accepted_processed_ask = None;
+    assert!(bare.processed_upgrade_ask().is_none(), "before this fix the start had no ask");
+    #[cfg(target_os = "linux")]
+    assert_eq!(TranscodeManager::processed_upgrade_gates(&bare, &snapshot, false), Ok(None),
+        "and the gates skipped it in silence");
+    let height = 2160_i64.min(file.height.unwrap_or(2160)) & !1;
+    let (trial, _) = TranscodeManager::processed_qualification_input(&snapshot, &request, height)
+        .expect("an accepted Original copy reaches FEL qualification");
+    assert_eq!(trial.kind, SessionKind::Transcode { height });
+    assert_eq!(trial.dv_processing_destination, Some(DvDestination::Profile81));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        TranscodeManager::processed_upgrade_gates(&request, &snapshot, false),
+        Ok(Some(DvDestination::Profile81)),
+        "the create registers the upgrade instead of skipping it"
+    );
 }
 
 /// Exercise the very helpers resolve_plan uses, then the real qualification
