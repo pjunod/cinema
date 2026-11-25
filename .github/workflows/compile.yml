@@ -1,0 +1,115 @@
+name: Compile
+
+# One RAM-heavy build or test command, run for an agent session in a leased,
+# memory-bounded CI VM instead of on a shared host (ci-fleet E-2791C96DD2).
+# Sessions submit with `ci-fleet compile submit` (ci-fleet's compile_cli.py):
+# it pushes a snapshot of their tree to a hidden ref, refs/compile/<id>, and
+# dispatches this workflow on main with that ref. Only the ci-fleet compile
+# policy serves the label below, as a background policy: one compile at a
+# time, and only on a host where no CI job waits for capacity.
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: The compile request's ID, as `ci-fleet compile` made it.
+        required: true
+        type: string
+      source:
+        description: The snapshot ref, refs/compile/<id>.
+        required: true
+        type: string
+      commit:
+        description: The snapshot commit the ref must point at.
+        required: true
+        type: string
+      command:
+        description: One shell command, run at the checkout's root.
+        required: true
+        type: string
+      artifacts:
+        description: Space-separated paths to keep; target/... is read from the Cargo target directory.
+        required: false
+        default: ""
+        type: string
+
+run-name: "Compile ${{ inputs.id }}"
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_MIN_STACK: "8388608"
+
+jobs:
+  compile:
+    name: compile
+    if: ${{ github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main' }}
+    runs-on: [ci-fleet-plurx-compile-v1]
+    # The same private CI image and bounds as rust-units.yml's build archive.
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 90
+    steps:
+      - name: Check the request
+        env:
+          ID: ${{ inputs.id }}
+          SOURCE: ${{ inputs.source }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          set -eu
+          printf '%s' "$ID" | grep -Eqx '[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7}-[0-9a-f]{6}'
+          [ "$SOURCE" = "refs/compile/$ID" ]
+          printf '%s' "$COMMIT" | grep -Eqx '[0-9a-f]{40}'
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - name: Check the snapshot
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: compile
+      - name: Run the command
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: bash -eo pipefail -c "$COMMAND"
+      - name: Collect the artifacts
+        if: ${{ success() && inputs.artifacts != '' }}
+        env:
+          ARTIFACTS: ${{ inputs.artifacts }}
+          TARGET: ${{ steps.cargo-cache.outputs.target-dir }}
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/compile-out"
+          mkdir -p "$out"
+          for path in $ARTIFACTS; do
+            case "$path" in /*|*..*) echo "refused artifact path: $path" >&2; exit 1 ;; esac
+            case "$path" in
+              target/*) from="${TARGET:-target}/${path#target/}" ;;
+              *) from="$path" ;;
+            esac
+            mkdir -p "$out/$(dirname "$path")"
+            cp -a "$from" "$out/$path"
+          done
+      - if: ${{ success() && inputs.artifacts != '' }}
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: compile-${{ inputs.id }}
+          path: ${{ runner.temp }}/compile-out
+          retention-days: 3
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
