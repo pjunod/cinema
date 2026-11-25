@@ -70,8 +70,12 @@ something else, e.g. `DV P7 → DV P8`, `DV → HDR10` or `DV P7 → HDR10-E`), 
 active Dolby Vision enhancements and the audio format. RPU and DYN mean mpv
 applied the RPU and the per-shot display mapping on this machine (RPU is not
 claimed on a Profile 7 → 8.1 delivery, where it is a pass-through). EL means
-the private build received the dual-layer Profile 7 stream and pairs its
-enhancement layer; neither plurx nor mpv says whether that layer is full or
+the native Dolby renderer composed the enhancement layer into the picture it is
+mapping now: the private mpv's `native-dovi-target-state` reports this as the
+level `enhancement-layer-composed`, which drops when the layer does even while
+mapping continues. An mpv without that field, or a non-native renderer, keeps
+the older inference (a dual-layer Profile 7 stream reached the private build).
+Neither plurx nor mpv says whether that layer is full or
 minimal, so FEL appears only when the server reports it (for example a
 server-reconstructed picture). Playback info adds the mapper line and why each
 enhancement is or is not active.

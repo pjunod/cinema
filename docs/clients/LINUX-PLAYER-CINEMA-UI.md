@@ -26,9 +26,15 @@ renderer line. The overlay reads the picture itself from mpv: resolution from
 decoded `video-params`, delivered range from its colour matrix and transfer,
 delivered profile from the selected track. RPU and DYN are claimed while mpv
 renders Dolby Vision, unless the private build said the frame had no RPU (RPU
-not on a Profile 7 → 8.1 delivery). EL is claimed for a Profile 7 track whose
-source has an enhancement layer, with the private build's renderer line
-present; FEL stays the server's claim, because no fact distinguishes a full
+not on a Profile 7 → 8.1 delivery). For the native Dolby renderer, EL follows
+the level `enhancement-layer-composed` in mpv's `native-dovi-target-state`
+(rog_hdr_dv `mpv-fel-system-dv` patch 0011): lit while the mapped picture has
+the enhancement layer composed in, off when a frame maps without it, and off
+after a frame-queue reset until a composed frame is mapped again. The overlay
+reads the property itself and redraws on its notification, so the pill does
+not depend on catching the renderer's one-time success line. An mpv without
+the field, or a non-native renderer, keeps the earlier inference: a Profile 7
+track whose source has an enhancement layer, with a renderer line present. FEL stays the server's claim, because no fact distinguishes a full
 from a minimal layer on this path. A carried route's server pills hold only
 while mpv renders Dolby Vision; a processed route's hold while its report does.
 No colour, decoder or renderer option changes.
@@ -100,8 +106,9 @@ renderer’s exact successful physical-target message from `vo/gpu-next` at
 Info level. Its finite physical peak overrides the signal-envelope property;
 the label is `shared native Dolby renderer`, without inventing a CM version.
 Facts reset on each load/start-file and authoritative target-state changes.
-The read-only `native-dovi-target-state` property reports eligibility and render
-generation; a success must match its active current generation. One read on a
+The read-only `native-dovi-target-state` property reports eligibility, render
+generation and, from patch 0011, the enhancement-layer composition level that
+Cinema's EL pill reads; a success must match its active current generation. One read on a
 success or state notification prevents stale compositor/lease facts without
 polling. Eligibility alone does not establish an active grade. A new
 file with no new success stays unknown; a compiled marker alone never proves
