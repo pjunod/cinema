@@ -65,6 +65,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [ANDROID-DOUBLE-BACK-RCA-AND-FIX.md](ANDROID-DOUBLE-BACK-RCA-AND-FIX.md) | Why rapid Back taps can empty Android navigation, the proposed entry ownership guard, emulator regression evidence, and review and release acceptance. | open |
 | [ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md](ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md) | Sol's build and delivery contract: recover the rebased candidate, finish the Media3 lint opt-in, preserve six regressions, validate, and prepare review and landing evidence. | open |
 | [ANDROID-DOUBLE-BACK-STATUS.md](ANDROID-DOUBLE-BACK-STATUS.md) | Current branch, milestones, validation, review, PR, and physical acceptance for the Android double-Back fix. | open |
+| [PLAYBACK-INFO-PER-SHOT-L1-DECISION.md](PLAYBACK-INFO-PER-SHOT-L1-DECISION.md) | Whether Playback info should show the current shot's L1 brightness, with the measured per-shot storage and wire cost; decided no. | done |
 | [PLAYBACK-INFO-REDESIGN.md](PLAYBACK-INFO-REDESIGN.md) | Playback info hierarchy, measurement semantics and qualification. | open |
 | [PLAYBACK-INFO-DIMENSIONS-STATUS.md](PLAYBACK-INFO-DIMENSIONS-STATUS.md) | Live build ledger for frame, aspect and provenance repairs across web, Apple and Android. | live |
 | [PLAYBACK-INFO-DIMENSIONS.md](PLAYBACK-INFO-DIMENSIONS.md) | Source handoff for the playback dimension and aspect repair, with evidence rules and acceptance cases. | open |
