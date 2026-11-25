@@ -6,7 +6,8 @@ local opts = {accent = '6EA8FE', hide_ms = 4000}
 require('mp.options').read_options(opts, 'cinema')
 local overlay = mp.create_osd_overlay('ass-events')
 local S = {shown = true, touched = 0, buttons = {}, focus = nil, menu = nil,
-           row = 1, preview = nil, dragging = false, hover = nil, mouse_bound = false}
+           row = 1, preview = nil, dragging = false, hover = nil, mouse_bound = false,
+           native = {}}
 local W, H = 1280, 720
 local render, activity, mouse, click, key, play_pause
 local function number(v) return type(v) == 'number' and v == v and math.abs(v) < math.huge end
@@ -178,7 +179,11 @@ local function snapshot()
     view.source=table_of(view.facts.source)
     view.renderer=type(view.facts.renderer)=='table' and view.facts.renderer or nil
     view.enhancement=type(view.facts.enhancement)=='table' and view.facts.enhancement or nil
-    view.native=table_of(prop('native-dovi-target-state'))
+    -- Delivered by its observer, never read here: mpv answers a read of this
+    -- property on its video-output thread, which can take a whole frame.
+    -- Renders follow every frame, so reading it would keep this script's event
+    -- queue from ever draining, and mpv runs the hide timer only once it has.
+    view.native=S.native
     return view
 end
 -- detail/helpers.js resLabel, on the frame mpv decodes rather than the file.
@@ -765,9 +770,10 @@ for _, pair in ipairs({{'TAB','tab'},{'Shift+TAB','backtab'},{'ENTER','enter'},{
 end
 mp.add_forced_key_binding('WHEEL_UP','cinema-wheel-up',function() if S.menu then key('up') else mp.commandv('add','volume',5); activity() end end)
 mp.add_forced_key_binding('WHEEL_DOWN','cinema-wheel-down',function() if S.menu then key('down') else mp.commandv('add','volume',-5); activity() end end)
-for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params','native-dovi-target-state'}) do
+for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params'}) do
     mp.observe_property(name,'native',function() render() end)
 end
+mp.observe_property('native-dovi-target-state','native',function(_,value) S.native=table_of(value); render() end)
 mp.observe_property('user-data/cinema','native',function()
     local retryable=cinema().retryable == true
     -- A stale popup must not cover the recovery action, especially in a
