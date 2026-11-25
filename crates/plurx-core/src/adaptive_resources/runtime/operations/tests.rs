@@ -25,6 +25,29 @@ fn vector(value: u64) -> ResourceVector {
         scratch_bytes: value,
     }
 }
+/// Charge of a later role in one prepared family. Every nonzero `processes`
+/// carries an unknown kernel-task peak and the ledger admits at most one such
+/// producer at a time (fdda9a593), so only the first role owns a process root.
+fn rootless(value: u64) -> ResourceVector {
+    ResourceVector {
+        processes: 0,
+        ..vector(value)
+    }
+}
+fn role_vector(index: usize, value: u64) -> ResourceVector {
+    if index == 0 {
+        vector(value)
+    } else {
+        rootless(value)
+    }
+}
+/// Total of `roles` two-unit roles of which only the first owns a root.
+fn family_charge(roles: u64) -> ResourceVector {
+    ResourceVector {
+        processes: 2,
+        ..vector(2 * roles)
+    }
+}
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(30)
 }
@@ -70,7 +93,7 @@ fn prepare(
         .map(|index| FamilyRoleDemand {
             role: [FamilyRole::Video, FamilyRole::Audio, FamilyRole::Companion][index],
             demand: WorkloadDemand {
-                resources: Metric::Known(vector(2)),
+                resources: Metric::Known(role_vector(index, 2)),
                 limit_epoch: 1,
                 trial: false,
             },
@@ -93,7 +116,10 @@ async fn dropped_prepare_selection_retains_whole_charge_then_durable_cancel_refu
     let root = tempfile::tempdir().expect("durable TMPDIR");
     let runtime = runtime(root.path());
     let owner = prepare(&runtime, vec![plan(), plan()], deadline()).expect("queued together");
-    assert_eq!(runtime.accounting().expect("provisional").used, vector(4));
+    assert_eq!(
+        runtime.accounting().expect("provisional").used,
+        family_charge(2)
+    );
     drop(owner);
     let mut retained = runtime.retained_preparations().expect("same owner book");
     assert_eq!(retained.len(), 1);
@@ -143,7 +169,10 @@ async fn late_prepare_commit_rechecks_epoch_and_cancels_without_returning_launch
     runtime
         .update_capacity(2, Metric::Known(vector(1)))
         .expect("new epoch below held cost");
-    assert_eq!(runtime.accounting().expect("not clamped").used, vector(4));
+    assert_eq!(
+        runtime.accounting().expect("not clamped").used,
+        family_charge(2)
+    );
     let error = runtime
         .resolve_preparation(&owner, deadline())
         .await
@@ -362,32 +391,33 @@ async fn retained_successor_pins_prevent_original_refund_until_candidate_is_reti
             .as_ref()
             .expect("actual audio owner")
             .retained_role();
-        let demand = WorkloadDemand {
-            resources: Metric::Known(vector(2)),
+        let demand = |index| WorkloadDemand {
+            resources: Metric::Known(role_vector(index, 2)),
             limit_epoch: 1,
             trial: false,
         };
         let incumbent_roles = [
             FamilyRoleDemand {
                 role: FamilyRole::Video,
-                demand,
+                demand: demand(0),
                 retained: Some(held_video),
             },
             FamilyRoleDemand {
                 role: FamilyRole::Audio,
-                demand,
+                demand: demand(1),
                 retained: Some(held_audio),
             },
         ];
+        // The incumbent video still owns the one admitted root producer.
         let successor_roles = [
             FamilyRoleDemand {
                 role: FamilyRole::Video,
-                demand,
+                demand: demand(1),
                 retained: None,
             },
             FamilyRoleDemand {
                 role: FamilyRole::Audio,
-                demand,
+                demand: demand(1),
                 retained: Some(held_audio),
             },
         ];
@@ -417,7 +447,7 @@ async fn retained_successor_pins_prevent_original_refund_until_candidate_is_reti
             .accounting()
             .expect("distinct obligations only")
             .used,
-        vector(6)
+        family_charge(3)
     );
     assert!(runtime
         .cancel_preparation(&original, deadline())
@@ -425,7 +455,7 @@ async fn retained_successor_pins_prevent_original_refund_until_candidate_is_reti
         .is_err());
     assert_eq!(
         runtime.accounting().expect("original pinned").used,
-        vector(6)
+        family_charge(3)
     );
     runtime
         .cancel_preparation(&successor, deadline())
@@ -437,7 +467,7 @@ async fn retained_successor_pins_prevent_original_refund_until_candidate_is_reti
         .expect("release retained users, not original costs");
     assert_eq!(
         runtime.accounting().expect("incumbent unchanged").used,
-        vector(4)
+        family_charge(2)
     );
     runtime
         .cancel_preparation(&original, deadline())

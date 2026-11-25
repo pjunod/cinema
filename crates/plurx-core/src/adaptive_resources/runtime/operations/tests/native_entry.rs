@@ -48,7 +48,7 @@ async fn overage_fence_closes_second_role_latch_and_keeps_both_charges() {
         runtime.accounting().expect("charge remains held").used,
         ResourceVector {
             scratch_bytes: 5,
-            ..vector(4)
+            ..family_charge(2)
         }
     );
     runtime.drain().expect("drain journal owner");

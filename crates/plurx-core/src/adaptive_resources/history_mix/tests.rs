@@ -140,13 +140,15 @@ fn replace_retained(fixture: &mut Fixture, memory: u64) {
 
 #[test]
 fn actual_mix_changes_with_the_committed_retained_resource_vector() {
-    let mut actual = fixture(256);
-    let small_mix = actual
+    // A retained replacement may only return capacity: prepare_retained_swap
+    // refuses a target that is not componentwise within its source charge.
+    let mut actual = fixture(512);
+    let large_mix = actual
         .ledger
         .actual_history_mix_for(actual.selected_family)
         .expect("one selected producer plus retained S");
-    replace_retained(&mut actual, 512);
-    let large_mix = actual
+    replace_retained(&mut actual, 256);
+    let small_mix = actual
         .ledger
         .actual_history_mix_for(actual.selected_family)
         .expect("one selected producer plus retained S");

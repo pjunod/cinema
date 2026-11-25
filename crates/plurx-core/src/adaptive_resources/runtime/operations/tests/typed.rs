@@ -21,7 +21,7 @@ pub(super) fn prepare_typed(
         .map(|i| FamilyRoleDemand {
             role: [FamilyRole::Video, FamilyRole::Audio, FamilyRole::Companion][i],
             demand: WorkloadDemand {
-                resources: Metric::Known(vector(2)),
+                resources: Metric::Known(role_vector(i, 2)),
                 limit_epoch: 1,
                 trial,
             },
@@ -90,7 +90,7 @@ async fn dropped_typed_prepare_selection_preserves_every_role_until_cancel_commi
         vec![typed_plan(), typed_plan()],
         false,
     ));
-    assert_eq!(runtime.accounting().unwrap().used, vector(4));
+    assert_eq!(runtime.accounting().unwrap().used, family_charge(2));
     let owner = runtime.retained_preparations().unwrap().pop().unwrap();
     runtime
         .resolve_preparation(&owner, deadline())

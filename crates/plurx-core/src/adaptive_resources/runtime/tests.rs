@@ -149,15 +149,34 @@ fn every_persisted_phase_restores_full_cleanup_only_unknown_held_above_new_cap()
 #[test]
 fn shared_family_edges_count_once_and_all_trial_members_keep_the_latch() {
     let mut recovered = snapshot(&[Phase::Sealed, Phase::Prepared], true);
+    // Every recovered process root carries an unknown kernel-task peak and the
+    // ledger admits at most one such producer (fdda9a593). Keep the shared
+    // audio obligation rootless and probe without a root, so the trial latch,
+    // not task serialization, is what refuses the probe.
+    recovered.obligations[1].resources.processes = 0;
+    recovered.total.processes -= 2;
     recovered.families.push(FamilyEdge {
         family_id: Uuid::new_v4(),
         role: Role::Audio,
         obligation_id: recovered.obligations[1].obligation_id,
     });
+    // The journal digest binds the complete edge set (ee8cc4674); an edge
+    // added after the snapshot was built must be covered by a fresh digest.
+    recovered.family_authority = crate::resource_custody::FamilyAuthority::from_validated_rows(
+        recovered.families.len() as u64,
+        crate::resource_custody::family_edges_digest(&recovered.families),
+        &recovered.families,
+    );
     let (ledger, _) =
         restore_accounting(1, Metric::Known(vector(100)), &recovered).expect("shared full edges");
     let held = ledger.snapshot().expect("snapshot");
-    assert_eq!(held.used, vector(4));
+    assert_eq!(
+        held.used,
+        ResourceVector {
+            processes: 2,
+            ..vector(4)
+        }
+    );
     assert_eq!(held.held, 2);
     assert!(held.trial_held);
     assert_eq!(
@@ -173,7 +192,10 @@ fn shared_family_edges_count_once_and_all_trial_members_keep_the_latch() {
     );
     assert!(matches!(
         ledger.reserve(WorkloadDemand {
-            resources: Metric::Known(vector(1)),
+            resources: Metric::Known(ResourceVector {
+                processes: 0,
+                ..vector(1)
+            }),
             limit_epoch: 1,
             trial: true,
         }),

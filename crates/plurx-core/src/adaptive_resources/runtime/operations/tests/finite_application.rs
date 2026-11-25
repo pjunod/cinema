@@ -49,7 +49,7 @@ async fn known_prepare_rollback_preflights_every_original_application_role_befor
     }
     assert_eq!(
         runtime.accounting().expect("all charges retained").used,
-        vector(4)
+        family_charge(2)
     );
     drop(lease);
     assert!(
@@ -64,7 +64,7 @@ async fn known_prepare_rollback_preflights_every_original_application_role_befor
             .accounting()
             .expect("still no finite terminal proof")
             .used,
-        vector(4)
+        family_charge(2)
     );
     drop(owner);
     runtime.drain().expect("join original journal");
@@ -106,7 +106,7 @@ async fn stale_admission_cannot_partially_cancel_a_family_with_an_original_appli
             .accounting()
             .expect("whole original family retained")
             .used,
-        vector(4)
+        family_charge(2)
     );
     assert!(runtime
         .cancel_preparation(&owner, deadline())
@@ -117,7 +117,7 @@ async fn stale_admission_cannot_partially_cancel_a_family_with_an_original_appli
             .accounting()
             .expect("no partial generic cancellation")
             .used,
-        vector(4)
+        family_charge(2)
     );
     drop(lease);
     drop(owner);

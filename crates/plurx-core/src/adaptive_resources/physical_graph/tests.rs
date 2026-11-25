@@ -40,6 +40,25 @@ fn graph(ledger: &ResourceLedger) -> OwnedPhysicalGraph {
         .expect("move exclusive custody")
 }
 
+/// A graph with no process-root budget. Every nonzero `processes` carries an
+/// unknown kernel-task peak and one ledger admits at most one such producer
+/// at a time (fdda9a593), so a second graph in the same ledger has no root.
+fn rootless_graph(ledger: &ResourceLedger) -> OwnedPhysicalGraph {
+    ledger
+        .reserve(WorkloadDemand {
+            resources: Metric::Known(ResourceVector {
+                processes: 0,
+                ..vector(1)
+            }),
+            limit_epoch: 1,
+            trial: false,
+        })
+        .expect("rootless reservation")
+        .0
+        .into_physical_graph()
+        .expect("move exclusive custody")
+}
+
 #[tokio::test]
 async fn graph_owned_role_borrow_is_counted_once_and_sealed_cleanup_cannot_share() {
     let ledger = ledger();
@@ -109,8 +128,10 @@ async fn graph_owned_role_borrow_is_counted_once_and_sealed_cleanup_cannot_share
 #[tokio::test]
 async fn root_control_rejects_cross_graph_and_waited_root_signal_without_refund() {
     let ledger = ledger();
+    // Both graphs need a live root; only one root producer fits per ledger.
+    let foreign = self::ledger();
     let mut first = graph(&ledger);
-    let mut second = graph(&ledger);
+    let mut second = graph(&foreign);
     let root = first
         .spawn_root(&mut child("sleep"), TEST_WORK)
         .await
@@ -133,16 +154,19 @@ async fn root_control_rejects_cross_graph_and_waited_root_signal_without_refund(
         .signal_root(root, crate::process::ProcessSignal::Resume)
         .await
         .is_err());
-    assert_eq!(ledger.snapshot().expect("still charged").held, 2);
+    assert_eq!(ledger.snapshot().expect("still charged").held, 1);
+    assert_eq!(foreign.snapshot().expect("still charged").held, 1);
     sealed.close().await;
     second.seal().close().await;
-    assert_eq!(
-        ledger
-            .snapshot()
-            .expect("physical uncertainty")
-            .unknown_held,
-        2
-    );
+    for ledger in [&ledger, &foreign] {
+        assert_eq!(
+            ledger
+                .snapshot()
+                .expect("physical uncertainty")
+                .unknown_held,
+            1
+        );
+    }
 }
 
 #[test]
@@ -230,7 +254,7 @@ fn child(mode: &str) -> Command {
 async fn no_acquisition_drop_and_close_release_only_their_own_reservation() {
     let ledger = ledger();
     let first = graph(&ledger);
-    let other = graph(&ledger);
+    let other = rootless_graph(&ledger);
     let first_identity = first.identity();
     assert_ne!(first_identity.generation, other.identity().generation);
     assert_eq!(
@@ -522,7 +546,9 @@ async fn task_panic_is_joined_abandonment_not_physical_release() {
 #[tokio::test]
 async fn root_identity_cannot_cross_graph_and_seal_rejects_late_acquisition() {
     let ledger = ledger();
-    let mut first = graph(&ledger);
+    // Both graphs need a live root; only one root producer fits per ledger.
+    let foreign = self::ledger();
+    let mut first = graph(&foreign);
     let mut second = graph(&ledger);
     let first_root = first
         .spawn_root(&mut child("sleep"), TEST_WORK)
@@ -568,7 +594,8 @@ async fn root_identity_cannot_cross_graph_and_seal_rejects_late_acquisition() {
         first.seal().close().await,
         GraphCloseOutcome::UnknownHeld(GraphHoldReason::ContainmentUnavailable)
     );
-    assert_eq!(ledger.snapshot().expect("both still held").held, 2);
+    assert_eq!(ledger.snapshot().expect("both still held").held, 1);
+    assert_eq!(foreign.snapshot().expect("both still held").held, 1);
 }
 
 #[test]
