@@ -886,7 +886,7 @@ impl Cluster {
     }
 
     pub(crate) fn maintenance_active(&self) -> bool {
-        self.local_membership().maintenance_fence()
+        self.access.local().maintenance_fence()
     }
 
     pub(crate) fn deployment_enabled(&self, configured: bool) -> bool {
