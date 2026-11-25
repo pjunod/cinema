@@ -2905,7 +2905,7 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
 #[cfg(unix)]
 #[tokio::test]
 async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
-    async fn run(script: &str) -> Result<super::BoundedOutput, super::HeldMetadataProbeError> {
+    async fn run(script: &str) -> Result<super::BoundedOutput, super::HeldProbeError> {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", script]);
         super::metadata_probe_output(
@@ -2920,13 +2920,13 @@ async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
     }
     assert_eq!(
         run("kill -9 $$").await.err(),
-        Some(super::HeldMetadataProbeError::Interrupted(
+        Some(super::HeldProbeError::Interrupted(
             "index metadata probe exited signal: 9 (SIGKILL)".into()
         ))
     );
     assert!(matches!(
         run("exit 1").await,
-        Err(super::HeldMetadataProbeError::Failed(_))
+        Err(super::HeldProbeError::Failed(_))
     ));
     assert!(run("exit 0").await.is_ok());
     let mut command = tokio::process::Command::new("/bin/sh");
@@ -2942,7 +2942,7 @@ async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
     .await
     .err();
     assert!(
-        matches!(timed_out, Some(super::HeldMetadataProbeError::Timeout(_))),
+        matches!(timed_out, Some(super::HeldProbeError::Timeout(_))),
         "{timed_out:?}"
     );
 }

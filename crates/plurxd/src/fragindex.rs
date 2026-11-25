@@ -596,12 +596,12 @@ fn tail_packet_end(
 
 /// A metadata probe that produced no document. Its deadline and an external
 /// kill are interruptions; anything else is the probe refusing this source.
-fn metadata_probe_failure(error: crate::ffmpeg::HeldMetadataProbeError) -> IndexFailure {
-    use crate::ffmpeg::HeldMetadataProbeError;
+fn metadata_probe_failure(error: crate::ffmpeg::HeldProbeError) -> IndexFailure {
+    use crate::ffmpeg::HeldProbeError;
     let (code, transient) = match &error {
-        HeldMetadataProbeError::Timeout(_) => (IndexFailureCode::IndexProbeTimeout, true),
-        HeldMetadataProbeError::Interrupted(_) => (IndexFailureCode::IndexProcessFailed, true),
-        HeldMetadataProbeError::Failed(_) => (IndexFailureCode::IndexProcessFailed, false),
+        HeldProbeError::Timeout(_) => (IndexFailureCode::IndexProbeTimeout, true),
+        HeldProbeError::Interrupted(_) => (IndexFailureCode::IndexProcessFailed, true),
+        HeldProbeError::Failed(_) => (IndexFailureCode::IndexProcessFailed, false),
     };
     IndexFailure::new(code, error.reason().to_owned(), 0).transient(transient)
 }
@@ -628,6 +628,44 @@ fn packet_probe_failure(
     failure.diagnostic.selected_stream = Some(stream_index);
     failure.diagnostic.output_bytes = Some(output_bytes);
     failure
+}
+
+/// Why the F+ first source packet's identity could not be taken.
+#[derive(Debug, PartialEq, Eq)]
+enum PacketIdentityError {
+    /// The held source could not be read or handed to the child.
+    Source(String),
+    /// The child itself: its own deadline, an outside kill, or its exit.
+    Probe(crate::ffmpeg::HeldProbeError),
+    /// The child answered, but not with one hash of the probed packet.
+    Unverified(String),
+}
+
+impl From<String> for PacketIdentityError {
+    fn from(reason: String) -> Self {
+        Self::Unverified(reason)
+    }
+}
+
+/// Only an answer about the media is terminal. The child's own deadline, an
+/// outside kill and a source read say nothing about the title, as for the
+/// metadata and packet probes.
+fn packet_identity_failure(error: PacketIdentityError) -> IndexFailure {
+    use crate::ffmpeg::HeldProbeError;
+    let (code, transient, reason) = match error {
+        PacketIdentityError::Source(reason) => (IndexFailureCode::IndexSourceIo, true, reason),
+        PacketIdentityError::Probe(HeldProbeError::Timeout(reason)) => {
+            (IndexFailureCode::IndexProbeTimeout, true, reason)
+        }
+        PacketIdentityError::Probe(HeldProbeError::Interrupted(reason)) => {
+            (IndexFailureCode::IndexProcessFailed, true, reason)
+        }
+        PacketIdentityError::Probe(HeldProbeError::Failed(reason))
+        | PacketIdentityError::Unverified(reason) => {
+            (IndexFailureCode::IndexCompletionUnverified, false, reason)
+        }
+    };
+    IndexFailure::new(code, format!("F+ source packet identity: {reason}"), 0).transient(transient)
 }
 
 async fn packet_probe_attempt(
@@ -975,20 +1013,24 @@ fn held_filtered_packet_hash<'a>(
     budget: Duration,
     cancel: Option<&'a tokio_util::sync::CancellationToken>,
     retain_parameter_sets: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<[u8; 32], String>> + Send + 'a>> {
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<[u8; 32], PacketIdentityError>> + Send + 'a>,
+> {
     Box::pin(async move {
         let (source, object_version, path, runtime_cache) = held;
         let mut view = source;
         view.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
         let input = match crate::background_jobs::source_budget() {
             Some(budget) => Some(
                 crate::source_input::SourceInput::open_background_held(
-                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)?,
+                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)
+                        .map_err(PacketIdentityError::Source)?,
                     crate::http::stream::file_content_type(path),
                     budget,
                 )
-                .await?,
+                .await
+                .map_err(PacketIdentityError::Source)?,
             ),
             None => None,
         };
@@ -1007,8 +1049,10 @@ fn held_filtered_packet_hash<'a>(
             let input_url = if let Some(input) = &input {
                 input.url().to_owned()
             } else {
-                let path = crate::ffmpeg::windows_source_path(source)?;
-                crate::ffmpeg::verify_windows_source_path(source, &path)?;
+                let path = crate::ffmpeg::windows_source_path(source)
+                    .map_err(PacketIdentityError::Source)?;
+                crate::ffmpeg::verify_windows_source_path(source, &path)
+                    .map_err(PacketIdentityError::Source)?;
                 path.to_string_lossy().into_owned()
             };
             command.args(filtered_packet_hash_args(
@@ -1026,7 +1070,7 @@ fn held_filtered_packet_hash<'a>(
         );
         #[cfg(not(unix))]
         let descriptors = crate::producer_spawn::Descriptors::default();
-        let result = crate::ffmpeg::bounded_ffmpeg_output_descriptors_cancellable(
+        let result = crate::ffmpeg::held_ffmpeg_probe_output(
             command,
             budget.min(Duration::from_secs(30)),
             64 * 1024,
@@ -1044,11 +1088,12 @@ fn held_filtered_packet_hash<'a>(
             input
                 .close_and_wait()
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
         }
         view.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
-        filtered_packet_hash(&result?.stdout, pts, time_base)
+            .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
+        let output = result.map_err(PacketIdentityError::Probe)?;
+        Ok(filtered_packet_hash(&output.stdout, pts, time_base)?)
     })
 }
 
@@ -3115,14 +3160,11 @@ async fn build_attested_pass(
                                 .await
                                 {
                                     Ok(hash) => pending.first_sample_sha256 = Some(hash),
-                                    Err(reason) => {
-                                        builds[slot] = Some(IndexBuild::plain(
-                                            IndexOutcome::Failed(Box::new(IndexFailure::new(
-                                                IndexFailureCode::IndexCompletionUnverified,
-                                                format!("F+ source packet identity: {reason}"),
-                                                0,
-                                            ))),
-                                        ));
+                                    Err(error) => {
+                                        builds[slot] =
+                                            Some(IndexBuild::plain(IndexOutcome::Failed(
+                                                Box::new(packet_identity_failure(error)),
+                                            )));
                                         continue;
                                     }
                                 }
