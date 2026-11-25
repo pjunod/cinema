@@ -114,6 +114,30 @@ struct Viewer<'a> {
 
 impl Viewer<'_> {
     async fn request_start(&self, file_id: i64, playback_id: &str) -> reqwest::Response {
+        // A real client asks /decision first. That handler is where the
+        // serving node records that the source is present, which the local
+        // media offer needs before Create can route to adaptive prepare.
+        let decision = self
+            .client
+            .post(format!("{}/api/v1/files/{file_id}/decision", self.base))
+            .bearer_auth(self.token)
+            .json(&json!({"caps": {
+                "v": 2,
+                "video": [{"codec":"h264", "profiles":["baseline","main","high"],
+                           "present":["sdr"], "max_height":1080, "max_width":1920}],
+                "audio": ["aac"],
+                "containers": ["mkv", "mp4"],
+                "display": {"hdr":false, "dolby_vision":false}
+            }}))
+            .send()
+            .await
+            .expect("send playback decision");
+        assert_eq!(
+            decision.status(),
+            StatusCode::OK,
+            "{playback_id} decision: {}",
+            decision.text().await.unwrap_or_default()
+        );
         self.client
             .post(format!("{}/api/v1/files/{file_id}/hls/sessions", self.base))
             .bearer_auth(self.token)
