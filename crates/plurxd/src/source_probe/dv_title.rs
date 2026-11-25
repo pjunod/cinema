@@ -182,7 +182,7 @@ async fn scan_owned(
     }
     let output = output.map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err("complete-title DV scan failed".into());
+        return Err(scan_failure(&output));
     }
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
@@ -409,6 +409,35 @@ pub(crate) async fn publish_title_with_tools_for_control(
     result
 }
 
+/// Longest scanner refusal carried into a title job's error.
+const MAX_SCAN_FAILURE_BYTES: usize = 512;
+
+/// A failed scan names how the scanner ended and, when it said, why: its
+/// last `DV title scan refused:` line, else the last line it wrote. Without
+/// it a refusal is indistinguishable from any other failure.
+fn scan_failure(output: &plurx_core::process::bounded::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = || {
+        stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+    };
+    let reason = lines()
+        .rfind(|line| line.starts_with("DV title scan refused:"))
+        .or_else(|| lines().next_back());
+    let mut message = format!("complete-title DV scan failed ({})", output.status);
+    if let Some(reason) = reason {
+        let mut end = reason.len().min(MAX_SCAN_FAILURE_BYTES);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.push_str(": ");
+        message.push_str(&reason[..end]);
+    }
+    message
+}
+
 #[cfg(any(unix, test))]
 pub(super) fn selected_video_index(document: &serde_json::Value) -> Option<u8> {
     let stream = document.get("streams")?.as_array()?.iter().find(|stream| {
@@ -437,6 +466,36 @@ mod tests {
             selected_video_index(&serde_json::json!({"streams":[]})),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_scan_names_the_scanners_refusal() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |status: i32, stderr: &str| plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(status),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        let refused = scan_failure(&output(
+            1 << 8,
+            "[hevc] noise\nDV title scan refused: complete demux EOF\n[mkv] after\n",
+        ));
+        assert!(refused.contains("exit status: 1"), "{refused}");
+        assert!(
+            refused.ends_with(": DV title scan refused: complete demux EOF"),
+            "{refused}"
+        );
+        let other = scan_failure(&output(1 << 8, "first\nlast words\n\n"));
+        assert!(other.ends_with(": last words"), "{other}");
+        let silent = scan_failure(&output(9, ""));
+        assert!(
+            silent.starts_with("complete-title DV scan failed ("),
+            "{silent}"
+        );
+        assert!(!silent.contains("): "), "{silent}");
+        let long = scan_failure(&output(1 << 8, &"é".repeat(2 * MAX_SCAN_FAILURE_BYTES)));
+        assert!(long.len() <= 64 + MAX_SCAN_FAILURE_BYTES, "{}", long.len());
     }
 }
 
