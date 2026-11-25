@@ -792,9 +792,12 @@ mod pending_request_tests {
                     if rebuilt {
                         store
                             .sharing_txn(
-                                super::super::media_session_principal_rebuild_schema()
-                                    .split("-- next statement\n")
-                                    .map(|s| (s.trim().trim_end_matches(';').into(), vec![]))
+                                // Production Source rebuild with the adaptive
+                                // rebind, so claims' maintenance finds ready
+                                // principal attempt authority.
+                                super::super::sharing_source_layout::provisioned_adaptive_layout_statements()
+                                    .into_iter()
+                                    .map(|sql| (sql, vec![]))
                                     .collect(),
                             )
                             .await

@@ -236,10 +236,20 @@ fn item_end(code: &str, item: usize) -> usize {
             | "union"
             | "macro_rules!"
     );
+    // A block statement (`if …{}`, `match …{}`) ends at its closing brace,
+    // after any `else` chain: it needs no trailing `;`, so the following
+    // expression (a closure's tail `command.spawn()`) is not part of it.
+    let is_block_statement = matches!(first_word, "if" | "match" | "while" | "for" | "loop");
     let mut depth = 0usize;
     for (offset, byte) in bytes[item..].iter().enumerate() {
         let at = item + offset;
         match byte {
+            b'}' if is_block_statement
+                && depth == 1
+                && !code[at + 1..].trim_start().starts_with("else") =>
+            {
+                return at;
+            }
             b'(' | b'[' => depth += 1,
             b'{' if is_item && depth == 0 => {
                 return matching(bytes, at, b'{', b'}').unwrap_or(bytes.len() - 1);
@@ -592,10 +602,25 @@ fn every_production_descriptor_install_uses_the_single_builder() {
     let installer = crates.join("plurx-core/src/process/source_lifetime/descriptors.rs");
     let empty_stdio = crates.join("plurx-core/src/process/source_lifetime.rs");
     let file_size_policy = crates.join("plurx-core/src/process/child_limits.rs");
+    // The fixed descriptor-bound probe collector lives in core (moved out of
+    // plurxd's decode_facts). It builds its own manifests from the held probe
+    // executable and source, and installs them from its custom-exec hooks.
+    let fixed_probe = crates.join("plurx-core/src/process/fixed_probe.rs");
+    // Raw child-side installers that are not `Command` descriptor plans: the
+    // contained launcher's post-clone child and the held-descriptor helper.
+    let raw_installers = [
+        crates.join("plurx-core/src/process/contained_launch/linux.rs"),
+        crates.join("plurx-core/src/process/inherited_descriptors.rs"),
+    ];
+    // The original planning engine clears CLOEXEC only on the held producer
+    // descriptor, in the forked child, so the parent File stays sealed.
+    let held_producer_hook = crates.join("plurx-core/src/process/fixed_planning_engine.rs");
     let policy_hooks = [
         crates.join("plurx-core/src/process/priority.rs"),
-        crates.join("plurxd/src/decode_facts.rs"),
-        crates.join("plurxd/src/decode_facts/pi_namespace.rs"),
+        fixed_probe.clone(),
+        crates.join("plurx-core/src/process/fixed_probe/pi_namespace.rs"),
+        crates.join("plurx-core/src/process/inherited_descriptors.rs"),
+        held_producer_hook.clone(),
         crates.join("plurxd/src/subtitle_ride_along.rs"),
         crates.join("plurxd/src/subtitle_translation/runtime.rs"),
     ];
@@ -619,6 +644,7 @@ fn every_production_descriptor_install_uses_the_single_builder() {
                 && file != builder
                 && file != installer
                 && !(pattern == "DescriptorManifest::new(" && file == empty_stdio)
+                && file != fixed_probe
             {
                 violations.push(format!(
                     "{}: {pattern} bypasses the descriptor builder",
@@ -627,7 +653,7 @@ fn every_production_descriptor_install_uses_the_single_builder() {
             }
         }
         for pattern in ["libc::dup2(", "libc::dup3("] {
-            if compact.contains(pattern) && file != installer {
+            if compact.contains(pattern) && file != installer && !raw_installers.contains(&file) {
                 violations.push(format!(
                     "{}: {pattern} bypasses the prepared installer",
                     file.display()
@@ -646,7 +672,11 @@ fn every_production_descriptor_install_uses_the_single_builder() {
         }
         // A policy/security hook can close or mark extra descriptors CLOEXEC;
         // clearing CLOEXEC or duplicating a child target belongs to the plan.
-        if compact.contains(".pre_exec(") && file != builder && compact.contains("libc::F_SETFD") {
+        if compact.contains(".pre_exec(")
+            && file != builder
+            && file != held_producer_hook
+            && compact.contains("libc::F_SETFD")
+        {
             violations.push(format!(
                 "{}: descriptor flag installation outside the builder",
                 file.display()

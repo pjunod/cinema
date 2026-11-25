@@ -53,6 +53,8 @@ pub mod sharing_receiver_retirement;
 pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
 pub mod sharing_receiver_sessions;
 pub use sharing_receiver_progress::SharingReceiverProgressStore;
+#[cfg(any(test, feature = "hiqlite-store"))]
+pub(crate) mod sharing_source_layout;
 #[cfg(feature = "hiqlite-store")]
 pub(crate) mod sharing_source_schema;
 pub use sharing_receiver_sessions::SharingReceiverSessionStore;
@@ -261,6 +263,7 @@ mod placeholder_census;
 mod consistent_read_census;
 
 pub mod background_jobs;
+pub(crate) mod encoded_output_publications;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 mod background_job_turns;
 pub mod background_jobs_artwork;

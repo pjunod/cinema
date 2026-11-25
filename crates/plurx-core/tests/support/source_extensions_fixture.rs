@@ -739,7 +739,15 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
     within_fixture_savepoint(connection, || {
         connection
             .execute_batch(
-                "DROP TRIGGER background_storage_domains_apply;
+                // The unversioned adaptive source-scope authority is installed
+                // after the ordinal migrations and reads the changed-roots view
+                // and pending table, so it goes first; the next open reinstalls
+                // its exact catalogue (all objects or none).
+                "DROP TRIGGER IF EXISTS adaptive_source_scope_legacy_apply;
+             DROP VIEW IF EXISTS adaptive_source_scope_mapping_blockers;
+             DROP VIEW IF EXISTS adaptive_source_scope_changes;
+             DROP VIEW IF EXISTS adaptive_source_scope_holders;
+             DROP TRIGGER background_storage_domains_apply;
              DROP VIEW background_storage_domain_affected_jobs;
              DROP VIEW background_storage_domain_disturbed;
              DROP VIEW background_storage_domain_changed_roots;

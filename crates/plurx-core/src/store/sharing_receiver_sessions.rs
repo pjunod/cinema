@@ -792,10 +792,14 @@ mod tests {
                         SqliteStore::open_in_memory().expect("memory")
                     };
                     if rebuilt {
-                        let statements = super::super::media_session_principal_rebuild_schema()
-                            .split("-- next statement\n")
-                            .map(|sql| (sql.trim().trim_end_matches(';').to_owned(), vec![]))
-                            .collect();
+                        // Production Source rebuild with the adaptive rebind,
+                        // so claims' maintenance finds ready principal attempt
+                        // authority.
+                        let statements =
+                            super::super::sharing_source_layout::provisioned_adaptive_layout_statements()
+                                .into_iter()
+                                .map(|sql| (sql, vec![]))
+                                .collect();
                         store
                             .sharing_txn(statements)
                             .await
@@ -1153,9 +1157,9 @@ mod tests {
                 if rebuilt {
                     store
                         .sharing_txn(
-                            super::super::media_session_principal_rebuild_schema()
-                                .split("-- next statement\n")
-                                .map(|sql| (sql.trim().trim_end_matches(';').to_owned(), vec![]))
+                            super::super::sharing_source_layout::provisioned_adaptive_layout_statements()
+                                .into_iter()
+                                .map(|sql| (sql, vec![]))
                                 .collect(),
                         )
                         .await

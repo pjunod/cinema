@@ -520,10 +520,18 @@ impl VodServe {
                 "original static Store publication command conflicts with its retained S".into(),
             );
         }
+        // The Store's result_ref is the exact published output object, as its
+        // publication statement serialized it, not the bare artifact id.
+        let records_expected = |result_ref: &str| {
+            serde_json::from_str::<plurx_core::store::background_jobs::CopyOutputJobOutput>(
+                result_ref,
+            )
+            .is_ok_and(|output| output == expected)
+        };
         let positive = matches!(record.result,
             JobPublishOutcome::Published { ref job_id, ref result_ref }
                 | JobPublishOutcome::AlreadyPublished { ref job_id, ref result_ref }
-                if job_id == &original.job_id && result_ref == &expected.artifact_id);
+                if job_id == &original.job_id && records_expected(result_ref));
         if !positive {
             return Ok(Some(false));
         }
@@ -535,7 +543,7 @@ impl VodServe {
             .map_err(|error| error.to_string())?;
         Ok(Some(job.is_some_and(|job| {
             job.state == JobState::Succeeded
-                && job.result_ref.as_deref() == Some(expected.artifact_id.as_str())
+                && job.result_ref.as_deref().is_some_and(records_expected)
         })))
     }
 
@@ -611,5 +619,224 @@ impl VodServe {
                 StaticArtifactExposure::Retry
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+    use plurx_core::store::background_jobs::{
+        ClaimJob, ClaimOutcome, EncodedOutputIntent, EnqueueJob, EnqueueOutcome, JobKind,
+        JobPayload, JobPublishOutcome, JobRequest, PublishEncodedOutputJob,
+    };
+    use plurx_core::store::{BackgroundJobStore, LibraryStore, MediaStore, SqliteStore};
+
+    /// A retained static S whose logical facts are exactly `identity`; the
+    /// reconcile reads only those facts, never the native owner.
+    fn retained(identity: [u8; 32]) -> super::super::retained::RetainedVodArtifact {
+        use super::super::output_measurement::{CompleteOutputObservation, OutputOrigin};
+        let rates = plurx_core::output_measurement::CompleteOutputRates {
+            identity,
+            wire_bytes: 100,
+            duration_micros: 1_000_000,
+            average_bps: 800,
+            rfc_peak_bps: 1000,
+            segment_burst_bps: 1000,
+        };
+        super::super::retained::RetainedVodArtifact {
+            private_preparation_origin: std::sync::OnceLock::new(),
+            id: uuid::Uuid::new_v4(),
+            observation: CompleteOutputObservation {
+                preimage: OutputOrigin {
+                    nonce: [1; 16],
+                    epoch: 1,
+                    source_version: "object:1".into(),
+                    recipe_key: "static".into(),
+                    playlist: Vec::new(),
+                    muxer_init: String::new(),
+                    served_init: String::new(),
+                },
+                rates,
+                epoch: 1,
+                served_init: String::new(),
+                members: Vec::new(),
+            },
+            directory: PathBuf::from("/nonexistent/static"),
+            finite_output: None,
+            static_policy: None,
+            charge: 0,
+            init_bytes: 0,
+            repair: Mutex::new(()),
+            recipe_key: "static".into(),
+            source_version: "object:1".into(),
+            candidate: None,
+            audio_delivery: None,
+            durable: false,
+            logical: None,
+            validated: std::sync::atomic::AtomicBool::new(true),
+            sealed_identity: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn intent() -> EncodedOutputIntent {
+        EncodedOutputIntent {
+            target_node_id: "node-a".into(),
+            target_height: 360,
+            requested_height: Some(360),
+            copy_for_burn: None,
+            audio_index: None,
+            audio_offset_ms: 0,
+            audio_claim: plurx_core::playback::audio::AudioClaim {
+                decoders: vec!["aac".into()],
+                sinks: vec![],
+            },
+            audio_delivery: plurx_core::playback::audio::AudioDelivery {
+                action: plurx_core::playback::audio::AudioAction::None,
+                downmix: None,
+                reason: "no_audio".into(),
+            },
+            subtitle_burn: None,
+            subtitle_digest: None,
+            hdr10_requested: false,
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            normalized_geometry: false,
+            profile: None,
+            width: 640,
+            height: 360,
+            plan_digest: "a".repeat(64),
+            executable_digest: "b".repeat(64),
+            engine_digest: "c".repeat(64),
+            candidate_id: None,
+            candidate_digest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lost_static_publication_await_reconciles_from_the_original_command() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "static".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/media".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "static".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file = store
+            .upsert_file(item, "/media/static.mkv", 100, 1, &Default::default())
+            .await
+            .expect("file");
+        let intent = intent();
+        assert!(intent.valid());
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::EncodedOutputPrepare {
+                        encoded_output_version: 1,
+                        file_id: file,
+                        source_generation: "source:1".into(),
+                        source_size: 100,
+                        source_mtime: 1,
+                        source_object_version: "object:1".into(),
+                        policy_generation: "policy:1".into(),
+                        intent: intent.clone(),
+                        candidate_catalog: None,
+                        scratch_bytes: 1000,
+                        reason: "recent_demand".into(),
+                    },
+                    dedupe_key: "static:1".into(),
+                    priority: 1,
+                    not_before_ms: 1000,
+                    now_ms: 1000,
+                    request: JobRequest {
+                        scope: "encoded".into(),
+                        request_id: "static:1".into(),
+                        request_digest: "d".repeat(64),
+                        consumer_kind: "encoded_output".into(),
+                        consumer_ref: file.to_string(),
+                        target_node_id: Some("node-a".into()),
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("enqueue"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let queued = store.background_job(&id).await.expect("job").expect("row");
+        let token = match store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: queued.revision,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::EncodedOutputPrepare,
+                payload_version: 1,
+                now_ms: 1001,
+                dispatched_at_ms: 1001,
+            })
+            .await
+            .expect("claim")
+        {
+            ClaimOutcome::Claimed { job } => job.token.expect("token"),
+            other => panic!("claim {other:?}"),
+        };
+        let base = tempfile::tempdir().expect("vod base");
+        let serve = VodServe::new(base.path().join("vod"), store.clone());
+        let artifact = retained([9; 32]);
+        // The publication is acknowledged by the Store, but the worker loses
+        // the await: only the durable command can tell it what happened.
+        assert!(matches!(
+            store
+                .publish_encoded_output_job(PublishEncodedOutputJob {
+                    token: token.clone(),
+                    intent: intent.clone(),
+                    output: VodServe::static_store_output(&artifact).expect("output"),
+                    now_ms: 1002,
+                })
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            serve
+                .reconcile_static_artifact_store(&artifact, &token, &intent)
+                .await,
+            Ok(Some(true)),
+            "the original positive command and succeeded job prove the publication"
+        );
+        assert!(
+            serve
+                .reconcile_static_artifact_store(&retained([8; 32]), &token, &intent)
+                .await
+                .is_err(),
+            "a different retained S conflicts with the original command"
+        );
+        let mut unpublished = token.clone();
+        unpublished.claim_id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            serve
+                .reconcile_static_artifact_store(&artifact, &unpublished, &intent)
+                .await,
+            Ok(None),
+            "a claim that never published has no original command"
+        );
     }
 }

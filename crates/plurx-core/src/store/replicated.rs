@@ -454,6 +454,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "mod.rs",
+        method: "put_resource_capacity",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "mod.rs",
         method: "with_fenced_conn",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -774,6 +781,22 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    // The adaptive attempt authority's two primitives: one route-projected
+    // read snapshot, and one route-projected batch of guarded statements.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "attempt_read",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "attempt_transaction",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
     },
     SqliteTransactionSite {
         module: "sessions.rs",
@@ -1404,16 +1427,68 @@ mod tests {
         ("watch.rs", include_str!("sqlite/watch.rs")),
     ];
 
-    fn production_source(source: &str) -> &str {
-        source
-            .split_once("\n#[cfg(test)]")
-            .map_or(source, |(code, _)| code)
+    /// Production code is the file with every `#[cfg(test)]`-gated item
+    /// removed: test modules (inline or `#[path]`, such as `sessions.rs`'s
+    /// `adaptive_attempt_tests` near its top), test-only `fn`s and `impl`s.
+    /// Cutting at the first gate instead hid every production site after a
+    /// gated item; cutting at the first test module counted test-only items.
+    fn production_source(source: &str) -> String {
+        const GATE: &str = "#[cfg(test)]";
+        let mut production = String::with_capacity(source.len());
+        let mut rest = source;
+        while let Some(at) = rest.find(GATE) {
+            let line = rest[..at].rfind('\n').map_or(0, |newline| newline + 1);
+            if !rest[line..at].trim().is_empty() {
+                production.push_str(&rest[..at + GATE.len()]);
+                rest = &rest[at + GATE.len()..];
+                continue;
+            }
+            production.push_str(&rest[..line]);
+            rest = &rest[at + GATE.len()..];
+            // Further attributes belong to the same gated item.
+            while rest.trim_start().starts_with("#[") {
+                let attribute = rest.len() - rest.trim_start().len();
+                rest = &rest[attribute + item_end(&rest[attribute..]) + 1..];
+            }
+            rest = &rest[item_end(rest) + 1..];
+        }
+        production.push_str(rest);
+        production
+    }
+
+    /// Byte offset of the `;` or closing brace ending the item (or bracketed
+    /// attribute) at the start of `item`, outside nested delimiters.
+    fn item_end(item: &str) -> usize {
+        let mut depth = 0usize;
+        for (at, byte) in item.bytes().enumerate() {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth = depth.checked_sub(1).expect("balanced gated item");
+                    let attribute = byte == b']' && item.starts_with("#[");
+                    if depth == 0 && (byte == b'}' || attribute) {
+                        return at;
+                    }
+                }
+                b';' if depth == 0 => return at,
+                _ => {}
+            }
+        }
+        item.len() - 1
     }
 
     fn source_for(module: &str) -> &'static str {
-        SQLITE_MODULES
-            .iter()
-            .find_map(|(name, source)| (*name == module).then_some(production_source(source)))
+        static PRODUCTION: std::sync::OnceLock<BTreeMap<&'static str, String>> =
+            std::sync::OnceLock::new();
+        PRODUCTION
+            .get_or_init(|| {
+                SQLITE_MODULES
+                    .iter()
+                    .map(|(name, source)| (*name, production_source(source)))
+                    .collect()
+            })
+            .get(module)
+            .map(String::as_str)
             .unwrap_or_else(|| panic!("unregistered SQLite module {module}"))
     }
 
@@ -1601,7 +1676,9 @@ mod tests {
         // Node removal retires the removed node's analysis requests and their
         // attempts in one batch (`retire_analysis_requests_for_node`).
         // Curation adds three: tag merge, bulk membership, suggestion rejections.
-        assert_eq!(methods.len(), 120);
+        // Adaptive resources add three: the attempt authority's read snapshot
+        // and statement batch, and the guarded resource-capacity update.
+        assert_eq!(methods.len(), 123);
     }
 
     mod source_inventory {
@@ -1638,8 +1715,8 @@ mod tests {
 
         let observed = SQLITE_MODULES
             .iter()
-            .flat_map(|(module, source)| {
-                let source = production_source(source);
+            .flat_map(|(module, _)| {
+                let source = source_for(module);
                 [
                     (
                         (*module, TransactionMechanism::RusqliteTransaction),

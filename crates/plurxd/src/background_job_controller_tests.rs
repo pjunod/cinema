@@ -153,6 +153,16 @@ async fn successor_claim_or_pruned_authority_never_becomes_original_store_close(
     let job = store.background_job(&id).await.unwrap().unwrap();
     let original = job.token.clone().unwrap();
     let next_ms = original.lease_expires_ms + 1;
+    // A successor never claims while the previous attempt's physical reader is
+    // still charged. Settle the original's custody exactly as its joined
+    // worker would, while its controller object stays alive and unfinished.
+    let custody = active
+        .fence
+        .0
+        .source_custody
+        .clone()
+        .expect("original source custody");
+    settle_joined_source_custody(&store, custody).await;
     let replacement = claim_with_resolution(
         store.as_ref(),
         &job,

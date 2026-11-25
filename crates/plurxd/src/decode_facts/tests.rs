@@ -61,16 +61,16 @@ async fn strict_native_listener_accounts_alias_seek_and_scalar_reads_and_denies_
         }
         let charged = budget.current_reserved_test_bytes().await;
         match mode {
-            10 => assert_eq!(
+            20 => assert_eq!(
                 charged,
                 Some(5),
                 "dup, reopen, pread and seek aliases all spend service"
             ),
-            11 | 12 => assert_eq!(
+            21 | 22 => assert_eq!(
                 charged, None,
                 "refused scalar/vector/mmap/copy operations issue no source read"
             ),
-            13 => assert_eq!(
+            23 => assert_eq!(
                 charged,
                 Some(1048576 + 32768),
                 "short/EOF reads never refund the full immutable request"

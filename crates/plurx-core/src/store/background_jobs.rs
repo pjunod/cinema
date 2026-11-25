@@ -4755,7 +4755,9 @@ LIMIT 1
             return Err(invalid("invalid encoded publication claim id"));
         }
         let rows = self.queue_sql(
-            "SELECT json_object('request', json(request_json), 'result', json(result_json)) AS result_json FROM background_job_commands WHERE id = json_extract($1, '$.claim_id') AND operation = 'publish_copy_output'".into(),
+            // The command row itself is transient (its trigger deletes it);
+            // the encoded publication record keeps the first positive one.
+            "SELECT json_object('request', json(request_json), 'result', json(result_json)) AS result_json FROM encoded_output_publications WHERE claim_id = json_extract($1, '$.claim_id')".into(),
             encode(&serde_json::json!({"claim_id": claim_id}))?, false, true,
         ).await?;
         rows.first().map(|row| decode(row)).transpose()
