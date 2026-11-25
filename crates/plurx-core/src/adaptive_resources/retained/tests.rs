@@ -216,7 +216,7 @@ fn preparation_keeps_the_full_durable_source_charge() {
 }
 
 #[test]
-fn commit_conserves_retained_charge_releases_cpu_and_preserves_trial() {
+fn commit_conserves_retained_charge_releases_cpu_and_the_trial_slot() {
     let (ledger, _reservation, source, durable, resources) = source_fixture(true);
     let target_durable = Uuid::new_v4();
     let retained = retained_from(resources);
@@ -230,7 +230,9 @@ fn commit_conserves_retained_charge_releases_cpu_and_preserves_trial() {
     let snapshot = ledger.snapshot().expect("committed snapshot");
     assert_eq!(snapshot.used, retained);
     assert_eq!(snapshot.held, 1);
-    assert!(snapshot.trial_held);
+    // The closed producer's trial slot ends with it (43f648b3d); retained
+    // storage alone never holds a trial.
+    assert!(!snapshot.trial_held);
     assert_eq!(authority.binding, swap.target_binding());
     let state = ledger.inner.lock().expect("ledger state");
     let target = state
@@ -241,10 +243,7 @@ fn commit_conserves_retained_charge_releases_cpu_and_preserves_trial() {
     assert_eq!(target.resources, retained);
     assert_eq!(target.state, ReservationState::Reaping);
     assert!(!state.entries.contains_key(&source.reservation));
-    assert!(state.trial.as_ref().is_some_and(|members| {
-        members.contains(&swap.target_binding().reservation)
-            && !members.contains(&source.reservation)
-    }));
+    assert!(state.trial.is_none());
 }
 
 #[test]
