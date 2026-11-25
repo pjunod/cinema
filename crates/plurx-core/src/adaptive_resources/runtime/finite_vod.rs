@@ -303,6 +303,12 @@ impl FiniteTrialMemoryEnvelope {
 
 /// Original core admission evidence for this precise contained finite request.
 #[cfg(target_os = "linux")]
+fn unknown_trial_memory(reason: &'static str) -> crate::resource_policy::TrialRefusal {
+    tracing::debug!(target: "plurx_core::adaptive_resources", reason, "finite trial memory unknown");
+    crate::resource_policy::TrialRefusal::UnknownMemory
+}
+
+#[cfg(target_os = "linux")]
 pub struct FiniteTrialPermit {
     key: super::finite_policy::FiniteTrialKey,
     memory: FiniteTrialMemoryEnvelope,
@@ -360,22 +366,26 @@ impl NodeResourceRuntime {
             }
         }
         let memory = FiniteTrialMemoryEnvelope::from_request(self, request)
-            .ok_or(TrialRefusal::UnknownMemory)?;
+            .ok_or_else(|| unknown_trial_memory("no trial memory envelope"))?;
         let Metric::Known(resources) = request.demand.resources else {
-            return Err(TrialRefusal::UnknownMemory);
+            return Err(unknown_trial_memory("request demand resources unknown"));
         };
         let charged = resources
             .peak_memory_bytes
             .checked_add(request.output.reserved_storage_bytes)
-            .ok_or(TrialRefusal::UnknownMemory)?;
+            .ok_or_else(|| unknown_trial_memory("charged bytes overflow"))?;
         let accounting = self
             .ledger
             .snapshot()
-            .map_err(|_| TrialRefusal::UnknownMemory)?;
+            .map_err(|_| unknown_trial_memory("ledger snapshot unavailable"))?;
         if !matches!(accounting.capacity.memory_bytes, Metric::Known(capacity)
             if accounting.used.peak_memory_bytes.checked_add(charged)
                 .is_some_and(|required| required <= capacity))
         {
+            tracing::debug!(target: "plurx_core::adaptive_resources",
+                capacity = ?accounting.capacity.memory_bytes,
+                used = accounting.used.peak_memory_bytes, charged,
+                "finite trial memory does not fit the ledger");
             return Err(TrialRefusal::UnknownMemory);
         }
         let key = self
