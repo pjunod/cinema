@@ -105,6 +105,7 @@ final class TvHomeLayoutTests: XCTestCase {
         )?.fileId, 43)
     }
 
+    #if os(tvOS)
     /// The theater feature resumes without title detail, so it must offer the
     /// same startup preparation title detail does, for exactly the window and
     /// file its Resume will play, and nothing while signed out or not ready.
@@ -134,6 +135,7 @@ final class TvHomeLayoutTests: XCTestCase {
         XCTAssertEqual(offer.selection, context.selection)
         XCTAssertEqual(offer.authorizationGeneration, Session.shared.playbackAuthorization.generation)
     }
+    #endif
 
     @MainActor
     func testTheaterPlayStartCancelsTheFeaturePreparation() throws {
