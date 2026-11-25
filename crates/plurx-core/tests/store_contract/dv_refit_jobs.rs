@@ -828,7 +828,10 @@ async fn a_fit_published_after_the_title_settled_reopens_that_title_once() {
         let file = title(&store, "refit-reopen", true).await;
         assert!(title_settled(&store, file.id).await, "{backend}: settled");
         assert!(reopen(&store).await.is_empty(), "{backend}: no table");
-        assert!(store.reopen_dv_titles_refit_since(FIT_VERSION, 0, now()).await.is_err());
+        assert!(store
+            .reopen_dv_titles_refit_since(FIT_VERSION, 0, now())
+            .await
+            .is_err());
         assert!(store
             .reopen_dv_titles_refit_since("not a fit version", 16, now())
             .await
@@ -862,13 +865,22 @@ async fn a_fit_published_after_the_title_settled_reopens_that_title_once() {
             .into_iter()
             .find(|d| d.file_id == file.id)
             .expect("reopened");
-        assert_eq!(reopened.probe_revision, revision, "{backend}: same generation");
+        assert_eq!(
+            reopened.probe_revision, revision,
+            "{backend}: same generation"
+        );
         assert!(DvTitleStats::from_probe_json(&reopened.probe_json).is_some());
         assert!(reopen(&store).await.is_empty(), "{backend}: already open");
         // Once the title job settles after the fit, the fit no longer reopens it.
         resettle_title(&store, &file, base + 3).await;
-        assert!(title_settled(&store, file.id).await, "{backend}: settled again");
-        assert!(reopen(&store).await.is_empty(), "{backend}: settled after the fit");
+        assert!(
+            title_settled(&store, file.id).await,
+            "{backend}: settled again"
+        );
+        assert!(
+            reopen(&store).await.is_empty(),
+            "{backend}: settled after the fit"
+        );
     })
     .await;
 }
@@ -897,7 +909,10 @@ async fn a_cancelled_title_attempt_is_not_reopened_by_a_later_fit() {
             .expect("cancel")
             .expect("cancelled");
         assert!(title_settled(&store, file.id).await, "{backend}: cancelled");
-        assert!(reopen(&store).await.is_empty(), "{backend}: cancelled generation");
+        assert!(
+            reopen(&store).await.is_empty(),
+            "{backend}: cancelled generation"
+        );
     })
     .await;
 }

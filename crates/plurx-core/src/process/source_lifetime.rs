@@ -14,8 +14,8 @@ pub use descriptors::{
     StdioMode,
 };
 pub use policy::{
-    configure_no_input_probe, daemon_roots_configured, is_registered_broker, register_broker,
-    set_daemon_roots, BrokerRegistration,
+    configure_no_input_probe, daemon_roots_configured, is_registered_broker,
+    owned_working_directory, register_broker, set_daemon_roots, BrokerRegistration,
 };
 
 static ADMISSION: RwLock<()> = RwLock::new(());
@@ -245,6 +245,18 @@ pub fn prepare_stdio_std(
     let manifest = Arc::new(DescriptorManifest::new(Vec::new(), facts, None)?);
     manifest.bind(command)?;
     Ok(manifest)
+}
+
+/// The empty, still unbound manifest for the bounded launcher's own captured
+/// stdio (null stdin, piped stdout and stderr). That launcher rewrites the
+/// environment before it spawns, so it binds this itself afterwards; a
+/// manifest bound earlier by `prepare_stdio` would no longer match.
+pub fn captured_stdio_manifest() -> io::Result<Arc<DescriptorManifest>> {
+    Ok(Arc::new(DescriptorManifest::new(
+        Vec::new(),
+        StdioFacts::CAPTURED,
+        None,
+    )?))
 }
 
 pub fn unmediated_descriptor() -> io::Result<()> {

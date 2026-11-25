@@ -94,6 +94,12 @@ pub fn configure_no_input_probe(command: &mut std::process::Command) {
         configure_no_input_probe_in(&state, command);
     }
 }
+/// The daemon-owned directory a declared child without a working directory of
+/// its own runs in. A child never inherits the daemon's own working directory,
+/// which lies outside every root the verifier accepts.
+pub fn owned_working_directory() -> Option<PathBuf> {
+    STATE.lock().ok()?.roots.as_ref()?.owned.first().cloned()
+}
 fn configure_no_input_probe_in(state: &State, command: &mut std::process::Command) {
     let Some(roots) = state.roots.as_ref() else {
         return;

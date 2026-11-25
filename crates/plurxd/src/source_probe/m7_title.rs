@@ -731,14 +731,8 @@ async fn held_source_st2086_frames(
     )
     .await?;
     let mut command = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
-    command
-        .args(&arguments)
-        .arg(input.url())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let output = source_lifetime::mediated(bounded::output_command(
+    command.args(&arguments).arg(input.url());
+    let output = source_lifetime::mediated(bounded::output_command_captured(
         &mut command,
         ST2086_FRAMES_DEADLINE,
         limit.saturating_add(1),

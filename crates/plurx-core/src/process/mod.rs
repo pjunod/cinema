@@ -554,6 +554,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_declared_bounded_launch_verifies_under_its_captured_manifest() {
+        let output = output_job_owned(&mut child("bounded-captured-declaration"), TEST_WORK)
+            .await
+            .expect("bounded declaration subprocess");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn approved_probe_cannot_load_explicit_or_inherited_environment_code() {
@@ -669,6 +681,61 @@ mod tests {
                 assert!(!observed.mediated);
                 assert_eq!(observed.declared, source_lifetime::SourceAccess::NoSource);
                 assert_eq!(observed.reason, Some("path_outside_daemon_roots"));
+            }
+            Ok("bounded-captured-declaration") => {
+                use source_lifetime::{no_source, set_daemon_roots};
+                let data = tempfile::tempdir().expect("isolated probe cwd");
+                let program = std::fs::canonicalize("/usr/bin/true").expect("native probe tool");
+                set_daemon_roots(
+                    &[data.path().to_owned()],
+                    &[program.parent().expect("tool root").to_owned()],
+                )
+                .expect("roots");
+                source_lifetime::install_observer(observe_source_launch).expect("observer");
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let launch = |captured: bool, purpose: &'static str| {
+                    // No working directory: the captured launcher supplies the
+                    // daemon-owned one, never this process's own.
+                    let mut command = tokio::process::Command::new(&program);
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime.block_on(no_source(async {
+                            let work = ChildWork::background(purpose);
+                            let wall = Duration::from_secs(10);
+                            if captured {
+                                bounded::output_command_captured(&mut command, wall, 1024, work)
+                                    .await
+                            } else {
+                                bounded::output_command(&mut command, wall, 1024, work).await
+                            }
+                        }))
+                    }))
+                };
+                let observed = |purpose: &str| {
+                    *SOURCE_OBSERVATIONS
+                        .lock()
+                        .expect("observations")
+                        .iter()
+                        .find(|event| event.purpose == purpose)
+                        .expect("launch observed")
+                };
+                // The bounded launcher rewrites the environment before it
+                // spawns; it binds the captured manifest after that rewrite.
+                let output = launch(true, "source observation bounded captured")
+                    .expect("verified launch does not refuse")
+                    .expect("bounded child");
+                assert!(output.status.success());
+                let verified = observed("source observation bounded captured");
+                assert!(verified.verified, "{:?}", verified.reason);
+                // Without a manifest the same declared launch cannot verify.
+                let refused = launch(false, "source observation bounded uncaptured");
+                assert_eq!(refused.is_err(), cfg!(debug_assertions));
+                assert_eq!(
+                    observed("source observation bounded uncaptured").reason,
+                    Some("missing_descriptor_manifest")
+                );
             }
             Ok("source-snapshot") => {
                 // A fresh subprocess proves startup attribution before any

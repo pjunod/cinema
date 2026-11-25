@@ -190,6 +190,38 @@ pub async fn output_command(
     .await
 }
 
+/// `output_command` for a child that inherits no descriptor beyond the
+/// launcher's captured stdio, launched under that empty manifest so a
+/// declared (brokered or no-source) launch can be verified. The manifest is
+/// bound after the launcher's final environment rewrite. A command without a
+/// working directory runs in the daemon-owned one rather than inheriting the
+/// daemon's.
+pub async fn output_command_captured(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+) -> io::Result<Output> {
+    if command.as_std().get_current_dir().is_none() {
+        if let Some(cwd) = super::source_lifetime::owned_working_directory() {
+            command.current_dir(cwd);
+        }
+    }
+    let manifest = super::source_lifetime::captured_stdio_manifest()?;
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Service,
+        None,
+        &[],
+        None,
+        Some(manifest),
+    )
+    .await
+}
+
 /// Bounded CPU child with held descriptors and an LC_ALL-only environment.
 /// Absolute executable and library-qualified package paths are required.
 pub async fn output_command_clean_env(
