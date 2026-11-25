@@ -1,0 +1,9 @@
+# A deep TMPDIR without XDG_RUNTIME_DIR put mpv's control socket past the
+# AF_UNIX limit, so mpv exited before it was ready.
+[[fixes]]
+id = "linux-player.runtime-socket-fits"
+commits = ["50d30f3c3"]
+source = "clients/linux-player/plurx_player/launcher.py"
+source_anchor = "def socket_fits(base):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_a_runtime_dir_too_deep_for_the_socket_is_passed_over"
