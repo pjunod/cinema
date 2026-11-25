@@ -83,7 +83,9 @@ jobs:
       - name: Run the command
         env:
           COMMAND: ${{ inputs.command }}
-        run: bash -eo pipefail -c "$COMMAND"
+        # The command is the submitting session's: it gets none of the job's tokens
+        # (Forgejo ignores `permissions:`, so they are withheld here instead).
+        run: env -u GITHUB_TOKEN -u GITEA_TOKEN -u FORGEJO_TOKEN -u ACTIONS_RUNTIME_TOKEN bash -eo pipefail -c "$COMMAND"
       - name: Collect the artifacts
         if: ${{ success() && inputs.artifacts != '' }}
         env:
@@ -93,14 +95,19 @@ jobs:
           set -eu
           out="$RUNNER_TEMP/compile-out"
           mkdir -p "$out"
+          set -f  # paths are literal: no globbing
           for path in $ARTIFACTS; do
-            case "$path" in /*|*..*) echo "refused artifact path: $path" >&2; exit 1 ;; esac
+            # The same rule `ci-fleet compile` applies: relative parts that start with a letter, digit or _.
+            if ! printf '%s' "$path" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*'; then
+              echo "refused artifact path: $path" >&2
+              exit 1
+            fi
             case "$path" in
               target/*) from="${TARGET:-target}/${path#target/}" ;;
               *) from="$path" ;;
             esac
-            mkdir -p "$out/$(dirname "$path")"
-            cp -a "$from" "$out/$path"
+            mkdir -p -- "$out/$(dirname -- "$path")"
+            cp -a -- "$from" "$out/$path"
           done
       - if: ${{ success() && inputs.artifacts != '' }}
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -108,6 +115,14 @@ jobs:
           name: compile-${{ inputs.id }}
           path: ${{ runner.temp }}/compile-out
           retention-days: 3
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
