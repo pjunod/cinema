@@ -455,7 +455,10 @@ async fn measure_new_title(
         },
         async {
             let fitted = FittedPublication::load(context).await?;
-            let mut source = source_plan(context, &title, &fitted)?;
+            // Inside the admitted, version-checked source run: the frame
+            // observation is of the same held object the census reads.
+            let st2086_frames = undeclared_st2086_frames(context, &title).await?;
+            let mut source = source_plan(context, &title, &fitted, st2086_frames.as_deref())?;
             let reserve_bytes = m7_comparison::title_scratch_bytes(source.layout).map_err(string)?;
             let reservation = crate::playback_cache::reserve(scratch.path(), reserve_bytes)
                 .await.map_err(string)?;
@@ -661,15 +664,16 @@ struct SourcePlan {
     static_hdr: StaticHdr,
 }
 
-fn source_plan(
-    context: &TitleContext<'_>,
-    title: &HeldTitle,
-    fitted: &FittedPublication,
-) -> Result<SourcePlan, EvaluationError> {
-    let document: serde_json::Value =
-        serde_json::from_str(&context.demand.probe_json).map_err(string)?;
+/// Domain of the static-HDR observation digest when the ST 2086 values come
+/// from the held source's frames rather than the probe document's stream.
+const ST2086_FRAMES_DOMAIN: &[u8] = b"plurx-m7-st2086-frames-v1";
+const ST2086_FRAMES_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn selected_video_stream(
+    document: &serde_json::Value,
+) -> Result<(u32, &serde_json::Value), EvaluationError> {
     let video_index =
-        crate::decode_facts::first_playable_video_index(&document).ok_or_else(|| {
+        crate::decode_facts::first_playable_video_index(document).ok_or_else(|| {
             EvaluationError::Unsupported("M7 source has no selected video stream".into())
         })?;
     let stream = document["streams"]
@@ -680,6 +684,158 @@ fn source_plan(
                 .find(|stream| stream["index"].as_u64() == Some(u64::from(video_index)))
         })
         .ok_or_else(|| EvaluationError::Unsupported("M7 selected stream is absent".into()))?;
+    Ok((video_index, stream))
+}
+
+/// The frozen protocol takes its static-HDR authority from the first original
+/// source access units. A remux often drops the container MDCV while every
+/// HEVC frame still carries the exact SEI, so a stream that declares none is
+/// resolved through the bounded, selected-stream frame projection Linux HDR10
+/// uses (`held_source_mastering`). A declared or malformed stream needs no
+/// frame observation: `static_hdr_authority` takes or refuses it.
+async fn undeclared_st2086_frames(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+) -> Result<Option<Vec<u8>>, EvaluationError> {
+    let document: serde_json::Value =
+        serde_json::from_str(&context.demand.probe_json).map_err(string)?;
+    let (video_index, stream) = selected_video_stream(&document)?;
+    if !matches!(
+        crate::decode_facts::mastering::source_st2086(stream),
+        Ok(None)
+    ) {
+        return Ok(None);
+    }
+    held_source_st2086_frames(context, title, video_index)
+        .await
+        .map(Some)
+        .map_err(|error| EvaluationError::Deferred(format!("M7 source frame MDCV probe: {error}")))
+}
+
+/// Run the exact `SourceFrames` FFprobe projection over the title's held
+/// source through the job's budgeted background input, as the M7 renderer
+/// observations read it. Stdout is bounded to the projection's limit; every
+/// failure (launch, timeout, exit, read, bound, drift) is transient.
+async fn held_source_st2086_frames(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    video_index: u32,
+) -> Result<Vec<u8>, String> {
+    use plurx_core::process::{source_lifetime, ChildWork};
+    let (arguments, limit) = crate::decode_facts::source_frames_projection(video_index);
+    let held = SourceFence::clone_held(&title.source.handle, title.source.object_version())?;
+    let input = crate::source_input::SourceInput::open_background_held(
+        held,
+        "application/octet-stream",
+        context.fence.source_budget(),
+    )
+    .await?;
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
+    command
+        .args(&arguments)
+        .arg(input.url())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = source_lifetime::mediated(bounded::output_command(
+        &mut command,
+        ST2086_FRAMES_DEADLINE,
+        limit.saturating_add(1),
+        ChildWork::background("Dolby Vision M7 source mastering frames"),
+    ))
+    .await;
+    let source_read_failed = input.source_read_failed();
+    input
+        .close_and_wait()
+        .await
+        .map_err(|error| format!("joining source input: {error}"))?;
+    let output = output.map_err(string)?;
+    if source_read_failed {
+        return Err("held source read failed".into());
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if output.stdout.len() > limit {
+        return Err("frame projection exceeded its output bound".into());
+    }
+    if !title.source.unchanged() {
+        return Err("held source changed during the frame projection".into());
+    }
+    Ok(output.stdout)
+}
+
+/// The recipe's static HDR and the observation it binds.
+///
+/// A stream-declared MDCV keeps `source_observation_sha256 = probe_sha256`,
+/// so historical and stream-declared sources hash exactly as before. Values
+/// resolved from frames bind SHA-256 over a domain-separated, length-prefixed
+/// encoding of `ST2086_FRAMES_DOMAIN`, the 32-byte probe digest, and the exact
+/// FFprobe frame-projection stdout bytes: the recipe names both the document
+/// that declared no MDCV and the frame observation that supplied it.
+fn static_hdr_authority(
+    stream: &serde_json::Value,
+    video_index: u32,
+    probe_sha256: [u8; 32],
+    st2086_frames: Option<&[u8]>,
+) -> Result<StaticHdr, EvaluationError> {
+    let absent = || {
+        EvaluationError::Unsupported("M7 selected source has no exact ST 2086 declarations".into())
+    };
+    let ((primaries_rgbw, max_1e4_nits, min_1e4_nits), source_observation_sha256) =
+        match crate::decode_facts::mastering::source_st2086(stream)
+            .map_err(EvaluationError::Unsupported)?
+        {
+            Some(declared) => (declared, probe_sha256),
+            None => {
+                let bytes = st2086_frames.ok_or_else(absent)?;
+                let frames: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+                    EvaluationError::Deferred(format!("M7 source frame MDCV probe JSON: {error}"))
+                })?;
+                let observed = crate::decode_facts::mastering::source_st2086_from_frames(
+                    stream,
+                    &frames,
+                    video_index,
+                )
+                .map_err(EvaluationError::Unsupported)?
+                .ok_or_else(absent)?;
+                (observed, st2086_frames_observation(probe_sha256, bytes))
+            }
+        };
+    Ok(StaticHdr {
+        primaries_rgbw,
+        max_1e4_nits,
+        min_1e4_nits,
+        // FEL reconstruction changes the samples to which the input CLL
+        // applied. Preserve its mastering declaration without CLL claims.
+        max_cll_fall: None,
+        source_observation_sha256,
+    })
+}
+
+fn st2086_frames_observation(probe_sha256: [u8; 32], frames: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    for part in [ST2086_FRAMES_DOMAIN, &probe_sha256, frames] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part);
+    }
+    hash.finalize().into()
+}
+
+fn source_plan(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    fitted: &FittedPublication,
+    st2086_frames: Option<&[u8]>,
+) -> Result<SourcePlan, EvaluationError> {
+    let document: serde_json::Value =
+        serde_json::from_str(&context.demand.probe_json).map_err(string)?;
+    let (video_index, stream) = selected_video_stream(&document)?;
     let cadence = stream["avg_frame_rate"]
         .as_str()
         .and_then(|rate| {
@@ -713,23 +869,7 @@ fn source_plan(
             "M7 coded raster is outside the managed full-plane recipe".into(),
         ));
     }
-    let (primaries_rgbw, max_1e4_nits, min_1e4_nits) =
-        crate::decode_facts::mastering::source_st2086(stream)
-            .map_err(EvaluationError::Unsupported)?
-            .ok_or_else(|| {
-                EvaluationError::Unsupported(
-                    "M7 selected source has no exact ST 2086 declarations".into(),
-                )
-            })?;
-    let static_hdr = StaticHdr {
-        primaries_rgbw,
-        max_1e4_nits,
-        min_1e4_nits,
-        // FEL reconstruction changes the samples to which the input CLL
-        // applied. Preserve its mastering declaration without CLL claims.
-        max_cll_fall: None,
-        source_observation_sha256: title.probe_sha256,
-    };
+    let static_hdr = static_hdr_authority(stream, video_index, title.probe_sha256, st2086_frames)?;
     let dv_level = context.file.dolby_vision.level.ok_or_else(|| {
         EvaluationError::Unsupported("M7 source Dolby Vision level is absent".into())
     })?;
@@ -1029,6 +1169,94 @@ fn string(error: impl std::fmt::Display) -> String {
 )]
 mod tests {
     use super::*;
+
+    fn eclipse_mdcv() -> serde_json::Value {
+        serde_json::json!({"side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000","white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "min_luminance":"1/10000","max_luminance":"10000000/10000"})
+    }
+
+    #[test]
+    fn static_hdr_binds_the_stream_declaration_or_the_exact_frame_observation() {
+        const P3: [u16; 8] = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let probe = [7; 32];
+        let declared = serde_json::json!({"index":0,"side_data_list":[eclipse_mdcv()]});
+        let silent = serde_json::json!({"index":0,"side_data_list":[{"side_data_type":"DOVI configuration record"}]});
+        let frame = serde_json::json!({"stream_index":0,"side_data_list":[eclipse_mdcv()]});
+        let frames =
+            serde_json::to_vec(&serde_json::json!({"frames":[frame.clone(),frame.clone(),frame]}))
+                .unwrap();
+
+        // A stream declaration keeps the historical binding, frames or not.
+        for supplied in [None, Some(frames.as_slice())] {
+            let hdr = static_hdr_authority(&declared, 0, probe, supplied).unwrap();
+            assert_eq!(
+                (hdr.primaries_rgbw, hdr.max_1e4_nits, hdr.min_1e4_nits),
+                (P3, 10_000_000, 1)
+            );
+            assert_eq!(hdr.source_observation_sha256, probe);
+            assert_eq!(hdr.max_cll_fall, None);
+        }
+
+        // Frame-only MDCV binds the domain, the probe and the exact bytes.
+        let hdr = static_hdr_authority(&silent, 0, probe, Some(&frames)).unwrap();
+        assert_eq!(
+            (hdr.primaries_rgbw, hdr.max_1e4_nits, hdr.min_1e4_nits),
+            (P3, 10_000_000, 1)
+        );
+        let mut expected = Sha256::new();
+        for part in [b"plurx-m7-st2086-frames-v1".as_slice(), &probe, &frames] {
+            expected.update((part.len() as u64).to_be_bytes());
+            expected.update(part);
+        }
+        let expected: [u8; 32] = expected.finalize().into();
+        assert_eq!(hdr.source_observation_sha256, expected);
+        assert_ne!(hdr.source_observation_sha256, probe);
+        let mut spaced = frames.clone();
+        spaced.push(b'\n');
+        assert_ne!(
+            static_hdr_authority(&silent, 0, probe, Some(&spaced))
+                .unwrap()
+                .source_observation_sha256,
+            expected,
+            "another frame observation is another binding"
+        );
+        assert_ne!(
+            static_hdr_authority(&silent, 0, [8; 32], Some(&frames))
+                .unwrap()
+                .source_observation_sha256,
+            expected
+        );
+
+        // Absence, conflicts, foreign streams and unreadable output.
+        let none = serde_json::to_vec(&serde_json::json!({"frames":[{"stream_index":0}]})).unwrap();
+        for supplied in [None, Some(none.as_slice())] {
+            assert!(matches!(
+                static_hdr_authority(&silent, 0, probe, supplied),
+                Err(EvaluationError::Unsupported(message))
+                    if message == "M7 selected source has no exact ST 2086 declarations"
+            ));
+        }
+        let mut other = eclipse_mdcv();
+        other["max_luminance"] = "40000000/10000".into();
+        let conflict = serde_json::to_vec(&serde_json::json!({"frames":[
+            {"stream_index":0,"side_data_list":[eclipse_mdcv()]},
+            {"stream_index":0,"side_data_list":[other]}]}))
+        .unwrap();
+        assert!(matches!(
+            static_hdr_authority(&silent, 0, probe, Some(&conflict)),
+            Err(EvaluationError::Unsupported(message)) if message.contains("conflicting")
+        ));
+        assert!(matches!(
+            static_hdr_authority(&silent, 1, probe, Some(&frames)),
+            Err(EvaluationError::Unsupported(message)) if message.contains("selected stream differs")
+        ));
+        assert!(matches!(
+            static_hdr_authority(&silent, 0, probe, Some(b"not json")),
+            Err(EvaluationError::Deferred(_))
+        ));
+    }
 
     fn exposure(model_means: [f64; 4]) -> CalibrationEvidence {
         CalibrationEvidence {

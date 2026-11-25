@@ -4161,8 +4161,17 @@ struct CollectedProbe {
 enum ProbeProjection {
     Decoder,
     SourceDocument,
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
     SourceFrames(u32),
+}
+
+/// The exact selected-stream frame-side-data projection (arguments before the
+/// input, and its stdout bound) for callers that run it on a held source
+/// outside this cache, such as the macOS M7 title experiment.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+pub(crate) fn source_frames_projection(absolute_stream: u32) -> (Vec<String>, usize) {
+    let projection = ProbeProjection::SourceFrames(absolute_stream);
+    (projection.arguments(), projection.output_limit())
 }
 
 impl ProbeProjection {
@@ -4173,14 +4182,14 @@ impl ProbeProjection {
                 "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
                 "-show_streams"]),
             Self::SourceDocument => args.extend(["-show_format", "-show_streams", "-show_chapters"]),
-            #[cfg(any(target_os = "linux", test))]
+            #[cfg(any(target_os = "linux", target_os = "macos", test))]
             Self::SourceFrames(_) => args.extend([
                 "-threads", "1", "-read_intervals", "%+#3", "-show_frames", "-show_entries",
                 "frame=stream_index:frame_side_data=side_data_type,red_x,red_y,green_x,green_y,blue_x,blue_y,white_point_x,white_point_y,min_luminance,max_luminance",
             ]),
         }
         let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
-        #[cfg(any(target_os = "linux", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
         if let Self::SourceFrames(index) = self {
             let mut args = args;
             args.extend(["-select_streams".to_owned(), index.to_string()]);
@@ -4194,7 +4203,7 @@ impl ProbeProjection {
             Self::Decoder => MAX_PROBE_STDOUT_BYTES,
             // Same bound as the held-source comparison this replaces.
             Self::SourceDocument => 16 * 1024 * 1024,
-            #[cfg(any(target_os = "linux", test))]
+            #[cfg(any(target_os = "linux", target_os = "macos", test))]
             Self::SourceFrames(_) => 256 * 1024,
         }
     }
