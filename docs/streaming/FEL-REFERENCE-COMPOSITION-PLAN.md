@@ -3,7 +3,8 @@
 **Status:** in progress — owner approved 5.1–5.2 on 2026-11-24 and 5.3 on
 2026-11-25; 5.1 built (section 8); 5.2 decided **go** (section 9); 5.3 built
 and matches the reference code for code, worker-GPU frame time still to
-measure (section 10) · **Written:** 2026-11-23 · **Owner:** Claude ·
+measure (section 10); 5.4 built, admitting clamp-binding titles under
+`pq-ccm001-*` (section 11) · **Written:** 2026-11-23 · **Owner:** Claude ·
 **Source baseline:** `bb2f165`
 
 Companion to [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) (the
@@ -404,3 +405,63 @@ until it cannot disturb `E-C599053EB8`'s trials.
 says so only in its log, so a mapped P010 surface (Cb and Cr in one
 texture) would have composed garbage; the stage binds each texture once,
 and the control fails on any libplacebo error.
+
+## 11. Clamp-binding titles (milestone 5.4)
+
+[`nlq_clipping.h`](../../tools/dv_processing/nlq_clipping.h) now has two
+predicates. `nlq_clip_is_bounded` holds the field bounds the stage
+implements (offset an EL code, slope and threshold below 1, `vdr_in_max`
+below 2). `nlq_clip_is_nonbinding` adds the all-code proof that the clamp
+cannot bind. `pq-ccm001-*` admits by the first, because
+[`fel_compose.h`](../../tools/dv_processing/fel_compose.h) clamps as clause
+5.4.3.2 does. `pq-bilinear-*` keeps the second, because it has no clamp.
+The helper and `dv_map_metadata` (`DV_FEL_CLAMPED` / `DV_FEL_UNCLAMPED`)
+choose by identity. The server still requests `pq-bilinear-*`, and so does
+its Rust planner's admission (`DvFelMetadata`). Serving these titles waits
+for 5.5's move to the new identity.
+
+**Tests.** `test_nlq_clipping` runs five clamp-binding limits through the
+reference's NLQ_LINEAR_DZ for every 10-bit EL code. `pq-bilinear` refuses
+each limit and `pq-ccm001` admits it. The clamp sets the affected codes'
+residual exactly to the limit and leaves every other code unchanged. The
+exact-equality limit (refused only for its rounding reserve) changes no
+code. `test_decoded_metadata` admits a binding limit only under the clamped
+mode, and the field bounds still hold there.
+
+**End to end** (this Mac, frames 0, 5, 11, against the reference):
+
+| Control | `vdr_in_max` | `pq-bilinear-rgb48-v1` | `pq-ccm001-rgb48-v1`, ΔE_ITP mean / max |
+|---|---|---|---|
+| `binding-max` | 524288 | refused | 0.030 / 0.039 |
+| `binding-tight` | 4096 (binds on all luma) | refused | 0.030–0.031 / 0.039 |
+
+0.03 is the measurement's display-path floor that section 10 already
+records; without the clamp, `binding-tight` was 1.1–2.1 (section 9). On
+the `valid` control, output under all three identities is byte-identical
+to 5.3's build.
+
+**Library census**
+([`fel_clamp_census.py`](../../tools/dv_processing/diagnostics/fel_quality/fel_clamp_census.py),
+result `diagnostics/fel_quality/results/fel-clamp-census-20261125.json`,
+titles redacted). The census covered 2,222 files on the library share and
+found 15 dual-layer Profile 7 titles. Each title was read at 12 evenly
+spaced positions and judged with the helper's own predicates:
+
+| | Titles | NLQ parameters (offset / slope / threshold / `vdr_in_max`) | Refused for the clamp before | After |
+|---|---|---|---|---|
+| FEL | 4 | 512 / 2048 / 0 / 1048576 | 0 | 0 |
+| MEL (zero residual) | 11 | 0 / 0 / 0 / 8388608 | 0 | 0 |
+
+No title in this library was refused for this reason, so 5.4 admits none of
+them today. It matters for titles whose limit binds, such as the
+`binding-tight` case. Limit: the census samples 12 frames per title, so a
+title whose parameters change between samples could be missed.
+
+**Also found.** Since 5.3, `fel_renderer.h` includes `fel_compose.h`, but
+the helper's source identity (the daemon's list and `bundle-manifest.py`)
+left it out. A bundle with a stale stage would have been accepted. Both
+lists now include it. The existing
+`test_every_source_compiled_into_the_bundle_is_in_its_identity` catches it.
+5.3 missed it because the task gate only compiles and that test was not
+among 5.3's local runs. The main-bound fast lane would have failed on it.
+

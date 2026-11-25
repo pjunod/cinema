@@ -1,0 +1,286 @@
+{
+ "roots": "redacted",
+ "files_scanned": 2222,
+ "dual_layer_profile7_titles": 15,
+ "samples_per_title": 12,
+ "predicates": "tools/dv_processing/nlq_clipping.h: nlq_clip_is_nonbinding (pq-bilinear-*), nlq_clip_is_bounded (pq-ccm001-*)",
+ "refused_for_clamp_before": 0,
+ "refused_for_clamp_after": 0,
+ "verdicts": {
+  "admitted under both": 15
+ },
+ "titles": [
+  {
+   "path": "title-1",
+   "duration": 6792.224,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 512,
+     "slope": 2048,
+     "threshold": 0,
+     "vdr_in_max": 1048576
+    }
+   ],
+   "mel": false,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-2",
+   "duration": 7025.852,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 512,
+     "slope": 2048,
+     "threshold": 0,
+     "vdr_in_max": 1048576
+    }
+   ],
+   "mel": false,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-3",
+   "duration": 7435.318,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 512,
+     "slope": 2048,
+     "threshold": 0,
+     "vdr_in_max": 1048576
+    }
+   ],
+   "mel": false,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-4",
+   "duration": 7836.454,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 512,
+     "slope": 2048,
+     "threshold": 0,
+     "vdr_in_max": 1048576
+    }
+   ],
+   "mel": false,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-5",
+   "duration": 4849.696,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-6",
+   "duration": 3169.6,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-7",
+   "duration": 4540.96,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-8",
+   "duration": 2710.72,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-9",
+   "duration": 3546.752,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-10",
+   "duration": 3523.744,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-11",
+   "duration": 3323.136,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-12",
+   "duration": 3046.816,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-13",
+   "duration": 2617.056,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-14",
+   "duration": 3373.728,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  },
+  {
+   "path": "title-15",
+   "duration": 3572.832,
+   "positions_read": 12,
+   "positions_unread": [],
+   "nlq_parameters": [
+    {
+     "offset": 0,
+     "slope": 0,
+     "threshold": 0,
+     "vdr_in_max": 8388608
+    }
+   ],
+   "mel": true,
+   "refused_pq_bilinear": false,
+   "refused_pq_ccm001": false,
+   "verdict": "admitted under both"
+  }
+ ],
+ "date": "2026-11-25",
+ "source": "library share, movies and tv (read-only NFS mount); fel_clamp_census.py --samples 12"
+}
