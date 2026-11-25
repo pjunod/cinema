@@ -647,6 +647,24 @@ impl From<String> for PacketIdentityError {
     }
 }
 
+/// A refusal or an unidentified packet after a failed bridge read is the
+/// read's failure. The child's own deadline and an outside kill keep their
+/// classes; they are transient either way.
+fn read_failure_is_the_source(
+    error: PacketIdentityError,
+    read_failed: bool,
+) -> PacketIdentityError {
+    match error {
+        PacketIdentityError::Probe(crate::ffmpeg::HeldProbeError::Failed(reason))
+        | PacketIdentityError::Unverified(reason)
+            if read_failed =>
+        {
+            PacketIdentityError::Source(format!("source read failed during the check: {reason}"))
+        }
+        other => other,
+    }
+}
+
 /// Only an answer about the media is terminal. The child's own deadline, an
 /// outside kill and a source read say nothing about the title, as for the
 /// metadata and packet probes.
@@ -1084,6 +1102,11 @@ fn held_filtered_packet_hash<'a>(
         } else {
             result.await
         };
+        // FFmpeg reads through the bridge: a failed source read reaches it as
+        // truncated input, so its refusal is then not the media's answer.
+        let read_failed = input
+            .as_ref()
+            .is_some_and(|input| input.source_read_failed());
         if let Some(input) = input {
             input
                 .close_and_wait()
@@ -1092,8 +1115,10 @@ fn held_filtered_packet_hash<'a>(
         }
         view.seek(SeekFrom::Start(0))
             .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
-        let output = result.map_err(PacketIdentityError::Probe)?;
-        Ok(filtered_packet_hash(&output.stdout, pts, time_base)?)
+        let hash = result
+            .map_err(PacketIdentityError::Probe)
+            .and_then(|output| Ok(filtered_packet_hash(&output.stdout, pts, time_base)?));
+        hash.map_err(|error| read_failure_is_the_source(error, read_failed))
     })
 }
 

@@ -76,6 +76,29 @@ fn an_interrupted_packet_identity_is_a_transient_failure() {
         unverified.reason,
         "F+ source packet identity: F+ packet hash has no time base"
     );
+
+    // After a failed bridge read, the child's refusal is the read's failure.
+    for error in [
+        PacketIdentityError::Probe(HeldProbeError::Failed("exited exit status: 1".into())),
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+    ] {
+        let failure = packet_identity_failure(read_failure_is_the_source(error, true));
+        assert_eq!(failure.code, IndexFailureCode::IndexSourceIo);
+        assert!(failure.transient_allowlisted);
+    }
+    let clean = read_failure_is_the_source(
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+        false,
+    );
+    assert!(matches!(clean, PacketIdentityError::Unverified(_)));
+    let timeout = read_failure_is_the_source(
+        PacketIdentityError::Probe(HeldProbeError::Timeout("timed out".into())),
+        true,
+    );
+    assert!(matches!(
+        timeout,
+        PacketIdentityError::Probe(HeldProbeError::Timeout(_))
+    ));
 }
 
 #[cfg(unix)]

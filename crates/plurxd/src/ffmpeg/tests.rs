@@ -2942,7 +2942,37 @@ async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
     .await
     .err();
     assert!(
-        matches!(timed_out, Some(super::HeldProbeError::Timeout(_))),
+        matches!(&timed_out, Some(super::HeldProbeError::Timeout(reason))
+            if reason.starts_with("index metadata probe timed out after ")),
         "{timed_out:?}"
     );
+}
+
+/// The F+ first-packet identity's exit statuses, classified by the shared
+/// runner step. The SIGKILL wording is the one revision 5 of the index failure
+/// policy reopens (`FragmentIndexOutcome::state`).
+#[cfg(unix)]
+#[test]
+fn an_f_plus_identity_exit_is_classified_by_its_status() {
+    use std::os::unix::process::ExitStatusExt;
+    let outcome = |raw| super::BoundedCommandOutcome {
+        status: std::process::ExitStatus::from_raw(raw),
+        output: Ok(super::BoundedOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }),
+    };
+    assert_eq!(
+        super::held_probe_outcome("F+ first packet identity", outcome(libc::SIGKILL)).err(),
+        Some(super::HeldProbeError::Interrupted(
+            "F+ first packet identity exited signal: 9 (SIGKILL)".into()
+        ))
+    );
+    assert_eq!(
+        super::held_probe_outcome("F+ first packet identity", outcome(256)).err(),
+        Some(super::HeldProbeError::Failed(
+            "F+ first packet identity exited exit status: 1".into()
+        ))
+    );
+    assert!(super::held_probe_outcome("F+ first packet identity", outcome(0)).is_ok());
 }
