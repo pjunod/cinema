@@ -1,6 +1,6 @@
 # The requested lane — how a pull request lands on `main`
 
-**Status:** built (`.github/workflows/main-fast-lane.yml`, `validation/lane_request.py`; the requesting side is `ci-fleet lane` in [noirr/ci-fleet](http://forge.lan:3000/noirr/ci-fleet)) · **Updated:** 2026-11-24 · **Owner:** Claude session for the batch-lane change
+**Status:** built (`.github/workflows/main-fast-lane.yml`, `validation/lane_request.py`; the requesting side is `ci-fleet lane` in [noirr/ci-fleet](http://forge.lan:3000/noirr/ci-fleet)) · **Updated:** 2026-11-25 · **Owner:** Claude session for the batch-lane change
 
 Any agent — Claude, GPT, OpenRouter — or person can follow this page. It
 replaces the merge train, which is retired.
@@ -62,6 +62,35 @@ GitHub-shaped payload. The receipt modules bind a prior run only when it was a
 `pull_request` run of `main-fast-lane.yml` for that PR and head; a label event
 is one, so its passes are adoptable like a push's
 (`validation/main_preflight_adoption.py` `PR_EVENT_ACTIONS`).
+
+## Batches
+
+ci-fleet may answer several `lane request`s with one run. Its bot account
+(`ci-fleet-lane`) builds a branch `lane-batch/b-<id>` from `main` with each
+member head merged in (`git merge --no-ff`, so every member head is an
+ancestor of the batch head), opens it as a pull request into `main`, and adds
+`lane`: the batch is an ordinary requested run, and the receipt modules bind
+it like any other pull request's. When that run's `Main promotion gate` is
+green, ci-fleet posts on each member head a status
+`main fast lane / Main promotion gate (batch)` whose description reads
+`ci-fleet batch b-<id>: run <run id> of #<batch pr> at <batch head> green`
+(optionally `· with #<n> …` and `· interaction`), then closes the batch pull
+request unmerged.
+
+`scripts/land` counts that status only after tracing it
+(`validation/landing.py` `verify_batch`): the description parses exactly;
+`ci-fleet-lane` posted it; the run is a `pull_request` run of
+`main-fast-lane.yml` for the batch pull request on the batch head and
+concluded `success`, with exactly one `Main promotion gate` job that
+succeeded; the batch pull request is from `lane-batch/b-<id>` into `main` at
+the batch head (closed is fine); and `refs/pull/<batch pr>/head`, fetched,
+is the batch head and has the member head as an ancestor. A batch status that
+fails any check is ignored, neither a pass nor a failure, and land prints one
+line saying why. A solo green gate on the head still passes as before.
+
+Sessions do nothing different: `ci-fleet lane request` and `ci-fleet lane
+wait` as before, then `scripts/land`. A member's verdict may come from a
+batch.
 
 ## Known costs
 
