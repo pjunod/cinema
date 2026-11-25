@@ -175,7 +175,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         }
         EnhancementRoute::ConvertedProfile81 => {
             if has_el {
-                // Said outright (Curator ADR 0026 §7): a viewer who chose the
+                // Said outright (Curator ADR 0031 §7): a viewer who chose the
                 // FEL remux should read that this play drops its layer, not
                 // infer it from the RPU line.
                 details.push(detail(

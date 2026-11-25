@@ -1,4 +1,4 @@
-//! Playback devices (Curator ADR 0026 §5, §7): a signed-in device's
+//! Playback devices (Curator ADR 0031 §5, §7): a signed-in device's
 //! capabilities are kept from its successful decision request, as a record
 //! of its login token that goes with the token; listed for the account and
 //! for a `playback:read` key; and turned into a per-version "plays on" line

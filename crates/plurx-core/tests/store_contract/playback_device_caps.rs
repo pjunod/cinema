@@ -1,4 +1,4 @@
-//! A signed-in device's capability record on both backends (Curator ADR 0026
+//! A signed-in device's capability record on both backends (Curator ADR 0031
 //! §5): written once per change, listed newest first over live tokens, and
 //! gone with its token on every path that removes one.
 use super::*;

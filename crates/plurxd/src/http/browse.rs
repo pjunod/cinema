@@ -783,7 +783,7 @@ pub async fn item_detail(
     }
     let (coverage, statuses) =
         vod_index_coverage(&state, &files, &probes, &availability, have_dovi, convert).await?;
-    // How each version plays on this account's devices (Curator ADR 0026
+    // How each version plays on this account's devices (Curator ADR 0031
     // §7): the capabilities each device last reported, judged by the same
     // function Play's decision uses on this node. One keyed, bounded read of
     // this account's live sign-ins; a listing failure costs the lines, never

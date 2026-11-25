@@ -1,5 +1,5 @@
 //! What each signed-in playback device decodes, and how a version will play
-//! on it (Curator ADR 0026 §5 and §7).
+//! on it (Curator ADR 0031 §5 and §7).
 //!
 //! Clients already send their capabilities with every playback decision
 //! ([`DeviceCaps`]); nothing kept them. This module is the record of the last

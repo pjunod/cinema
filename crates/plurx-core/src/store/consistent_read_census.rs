@@ -61,7 +61,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Curation (tags, rows, Home layouts) checks its shape and marker: two more.
     // F+ curve fits check their extension shape and marker: two more.
     // Fragment publication (#1827) checks its trigger shape before startup.
-    // Device capabilities (Curator ADR 0026 §5) check their shape and marker: two more.
+    // Device capabilities (Curator ADR 0031 §5) check their shape and marker: two more.
     ("hiqlite.rs", 83),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),

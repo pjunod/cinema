@@ -2925,7 +2925,7 @@ pub trait UserStore: Send + Sync + 'static {
     /// digests to the HTTP layer.
     async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError>;
     /// Keep the playback capability document a native login token's device
-    /// just sent (Curator ADR 0026 §5), as that token's record. Compared
+    /// just sent (Curator ADR 0031 §5), as that token's record. Compared
     /// against this node's copy first and written only when it differs, so an
     /// ordinary Play is not a replicated write. Returns whether it wrote. A
     /// token that is unknown or a Jellyfin compatibility login records

@@ -75,7 +75,7 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   return `<dt>${label}</dt><dd>${chips}${note?`<div class="langnote">${esc(note)}</div>`:""}</dd>`;
 }
 // Dolby Vision, as the configuration record and the complete-title scan
-// measured it (Curator ADR 0026): "Profile 7 · FEL · level 6 · HDR10 base".
+// measured it (Curator ADR 0031): "Profile 7 · FEL · level 6 · HDR10 base".
 const DV_BASE={0:"no base layer",1:"HDR10 base",2:"SDR base",4:"HLG base",6:"HDR10 base"};
 function dvFactsLine(f){
   if(f.dv_profile==null) return "";

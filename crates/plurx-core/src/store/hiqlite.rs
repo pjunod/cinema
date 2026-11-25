@@ -4458,7 +4458,7 @@ impl HiqliteAuthStore {
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
 
-    /// The device-capability extension (Curator ADR 0026 §5): its table,
+    /// The device-capability extension (Curator ADR 0031 §5): its table,
     /// index and marker. `None` when none exist, `Some(true)` when all match
     /// exactly and the marker is committed; a partial shape is refused.
     async fn playback_device_caps_shape(&self) -> Result<Option<bool>, StoreError> {

@@ -1,4 +1,4 @@
-//! Playback devices and what they decode (Curator ADR 0026 §5).
+//! Playback devices and what they decode (Curator ADR 0031 §5).
 //!
 //! Every native client sends a capability document with its playback
 //! decision; this keeps the last one per signed-in device, so the title page
