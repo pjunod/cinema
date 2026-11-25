@@ -706,6 +706,9 @@ pub(super) fn projected_application_owner_bytes(
 pub(super) struct AdaptiveAttemptRegistry {
     slots: Mutex<[Option<AttemptRef>; MAX_LOCAL_ATTEMPTS]>,
     client: Mutex<Option<AttemptRootClient>>,
+    /// Signalled when an attempt's coordinator or control future returns, so
+    /// the manager reconciles at once instead of on its next repair tick.
+    task_returned: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
@@ -754,6 +757,11 @@ pub(super) struct AttemptEntry {
     /// `local_cutoff`. It bounds only Adopt, the activation step the create
     /// keeps its last allowance for; P and R entry stay on `local_cutoff`.
     local_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+    /// Set when the held coordinator or control future has returned; its
+    /// handle then completes at once, so reconciliation may join it.
+    coordinator_returned: Arc<std::sync::atomic::AtomicBool>,
+    control_returned: Arc<std::sync::atomic::AtomicBool>,
+    task_returned: Arc<tokio::sync::Notify>,
 }
 
 enum PlanningState {
@@ -903,11 +911,16 @@ impl Default for AdaptiveAttemptRegistry {
         Self {
             slots: Mutex::new(std::array::from_fn(|_| None)),
             client: Mutex::new(None),
+            task_returned: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
 
 impl AdaptiveAttemptRegistry {
+    pub(super) fn task_returned_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.task_returned)
+    }
+
     /// Claim one inline slot before scheduling any native-owning work. A
     /// replay selects only the exact same local process and serving epoch.
     pub(super) fn reserve(
@@ -981,6 +994,9 @@ impl AdaptiveAttemptRegistry {
                 task_admission_sealed: std::sync::atomic::AtomicBool::new(false),
                 local_cutoff,
                 local_activation_cutoff,
+                coordinator_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                control_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                task_returned: Arc::clone(&self.task_returned),
             })
             .map_err(|_| "adaptive attempt root allocation refused")?;
         *vacant = Some(entry.clone());
@@ -1249,10 +1265,15 @@ impl AttemptEntry {
         F: Future<Output = ()> + Send + 'static,
     {
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+        let returned = Arc::clone(&self.coordinator_returned);
+        returned.store(false, std::sync::atomic::Ordering::Release);
+        let task_returned = Arc::clone(&self.task_returned);
         let original = async move {
             if start_rx.await.is_ok() {
                 future.await;
             }
+            returned.store(true, std::sync::atomic::Ordering::Release);
+            task_returned.notify_one();
         };
         self.coordinator_frame_bytes.store(
             std::mem::size_of_val(&original),
@@ -1323,7 +1344,18 @@ impl AttemptEntry {
     /// table. Its handle stays here through request cancellation and is joined
     /// by the existing manager maintenance cadence.
     async fn join_finished_original(&self, coordinator: bool) -> Result<(), &'static str> {
-        self.join_original_task(coordinator, false).await
+        // A returned future's handle completes immediately; wait for it rather
+        // than skipping it until a later pass.
+        let returned = if coordinator {
+            &self.coordinator_returned
+        } else {
+            &self.control_returned
+        };
+        self.join_original_task(
+            coordinator,
+            returned.load(std::sync::atomic::Ordering::Acquire),
+        )
+        .await
     }
 
     async fn join_original_task(&self, coordinator: bool, wait: bool) -> Result<(), &'static str> {
@@ -1374,10 +1406,15 @@ impl AttemptEntry {
         F: Future<Output = ()> + Send + 'static,
     {
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+        let returned = Arc::clone(&self.control_returned);
+        returned.store(false, std::sync::atomic::Ordering::Release);
+        let task_returned = Arc::clone(&self.task_returned);
         let original = async move {
             if start_rx.await.is_ok() {
                 future.await;
             }
+            returned.store(true, std::sync::atomic::Ordering::Release);
+            task_returned.notify_one();
         };
         if std::mem::size_of_val(&original)
             > self
@@ -1457,10 +1494,15 @@ impl AttemptEntry {
         F: Future<Output = ()> + Send + 'static,
     {
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+        let returned = Arc::clone(&self.coordinator_returned);
+        returned.store(false, std::sync::atomic::Ordering::Release);
+        let task_returned = Arc::clone(&self.task_returned);
         let original = async move {
             if start_rx.await.is_ok() {
                 future.await;
             }
+            returned.store(true, std::sync::atomic::Ordering::Release);
+            task_returned.notify_one();
         };
         let frame_bytes = std::mem::size_of_val(&original);
         if std::mem::size_of_val(&original) > attempt_root::COORDINATOR_BYTES {

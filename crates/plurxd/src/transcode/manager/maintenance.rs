@@ -828,6 +828,10 @@ impl TranscodeManager {
         let application_release = self.vod.finite_close_progress_signal();
         #[cfg(not(target_os = "linux"))]
         let application_release = Arc::new(tokio::sync::Notify::new());
+        #[cfg(target_os = "linux")]
+        let attempt_returned = self.adaptive_attempts.task_returned_signal();
+        #[cfg(not(target_os = "linux"))]
+        let attempt_returned = Arc::new(tokio::sync::Notify::new());
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -836,6 +840,11 @@ impl TranscodeManager {
                     continue;
                 }
                 () = application_release.notified() => {
+                    #[cfg(target_os = "linux")]
+                    self.reconcile_adaptive_attempt_tasks().await;
+                    continue;
+                }
+                () = attempt_returned.notified() => {
                     #[cfg(target_os = "linux")]
                     self.reconcile_adaptive_attempt_tasks().await;
                     continue;
