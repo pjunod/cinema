@@ -1234,19 +1234,15 @@ impl ProbeOriginalOwners {
     }
 
     async fn retry_cleanup(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
-        let process_group = match self.child.as_ref() {
-            Some(child) => Some(
-                child
-                    .id()
-                    .and_then(|pid| libc::pid_t::try_from(pid).ok())
-                    .ok_or_else(|| {
-                        std::io::Error::other(
-                            "original FFprobe child has no process-group identity",
-                        )
-                    })?,
-            ),
-            None => None,
-        };
+        // A child the failed collector already killed and reaped (its deadline
+        // path ran `terminate_probe_session`) reports no pid. Its process group
+        // is gone and its number may be reused, so it must not be signalled
+        // again; the retained child still yields its cached exit status below.
+        let process_group = self
+            .child
+            .as_ref()
+            .and_then(tokio::process::Child::id)
+            .and_then(|pid| libc::pid_t::try_from(pid).ok());
         let signal = match process_group {
             Some(group) => Some(kill_probe_session_checked(Some(group))?),
             None => None,
