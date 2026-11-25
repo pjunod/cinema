@@ -1,8 +1,9 @@
 # FEL reference composition — build plan
 
-**Status:** in progress — owner approved milestones 5.1–5.2 on 2026-11-24;
-5.1 built (section 8); 5.2 measured on real titles and the synthetic
-controls with a **go** result (section 9) · **Written:** 2026-11-23 · **Owner:** Claude ·
+**Status:** in progress — owner approved 5.1–5.2 on 2026-11-24 and 5.3 on
+2026-11-25; 5.1 built (section 8); 5.2 decided **go** (section 9); 5.3 built
+and matches the reference code for code, worker-GPU frame time still to
+measure (section 10) · **Written:** 2026-11-23 · **Owner:** Claude ·
 **Source baseline:** `bb2f165`
 
 Companion to [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) (the
@@ -246,6 +247,12 @@ capture later disagrees.
   down-sampling averages two rows; the measured streams signal top-left
   siting. The oracle follows the text as written, which puts its EL chroma
   ⅛ of an EL chroma row from the renderer's top-left sampling.
+- **R12. Coefficient ranges.** Clauses 5.3.3.2 and 5.3.3.3 bound the
+  integer parts (polynomial −64…63, MMR −65 536…65 535). Both the reference
+  and the stage refuse coefficients outside them; inside them the
+  reference's polynomial sum stays below 2^60 (exact in int64). The 5.3
+  parity control found the reference overflowing on out-of-range input
+  before this check.
 
 The risk in section 6 about an erratum in one MMR index was checked against
 the text alone: the term table in 5.4.2.3.3 is internally consistent (each
@@ -331,3 +338,69 @@ as clause 5.4.3.3 does.
   `capture_layers` (packet timing) and are not measured.
 - Limits: measured on macOS (MoltenVK, Homebrew libplacebo 7.387), not
   the worker's pinned build; two frames per title, three per control.
+
+## 10. The matching stage (milestone 5.3)
+
+[`fel_compose.h`](../../tools/dv_processing/fel_compose.h) is Cinema's own
+pass set, shared like `dv_dm.h`, selected by the new identities
+`pq-ccm001-rgb48-v1` and `pq-ccm001-yuv420p10-v1`; the existing
+`pq-bilinear-*` identities are untouched (their output is byte-identical to
+the 5.2 build). The server still requests `pq-bilinear-*`, so nothing served
+changes until 5.5 requalifies on the new identity.
+
+**Design.** Exact integers throughout, on the 4:2:0 grids:
+
+- A vertical pass runs Annex B.3's EL filters once per EL sample (half-size
+  EL only); the luma and chroma passes finish with the horizontal filter.
+- Polynomial pieces come from a per-frame table of every BL code, computed
+  exactly on the CPU (clause 5.4.2.2–5.4.2.3.2). MMR runs in the shader with
+  a 96-bit accumulator built from `umulExtended`/`imulExtended`, exact
+  across clause 5.3.3's ranges; it needs no optional 64-bit shader support.
+- LINEAR_DZ with the `vdr_in_max` clamp and clause 5.4.3.3's rounding
+  produce the 12-bit 4:2:0 picture. libplacebo then gets it as a Dolby
+  Vision frame with no pivots, no NLQ and no enhancement layer, so it does
+  only chroma up-sampling and the RPU matrices (5.2's display path).
+- Parameters come from FFmpeg's `AVDOVIMetadata` at admission; the stage
+  never includes the reference.
+
+**Parity.** [`run_fel_compose_parity.py`](../../tools/dv_processing/controls/run_fel_compose_parity.py)
+runs [`fel_compose_control.c`](../../tools/dv_processing/controls/fel_compose_control.c)
+and the reference on the same inputs and requires identical codes, which is
+stricter than this milestone's 1 code: a 1-code allowance passes a shader
+that drops the output rounding or the floor of negative residuals (both
+caught by mutating it). On the Apple GPU (MoltenVK): 200 seeded synthetic
+vectors (2–9 pivots, polynomial and MMR orders 1–3, coefficients at the
+clause 5.3.3 bounds, binding and non-binding clamps, both EL sizes, 8/10-bit
+layers, 10/12-bit output, denominators 15–32, half with Cb and Cr in one
+texture as a mapped P010 surface delivers them) and 13 frames (*Michael* 0
+and 24, b2-29, b2-19 with MMR chroma, the synthetic valid and binding-tight
+controls) all match; 13 out-of-range vectors are refused by both. Eight
+shader mutations each fail it. CI runs the shader's GLSL compiled as C++
+([`fel_compose_cpu_port.py`](../../tools/dv_processing/controls/fel_compose_cpu_port.py),
+`tests/operations/test_fel_compose_stage.py`). Result:
+`diagnostics/fel_quality/results/fel-compose-stage-20261125.json`.
+
+**End to end** (helper render against the reference, 5.2's tool):
+
+| Title | ΔE_ITP mean / max | < 0.1 nit mean | Y RMS (code) | Was (5.2, total) |
+|---|---|---|---|---|
+| *Michael* 5400 | 0.027 / 0.06 | 0.013 | 0.02–0.03 | 0.40–0.49 / 2.1–4.5 |
+| b2-29 | 0.015 / 0.04 | 0.012 | 0.03 | 0.28–0.30 / 2.3–2.6 |
+| b2-19 | 0.023 / 0.05 | 0.010 | 0.02 | 0.16–0.17 / 1.1–1.2 |
+
+What remains is the measurement's own display path (the CPU model's floor in
+5.2 was ΔE_ITP 0.03–0.04), not composition.
+
+**Frame time.** 4K *Michael*, 48 frames, per-frame render loop: 30.8 ms
+against 28.8 ms for `pq-bilinear-rgb48-v1` (+7.1 %, median of five
+alternating runs) on this Mac. GPU time per frame: the stage's passes
+2.0 ms, libplacebo's pass 0.44 ms (was 0.88 ms with the EL). The first
+version computed the polynomial per pixel and the EL filters inline
+(+14 %); the table and the separate vertical pass brought it inside 10 %.
+The acceptance names the worker GPU, which is not yet measured: it waits
+until it cannot disturb `E-C599053EB8`'s trials.
+
+**Also found.** libplacebo refuses a pass that binds one texture twice and
+says so only in its log, so a mapped P010 surface (Cb and Cr in one
+texture) would have composed garbage; the stage binds each texture once,
+and the control fails on any libplacebo error.
