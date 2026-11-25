@@ -443,7 +443,6 @@ impl HlsDeliveryFixture {
                 .actor_prepublication_producer
                 .store(true, Release);
         }
-        let session = Arc::new(raw_session);
         let construct = if matches!(fixture_kind, DeliveryFixtureKind::Unhooked) {
             crate::state::AppState::new_unhooked
         } else {
@@ -465,6 +464,23 @@ impl HlsDeliveryFixture {
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
+        // On Linux a non-cached rolling session without scratch is, by
+        // construction, a selected core copy that owns `core_copy`; publication
+        // and retirement branch on exactly that. This fixture is an ordinary
+        // rolling session, so it holds the scratch admission one always does,
+        // from its own manager's ledger.
+        #[cfg(target_os = "linux")]
+        {
+            raw_session.scratch = Some(
+                state
+                    .transcode
+                    .scratch_ledger
+                    .reserve(0, super::HLS_SCRATCH_MAX_BYTES_DEFAULT)
+                    .expect("fixture scratch admission")
+                    .bound_to(session_id, 0),
+            );
+        }
+        let session = Arc::new(raw_session);
         state
             .transcode
             .register_session_for_test(session_id, Arc::clone(&session))
