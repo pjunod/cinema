@@ -55,7 +55,7 @@ class VendorAuditLockCase(unittest.TestCase):
         evidence = script.merge_package_inventories(
             (ROOT / "spikes/hiqlite-m0/Cargo.lock").read_text(),
             [(ROOT / f"vendor/{name}/registry-provenance.lock").read_text()
-             for name in ("gemm-common", "ksni")],
+             for name in ("gemm-common", "ksni", "openraft")],
         )
         expected = {
             (package["name"], package["version"]): package

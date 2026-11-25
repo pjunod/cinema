@@ -32,6 +32,21 @@ pub async fn try_connect(
     tls_config: Option<Arc<rustls::ClientConfig>>,
     secret: &[u8],
 ) -> Result<WebSocket<TokioIo<Upgraded>>, Error> {
+    try_connect_negotiated(node_id, addr, raft_type, tls_config, secret)
+        .await
+        .map(|(ws, _)| ws)
+}
+
+/// Plurx patch 37: [`try_connect`] that also reports whether the server advertised pre-vote on
+/// its upgrade response (`raft_server::RAFT_PRE_VOTE_HEADER`). The answer belongs to this socket
+/// only; a reconnect may reach a server of another version.
+pub(crate) async fn try_connect_negotiated(
+    node_id: NodeId,
+    addr: &str,
+    raft_type: &RaftType,
+    tls_config: Option<Arc<rustls::ClientConfig>>,
+    secret: &[u8],
+) -> Result<(WebSocket<TokioIo<Upgraded>>, bool), Error> {
     tokio::time::timeout(
         LEADER_STREAM_CONNECT_TIMEOUT,
         try_connect_stream(node_id, addr, raft_type, tls_config, secret),
@@ -51,7 +66,7 @@ async fn try_connect_stream(
     raft_type: &RaftType,
     tls_config: Option<Arc<rustls::ClientConfig>>,
     secret: &[u8],
-) -> Result<WebSocket<TokioIo<Upgraded>>, Error> {
+) -> Result<(WebSocket<TokioIo<Upgraded>>, bool), Error> {
     let scheme = if tls_config.is_some() {
         "https"
     } else {
@@ -85,7 +100,7 @@ async fn try_connect_stream(
         .await
         .map_err(|err| Error::Connect(err.to_string()))?;
 
-    let (mut ws, _) = if let Some(config) = tls_config {
+    let (mut ws, response) = if let Some(config) = tls_config {
         let (addr, _) = addr.split_once(':').unwrap_or((addr, ""));
         let tls_stream = tls::into_tls_stream(addr, stream, config).await?;
 
@@ -97,6 +112,7 @@ async fn try_connect_stream(
         error!("Error opening WebSocket stream: {err:?}");
         Error::Connect(err.to_string())
     })?;
+    let peer_pre_vote = crate::network::raft_server::peer_answers_pre_vote(response.headers());
     ws.set_auto_close(true);
     debug!("WebSocket connection established");
 
@@ -109,6 +125,6 @@ async fn try_connect_stream(
         )))
     } else {
         info!("WebSocket stream connected to: {addr}");
-        Ok(ws)
+        Ok((ws, peer_pre_vote))
     }
 }

@@ -95,7 +95,11 @@ BUILD_SPECS = {
     # the paperwork help and comment, and make android-release hand the
     # host-derived build number to Gradle as a project property; no native
     # recipe changes.
-    'Makefile': '7d7b9cb5a429c7c185cb7d8cb23c5b42b60bee749c6097a071b469659b163e7a',
+    # C4 pre-vote (#1904) changes only cluster-wal-check: eight exact vendored
+    # hiqlite pre-vote tests, the vendored OpenRaft pre-vote module, and the
+    # OpenRaft snapshot regression run from vendor/openraft instead of the
+    # registry package located through cargo metadata; no native recipe changes.
+    'Makefile': '8355f6bea67a7f4c7f74e00137dad4a40b7f5ca76e141d1476299f43d2bfaea8',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
