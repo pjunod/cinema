@@ -452,6 +452,18 @@ impl FiniteControl {
     pub(in crate::adaptive_resources::runtime) fn requested(&self) -> bool {
         self.requested.load(std::sync::atomic::Ordering::Acquire)
     }
+    /// The writer was blocked this long on the producer's output.
+    pub(in crate::adaptive_resources::runtime) fn producer_waited(
+        &self,
+        wait: std::time::Duration,
+    ) {
+        #[cfg(target_os = "linux")]
+        if let Ok(mut timing) = self.timing.lock() {
+            timing.producer_waited(wait);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = wait;
+    }
     pub(in crate::adaptive_resources::runtime) fn install(
         &self,
         control: crate::process::priority::RegisteredChildControl,

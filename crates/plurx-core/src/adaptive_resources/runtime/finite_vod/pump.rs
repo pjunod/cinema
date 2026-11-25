@@ -412,8 +412,13 @@ impl SoftwarePump {
         );
         #[cfg(not(target_os = "linux"))]
         let _ = control;
+        let mut stdout = ProducerWaitTimed {
+            inner: stdout,
+            control: &self.stop,
+            blocked_since: None,
+        };
         let mut muxer = super::initial_unit::read_initial_unit(
-            stdout,
+            &mut stdout,
             self.plan.memory.reader,
             self.plan.memory.read_chunk_bytes,
         )
@@ -616,6 +621,31 @@ async fn publish(
         .map_err(|error| error.into_io_error())?;
     output.validate_sources().await.map_err(io::Error::other)
 }
+/// The producer's stdout as the writer reads it. Time the writer is blocked
+/// waiting for the encoder's output is reported to the trial startup witness,
+/// which excludes the encoder's warm-up from plurx's own startup bound.
+struct ProducerWaitTimed<'a, R> {
+    inner: R,
+    control: &'a FiniteControl,
+    blocked_since: Option<Instant>,
+}
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ProducerWaitTimed<'_, R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = &mut *self;
+        let poll = std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+        if poll.is_pending() {
+            this.blocked_since.get_or_insert_with(Instant::now);
+        } else if let Some(since) = this.blocked_since.take() {
+            this.control.producer_waited(since.elapsed());
+        }
+        poll
+    }
+}
+
 fn stopping(stop: Option<&FiniteControl>) -> io::Result<()> {
     if stop.is_some_and(FiniteControl::requested) {
         // NotFound is the generation's session-gone end, reported as `Ran`.

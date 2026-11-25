@@ -7,6 +7,9 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 // These are a supported operating envelope, not the maximum of samples.
 // A profile enters this envelope only through verified output and the known
 // final receipt of its original ordinary, deliberately stopped owner.
+// Startup bounds plurx's own work from preparation to the first verified
+// segment: the time its writer is blocked waiting for the encoder's output
+// (the encoder's warm-up) is not plurx startup and is excluded.
 const STARTUP_BOUND: Duration = Duration::from_secs(1);
 const CLEANUP_BOUND: Duration = Duration::from_secs(1);
 const QUALIFICATION_AGE: Duration = Duration::from_secs(30 * 60);
@@ -45,6 +48,9 @@ impl FiniteQualificationWindow {
 pub(in crate::adaptive_resources::runtime) struct FiniteTimingWitness {
     key: Option<FiniteTrialKey>,
     started: Option<Instant>,
+    // Writer time blocked on the producer's output before the first verified
+    // segment; excluded from the startup bound.
+    producer_wait: Duration,
     startup_proved: bool,
     stop_requested: Option<Instant>,
     startup_scope: Option<FiniteQualificationWindow>,
@@ -87,10 +93,17 @@ impl FiniteTimingWitness {
         }
     }
 
+    pub(in crate::adaptive_resources::runtime) fn producer_waited(&mut self, wait: Duration) {
+        if self.started.is_some() {
+            self.producer_wait = self.producer_wait.saturating_add(wait);
+        }
+    }
+
     pub(in crate::adaptive_resources::runtime) fn verified_publish(&mut self, now: Instant) {
         if let Some(started) = self.started {
             tracing::debug!(target: "plurx_core::adaptive_resources",
                 startup_ms = now.saturating_duration_since(started).as_millis(),
+                producer_wait_ms = self.producer_wait.as_millis(),
                 scope_unchanged = self.startup_scope.as_ref().is_some_and(|scope| scope.unchanged()),
                 stopped = self.stop_requested.is_some(),
                 "finite trial startup witness");
@@ -103,7 +116,8 @@ impl FiniteTimingWitness {
                 && self.stop_requested.is_none()
                 && now
                     .checked_duration_since(started)
-                    .is_some_and(|time| time <= STARTUP_BOUND);
+                    .is_some_and(|time| time.saturating_sub(self.producer_wait) <= STARTUP_BOUND);
+            self.producer_wait = Duration::ZERO;
         }
     }
 
@@ -302,6 +316,42 @@ mod tests {
             b"32 20 0:101 / /noswap rw,noswap - tmpfs tmpfs rw,mode=700\n",
             32,
         ));
+    }
+
+    #[test]
+    fn startup_bound_excludes_only_the_writer_wait_for_producer_output() {
+        let epoch = Arc::new(AtomicU64::new(1));
+        let key = FiniteTrialKey {
+            workload: [1; 32],
+            recipe: [2; 32],
+            executable: [3; 32],
+            limit_epoch: 1,
+            native_memory: 64 * 1024 * 1024,
+            native_tasks: 4,
+        };
+        let start = Instant::now();
+        let proved = |wait: Duration, published: Duration| {
+            let mut witness = FiniteTimingWitness::new(Some(key));
+            witness.set_start_scope(FiniteQualificationWindow::capture(Arc::clone(&epoch)));
+            // A wait reported before the start is not part of this startup.
+            witness.producer_waited(Duration::from_secs(5));
+            witness.start(start);
+            witness.producer_waited(wait);
+            witness.verified_publish(start + published);
+            witness.set_stop_scope(FiniteQualificationWindow::capture(Arc::clone(&epoch)));
+            witness.stop(start + published + Duration::from_millis(10));
+            witness.take_stopped().is_some()
+        };
+        // 1.6 s with 0.6 s of encoder warm-up is 1.0 s of plurx startup.
+        assert!(proved(
+            Duration::from_millis(600),
+            Duration::from_millis(1600)
+        ));
+        assert!(!proved(
+            Duration::from_millis(500),
+            Duration::from_millis(1600)
+        ));
+        assert!(!proved(Duration::ZERO, Duration::from_millis(1001)));
     }
 
     #[test]
