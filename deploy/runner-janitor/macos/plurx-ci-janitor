@@ -129,6 +129,26 @@ daemon_is_idle() {
   return 0
 }
 
+user_for_plist() {
+  plutil -convert json -o - "$1" 2>/dev/null |
+    sed 's|\\/|/|g' | sed -n 's/.*"UserName":"\([^"]*\)".*/\1/p'
+}
+
+# Which users run a runner daemon here, and which of them have one that may be
+# in a job. Unloaded is not busy (nothing is running); loaded and not provably
+# idle is.
+sim_users=" "; busy_users=" "; sim_probe=/
+note_simulator_owner() {
+  local label plist root user
+  label=$1; plist=$2; root=$3
+  user=$(user_for_plist "$plist")
+  [ -n "$user" ] || return 0
+  sim_probe=$root
+  case "$sim_users" in *" $user "*) ;; *) sim_users="$sim_users$user " ;; esac
+  launchctl print "system/$label" >/dev/null 2>&1 || return 0
+  daemon_is_idle "$label" "$root" || busy_users="$busy_users$user "
+}
+
 reset_cache() {
   local label plist dir used_kb deleted
   label=$1; plist=$2; dir=$3; used_kb=$4
@@ -190,6 +210,9 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   # directory whole, so the path check is the entire safety argument.
   case "$dir" in */*runner*/cache) ;; *) continue ;; esac
   [ ! -L "$dir" ] || continue
+  # Before the maintenance check: a disabled daemon may still be finishing a
+  # job, and its simulators are that job's.
+  note_simulator_owner "$label" "$plist" "$(dirname -- "$dir")"
   # Intentional maintenance is persistent: never undo launchctl disable.
   if launchctl print-disabled system 2>/dev/null | grep -F "\"$label\" => true" >/dev/null; then
     say "$label is disabled for maintenance"
@@ -228,14 +251,65 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   reset_cache "$label" "$plist" "$dir" "$used_kb"
 done
 
+# CI simulators a dead job left behind, every pass. Each Apple job creates an
+# iPhone, an iPad and an Apple TV named `plurx CI <device> <run>-<attempt>`
+# (and `scripts/apple-tv-navigation-test` its own `Plurx navigation isolated`)
+# and deletes them in its last step. A job that never reaches that step --
+# cancelled, timed out, or failed because the disk was already full, which is
+# what run 9462 did on 2026-11-25 -- leaves them booted, 1-3G each, and the
+# workflow's own sweep only takes earlier attempts of the *same* run. Nothing
+# else deletes them: five of them held 10G of gha-maca-apple-01's last 11G.
+#
+# They are taken only while every runner daemon of the owning user is idle by
+# the same test the cache reset uses, so no live job can own one; a busy user
+# keeps them until the next pass.
+SIM_NAMES='^(plurx CI (iPhone|iPad|Apple TV) [1-9][0-9]*-[1-9][0-9]*|Plurx navigation isolated)$'
+orphan_simulators=0
+for user in $sim_users; do
+  case "$busy_users" in
+    *" $user "*) say "a runner of $user is running a job; leaving its CI simulators for the next pass"; continue ;;
+  esac
+  before_kb=$(available_kb_for "$sim_probe")
+  ids=$(sudo -n -H -u "$user" xcrun simctl list devices --json 2>/dev/null |
+    python3 -c '
+import json, re, sys
+pattern = re.compile(sys.argv[1])
+try:
+    devices = json.load(sys.stdin).get("devices", {})
+except ValueError:
+    sys.exit(0)
+for runtime in devices.values():
+    for device in runtime if isinstance(runtime, list) else []:
+        name, udid = device.get("name"), device.get("udid")
+        if isinstance(name, str) and isinstance(udid, str) and pattern.match(name):
+            print(udid)
+' "$SIM_NAMES") || ids=
+  for udid in $ids; do
+    if [ "$dry_run" = true ]; then
+      say "would delete $user's orphaned CI simulator $udid"
+      orphan_simulators=$((orphan_simulators + 1))
+      continue
+    fi
+    sudo -n -H -u "$user" xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+    if sudo -n -H -u "$user" xcrun simctl delete "$udid" >/dev/null 2>&1; then
+      orphan_simulators=$((orphan_simulators + 1))
+    fi
+  done
+  if [ "$dry_run" != true ] && [ -n "$ids" ]; then
+    after_kb=$(available_kb_for "$sim_probe")
+    [ "$after_kb" -gt "$before_kb" ] && reclaimed_kb=$((reclaimed_kb + after_kb - before_kb))
+    say "deleted $orphan_simulators of $user's orphaned CI simulators, $((after_kb / 1024 / 1024))G free"
+  fi
+done
+
 # The full hostname, not `hostname -s`: on a Mac that cuts at the first dot and
 # both of these report "pauls", which names neither of them.
 if [ "$dry_run" != true ]; then
   mkdir -p "$STATE_DIR"
-  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"budget_gb":%d,"recovered":%d,"failures":%d,"reserve_gb":%d}\n' \
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"orphan_simulators":%d,"reclaimed_gb":%d,"budget_gb":%d,"recovered":%d,"failures":%d,"reserve_gb":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" \
-    "$instances" "$over_budget" "$reset_count" \
+    "$instances" "$over_budget" "$reset_count" "$orphan_simulators" \
     "$((reclaimed_kb / 1024 / 1024))" "$BUDGET_GB" "$recovered" "$failures" "$RESERVE_GB" > "$STATE_DIR/last-run.json"
 fi
-say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $((reclaimed_kb / 1024 / 1024))G reclaimed"
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $orphan_simulators orphaned CI simulators, $((reclaimed_kb / 1024 / 1024))G reclaimed"
 [ "$failures" -eq 0 ]

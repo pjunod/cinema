@@ -459,6 +459,64 @@ while IFS= read -r unit; do
 done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*' |
   awk '{ print $1 }')
 
+# Orphaned job volumes, every pass, busy or not. A container job's workspace
+# is not a directory under `_work` but a pair of named Docker volumes, `<32
+# hex>` (the checkout and its whole `target/`) and `<32 hex>-env`, which the
+# runner removes when the job ends. A job that never reaches its cleanup -- a
+# runner restarted mid-job, a VM the watchdog restarted, a job killed at its
+# timeout -- leaves both behind, every byte of them, under a name no later job
+# will use. On 2026-11-25 `gha-lab6-general-02` held 47G of them (one 36G) on a
+# 140G guest, lab5 13G and `gha-lab4-general-01` 6G, while every other
+# deleter here reported "within budget": none of them looks at volumes.
+#
+# This is garbage, not a cache, so it is collected whether or not the disk is
+# short, and it does not wait for the host to be idle -- on a busy host the
+# Docker pass below is skipped every hour, which is how 47G accumulated. It is
+# safe beside a running job because Docker refuses to remove a volume any
+# container references (`dangling=true` is exactly "no container"), and the
+# job container exists from the job's first step to its last. The age gate
+# covers the seconds between the runner creating a job's volumes and creating
+# the container that mounts them.
+ORPHAN_VOLUME_AGE=${PLURX_JANITOR_ORPHAN_VOLUME_AGE_SECONDS:-3600}
+[[ "$ORPHAN_VOLUME_AGE" =~ ^[0-9]+$ ]] || {
+  echo "plurx-ci-janitor: orphan volume age must be whole seconds" >&2; exit 2
+}
+orphan_volumes=0
+docker_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$DOCKER_QUERY_TIMEOUT" "$DOCKER" "$@"
+  else
+    "$DOCKER" "$@"
+  fi
+}
+if command -v "$DOCKER" >/dev/null 2>&1 && docker_bounded info >/dev/null 2>&1; then
+  orphan_root=$(docker_bounded info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+  orphan_before_kb=0
+  [ -d "${orphan_root:-}" ] && orphan_before_kb=$(available_kb_for "$orphan_root")
+  orphan_cutoff=$(($(date +%s) - ORPHAN_VOLUME_AGE))
+  while read -r volume created; do
+    [[ "$volume" =~ ^[0-9a-f]{32}(-env)?$ ]] || continue
+    created_s=$(date -d "$created" +%s 2>/dev/null) || continue
+    [ "$created_s" -le "$orphan_cutoff" ] || continue
+    if [ "$dry_run" = true ]; then
+      say "would remove orphaned job volume $volume (created $created)"
+      orphan_volumes=$((orphan_volumes + 1))
+    elif docker_bounded volume rm "$volume" >/dev/null 2>&1; then
+      orphan_volumes=$((orphan_volumes + 1))
+    fi
+  done < <(docker_bounded volume ls -q --filter dangling=true 2>/dev/null |
+    grep -E '^[0-9a-f]{32}(-env)?$' |
+    while read -r volume; do
+      docker_bounded volume inspect --format '{{.Name}} {{.CreatedAt}}' "$volume" 2>/dev/null || true
+    done)
+  if [ "$orphan_volumes" -gt 0 ] && [ "$dry_run" != true ] && [ -d "${orphan_root:-}" ]; then
+    orphan_after_kb=$(available_kb_for "$orphan_root")
+    [ "$orphan_after_kb" -gt "$orphan_before_kb" ] &&
+      reclaimed_kb=$((reclaimed_kb + orphan_after_kb - orphan_before_kb))
+    say "removed $orphan_volumes orphaned job volumes, $((orphan_after_kb / 1024 / 1024))G free"
+  fi
+fi
+
 # Docker last, and only under pressure. Nothing bounds the image store: every
 # packaging job loads a new `plurx/plurxd:ci-<arch>`, and media1 was carrying
 # 101G of images with four of a hundred and thirty-one in use. The named
@@ -555,11 +613,11 @@ done
 # at, what it decided, and what that cost.
 if [ "$dry_run" != true ]; then
   mkdir -p "$STATE_DIR"
-  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"short_after":%d,"demand_dropped":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d,"required_gb":%d}\n' \
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"short_after":%d,"demand_dropped":%d,"orphan_volumes":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d,"required_gb":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s)" \
     "$instances" "$over_budget" "$reset_count" "$short_after" "$demand_dropped" \
-    "$((reclaimed_kb / 1024 / 1024))" \
+    "$orphan_volumes" "$((reclaimed_kb / 1024 / 1024))" \
     "$docker_pruned" "$BUDGET_GB" "$REQUIRED_GB" \
     > "$STATE_DIR/last-run.json"
 fi
-say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $short_after still short, $demand_dropped on the percentage rule, $((reclaimed_kb / 1024 / 1024))G reclaimed"
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $short_after still short, $demand_dropped on the percentage rule, $orphan_volumes orphaned job volumes, $((reclaimed_kb / 1024 / 1024))G reclaimed"
