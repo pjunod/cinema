@@ -62,7 +62,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // F+ curve fits check their extension shape and marker: two more.
     // Adaptive attempt/source/settings installation and the typed planning read;
     // fragment publication (#1827) checks its trigger shape before startup.
-    ("hiqlite.rs", 87),
+    // The encoded-output publication record settles its catalogue: one more.
+    ("hiqlite.rs", 88),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
