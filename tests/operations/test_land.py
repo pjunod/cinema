@@ -713,11 +713,11 @@ class WiringCase(unittest.TestCase):
         self.assertIn("python3 -m validation.landing check", workflow)
         self.assertNotIn("--offline", workflow)
 
-    def test_scripts_land_is_the_documented_off_mode_path(self):
+    def test_scripts_land_is_the_documented_landing_path(self):
         script = ROOT / "scripts/land"
         self.assertTrue(script.stat().st_mode & 0o111, "scripts/land must be executable")
         self.assertIn("main_land", script.read_text(encoding="utf-8"))
-        for doc in ("AGENTS.md", "docs/ci/MERGE-TRAIN.md"):
+        for doc in ("AGENTS.md", "docs/ci/REQUESTED-LANE.md"):
             text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
             self.assertTrue("scripts/land <pr> --head <sha>" in text, doc)
             self.assertTrue("never the raw merge API" in text, doc)

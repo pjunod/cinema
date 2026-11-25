@@ -2453,11 +2453,12 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
         def enabled(expression, *, apple, desktop, retained, tv_adopted=False, native_adopted=False,
-                    preflight="success", train=False, scope_success=True, cancelled=False):
-            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained, "train_selected": train}
+                    preflight="success", requested=True, scope_success=True, cancelled=False):
+            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained,
+                      "lane_requested": requested}
             expression = re.sub(
                 r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
-                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|train_selected) (==|!=) 'true'",
+                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|lane_requested) (==|!=) 'true'",
                 lambda match: str(not tv_adopted) if match[1] else
                 str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
@@ -2505,8 +2506,12 @@ assert.equal(context.ACT_TIMER, null);
                                              preflight="failure"))
                     self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
                                              preflight="skipped"))
-                    self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True,
-                                            preflight="skipped", train=True))
+                    # Apple is a requested-lane job (docs/ci/REQUESTED-LANE.md):
+                    # a cheap push run never allocates the macOS runner.
+                    self.assertFalse(enabled(condition, apple=True, desktop=True, retained=False,
+                                             requested=False))
+                    self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
+                                             preflight="skipped", requested=False))
                     self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
                                              cancelled=True))
                     receipts = steps["Authenticate compatible original native test receipts"]
