@@ -66,7 +66,7 @@ concurrency:
   group: ci-${{ github.ref }}
   # A final promotion candidate must survive a newer event long enough to
   # retain a diagnostic result. Ordinary PRs and main pushes still supersede
-  # their older work; tags remain immutable evidence. Workflow concurrency is
+  # their older work. Workflow concurrency is
   # evaluated before jobs, so this intentionally uses event context only.
   cancel-in-progress: >-
     ${{
