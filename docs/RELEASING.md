@@ -127,7 +127,7 @@ CI passes the tag name automatically when it publishes an image.
    Tagging by hand remains possible and is the same act the workflow performs:
 
    ```sh
-   make release-check
+   make release-check   # plus every unit test, e.g. `cargo test --workspace`
    git tag -a v0.3.1 -m "v0.3.1"
    git push origin v0.3.1
    ```
@@ -163,8 +163,18 @@ at 06:00 UTC and starts from `main`'s tip:
   has since edited the release's section.
 - If a release is waiting, the run checks the release commit out and the gate
   there is `make release-check`; if not, the gate on the tip is the same
-  `scripts/validate run --profile ci --all --strict` sweep, so every week
+  `scripts/validate run --profile release --all --strict` sweep, so every week
   answers "is `main` releasable" whether or not anything is waiting.
+- The gate has two halves, because the runner stops any job at 3 h and the
+  serial `cargo test --workspace` could not finish inside one with the rest of
+  the sweep (v0.9.1 runs 9461 and 9483). Every Rust unit and integration test
+  runs in `rust-units.yml`'s complete mode on the same commit: one archive,
+  sharded, no receipt adopted, any failure blocking
+  ([RUST-UNIT-FANOUT.md](ci/RUST-UNIT-FANOUT.md)). The `release` profile is
+  the `ci` profile with `rust-gate-ci` replaced by `rust-gate-release`
+  (format, Clippy, doctests). The tag needs both halves green. A release
+  commit that predates the `release` profile cannot pass this gate; cut a new
+  one.
 - Both checks build the checked-out commit's CI tooling on the media assets
   selected by release publication, then run the resulting immutable image ID.
   On amd64 this includes exporting and installing the audited Dolby media

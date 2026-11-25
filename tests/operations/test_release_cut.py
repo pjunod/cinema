@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -508,6 +509,8 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
             encoding="utf-8"
         )
         self.tag = self.workflow.split("\n  tag:\n", 1)[1]
+        self.find = self.workflow.split("\n  find:\n", 1)[1].split("\n  release-units:\n", 1)[0]
+        self.units = self.workflow.split("\n  release-units:\n", 1)[1].split("\n  release-check:\n", 1)[0]
         self.check = self.workflow.split("\n  release-check:\n", 1)[1].split("\n  tag:\n", 1)[0]
 
     def test_it_runs_every_monday_and_on_demand(self):
@@ -515,16 +518,25 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertIn("  workflow_dispatch:\n", self.workflow)
 
     def test_the_tag_needs_a_green_scheduled_gate_on_a_pending_release(self):
-        self.assertIn("    needs: release-check\n", self.tag)
-        condition = re.search(r"(?m)^    if: (.+)$", self.tag).group(1)
+        self.assertIn("    needs: [find, release-units, release-check]\n", self.tag)
+        condition = self.tag.split("    if: >-\n", 1)[1].split("    runs-on:", 1)[0]
         self.assertIn("github.event_name == 'schedule'", condition)
+        self.assertIn("needs.find.outputs.pending == 'true'", condition)
+        self.assertIn("needs.release-units.result == 'success'", condition)
         self.assertIn("needs.release-check.result == 'success'", condition)
-        self.assertIn("needs.release-check.outputs.pending == 'true'", condition)
-        # The gate for a pending release is the whole of `make release-check`.
+        # The gate for a pending release is the whole of `make release-check`
+        # plus every Rust unit test in the complete fan-out.
         self.assertIn(
-            "        if: steps.release.outputs.pending == 'true'\n        run: python3 \"$RUNNER_TEMP/release-readiness\" make release-check",
+            "        if: needs.find.outputs.pending == 'true'\n        run: python3 \"$RUNNER_TEMP/release-readiness\" make release-check",
             self.check,
         )
+
+    def test_every_rust_unit_test_runs_on_the_gated_commit(self):
+        self.assertIn("    needs: find\n", self.units)
+        self.assertIn("    uses: ./.github/workflows/rust-units.yml\n", self.units)
+        self.assertIn("      ref: ${{ needs.find.outputs.sha }}\n", self.units)
+        self.assertIn("      complete: true\n", self.units)
+        self.assertIn("    secrets: inherit\n", self.units)
 
     def test_the_gate_runs_on_the_release_commit_not_the_tip(self):
         """The commit gated is the commit tagged: the release commit.
@@ -535,26 +547,42 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         tags a commit it never ran.
         """
 
+        self.assertIn("    needs: find\n", self.check)
         checkout = self.check.index(
             "      - name: Check out the release commit\n"
-            "        if: steps.release.outputs.pending == 'true'\n"
+            "        if: needs.find.outputs.pending == 'true'\n"
             "        env:\n"
-            "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
+            "          RELEASE_SHA: ${{ needs.find.outputs.sha }}\n"
             '        run: git checkout -q --detach "$RELEASE_SHA"\n'
         )
         self.assertLess(
             checkout,
             self.check.index('run: python3 "$RUNNER_TEMP/release-readiness" make release-check'),
         )
-        self.assertIn("sha: ${{ steps.release.outputs.sha }}", self.check)
+        self.assertIn(
+            "sha: ${{ steps.release.outputs.pending == 'true' && steps.release.outputs.sha || github.sha }}",
+            self.find,
+        )
         # A refusal from `--pending` fails the step instead of vanishing into a pipe.
-        find = self.check.split("id: release\n", 1)[1].split("      - name:", 1)[0]
-        self.assertNotIn("| tee", find)
-        self.assertIn('scripts/release-cut --pending > "$found"', find)
+        found = self.find.split("id: release\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("| tee", found)
+        self.assertIn('scripts/release-cut --pending > "$found"', found)
         self.assertIn('grep -qx "sha=$TESTED_SHA"', self.tag)
 
+    def test_each_half_of_the_gate_fits_the_fleet_job_limit(self):
+        minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", self.check).group(1))
+        self.assertLess(minutes, 180)
+        # The serial workspace `cargo test` is not in the release profile; its
+        # tests are the complete fan-out's, its lint and doctests
+        # rust-gate-release's.
+        catalog = tomllib.loads((ROOT / "validation/points.toml").read_text(encoding="utf-8"))
+        release = {c["id"] for c in catalog["checks"] if "release" in c["profiles"]}
+        ci = {c["id"] for c in catalog["checks"] if "ci" in c["profiles"]}
+        self.assertEqual(ci - release, {"rust-gate-ci"})
+        self.assertEqual(release - ci, {"rust-gate-release"})
+
     def test_the_tag_goes_on_the_commit_the_gate_passed_and_is_annotated(self):
-        self.assertIn("ref: ${{ needs.release-check.outputs.sha }}", self.tag)
+        self.assertIn("ref: ${{ needs.find.outputs.sha }}", self.tag)
         self.assertIn('test "$(git rev-parse HEAD)" = "$TESTED_SHA"', self.tag)
         self.assertIn('tag -a "$TAG" -m "$TAG" "$TESTED_SHA"', self.tag)
         self.assertNotIn("--force", self.tag)

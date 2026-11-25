@@ -17,6 +17,16 @@ the code being merged; rebasing must not repeat tests that already passed on
 the same inputs; only what failed runs again; history that cannot be
 authenticated is simply not adopted.
 
+## Complete runs: release qualification
+
+`complete: true` (with `ref`, the commit to test) marks every unit crate due
+in full: `select --complete` keeps the real keys but drops narrowing to
+declared dynamic reads, `adopt --complete` adopts no receipt, the merge-base
+check is skipped and any failure fails the gate. `release-readiness.yml` runs
+the release commit this way, so the release gate's Rust suite uses the same
+archive and shards as a pull request instead of one serial job past the
+fleet's 3 h limit. A dispatch can do the same to measure a full run.
+
 ## Reviewed continuation across test-only source repairs
 
 An explicit manual `ci.yml` dispatch may resume an authenticated selected-PR

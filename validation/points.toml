@@ -1,7 +1,7 @@
 version = 1
 
 [settings]
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 artifact_dir = "target/validation"
 always_checks = ["catalog-contract", "history-regressions"]
 audit_paths = [
@@ -39,7 +39,7 @@ allow_unmatched_globs = ["docs/features/METADATA*.md"]
 id = "catalog-contract"
 title = "Validation runner contract"
 command = "python3 -m unittest discover -s tests/validation -p 'test_*.py'"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 # The complete suite measured 95s on the 0.8.0 release workstation.
@@ -49,7 +49,7 @@ timeout_seconds = 180
 id = "history-regressions"
 title = "Historical corrective commits have current validation evidence"
 command = "scripts/history-audit --report target/validation/history.json"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["git", "python3"]
 missing = "fail"
 # The complete audit measured 312s on macOS and 172s in release CI.
@@ -59,17 +59,20 @@ timeout_seconds = 600
 id = "operations-contract"
 title = "Deploy, CI, container, and client shipping contracts"
 command = "python3 -m unittest discover -s tests/operations -p 'test_*.py'"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["bash", "make", "python3", "sh"]
 missing = "fail"
 # The complete shipping-contract suite measured 193s for the 0.8.0 release.
-timeout_seconds = 300
+# By 2026-11-25 it had grown to 2024 tests, 225s on an M-series Mac, and both
+# v0.9.1 release gates (runs 9461 and 9483) stopped it at the old 300s on the
+# heavy nonvoter. 600s is the same headroom history-audit keeps.
+timeout_seconds = 600
 
 [[checks]]
 id = "benchmark-contract"
 title = "Cinema-vs-Plex benchmark config, runners, raw schema, and reports"
 command = "make benchmark-check"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["make", "python3"]
 missing = "fail"
 timeout_seconds = 120
@@ -78,7 +81,7 @@ timeout_seconds = 120
 id = "audio-synthetic-receipt"
 title = "Retained shipped-engine downmix synthetic measurements"
 command = "python3 -m unittest tests.operations.test_audio_downmix_qualification"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 timeout_seconds = 30
@@ -87,7 +90,7 @@ timeout_seconds = 30
 id = "mobile-version"
 title = "Mobile marketing versions track the workspace; build numbers are derived, never stored"
 command = "python3 -m validation.mobile_versions"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["git", "python3"]
 missing = "fail"
 timeout_seconds = 60
@@ -96,7 +99,7 @@ timeout_seconds = 60
 id = "player-input-fence"
 title = "Key handling lives only in the player input adapters; fixture resources stay wired"
 command = "scripts/player-input-fence"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 timeout_seconds = 30
@@ -105,7 +108,7 @@ timeout_seconds = 30
 id = "playback-surface-fence"
 title = "Every playback surface write lives inside the presenter's render or its migration budget"
 command = "scripts/playback-surface-fence"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 timeout_seconds = 30
@@ -135,11 +138,28 @@ missing = "fail"
 # four-CPU nonvoter (run 7243 measured ~175 minutes).
 timeout_seconds = 10800
 
+# The release profile is the CI profile with this serial check split in two.
+# Its unit and integration tests run in release-readiness.yml's complete
+# `rust-units.yml` fan-out on the release commit (one archive, sharded), and
+# everything else it covers runs here. The serial check could not finish
+# inside the fleet's 3 h job limit together with the rest of the sweep: run
+# 9461 was still in it after 2 h 41 min when the runner stopped the job.
+[[checks]]
+id = "rust-gate-release"
+title = "Rust format, Clippy, doctests, and restart contracts (release split)"
+command = "make release-rust-gate"
+profiles = ["release"]
+requires = ["cargo", "make"]
+missing = "fail"
+# Not yet measured on the heavy nonvoter at CARGO_BUILD_JOBS=1; Clippy took
+# 9 min warm on the compile pool (run 9485). Two hours, inside the job's 175.
+timeout_seconds = 7200
+
 [[checks]]
 id = "unit-core"
 title = "plurx-core unit tests with replicated-store feature coverage"
 command = "PLURX_EXPECT_TEST_COUNT_AT_LEAST=1100 make unit-core"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["cargo", "make"]
 missing = "fail"
 timeout_seconds = 1800
@@ -149,7 +169,7 @@ expect_at_least = 1100
 id = "hiqlite-vendor-clippy"
 title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
 command = "make hiqlite-vendor-clippy"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["cargo", "make"]
 missing = "fail"
 timeout_seconds = 1800
@@ -158,7 +178,7 @@ timeout_seconds = 1800
 id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["node", "npm", "python3"]
 missing = "fail"
 # make web-check now runs the Node web suite, two browser checks and tsc: 94 s
@@ -170,7 +190,7 @@ timeout_seconds = 480
 id = "web-layout"
 title = "Every web layout against the structural golden"
 command = "make ui-check"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3", "ffmpeg"]
 requires_files = ["tests/ui-structure.golden"]
 preflight = "python3 -c 'import playwright'"
@@ -197,7 +217,7 @@ timeout_seconds = 3600
 id = "playback-shaping"
 title = "Network-shaping harness contract"
 command = "node tests/playback/network-shaping.test.js && node --test tests/playback/preparation-measurement.test.js tests/playback/frame-clock.test.js tests/playback/cq-native-shipping-evidence.test.js"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["node"]
 missing = "fail"
 timeout_seconds = 300
@@ -212,7 +232,7 @@ timeout_seconds = 300
 id = "web-membership"
 title = "Cluster membership panel wording and join-token handling"
 command = "node tests/web/cluster-membership.test.js"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["node"]
 missing = "fail"
 timeout_seconds = 120
@@ -221,7 +241,7 @@ timeout_seconds = 120
 id = "reader-browser"
 title = "EPUB reader restore, navigation, search, and hostile-content boundary"
 command = "scripts/reader-browser"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3", "cargo"]
 preflight = "python3 -c 'import playwright'"
 missing = "skip"
@@ -231,7 +251,7 @@ timeout_seconds = 1800
 id = "desktop-macos"
 title = "Native macOS server tray build and unit contracts"
 command = "make desktop-macos-check"
-profiles = ["ci", "full", "nightly"]
+profiles = ["ci", "release", "full", "nightly"]
 platforms = ["darwin"]
 requires = ["make", "swift", "xcodebuild", "xcrun", "codesign"]
 missing = "skip"
@@ -241,7 +261,7 @@ timeout_seconds = 900
 id = "apple-simulators"
 title = "Shared iOS and tvOS XCTest suite"
 command = "make apple-test"
-profiles = ["ci", "full", "nightly"]
+profiles = ["ci", "release", "full", "nightly"]
 platforms = ["darwin"]
 requires = ["xcodebuild", "xcodegen"]
 missing = "skip"
@@ -251,7 +271,7 @@ timeout_seconds = 3600
 id = "apple-tv-navigation"
 title = "Native Apple TV remote navigation journeys"
 command = "make apple-tv-navigation-test"
-profiles = ["ci", "full", "nightly"]
+profiles = ["ci", "release", "full", "nightly"]
 platforms = ["darwin"]
 requires = ["xcodebuild", "xcodegen"]
 missing = "fail"
@@ -265,7 +285,7 @@ command = """
 mkdir -p target/validation/buildx && \
 BUILDX_CONFIG=target/validation/buildx make android-test
 """
-profiles = ["ci", "full", "nightly"]
+profiles = ["ci", "release", "full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["docker"]
 missing = "skip"
@@ -309,7 +329,7 @@ timeout_seconds = 300
 id = "database-upgrades"
 title = "SQLite upgrade, import staging, and downgrade-safety contract"
 command = "cargo test -p plurx-core store::sqlite::tests:: -- --nocapture && cargo test -p plurx-core cluster::migration -- --nocapture"
-profiles = ["ci", "full", "nightly"]
+profiles = ["ci", "release", "full", "nightly"]
 requires = ["cargo"]
 missing = "fail"
 timeout_seconds = 300
@@ -338,7 +358,7 @@ timeout_seconds = 28800
 id = "offline-contract"
 title = "Offline package persistence, ownership, lease, and media boundary"
 command = "cargo test -p plurx-core store::sqlite::offline -- --nocapture && cargo test -p plurx-core v14_offline -- --nocapture && cargo test -p plurxd offline -- --nocapture"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["cargo"]
 missing = "fail"
 timeout_seconds = 600
@@ -347,7 +367,7 @@ timeout_seconds = 600
 id = "credential-encryption"
 title = "Trakt bearer credential sealed at rest, migrated on upgrade, refused without its key"
 command = "cargo test -p plurx-core secrets:: -- --nocapture && cargo test -p plurx-core cluster::tests -- --nocapture && cargo test -p plurx-core store::sqlite::trakt -- --nocapture"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["cargo"]
 missing = "fail"
 timeout_seconds = 300
@@ -575,7 +595,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
-checks = ["rust-gate", "rust-gate-ci", "unit-core"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "unit-core"]
 
 [[points]]
 id = "persistence.upgrades"
@@ -614,7 +634,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "database-upgrades", "cluster-auth"]
 depends_on = ["core.media"]
 
 [[points]]
@@ -792,7 +812,7 @@ paths = [
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "cluster-auth", "cluster-transport-recovery"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "hiqlite-vendor-clippy", "cluster-auth", "cluster-transport-recovery"]
 depends_on = ["core.media", "identity.access"]
 
 [[points]]
@@ -836,7 +856,7 @@ paths = [
   "crates/plurxd/src/macos_video/live.rs",
   "crates/plurxd/src/macos_video/p5.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
 
 [[points]]
@@ -854,7 +874,7 @@ paths = [
   "tests/operations/test_k06_owned_lab_review.py",
   "tests/operations/test_k06_transport_diagnostics.py",
 ]
-checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "operations-contract"]
 depends_on = ["cluster.membership"]
 
 [[points]]
@@ -875,7 +895,7 @@ paths = [
   "scripts/replicated-write-capture.fleet.example.json",
   "tests/operations/test_replicated_write_capture.py",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]
@@ -927,7 +947,7 @@ paths = [
   "crates/plurxd/src/transcode.rs",
   "crates/plurxd/src/transcode/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]
@@ -988,7 +1008,7 @@ paths = [
   "scripts/cluster-page-latency",
   "tests/benchmark/test_cluster_page_latency.py",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "benchmark-contract", "web-static"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "cluster-auth", "benchmark-contract", "web-static"]
 depends_on = ["cluster.auth"]
 
 [[points]]
@@ -1028,7 +1048,7 @@ paths = [
   "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]
-checks = ["rust-gate", "rust-gate-ci", "api-wire", "user-journey", "resource-bounds"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "api-wire", "user-journey", "resource-bounds"]
 depends_on = ["core.media", "persistence.upgrades"]
 
 [[points]]
@@ -1071,7 +1091,7 @@ paths = [
   "docs/FEATURES.md",
   "docs/REQUIREMENTS.md",
 ]
-checks = ["rust-gate", "rust-gate-ci"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release"]
 depends_on = ["core.media", "server.api"]
 
 [[points]]
@@ -1089,7 +1109,7 @@ paths = [
   "tests/web/local-search.test.js",
   "docs/features/LOCAL-LIBRARY-SEARCH.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "web-static", "operations-contract"]
 depends_on = ["library.catalog", "metadata.enrichment", "identity.access"]
 
 [[points]]
@@ -1102,7 +1122,7 @@ paths = [
   "crates/plurxd/src/http/items.rs",
   "docs/features/METADATA*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -1144,7 +1164,7 @@ paths = [
   "crates/plurxd/src/http/internal_auth_revocation.rs",
   "docs/SECURITY.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "credential-encryption"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "security-boundaries", "credential-encryption"]
 depends_on = ["core.media", "server.api"]
 
 [[points]]
@@ -1307,7 +1327,7 @@ paths = [
   "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff", "audio-synthetic-receipt"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "web-static", "player-input-fence", "playback-surface-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff", "audio-synthetic-receipt"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -1324,7 +1344,7 @@ paths = [
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/{trakt,watch}.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "user-journey"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "user-journey"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -1359,7 +1379,7 @@ paths = [
   "docs/features/LIVE-TV-ORIGINAL-QUALITY-*.md",
   "tests/playback/live-tv-guide-cases.json",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
@@ -1383,7 +1403,7 @@ paths = [
   "docs/features/LIBRARY-CHANNELS-PLAYBACK-REPAIR.md",
   "docs/features/LIBRARY-CHANNELS-STATUS.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
 depends_on = ["library.catalog", "identity.access", "playback.pipeline", "server.api"]
 
 [[points]]
@@ -1405,7 +1425,7 @@ paths = [
   "docs/features/LIVE-TV-DVR-IMPLEMENTATION.md",
   "docs/features/LIVE-TV-DVR-STATUS.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
 depends_on = ["live-tv.integration", "library.catalog", "identity.access", "playback.pipeline", "server.api"]
 
 [[points]]
@@ -1466,7 +1486,7 @@ paths = [
   "crates/plurxd/src/http/plex.rs",
   "crates/plurxd/src/http/plex_census.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release"]
 depends_on = ["server.api", "api.contract", "playback.pipeline"]
 
 [[points]]
@@ -1498,7 +1518,7 @@ paths = [
   "tests/operations/test_jellyfin_identity_guard.py",
   "docs/clients/JELLYFIN-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "operations-contract", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "operations-contract", "security-boundaries"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
@@ -1541,7 +1561,7 @@ paths = [
   # dev-only, never served or shipped (THIRD-PARTY-NOTICES §7).
   "tools/web-types/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive", "desktop-cec-host", "desktop-cec-extension"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive", "desktop-cec-host", "desktop-cec-extension"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
 
 [[points]]
@@ -1718,7 +1738,7 @@ paths = [
   "tests/operations/**",
   "tests/desktop/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "operations-contract", "container-runtime", "resource-bounds"]
 depends_on = ["server.api"]
 
 [[points]]
@@ -1907,14 +1927,14 @@ paths = [
   "crates/plurxd/tests/sharing_daemon_restart.rs",
   "docs/features/SHARED-LIBRARIES-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption", "web-static"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption", "web-static"]
 depends_on = ["identity.access", "cluster.auth", "persistence.upgrades"]
 
 [[checks]]
 id = "desktop-cec-host"
 title = "Desktop CEC framing, freshness, structured adapters and installation ownership"
 command = "python3 -m unittest discover -s clients/desktop-remote/tests -p 'test_*.py'"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 timeout_seconds = 30
@@ -1923,7 +1943,7 @@ timeout_seconds = 30
 id = "linux-player-launcher"
 title = "plurx Player launcher against a fake server and a fake mpv"
 command = "python3 -m unittest discover -s clients/linux-player/tests -p 'test_*.py'"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 timeout_seconds = 120
@@ -1932,7 +1952,7 @@ timeout_seconds = 120
 id = "desktop-cec-extension"
 title = "Desktop CEC document binding, local credit deadlines and semantic delivery"
 command = "node --test clients/desktop-remote/tests/extension.test.mjs"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["node"]
 missing = "fail"
 timeout_seconds = 30
@@ -1941,7 +1961,7 @@ timeout_seconds = 30
 id = "diagnostics-contract"
 title = "Strict diagnostic wire/privacy/archive contracts"
 command = "make unit-diagnostics"
-profiles = ["commit", "ci", "full", "nightly"]
+profiles = ["commit", "ci", "release", "full", "nightly"]
 requires = ["cargo", "node", "make"]
 missing = "fail"
 timeout_seconds = 600
@@ -1988,7 +2008,7 @@ paths = [
   "crates/plurxd/src/subtitle_models/catalog-v1.json",
   "tests/fixtures/subtitle-translation/**",
 ]
-checks = ["operations-contract", "rust-gate", "rust-gate-ci", "web-static"]
+checks = ["operations-contract", "rust-gate", "rust-gate-ci", "rust-gate-release", "web-static"]
 depends_on = ["core.media", "server.api"]
 
 [[points]]
@@ -1996,7 +2016,7 @@ id = "desktop.control"
 title = "Native desktop control and authenticated upgrades"
 contract = "Native owners manage only the identified local installation. Shutdown requires a connection-bound generation and a clean durable receipt; signed complete release cohorts install under exclusive coordination, preserve startup policy, and recover or hold before any later service start. Headless operation needs no desktop libraries."
 paths = ["crates/plurx-desktop-control/**", "scripts/plurx-compose-control"]
-checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "operations-contract"]
 depends_on = ["server.api", "identity.access"]
 
 [[points]]
@@ -2004,7 +2024,7 @@ id = "desktop.linux"
 title = "Linux desktop tray and control window"
 contract = "An eligible local graphical session exposes native server status, lifecycle, startup preferences and authenticated upgrades through the fixed controller protocol. Automatic login and qualification reject headless, remote and container sessions; the explicitly opened control window explains unsupported desktop state, and quitting the tray leaves the server running."
 paths = ["crates/plurx-tray/**", "vendor/ksni/**"]
-checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "rust-gate-release", "operations-contract"]
 depends_on = ["desktop.control"]
 
 [[points]]

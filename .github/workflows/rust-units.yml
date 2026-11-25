@@ -16,6 +16,14 @@ name: Rust units
 #             a test that fails there too is pre-existing on main and does not
 #             block, anything else does.
 # gate     -> the one result the caller reads.
+#
+# A caller may pass `complete: true` with the commit to qualify as `ref`
+# (release-readiness.yml does, for the release commit): every unit crate is
+# then due in full, no earlier receipt is adopted, and there is no merge-base
+# check, so any failure fails the gate. That is the release gate's rule --
+# every test passes on the release commit itself -- run on the same archive
+# and shards as a pull request's, so it fits the fleet's 3 h job limit where
+# the serial `cargo test --workspace` did not (runs 9461, 9483).
 on:
   workflow_call:
     inputs:
@@ -23,6 +31,18 @@ on:
         description: Commit the change is measured against; its merge-base with the head is used.
         required: true
         type: string
+      ref:
+        description: Commit to check out and test instead of the triggering one.
+        required: false
+        default: ""
+        type: string
+      complete:
+        description: Run every unit test in full; adopt nothing; any failure blocks.
+        required: false
+        default: false
+        type: boolean
+  # A dispatched boolean may arrive as the string "false", which is truthy in
+  # an expression, so every use compares `complete` explicitly.
   workflow_dispatch:
     inputs:
       base:
@@ -30,6 +50,16 @@ on:
         required: false
         default: origin/main
         type: string
+      ref:
+        description: Commit to check out and test instead of the dispatched one.
+        required: false
+        default: ""
+        type: string
+      complete:
+        description: Run every unit test in full; adopt nothing; any failure blocks.
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: never
@@ -64,18 +94,21 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Select the crates whose content keys differ from the merge-base
         id: select
         env:
           BASE: ${{ inputs.base }}
-        run: python3 -m validation.rust_units select --base "$BASE"
+          COMPLETE: ${{ (inputs.complete == true || inputs.complete == 'true') && 'true' || '' }}
+        run: python3 -m validation.rust_units select --base "$BASE" ${COMPLETE:+--complete}
       - name: Drop tests that already passed under the same keys
         id: adopt
         if: steps.select.outputs.any == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -m validation.rust_units adopt
+          COMPLETE: ${{ (inputs.complete == true || inputs.complete == 'true') && 'true' || '' }}
+        run: python3 -m validation.rust_units adopt ${COMPLETE:+--complete}
       - name: Hand the selection to the archive job
         if: steps.adopt.outputs.build == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -141,6 +174,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Size Cargo parallelism from the container's limits
         run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
@@ -251,6 +285,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Provision the private D-Bus session runtime for unit tests
         run: |
           set -euo pipefail
@@ -324,6 +359,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: rust-units-plan-${{ github.run_id }}
@@ -452,7 +488,8 @@ jobs:
   rust_units_baseline:
     name: "Rust units: merge-base check of failures"
     needs: verdict
-    if: always() && needs.verdict.outputs.failures == 'true'
+    # A complete run has no merge-base excuse: its failures block as they are.
+    if: always() && needs.verdict.outputs.failures == 'true' && !(inputs.complete == true || inputs.complete == 'true')
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -492,6 +529,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Size Cargo parallelism from the container's limits
         run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
@@ -606,8 +644,18 @@ jobs:
           VERDICT: ${{ needs.verdict.result }}
           FAILURES: ${{ needs.verdict.outputs.failures }}
           BASELINE: ${{ needs.rust_units_baseline.result }}
+          COMPLETE: ${{ (inputs.complete == true || inputs.complete == 'true') && 'true' || 'false' }}
         run: |
-          echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT failures=$FAILURES baseline=$BASELINE"
+          echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT failures=$FAILURES baseline=$BASELINE complete=$COMPLETE"
+          if [ "$COMPLETE" = true ]; then
+            # Every unit test is due here, so none may be missing or failing.
+            [ "$SELECT" = success ] && [ "$BUILD" = true ] || { echo "a complete run selected nothing"; exit 1; }
+            [ "$ARCHIVE" = success ] && [ "$SHARDS" != '[]' ] || { echo "a complete run planned no tests ($ARCHIVE)"; exit 1; }
+            [ "$SHARD" = success ] && [ "$VERDICT" = success ] || { echo "shards $SHARD, verdict $VERDICT"; exit 1; }
+            [ "$FAILURES" != true ] || { echo "Rust unit failures on the qualified commit"; exit 1; }
+            echo "Every unit test passed on this commit."
+            exit 0
+          fi
           [ "$SELECT" = success ] || { echo "selection did not complete"; exit 1; }
           if [ "$BUILD" != true ]; then echo "No due Rust unit test: every affected crate already passed under its key, or none is affected."; exit 0; fi
           [ "$ARCHIVE" = success ] || { echo "the archive job ended with $ARCHIVE"; exit 1; }

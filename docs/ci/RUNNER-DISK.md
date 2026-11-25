@@ -260,7 +260,7 @@ Measured on the fleet on 2026-09-07, when the whole thing was full:
 |---|---|---|---|
 | Runner cache server | `<runner>/cache` (`bolt.db` + blobs) | 41 G on `gha-lab6-general-01`, ~167 G fleet-wide | the janitor timer, and nothing else |
 | Runner work root | `<runner>/_work` (checkouts) | ~58 M on `gha-lab4-general-01`, 2026-09-08 | nothing, and it does not need to be |
-| Cargo caches | `$RUNNER_TOOL_CACHE/plurx-ci/cargo/...` | 30 G budget per runner, shared by its `-uid<N>` executor roots | `scripts/ci-cache-prune`, before and after every job |
+| Cargo caches | `$RUNNER_TOOL_CACHE/plurx-ci/cargo/...` | 30 G per runner, shared by its `-uid<N>` roots | `scripts/ci-cache-prune`, before and after every job |
 | Docker + BuildKit | `/var/lib/docker` | 101 G images · 58 G build cache on media1 | `scripts/ci-buildkit-prune` (50 G) and the janitor |
 
 A dead job's leftovers: [RUNNER-JOB-LEFTOVERS.md](RUNNER-JOB-LEFTOVERS.md).

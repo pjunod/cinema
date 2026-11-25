@@ -28,7 +28,7 @@ class ReleaseReadinessCase(unittest.TestCase):
         saved = check.index('cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"')
         checkout = check.index('git checkout -q --detach "$RELEASE_SHA"')
         self.assertLess(saved, checkout)
-        for command in ("make release-check", "scripts/validate run --profile ci --all --strict"):
+        for command in ("make release-check", "scripts/validate run --profile release --all --strict"):
             invocation = f'python3 "$RUNNER_TEMP/release-readiness" {command}'
             self.assertIn(invocation, check)
             self.assertLess(checkout, check.index(invocation))

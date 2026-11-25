@@ -101,7 +101,10 @@ BUILD_SPECS = {
     # registry package located through cargo metadata; no native recipe changes.
     # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
     # the web-unit-check recipe (a Node web test); no native recipe changes.
-    'Makefile': '562fe36a23271d6bbf6654768af01d3fbf226bcaea9e9de1b8857f05e3f946b9',
+    # The split release gate adds release-rust-gate (fmt, spike lock, Clippy,
+    # `cargo test --doc`) and points release-check at the `release` profile
+    # with its notes; no native recipe changes.
+    'Makefile': 'c5d34ad9d8905d1f2a9d3840cb07baa1cc882e23454898f5c2d857325bb71056',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,

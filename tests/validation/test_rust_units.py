@@ -153,6 +153,46 @@ class SelectionTests(unittest.TestCase):
     def test_the_excluded_crate_is_never_selected(self):
         self.assertEqual(self.due_after({"crates/harness/src/lib.rs": "pub fn harness() { /* x */ }\n"}), [])
 
+    def test_a_complete_selection_makes_every_unit_crate_due_in_full(self):
+        self.repo.write("manual/guide.md", "only an exempt change\n")
+        head = self.repo.commit()
+        doc = ru.selection(head, self.base, repository=self.repo.root)
+        self.assertEqual([name for name, entry in doc["crates"].items() if entry["due"]], [])
+        keys = {name: entry["key"] for name, entry in doc["crates"].items()}
+        ru.complete_selection(doc)
+        self.assertTrue(doc["complete"])
+        self.assertEqual(sorted(doc["crates"]), ["app", "core", "devonly", "leaf"])
+        for name, entry in doc["crates"].items():
+            self.assertTrue(entry["due"], name)
+            self.assertIsNone(entry["only"], name)
+            self.assertEqual(entry["reason"], [ru.COMPLETE_REASON], name)
+            self.assertEqual(entry["key"], keys[name], name)
+
+    def test_a_complete_adopt_reads_no_history_even_with_a_token(self):
+        head = self.repo.commit("head")
+        doc = ru.complete_selection(ru.selection(head, self.base, repository=self.repo.root))
+        selection_path = self.repo.root / "out" / "selection.json"
+        pending_path = self.repo.root / "out" / "pending.json"
+        ru.write_json(selection_path, doc)
+        environment = {key: value for key, value in os.environ.items() if key != "GITHUB_OUTPUT"}
+        environment["GITHUB_TOKEN"] = "unused"
+        cwd = os.getcwd()
+        os.chdir(self.repo.root)
+        try:
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(ru, "forge_from_environment",
+                                      side_effect=AssertionError("a complete run read history")), \
+                    mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(ru.main(["adopt", "--complete", "--selection", str(selection_path),
+                                          "--output", str(pending_path)]), 0)
+        finally:
+            os.chdir(cwd)
+        pending = ru.read_json(pending_path)
+        self.assertEqual(pending["adopted"], {})
+        self.assertEqual(sorted(pending["crates"]), ["app", "core", "devonly", "leaf"])
+        self.assertTrue(all(entry["passed"] == [] and entry["only"] is None
+                            for entry in pending["crates"].values()))
+
     def test_the_key_is_identical_for_identical_inputs_across_commits(self):
         first = ru.Keys(ru.Tree(self.base, self.repo.root), ru.Config.load(CONFIG)).key("app")
         self.repo.write("manual/guide.md", "other\n")

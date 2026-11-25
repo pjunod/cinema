@@ -137,6 +137,15 @@ ci-rust-gate: fmt-check spike-lock-check lint test-socket-permission-check ## CI
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
+# The release gate's half of ci-rust-gate (validation/points.toml
+# rust-gate-release). Unit and integration test binaries, including the serial
+# vodencode restart regressions, run in release-readiness.yml's complete
+# rust-units.yml fan-out on the same commit; nextest runs no doctests, so they
+# run here.
+.PHONY: release-rust-gate
+release-rust-gate: fmt-check spike-lock-check lint ## Release gate: format, Clippy, and doctests (units run sharded)
+	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --doc --no-fail-fast
+
 # The real mount-namespace exercises for scratch aliasing and mount points
 # inside scratch. They call `mount --bind`, so they need CAP_SYS_ADMIN and are
 # not part of `check`: a developer without privileges would get a failing
@@ -1875,14 +1884,16 @@ docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget
 	@echo "image up: $(VERSION)"
 
 .PHONY: release-check
-release-check: ## Verify the tree is ready to tag the current version
+release-check: ## Verify the tree is ready to tag the current version (Rust units run separately)
 	@test -z "$$(git status --porcelain)" || { echo "working tree is dirty — commit first"; exit 1; }
 	@git rev-parse -q --verify "refs/tags/v$(VERSION)" >/dev/null \
 	  && { echo "tag v$(VERSION) already exists — bump the version in Cargo.toml"; exit 1; } || true
 	@grep -q '^## \[$(VERSION)\]' CHANGELOG.md \
 	  || { echo "CHANGELOG.md has no '## [$(VERSION)]' section"; exit 1; }
-	@scripts/validate run --profile ci --all --strict
-	@echo "Ready: git tag -a v$(VERSION) -m 'v$(VERSION)' && git push && git push --tags"
+	@scripts/validate run --profile release --all --strict
+	@echo "Sweep passed. Rust unit tests are not part of this target: release-readiness.yml runs them all"
+	@echo "(rust-units.yml complete); by hand, run 'cargo test --workspace --locked --exclude plurx-cluster-check'."
+	@echo "Then: git tag -a v$(VERSION) -m 'v$(VERSION)' && git push && git push --tags"
 
 # Installing the server is one command per platform, and the platform is
 # detected rather than asked for. deploy/install does the work; these targets

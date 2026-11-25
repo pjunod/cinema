@@ -499,6 +499,22 @@ def selection(head_rev, base_rev, repository=".", config=None):
             "crates": crates}
 
 
+COMPLETE_REASON = "complete run: every unit test is due"
+
+
+def complete_selection(doc):
+    """Every unit crate due, whole: release qualification runs every test.
+
+    The keys are still the head's real keys, so the receipts this run
+    publishes are as exact as any other. Nothing is narrowed to declared
+    dynamic reads and, with ``adopt --complete``, nothing earlier is adopted.
+    """
+    for entry in doc["crates"].values():
+        entry.update(due=True, only=None, reason=[COMPLETE_REASON])
+    doc["complete"] = True
+    return doc
+
+
 # --------------------------------------------------------------------------
 # Receipts: authenticated per-test outcomes under a crate key
 
@@ -1071,6 +1087,8 @@ def command_select(args):
     base = subprocess.run(["git", "merge-base", args.base, args.head], stdout=subprocess.PIPE,
                           text=True, check=True).stdout.strip()
     doc = selection(args.head, base)
+    if args.complete:
+        complete_selection(doc)
     write_json(args.output, doc)
     due = sorted(name for name, entry in doc["crates"].items() if entry["due"])
     lines = [f"Rust units: {len(due)} of {len(doc['crates'])} unit crates have different content "
@@ -1088,7 +1106,9 @@ def command_adopt(args):
     doc = read_json(args.selection)
     config = Config.load(Tree(doc["head"]).text(str(CONFIG)))
     pending = {"schema": SCHEMA, "head": doc["head"], "base": doc["base"], "crates": {}, "adopted": {}}
-    forge = forge_from_environment() if os.environ.get("GITHUB_TOKEN") else None
+    # A complete run adopts nothing: every test has to pass in this run.
+    forge = (forge_from_environment()
+             if os.environ.get("GITHUB_TOKEN") and not args.complete else None)
     authenticator = Authenticator(forge, int(os.environ.get("GITHUB_RUN_ID", "0")), config) if forge else None
     for crate, entry in sorted(doc["crates"].items()):
         if not entry["due"]:
@@ -1257,10 +1277,14 @@ def main(argv=None):
     p.add_argument("--base", required=True)
     p.add_argument("--head", default="HEAD")
     p.add_argument("--output", default=str(STATE / "selection.json"))
+    p.add_argument("--complete", action="store_true",
+                   help="mark every unit crate due in full (release qualification)")
     p.set_defaults(func=command_select)
     p = sub.add_parser("adopt", help="drop tests already passed under the same key")
     p.add_argument("--selection", default=str(STATE / "selection.json"))
     p.add_argument("--output", default=str(STATE / "pending.json"))
+    p.add_argument("--complete", action="store_true",
+                   help="adopt no earlier receipt: every due test runs here")
     p.set_defaults(func=command_adopt)
     p = sub.add_parser("archive-filter", help="nextest archive filterset for the pending crates")
     p.add_argument("--pending", default=str(STATE / "pending.json"))

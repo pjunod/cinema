@@ -25,8 +25,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The gate runs as two halves that each fit the fleet's 3 h job limit, which
+  # the runner enforces whatever timeout-minutes says: run 9461 was stopped at
+  # exactly 3 h, 2 h 41 min into the serial `cargo test --workspace`. Every
+  # Rust unit and integration test now runs in `rust-units.yml`'s complete
+  # mode on the release commit -- one archive, sharded across idle runners, no
+  # receipt adopted, any failure blocking -- and the rest of the sweep runs in
+  # `release-check` under the catalog's release profile (the CI profile with
+  # that serial check replaced by `rust-gate-release`). The tag needs both.
+  find:
+    name: find the release commit
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
+    outputs:
+      pending: ${{ steps.release.outputs.pending }}
+      tag: ${{ steps.release.outputs.tag }}
+      # The commit both halves test: the release commit when one is waiting,
+      # otherwise main's tip.
+      sha: ${{ steps.release.outputs.pending == 'true' && steps.release.outputs.sha || github.sha }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Find the release commit, if a release is waiting
+        id: release
+        run: |
+          # Not a pipe: a refusal (a dated section that no release commit
+          # explains) has to fail this step, not vanish into `tee`.
+          found=$(mktemp)
+          scripts/release-cut --pending > "$found"
+          cat "$found"
+          cat "$found" >> "$GITHUB_OUTPUT"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  release-units:
+    name: every Rust unit test passes on the release commit
+    needs: find
+    uses: ./.github/workflows/rust-units.yml
+    with:
+      base: ${{ needs.find.outputs.sha }}
+      ref: ${{ needs.find.outputs.sha }}
+      complete: true
+    secrets: inherit
+
   release-check:
     name: current version is ready to tag
+    needs: find
     # Use the shipped media runtime, independently of the host's FFmpeg.
     # The complete Rust suite needs the same memory pool as ci.yml:check: the
     # plurxd test build alone peaks near 15.3 GiB, which a 16 GiB container on
@@ -40,14 +98,11 @@ jobs:
       # As ci.yml:check: debug source-actor futures need 8 MiB test threads
       # (docs/ci/RUST-UNIT-FANOUT.md).
       RUST_MIN_STACK: "8388608"
-    # Includes the candidate-owned runtime build and complete strict sweep.
-    # rust-gate-ci alone is ci.yml:check's suite (~175 min on this pool, run
-    # 7243), and the rest of the sweep took about 65 min in run 9325.
-    timeout-minutes: 300
-    outputs:
-      pending: ${{ steps.release.outputs.pending }}
-      tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ steps.release.outputs.sha }}
+    # Includes the candidate-owned runtime build and the strict release-profile
+    # sweep. The sweep without rust-gate-ci took about 65 min in run 9325;
+    # rust-gate-release adds Clippy and the doctests. The runner stops any job
+    # at 3 h, so this must stay inside 180 minutes.
+    timeout-minutes: 175
     steps:
       - name: Verify effective nonvoter resource bounds
         shell: sh
@@ -93,28 +148,19 @@ jobs:
           # Keep the current runner outside the checkout: a pending release
           # can predate this workflow fix and its helper.
           cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"
-      - name: Find the release commit, if a release is waiting
-        id: release
-        run: |
-          # Not a pipe: a refusal (a dated section that no release commit
-          # explains) has to fail this step, not vanish into `tee`.
-          found=$(mktemp)
-          scripts/release-cut --pending > "$found"
-          cat "$found"
-          cat "$found" >> "$GITHUB_OUTPUT"
       - name: Check out the release commit
-        if: steps.release.outputs.pending == 'true'
+        if: needs.find.outputs.pending == 'true'
         env:
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_SHA: ${{ needs.find.outputs.sha }}
         run: git checkout -q --detach "$RELEASE_SHA"
       - name: Verify release readiness
-        if: steps.release.outputs.pending == 'true'
+        if: needs.find.outputs.pending == 'true'
         run: python3 "$RUNNER_TEMP/release-readiness" make release-check
       - name: Verify main is releasable (no release pending)
-        if: steps.release.outputs.pending != 'true'
+        if: needs.find.outputs.pending != 'true'
         run: |
           echo "No release pending: $(scripts/release-cut --pending | tr '\n' ' ')"
-          python3 "$RUNNER_TEMP/release-readiness" scripts/validate run --profile ci --all --strict
+          python3 "$RUNNER_TEMP/release-readiness" scripts/validate run --profile release --all --strict
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -125,10 +171,12 @@ jobs:
 
   tag:
     name: tag the green release commit
-    needs: release-check
-    # Only a scheduled run tags, only when the gate above passed, and only a
-    # commit that is an untagged, dated release.
-    if: github.event_name == 'schedule' && needs.release-check.result == 'success' && needs.release-check.outputs.pending == 'true'
+    needs: [find, release-units, release-check]
+    # Only a scheduled run tags, only when both halves of the gate passed, and
+    # only a commit that is an untagged, dated release.
+    if: >-
+      github.event_name == 'schedule' && needs.find.outputs.pending == 'true' &&
+      needs.release-units.result == 'success' && needs.release-check.result == 'success'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -145,15 +193,15 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: ${{ needs.release-check.outputs.sha }}
+          ref: ${{ needs.find.outputs.sha }}
       - name: Push the annotated tag on the release commit the gate passed
         env:
           # A tag pushed with the run's own token starts no workflow, so the
           # tag that must start ci.yml is pushed with a repository secret
           # scoped to this one step.
           RELEASE_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
-          TESTED_SHA: ${{ needs.release-check.outputs.sha }}
-          TAG: ${{ needs.release-check.outputs.tag }}
+          TESTED_SHA: ${{ needs.find.outputs.sha }}
+          TAG: ${{ needs.find.outputs.tag }}
         run: |
           set -eu
           if [ -z "$RELEASE_TAG_TOKEN" ]; then

@@ -2898,7 +2898,7 @@ assert.equal(context.ACT_TIMER, null);
                     "denied-warning Clippy"
                 ),
                 "command": "make hiqlite-vendor-clippy",
-                "profiles": ["commit", "ci", "full", "nightly"],
+                "profiles": ["commit", "ci", "release", "full", "nightly"],
                 "requires": ["cargo", "make"],
                 "missing": "fail",
                 "timeout_seconds": 1800,
