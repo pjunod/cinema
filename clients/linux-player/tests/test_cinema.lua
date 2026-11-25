@@ -379,4 +379,6 @@ timers[1]()
 assert(overlay.data:find("● EL: plurx Player's Dolby renderer composed the enhancement layer",1,true))
 update('native-dovi-target-state',nil)
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
+-- No path, including the Info panel's 5 Hz refresh, ever reads the level synchronously.
+eq(reads['native-dovi-target-state'],nil)
 print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 18 quality pill cases passed')
