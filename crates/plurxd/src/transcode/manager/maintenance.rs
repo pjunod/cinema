@@ -846,7 +846,7 @@ impl TranscodeManager {
                 }
                 () = attempt_returned.notified() => {
                     #[cfg(target_os = "linux")]
-                    self.reconcile_adaptive_attempt_tasks().await;
+                    self.release_returned_adaptive_tasks().await;
                     continue;
                 }
             }

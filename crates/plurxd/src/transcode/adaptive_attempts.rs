@@ -4260,6 +4260,25 @@ impl super::TranscodeManager {
         }
     }
 
+    /// Join original tasks that have just returned and drop an application
+    /// fence they no longer need. Unlike full reconciliation this takes no
+    /// attempt state lock and starts no Store work, so it is safe to run while
+    /// an Adopt is still publishing the same attempt.
+    pub(super) async fn release_returned_adaptive_tasks(&self) {
+        for entry in self.adaptive_attempts.entries().into_iter().flatten() {
+            for coordinator in [true, false] {
+                if let Err(error) = entry.join_finished_original(coordinator).await {
+                    entry.mark_unknown();
+                    tracing::error!(attempt_id = %entry.attempt_id(), error, "adaptive original task failure remains held");
+                }
+            }
+            if let Err(error) = entry.release_finished_application(&entry) {
+                tracing::warn!(attempt_id = %entry.attempt_id(), error,
+                    "adaptive application fence remains held");
+            }
+        }
+    }
+
     /// Reuse the manager's existing repair cadence. A completed original task
     /// is joined before its entry can be considered terminal; a panic leaves
     /// the exact row visible as Unknown, never as a cleanup receipt.
