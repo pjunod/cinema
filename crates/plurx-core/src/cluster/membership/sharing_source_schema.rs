@@ -186,7 +186,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
     // Authority: presence dispatch avoids preparing optional-table SQL against
     // an absent adjunct; both selected branches assert their shape at commit.
     let adjunct = inner.client.query_consistent_map::<CountRow,_>(
-        "activate_source_schema",
+        "membership_install",
         "SELECT count(*) AS count FROM sqlite_master WHERE name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*'", params!()
     ).await?;
     let adaptive = match adjunct.as_slice() {
