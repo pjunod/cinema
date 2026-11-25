@@ -411,7 +411,7 @@ impl NodeResourceRuntime {
             );
         let allocation = TrialBudget {
             original_deadline,
-            activation_allowance: std::time::Duration::ZERO,
+            activation_allowance: crate::resource_policy::LOCAL_TRIAL_ADOPTION_ALLOWANCE,
             peer_prepare_estimate: Metric::Unknown(
                 crate::process::observation::UnknownReason::InsufficientEvidence,
             ),

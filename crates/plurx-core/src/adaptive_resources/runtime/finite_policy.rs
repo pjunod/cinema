@@ -26,7 +26,7 @@ type Class = ([u8; 32], [u8; 32]);
 fn finite_trial_budget(memory: MemoryClaim, original_preparation_cutoff: Instant) -> TrialBudget {
     TrialBudget {
         original_deadline: original_preparation_cutoff,
-        activation_allowance: Duration::ZERO,
+        activation_allowance: crate::resource_policy::LOCAL_TRIAL_ADOPTION_ALLOWANCE,
         peer_prepare_estimate: Metric::Unknown(UnknownReason::InsufficientEvidence),
         // No authenticated positive peer fact was supplied. False means
         // no KNOWN capacity peer, never proof that no peer exists.

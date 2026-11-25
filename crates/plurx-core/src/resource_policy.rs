@@ -10,6 +10,10 @@ use crate::resource_observation::{ServiceUnit, ServiceWindow, WorkPhase, WorkSam
 
 const PEER_FLOOR: Duration = Duration::from_secs(3);
 const TRIAL_CEILING: Duration = Duration::from_secs(5);
+/// Time a verified local trial is given to bind its worker, record it in the
+/// Store and publish. It is reserved from the trial budget, so a verified trial
+/// is not refused merely because adoption outlasted the useful window.
+pub const LOCAL_TRIAL_ADOPTION_ALLOWANCE: Duration = Duration::from_secs(1);
 const USEFUL_WINDOW: Duration = Duration::from_secs(2);
 const RUNWAY_FLOOR: Duration = Duration::from_secs(20);
 const FRESHNESS: Duration = Duration::from_secs(15);
@@ -100,6 +104,10 @@ pub struct TrialAllocation {
     pub stop_by: Instant,
     /// Deadline by which cleanup must be proved; not a release receipt.
     pub cleanup_by: Instant,
+    /// Deadline for finishing an adoption that began before `stop_by`. It
+    /// spends the activation time reserved after the useful window, so a
+    /// late failure still cleans up before the peer reservation.
+    pub adopt_by: Instant,
     pub peer_reserved: Duration,
     pub activation_reserved: Duration,
     pub useful_budget: Duration,
@@ -147,6 +155,10 @@ impl TrialBudget {
                 .checked_add(useful_budget)
                 .ok_or(TrialRefusal::DeadlineBudget)?,
             cleanup_by: now.checked_add(total).ok_or(TrialRefusal::DeadlineBudget)?,
+            adopt_by: now
+                .checked_add(useful_budget)
+                .and_then(|stop_by| stop_by.checked_add(self.activation_allowance))
+                .ok_or(TrialRefusal::DeadlineBudget)?,
             peer_reserved: peer,
             activation_reserved: self.activation_allowance,
             useful_budget,
@@ -235,6 +247,7 @@ impl TrialMonitor {
     ) -> Result<Self, TrialRefusal> {
         if allocation.stop_by <= now
             || allocation.cleanup_by < allocation.stop_by
+            || allocation.adopt_by < allocation.stop_by
             || candidate_generation == 0
             || protected.len() > MAX_PROTECTED
         {
@@ -538,6 +551,25 @@ mod tests {
         assert_eq!(
             assess_finite_observed_service(Some(startup), Some(startup), 3, Duration::from_secs(7)),
             FiniteObservedService::PriorWithinRemaining(Duration::from_secs(6))
+        );
+    }
+
+    #[test]
+    fn an_adoption_may_spend_the_reserved_activation_time_and_still_clean_up_before_the_peer() {
+        let now = Instant::now();
+        let budget = TrialBudget {
+            activation_allowance: LOCAL_TRIAL_ADOPTION_ALLOWANCE,
+            ..budget(now)
+        };
+        let allocation = budget.allocate(now).expect("trial fits its budget");
+        assert_eq!(
+            allocation.adopt_by,
+            allocation.stop_by + LOCAL_TRIAL_ADOPTION_ALLOWANCE
+        );
+        assert!(
+            allocation.adopt_by + allocation.cleanup_bound + allocation.peer_reserved
+                <= budget.original_deadline,
+            "a late adoption failure must still leave cleanup and the peer inside the deadline"
         );
     }
 

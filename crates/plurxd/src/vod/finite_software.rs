@@ -296,7 +296,7 @@ impl FiniteSoftwareProducer {
 
     pub(super) fn activate_driver(&self) -> Result<(), String> {
         if let Some(trial) = self.trial.as_ref() {
-            if Instant::now() >= trial.allocation.stop_by
+            if Instant::now() >= trial.allocation.adopt_by
                 || trial
                     .outcome
                     .compare_exchange(
@@ -382,7 +382,7 @@ impl FiniteSoftwareProducer {
                 }
                 _ => {}
             }
-            tokio::time::timeout_at(trial.allocation.stop_by.into(), changed)
+            tokio::time::timeout_at(trial.allocation.adopt_by.into(), changed)
                 .await
                 .map_err(|_| "the original finite trial reached its cutoff")?;
         }
@@ -1696,6 +1696,7 @@ async fn observe_prepared_trial(
         return false;
     };
     let stopped_at = tokio::time::Instant::from_std(trial.allocation.stop_by);
+    let adopt_at = tokio::time::Instant::from_std(trial.allocation.adopt_by);
     let startup_at = tokio::time::Instant::from_std(trial.startup_by);
     let mut started = false;
     let mut next_pressure_at = tokio::time::Instant::now();
@@ -1784,7 +1785,18 @@ async fn observe_prepared_trial(
                     return false;
                 }
             }
-            () = tokio::time::sleep_until(stopped_at) => {
+            // An adoption that began before stop_by may finish within the
+            // activation time reserved for it; one never begun ends here.
+            () = tokio::time::sleep_until(stopped_at),
+                if trial.outcome.load(Acquire) == FiniteTrialRun::ACCEPTED =>
+            {
+                if trial.outcome.compare_exchange(
+                    FiniteTrialRun::ACCEPTED, FiniteTrialRun::REFUSED, AcqRel, Acquire,
+                ).is_ok() {
+                    return false;
+                }
+            },
+            () = tokio::time::sleep_until(adopt_at) => {
                 let outcome = trial.outcome.load(Acquire);
                 if outcome != FiniteTrialRun::PROMOTED
                     && trial.outcome.compare_exchange(
