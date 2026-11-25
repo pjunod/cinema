@@ -1280,6 +1280,9 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).expect("downgrade fixture");
         crate::queue_fixture::remove_jellyfin_compatibility_schema(&connection);
         crate::queue_fixture::remove_common_queue_schema(&connection);
+        // v43 predates the session columns and queue tables that the
+        // post-migration extensions guard; the reopen reinstalls them.
+        crate::queue_fixture::remove_empty_post_migration_extensions(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER IF EXISTS playback_settings_insert;

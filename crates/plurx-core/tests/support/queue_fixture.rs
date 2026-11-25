@@ -1914,6 +1914,47 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
 /// This touches the common queue and its v87 analysis-source reservations,
 /// never production migration.
 #[allow(dead_code)]
+/// Remove the empty unversioned extensions installed after the ordinal
+/// migrations before a rewind rewrites the tables they guard: the adaptive
+/// resource authority, the adaptive source scope that depends on it, and the
+/// encoded-output publication record. Each is all objects or none, and the
+/// next `SqliteStore::open` reinstalls it after replaying the migrations.
+/// Refuses to discard any request, attempt, history or publication row.
+#[allow(dead_code)]
+pub(crate) fn remove_empty_post_migration_extensions(connection: &rusqlite::Connection) {
+    let objects = connection
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE sql IS NOT NULL
+             AND (name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*'
+                  OR name GLOB 'adaptive_source_scope_*'
+                  OR name GLOB 'encoded_output_publications*')
+             ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, name",
+        )
+        .expect("post-migration extension inventory")
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .expect("post-migration extension rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete post-migration extension inventory");
+    for (kind, name) in &objects {
+        if kind == "table" && name != "media_resource_schema" {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM \"{name}\""), [], |row| {
+                    row.get(0)
+                })
+                .expect("post-migration extension row count");
+            assert_eq!(
+                rows, 0,
+                "historical fixture must not discard extension rows in {name}"
+            );
+        }
+    }
+    for (kind, name) in objects {
+        connection
+            .execute_batch(&format!("DROP {} \"{name}\";", kind.to_ascii_uppercase()))
+            .expect("remove empty post-migration extension");
+    }
+}
+
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
     // Refuse to discard managed subtitle model receipts before any rewind,
     // even in a bare fixture that carries only the receipt table.
