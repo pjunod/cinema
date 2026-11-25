@@ -890,7 +890,7 @@ pub(crate) async fn hydrate_from_peers(
                 return false;
             }
         };
-    let Ok(metadata) = attested.handle.metadata() else {
+    let Ok(metadata) = plurx_core::media_io::fstat(&attested.handle) else {
         return false;
     };
     let bound = crate::fragment_index_cluster::source_stamp(&metadata);
@@ -1168,8 +1168,7 @@ async fn hydration_source_still_bound(
     path: &Path,
     bound: SourceStamp,
 ) -> bool {
-    let held_after = held
-        .metadata()
+    let held_after = plurx_core::media_io::fstat(held)
         .ok()
         .map(|metadata| crate::fragment_index_cluster::source_stamp(&metadata));
     let path_after = tokio::fs::metadata(path)
@@ -1445,7 +1444,7 @@ pub(crate) async fn open_verified_for_peer(
     let Opened::Verified(file) = opened else {
         return None;
     };
-    let bytes = file.metadata().ok()?.len();
+    let bytes = plurx_core::media_io::fstat(&file).ok()?.len();
     Some((
         PinnedSubtitleBlob {
             file: tokio::fs::File::from_std(file),

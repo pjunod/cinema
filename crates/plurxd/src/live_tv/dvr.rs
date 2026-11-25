@@ -1581,10 +1581,9 @@ impl LiveTvManager {
             if let Ok((live_tv, dvr)) = configs {
                 let ours = live_tv.owner_node_id == self.node_id;
                 if ours && live_tv.enabled && dvr.enabled && self.serving.admit().is_some() {
-                    self.dvr_storage_free_bytes.store(
-                        crate::live_tv::free_space_bytes(&dvr.root).unwrap_or(u64::MAX),
-                        Ordering::Relaxed,
-                    );
+                    let free = crate::live_tv::free_space_bytes(&dvr.root).await;
+                    self.dvr_storage_free_bytes
+                        .store(free.unwrap_or(u64::MAX), Ordering::Relaxed);
                     if let Err(error) = self
                         .dvr_tick(&live_tv, &dvr, &events, &mut last_retention)
                         .await
@@ -2452,7 +2451,7 @@ impl LiveTvManager {
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
             ));
         }
-        if super::free_space_bytes(&dvr.root).is_some_and(|free| {
+        if super::free_space_bytes(&dvr.root).await.is_some_and(|free| {
             free < (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
         }) {
             return Err(LiveTvError::Capacity(
