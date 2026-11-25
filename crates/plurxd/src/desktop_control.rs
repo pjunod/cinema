@@ -1327,9 +1327,20 @@ mod tests {
         assert!(!state.shutdown.is_cancelled());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn native_uninitialized_and_configured_sole_voter_commit_real_replicated_store() {
-        for configured in [false, true] {
+    /// A real one-voter replicated store with its passive metrics sampler
+    /// and serving monitor running, proven ready to serve.
+    struct RealSoleVoter {
+        root: tempfile::TempDir,
+        state: AppState,
+        selected: plurx_core::cluster::migration::SelectedStore,
+        observation: Arc<crate::StartupObservationHttp>,
+        stop: CancellationToken,
+        metrics: tokio::task::JoinHandle<()>,
+        serving: tokio::task::JoinHandle<()>,
+    }
+
+    impl RealSoleVoter {
+        async fn start(configured: bool) -> Self {
             let root =
                 tempfile::tempdir_in(std::env::current_dir().expect("desktop control fixture"))
                     .expect("desktop control fixture");
@@ -1346,9 +1357,11 @@ mod tests {
                 crate::StartupObservationHttp::from_std_listener(http)
                     .expect("desktop control fixture"),
             );
-            let selected = plurx_core::cluster::migration::select_daemon_store_observing(
-                &config,
-                Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
+            let selected = Box::pin(
+                plurx_core::cluster::migration::select_daemon_store_observing(
+                    &config,
+                    Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
+                ),
             )
             .await
             .expect("desktop control fixture");
@@ -1411,7 +1424,37 @@ mod tests {
             })
             .await
             .expect("fresh sole-voter serving proof");
-            let control = control(root.path().to_owned());
+            Self {
+                root,
+                state,
+                selected,
+                observation,
+                stop,
+                metrics,
+                serving,
+            }
+        }
+
+        async fn close(self) -> tempfile::TempDir {
+            self.stop.cancel();
+            self.metrics.await.expect("desktop control fixture");
+            self.serving.await.expect("desktop control fixture");
+            self.observation.stop_and_drain().await;
+            self.selected
+                .shutdown()
+                .await
+                .expect("desktop control fixture");
+            self.root
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_uninitialized_and_configured_sole_voter_commit_real_replicated_store() {
+        for configured in [false, true] {
+            // The real activation future exceeds the default test stack.
+            let voter = Box::pin(RealSoleVoter::start(configured)).await;
+            let state = voter.state.clone();
+            let control = control(voter.root.path().to_owned());
             let context = context(Arc::clone(&control));
             #[cfg(target_os = "linux")]
             let native_peer = Peer { uid: 0, ..peer() };
@@ -1425,12 +1468,12 @@ mod tests {
                 confirm_interruption: true,
                 target_version: None,
             };
-            let prepared = match prepare_owned(
+            let prepared = match Box::pin(prepare_owned(
                 state.clone(),
                 Arc::clone(&context),
                 native_peer.clone(),
                 request,
-            )
+            ))
             .await
             {
                 Ok(Json(prepared)) => prepared,
@@ -1444,10 +1487,11 @@ mod tests {
                 owner_capability: prepared.owner_capability,
             };
             let operation_id = commit.operation_id.clone();
-            let committed = match commit_owned(state.clone(), context, native_peer, commit).await {
-                Ok(Json(committed)) => committed,
-                Err(error) => panic!("real sole-voter commit: {}", error.2),
-            };
+            let committed =
+                match Box::pin(commit_owned(state.clone(), context, native_peer, commit)).await {
+                    Ok(Json(committed)) => committed,
+                    Err(error) => panic!("real sole-voter commit: {}", error.2),
+                };
             assert!(committed.committed);
             assert!(state.shutdown.is_cancelled());
             assert!(state
@@ -1457,11 +1501,7 @@ mod tests {
                 .await
                 .is_none());
             // Closing the controller leaves the committed daemon owner alive.
-            stop.cancel();
-            metrics.await.expect("desktop control fixture");
-            serving.await.expect("desktop control fixture");
-            observation.stop_and_drain().await;
-            selected.shutdown().await.expect("desktop control fixture");
+            let root = Box::pin(voter.close()).await;
             control.record_http_drain(true);
             control.finish(true).await.expect("desktop control fixture");
             let receipt: ShutdownReceiptV1 = serde_json::from_slice(
@@ -1471,6 +1511,52 @@ mod tests {
             .expect("desktop control fixture");
             assert_eq!(receipt.exit_class, ExitClass::Clean);
         }
+    }
+
+    /// openraft answers a write before it republishes `last_applied`. A
+    /// sole voter read straight after its own write (the order `commit_owned`
+    /// uses after reasserting its lease) or during its writes must still be
+    /// in sync: entries the state machine is applying are not replication lag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sole_voter_stays_in_sync_through_its_own_replicated_writes() {
+        const WRITES: usize = 200;
+        let voter = Box::pin(RealSoleVoter::start(true)).await;
+        let writer = voter.state.clone();
+        let reader = voter.state.clone();
+        let done = CancellationToken::new();
+        let writes_done = done.clone();
+        let writes = tokio::spawn(async move {
+            let _done = writes_done.drop_guard();
+            for round in 0..WRITES {
+                writer
+                    .store
+                    .put_setting("desktop-control-in-sync-regression", &round.to_string())
+                    .await
+                    .expect("real replicated write");
+                let status = writer.cluster.replication_status().await;
+                assert_eq!(
+                    status.health,
+                    ReplicationHealth::InSync,
+                    "read after write {round}: {}",
+                    status.explanation
+                );
+            }
+        });
+        let mut concurrent_reads = 0_usize;
+        while !done.is_cancelled() {
+            let status = reader.cluster.replication_status().await;
+            assert_eq!(
+                status.health,
+                ReplicationHealth::InSync,
+                "read during writes: {}",
+                status.explanation
+            );
+            concurrent_reads += 1;
+            tokio::task::yield_now().await;
+        }
+        writes.await.expect("writer and its after-write reads");
+        assert!(concurrent_reads > 0);
+        voter.close().await;
     }
 
     #[test]

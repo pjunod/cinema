@@ -5697,6 +5697,7 @@ pub mod status {
         crate::cluster::timing::serving::QUORUM_WATERMARK_REFRESH;
     const QUORUM_WATERMARK_TIMEOUT: Duration =
         crate::cluster::timing::serving::QUORUM_WATERMARK_TIMEOUT;
+    const LOCAL_APPLY_SETTLE: Duration = crate::cluster::timing::serving::LOCAL_APPLY_SETTLE;
     /// How long one quorum confirmation proves this node's authority to serve
     /// from its replica. The route cache of playback-start E1c holds a fact it
     /// observed directly (a row it committed, or a quorum read) for the same
@@ -7488,6 +7489,7 @@ pub mod status {
                 .expect("replicated monitor must carry a client");
             let status = match client.metrics_db().await {
                 Ok(metrics) => {
+                    let metrics = settle_local_apply(client, metrics).await;
                     let voter_ids = metrics
                         .membership_config
                         .voter_ids()
@@ -7540,6 +7542,45 @@ pub mod status {
                 .previous
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+        }
+    }
+
+    /// openraft answers a local write before it republishes `last_applied`,
+    /// so a snapshot read during or just after a local write can hold entries
+    /// the state machine is applying in that same Raft-core turn. Local lag is
+    /// degradation only when the entries this snapshot already holds stay
+    /// unapplied past `LOCAL_APPLY_SETTLE`. Entries appended while waiting are
+    /// not part of this observation: they neither extend the wait nor count as
+    /// lag, and the next read settles them the same way. A remote client, a
+    /// stopped Raft, or lag that outlasts the bound keeps the original
+    /// snapshot, so real lag is still reported.
+    async fn settle_local_apply(
+        client: &Client,
+        metrics: hiqlite::DbRaftMetrics,
+    ) -> hiqlite::DbRaftMetrics {
+        let Some(target) = metrics.last_log_index else {
+            return metrics;
+        };
+        let applied = |metrics: &hiqlite::DbRaftMetrics| {
+            metrics.last_applied.as_ref().map(|log| log.index) >= Some(target)
+        };
+        if metrics.running_state.is_err() || applied(&metrics) {
+            return metrics;
+        }
+        let deadline = tokio::time::Instant::now() + LOCAL_APPLY_SETTLE;
+        match client
+            .wait_local_db_metrics(deadline, move |current| {
+                current.running_state.is_err() || applied(current)
+            })
+            .await
+        {
+            Ok(mut settled) => {
+                if settled.running_state.is_ok() {
+                    settled.last_log_index = settled.last_applied.as_ref().map(|log| log.index);
+                }
+                settled
+            }
+            Err(_) => metrics,
         }
     }
 
