@@ -3195,6 +3195,7 @@ impl Shared {
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             envelope = closing.is_some(), "collected finite close stage=started");
         let mut rich_watch: Option<Weak<Rendition>> = None;
+        let mut producer_watch: Option<Weak<super::finite_software::FiniteSoftwareProducer>> = None;
         if let Some(closing) = closing.as_ref() {
             if !closing.cleanup_ready.load(Acquire) {
                 return Err("original finite builder still owns its close arm".into());
@@ -3205,6 +3206,7 @@ impl Shared {
             let rich = closing.rich.lock().await.as_ref().cloned();
             let rich_weak = rich.as_ref().map(Arc::downgrade);
             rich_watch = rich_weak.clone();
+            producer_watch = producer.as_ref().map(Arc::downgrade);
             if let Some(rendition) = rich.as_ref() {
                 rendition.closed.store(true, Release);
                 rendition.kick();
@@ -3338,8 +3340,9 @@ impl Shared {
             };
             let rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1);
             drop(survivor);
+            let producer_strong = producer_watch.as_ref().map(Weak::strong_count);
             tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                ?rich_strong, ?readers, waited_ms = releasing.elapsed().as_millis(),
+                ?rich_strong, ?readers, ?producer_strong, waited_ms = releasing.elapsed().as_millis(),
                 "collected finite close still waits for application release");
         }
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
