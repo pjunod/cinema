@@ -299,6 +299,24 @@ class LandCase(unittest.TestCase):
         self.assertEqual(landing.gate_state([{"context": "main fast lane / Main promotion gate", "status": "pending"}])[0],
                          "pending")
 
+    def test_one_green_requested_run_of_the_head_is_its_receipt(self):
+        # docs/ci/REQUESTED-LANE.md: a later cheap or label-event run on the
+        # same head posts a newer skipped (or failed) gate; the pass stands.
+        green = {"id": 5, "context": GATE, "status": "success", "updated_at": "2026-11-15T10:00:00Z",
+                 "target_url": "green"}
+        skipped = {"id": 9, "context": GATE, "status": "skipped", "updated_at": "2026-11-15T11:00:00Z",
+                   "target_url": "skipped"}
+        failed = {"id": 12, "context": GATE + " (pull_request)", "status": "failure",
+                  "updated_at": "2026-11-15T12:00:00Z", "target_url": "failed"}
+        self.assertEqual(landing.gate_state([green, skipped]), ("success", "green"))
+        self.assertEqual(landing.gate_state([skipped, failed, green]), ("success", "green"))
+        # Without a pass the latest status still says where the gate stands.
+        self.assertEqual(landing.gate_state([skipped, failed]), ("failure", "failed"))
+        self.assertEqual(landing.gate_state([skipped]), ("skipped", "skipped"))
+        # A pass in another context is not this gate's pass.
+        other = {"id": 13, "context": "main fast lane / paperwork (pull_request)", "status": "success"}
+        self.assertEqual(landing.gate_state([skipped, other]), ("skipped", "skipped"))
+
     def test_an_untested_head_lands_only_with_a_reason_that_is_printed_and_recorded(self):
         forge = self.forge(gate="failure")
         sha = self.land(forge, untested="Paul ordered a direct merge of the hotfix")
