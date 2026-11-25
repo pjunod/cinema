@@ -297,8 +297,11 @@ function statsResourceService(service,healthAgeMs){
     buffer_paced:"buffer paced",client_backpressured:"client backpressured",
     source_backpressured:"source backpressured",paused:"paused",retrying:"retrying",retiring:"retiring"})[service.phase]||"unavailable";
   const metric=service.units_per_second;
+  // A speed is shown only from a report the panel still calls current: the
+  // same 5 s age as PLAYBACK_WAIT_HEALTH_MAX_AGE_MS, kept here because the
+  // stats harness loads this function on its own.
   const fresh=Number.isSafeInteger(service.interval_ms)&&service.interval_ms>0&&service.interval_ms<=15000&&
-    Number.isFinite(healthAgeMs)&&healthAgeMs>=0&&healthAgeMs<=15000;
+    Number.isFinite(healthAgeMs)&&healthAgeMs>=0&&healthAgeMs<=5000;
   let speed="unavailable";
   if(service.phase==="producing"&&service.unit==="media_milliseconds"&&metric&&metric.state==="known"&&
       Number.isSafeInteger(metric.value)&&metric.value>=0&&fresh){
