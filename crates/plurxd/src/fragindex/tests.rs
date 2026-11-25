@@ -2,6 +2,41 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+/// The ROG, 2026-11-25: a host OOM killed file 206's metadata probe and the
+/// kill was recorded as a terminal refusal of that delivery route. A probe
+/// killed from outside is transient, as the index pipe already was; a probe
+/// that refuses the source is not.
+#[test]
+fn an_externally_killed_probe_is_a_transient_failure() {
+    use crate::ffmpeg::{HeldMetadataProbeError, HeldPacketProbeError};
+
+    let killed = metadata_probe_failure(HeldMetadataProbeError::Interrupted(
+        "index metadata probe exited signal: 9 (SIGKILL)".into(),
+    ));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "index metadata probe exited signal: 9 (SIGKILL)"
+    );
+    let refused = metadata_probe_failure(HeldMetadataProbeError::Failed(
+        "index metadata probe exited exit status: 1".into(),
+    ));
+    assert_eq!(refused.code, IndexFailureCode::IndexProcessFailed);
+    assert!(!refused.transient_allowlisted);
+    let timeout = metadata_probe_failure(HeldMetadataProbeError::Timeout(
+        "index metadata probe timed out after 30 seconds".into(),
+    ));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+
+    let packet = packet_probe_failure(HeldPacketProbeError::Interrupted("killed".into()), 0, 0);
+    assert_eq!(packet.code, IndexFailureCode::IndexProcessFailed);
+    assert!(packet.transient_allowlisted);
+    let packet = packet_probe_failure(HeldPacketProbeError::Process("refused".into()), 0, 0);
+    assert!(!packet.transient_allowlisted);
+}
+
 #[cfg(unix)]
 #[test]
 fn an_external_index_process_kill_is_a_bounded_transient_failure() {

@@ -234,6 +234,10 @@ impl FragmentIndexOutcome {
     /// refusal is checked too.
     /// Revision 3 also reopens process failures caused by an external kill.
     /// Older workers recorded those interruptions as terminal media failures.
+    /// Revision 4 reopens the probe kills revision 3 still recorded that way:
+    /// their only trace is the probe's own words, `exited signal: 9`, since a
+    /// probe failure carries no exit category. Budget failures are not
+    /// reopened again: revision 2's budget is the one they still run under.
     ///
     /// The retry deadline alone never makes a row terminal. A retryable row
     /// past it is due: the window closes when an attempt after the deadline
@@ -242,15 +246,20 @@ impl FragmentIndexOutcome {
     /// window promised instead of declaring the title unindexable unread.
     pub fn state(&self, now_ms: i64) -> IndexOutcomeState {
         use crate::content_analysis::IndexFailureCode;
+        const KILLED: &str = "signal: 9 (SIGKILL)";
+        let recorded_killed = self
+            .diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.exit_category.as_deref() == Some(KILLED))
+            || self.reason.contains(KILLED);
         if matches!(self.refusal, IndexRefusal::Truncated { .. })
-            && self.policy_revision < crate::content_analysis::INDEX_FAILURE_POLICY_REVISION
-            && (self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded)
-                || (self.typed_code == Some(IndexFailureCode::IndexProcessFailed)
+            && ((self.policy_revision < 3
+                && self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded))
+                || (self.policy_revision < crate::content_analysis::INDEX_FAILURE_POLICY_REVISION
+                    && self.typed_code == Some(IndexFailureCode::IndexProcessFailed)
                     && self.typed_retryable == Some(false)
                     && self.retry_deadline_ms == 0
-                    && self.diagnostic.as_ref().is_some_and(|diagnostic| {
-                        diagnostic.exit_category.as_deref() == Some("signal: 9 (SIGKILL)")
-                    })))
+                    && recorded_killed))
         {
             return IndexOutcomeState::Due;
         }
@@ -1612,10 +1621,40 @@ mod tests {
     fn a_budget_failure_under_the_old_policy_is_due_once() {
         let mut old = outcome(Some(false), i64::MAX, 1_000);
         old.typed_code = Some(IndexFailureCode::IndexBudgetExceeded);
-        old.policy_revision = INDEX_FAILURE_POLICY_REVISION - 1;
+        old.policy_revision = 2;
         assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Due);
-        old.policy_revision = INDEX_FAILURE_POLICY_REVISION;
-        assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Terminal);
+        // Revision 3 already budgets from the measurement; a later revision
+        // about process kills does not spend another whole-file read on it.
+        for revision in [3, INDEX_FAILURE_POLICY_REVISION] {
+            old.policy_revision = revision;
+            assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Terminal);
+        }
+    }
+
+    /// The ROG, 2026-11-25: a host OOM killed a title's metadata probe, and
+    /// revision 3 recorded the kill as a terminal process failure -- a
+    /// permanent `vod_index_unavailable` for that delivery route. A probe
+    /// failure carries no exit category; its words are the only trace.
+    #[test]
+    fn a_revision_three_probe_kill_is_due_once() {
+        for reason in [
+            "index metadata probe exited signal: 9 (SIGKILL)",
+            "packet probe exited signal: 9 (SIGKILL): ",
+        ] {
+            let mut killed = outcome(Some(false), i64::MAX, 0);
+            killed.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+            killed.policy_revision = 3;
+            killed.reason = reason.to_owned();
+            killed.diagnostic = Some(crate::content_analysis::IndexDiagnostic::default());
+            assert_eq!(killed.state(1_000), IndexOutcomeState::Due, "{reason}");
+            killed.policy_revision = INDEX_FAILURE_POLICY_REVISION;
+            assert_eq!(killed.state(1_000), IndexOutcomeState::Terminal, "{reason}");
+        }
+        let mut refused = outcome(Some(false), i64::MAX, 0);
+        refused.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        refused.policy_revision = 3;
+        refused.reason = "index metadata probe exited exit status: 1".to_owned();
+        assert_eq!(refused.state(1_000), IndexOutcomeState::Terminal);
     }
 
     #[test]
