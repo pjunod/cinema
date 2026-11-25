@@ -50,6 +50,16 @@ rustc --version | grep -F 'rustc 1.97.1 '
 python3 -c 'import importlib.metadata; assert importlib.metadata.version("playwright") == "1.62.0"'
 export PLURX_PLAYBACK_CHROME="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
 test -x "$PLURX_PLAYBACK_CHROME"
+# The checkout owner's uid normally has no account in this image. Give it one
+# whose home is $HOME, as on any host: code that looks the user up
+# (Path.home() with HOME unset, ~ expansion, getpwuid) must find a home, not
+# fail. A uid the image already knows keeps its own entry.
+if ! getent passwd "$READINESS_UID" >/dev/null; then
+  getent group "$READINESS_GID" >/dev/null || groupadd --gid "$READINESS_GID" readiness
+  useradd --uid "$READINESS_UID" --gid "$READINESS_GID" --home-dir "$HOME" --no-create-home \
+    --shell /bin/bash readiness
+  test "$(getent passwd "$READINESS_UID" | cut -d: -f6)" = "$HOME"
+fi
 # The image keeps its toolchain; only build/dependency caches are host-mounted.
 # Check the host client against the daemon after dropping root, too. The
 # Bookworm docker.io client is too old for this fleet's Docker 29 API.
@@ -71,7 +81,7 @@ FORWARD_ENV = (
     "GITHUB_SHA", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_RUN_ID",
     "GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL",
     "GITHUB_API_URL", "GITHUB_WORKSPACE", "CARGO_BUILD_JOBS", "RUST_TEST_THREADS",
-    "CARGO_INCREMENTAL", "CARGO_TERM_COLOR",
+    "RUST_MIN_STACK", "CARGO_INCREMENTAL", "CARGO_TERM_COLOR",
     "PLURX_LIVE_TV_DEVICE", "PLURX_LIVE_TV_TUNERS",
 )
 
@@ -181,9 +191,17 @@ def run_owned(args: list[str], *, check: bool = True) -> int:
     return status
 
 
-def container_command(image: str, command: list[str], name: str, *, host_network: bool = False, memory_gb: int = 16) -> list[str]:
-    if memory_gb not in (8, 16):
-        raise ValueError("runtime memory must be 8 or 16 GiB")
+# The complete strict sweep compiles plurxd's test binary, whose rustc alone
+# peaks near 15.3 GiB resident (measured 2026-11-24); a 16 GiB container
+# killed it. 18 GiB without swap runs inside the heavy nonvoter's 20 GiB,
+# swapless slice and leaves the rest to the runner and dockerd. 8 GiB is the
+# nightly media sweep, which compiles no plurxd tests.
+MEMORY_GB = (8, 18)
+
+
+def container_command(image: str, command: list[str], name: str, *, host_network: bool = False, memory_gb: int = 18) -> list[str]:
+    if memory_gb not in MEMORY_GB:
+        raise ValueError("runtime memory must be 8 or 18 GiB")
     workspace = Path.cwd().resolve()
     if not (workspace / "Cargo.toml").is_file() or not (workspace / ".git").exists():
         raise ValueError("run from the checked-out repository root")
@@ -197,7 +215,7 @@ def container_command(image: str, command: list[str], name: str, *, host_network
     args = [
         "docker", "run", "--rm", "--init", "--pull=never", "--name", name,
         "--cpus", "3", "--memory", f"{memory_gb}g",
-        "--memory-swap", "8g" if memory_gb == 8 else "18g", "--pids-limit", "4096",
+        "--memory-swap", f"{memory_gb}g", "--pids-limit", "4096",
         "--workdir", str(workspace),
     ]
     if host_network:
@@ -246,7 +264,7 @@ def container_command(image: str, command: list[str], name: str, *, host_network
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host-network", action="store_true")
-    parser.add_argument("--memory-gb", type=int, choices=(8, 16), default=16)
+    parser.add_argument("--memory-gb", type=int, choices=MEMORY_GB, default=18)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     options = parser.parse_args(argv)
     if not options.command:

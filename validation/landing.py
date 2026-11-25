@@ -2,7 +2,7 @@
 
 `make history-check` reads a corrective pull request's `Regression-Test:`
 lines from the landing commit's message (docs/VALIDATION.md, "The boundary,
-and what replaces a fragment past it"). The merge train copies them. The raw
+and what replaces a fragment past it"). The raw
 API does not: `POST …/pulls/<N>/merge` without `MergeMessageField` lands the
 title alone, and a landing commit cannot be amended, so every such merge
 costs a permanent row in `validation/merge-errata.toml` (#1596 and #1599 on
@@ -10,11 +10,11 @@ costs a permanent row in `validation/merge-errata.toml` (#1596 and #1599 on
 
 Two entry points share one definition of a landing message:
 
-* `scripts/land <pr> --head <sha>` is the landing path for a merge made with
-  the train off. It refuses a pull request that is not ready, whose head has
+* `scripts/land <pr> --head <sha>` is the landing path for every merge into
+  `main` (docs/ci/REQUESTED-LANE.md). It refuses a pull request that is not ready, whose head has
   not passed the lane's promotion gate, or whose merge tree it cannot build;
   resolves every line in the tree the merge will produce; merges with the
-  message the merge train uses; then reads the landed commit back.
+  message the retired merge train used; then reads the landed commit back.
 * `python3 -m validation.landing check` runs on every push to `main`
   (`.github/workflows/landing-check.yml`) and fails, naming the pull request,
   when a landing lacks the lines its description carries. It is the same
@@ -59,16 +59,17 @@ TARGET = "main"
 # Forgejo's own work-in-progress prefixes; either keeps a pull request a draft.
 DRAFT_RE = re.compile(r"^\s*(?:wip:|\[wip\])", re.IGNORECASE)
 # Forgejo answers 405 with this text while it is still computing whether the
-# pull request merges cleanly. The merge train waits on the same answer.
+# pull request merges cleanly.
 RETRY_LATER = re.compile(r"try again later", re.IGNORECASE)
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 MERGE_RETRIES = 12
 MERGE_WAIT = 5.0
 READBACK_RETRIES = 5
 READBACK_WAIT = 2.0
-# What the merge train calls green: the fast lane's `promotion_gate` job
-# itself succeeded. A run that skipped the gate (a draft, a paperwork-only
-# run) reports an overall success and is not green.
+# Green: the fast lane's `promotion_gate` job itself succeeded on this head.
+# It runs only on a requested lane run (the `lane` label); a run that skipped
+# the gate (a cheap push run, a draft, a paperwork-only run) reports an
+# overall success and is not green.
 GATE_CONTEXT = "main fast lane / Main promotion gate"
 UNTESTED_TRAILER = "Landed-Untested"
 
@@ -137,10 +138,21 @@ class Forge:
         return self._call("GET", f"/pulls/{number}")
 
     def statuses(self, sha: str) -> list[dict]:
-        """The latest commit status per context for `sha`."""
+        """Every commit status reported for `sha`, newest first.
 
-        combined = self._call("GET", f"/commits/{sha}/status") or {}
-        return list(combined.get("statuses") or [])
+        The full list, not the combined `/status` view: that keeps only the
+        newest status per context, so a later run on the same head (a cheap
+        push-event run, a label tidy-up) posting a skipped gate would hide the
+        requested run's green one, which `gate_state` accepts.
+        """
+
+        statuses: list[dict] = []
+        for page in range(1, 21):
+            rows = self._call("GET", f"/commits/{sha}/statuses?page={page}&limit=50") or []
+            statuses.extend(rows)
+            if len(rows) < 50:
+                break
+        return statuses
 
     def source_gate(self, number, head, main, root, run_id):
         from validation import source_gate_landing
@@ -270,11 +282,11 @@ def merge_tree(root: Path, main: str, head: str) -> tuple[str | None, bool]:
 def landing_message(pull: dict, untested: str | None = None) -> tuple[str, str]:
     """The subject and message a landing of `pull` carries.
 
-    The merge train's form (`cifleet/train.py` `_merge_message`, ci-fleet
-    472831c): Forgejo's own subject, then the whole description and a
+    The retired merge train's form (`cifleet/train.py` `_merge_message`,
+    ci-fleet 472831c): Forgejo's own subject, then the whole description and a
     `Reviewed-on:` line, which is also what `MERGE_TEMPLATE.md` prefills the
     web form with. The description is where the `Regression-Test:` lines are,
-    so a landing made here and one made by the train read the same.
+    so every landing on `main` reads the same.
     `untested` adds the reason a head was landed without a green gate.
     """
 
@@ -301,6 +313,10 @@ def gate_state(statuses: list[dict]) -> tuple[str, str]:
     """(state, where to look) of the promotion gate among a commit's statuses.
 
     "missing" when the lane never reported the gate for this commit.
+    Any `success` on this exact head is the answer: one complete green
+    requested run is the receipt, and a later cheap or label-event run on
+    the same head posts a newer `skipped` gate that must not hide it.
+    Otherwise the latest status says where the gate stands.
     """
 
     gates = [
@@ -310,6 +326,9 @@ def gate_state(statuses: list[dict]) -> tuple[str, str]:
     ]
     if not gates:
         return "missing", ""
+    passed = [status for status in gates if str(status.get("status") or status.get("state") or "") == "success"]
+    if passed:
+        gates = passed
     latest = max(gates, key=lambda status: (str(status.get("updated_at") or ""), status.get("id") or 0))
     return str(latest.get("status") or latest.get("state") or "missing"), str(latest.get("target_url") or "")
 
@@ -673,7 +692,7 @@ def main_land(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/land",
         description="Land a pull request on main with its Regression-Test lines in the landing "
-                    "commit. The landing path when MERGE_TRAIN is off; never the raw merge API.",
+                    "commit. The landing path for main; never the raw merge API.",
         epilog="Exit codes: 0 landed (or a clean dry run); 1 refused or conflicting, nothing merged; "
                "2 usage or forge error, nothing merged; 3 MERGED, but the landing commit is wrong "
                "and needs an errata row.",

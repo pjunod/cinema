@@ -131,7 +131,9 @@ command = "make ci-rust-gate"
 profiles = ["ci"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 1800
+# The same suite as ci.yml:check, which needs its 180-minute budget on the
+# four-CPU nonvoter (run 7243 measured ~175 minutes).
+timeout_seconds = 10800
 
 [[checks]]
 id = "unit-core"
@@ -159,7 +161,10 @@ command = "make web-check"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node", "npm", "python3"]
 missing = "fail"
-timeout_seconds = 120
+# make web-check now runs the Node web suite, two browser checks and tsc: 94 s
+# on a fast workstation (2026-11-24), past 120 s in the release gate's
+# 3-CPU container. Five times the measured run.
+timeout_seconds = 480
 
 [[checks]]
 id = "web-layout"
@@ -780,6 +785,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "vendor/hiqlite/**",
   "vendor/hiqlite-wal/**",
+  "vendor/openraft/**",
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]

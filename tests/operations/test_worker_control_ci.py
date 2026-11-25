@@ -39,7 +39,11 @@ class WorkerControlCiTests(unittest.TestCase):
 
     def test_proof_job_selects_only_relevant_source_changes(self) -> None:
         self.assertIn("needs: scope", self.proof)
-        self.assertIn("if: github.event.pull_request.draft == false", self.proof)
+        condition = " ".join(self.proof.split("    runs-on:")[0].split("    if: >-")[1].split())
+        # A ready PR's requested lane only (docs/ci/REQUESTED-LANE.md).
+        self.assertIn("github.event.pull_request.draft == false", condition)
+        self.assertIn("needs.scope.outputs.lane_requested == 'true'", condition)
+        self.assertIn("needs.scope.outputs.worker_control == 'true'", condition)
         selection = step_block(self.proof, "Select affected worker controller proof inputs")
         self.assertIn('git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA"', selection)
         for path in (

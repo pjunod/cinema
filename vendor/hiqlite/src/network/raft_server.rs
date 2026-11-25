@@ -53,6 +53,33 @@ pub enum RaftStreamRequest {
     RemoveMembershipCache(u64),
     #[cfg(feature = "cache")]
     FencedRemoveMembershipCache(crate::ReductionFenceReference),
+
+    // Plurx patch 37: pre-vote, appended after every deployed ordinal. Sent only on a connection
+    // whose server advertised [`RAFT_PRE_VOTE_HEADER`]; an older server never receives it.
+    #[cfg(feature = "sqlite")]
+    PreVoteDB((usize, VoteRequest<u64>)),
+    #[cfg(feature = "cache")]
+    PreVoteCache((usize, VoteRequest<u64>)),
+}
+
+/// Plurx patch 37: a Raft stream server that answers `PreVote*` says so on its WebSocket upgrade
+/// response. An older server omits it, and a client then never writes a pre-vote on that socket
+/// (an unknown request variant would close the whole stream, appends included).
+pub(crate) const RAFT_PRE_VOTE_HEADER: &str = "x-hiqlite-raft-prevote";
+/// The only value of [`RAFT_PRE_VOTE_HEADER`] this build understands.
+pub(crate) const RAFT_PRE_VOTE_V1: &str = "v1";
+
+pub(crate) fn peer_answers_pre_vote(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(RAFT_PRE_VOTE_HEADER)
+        .is_some_and(|value| value.as_bytes() == RAFT_PRE_VOTE_V1.as_bytes())
+}
+
+fn advertise_pre_vote<B>(response: &mut axum::http::Response<B>) {
+    response.headers_mut().insert(
+        RAFT_PRE_VOTE_HEADER,
+        axum::http::HeaderValue::from_static(RAFT_PRE_VOTE_V1),
+    );
 }
 
 impl From<&[u8]> for RaftStreamRequest {
@@ -91,6 +118,15 @@ pub enum RaftStreamResponsePayload {
     VoteCache(Result<VoteResponse<u64>, RaftError<u64>>),
     #[cfg(feature = "cache")]
     SnapshotCache(Result<InstallSnapshotResponse<u64>, RaftError<u64, InstallSnapshotError>>),
+
+    // Plurx patch 37: answers to `PreVote*`, appended after every deployed ordinal.
+    #[cfg(feature = "sqlite")]
+    PreVoteDB(Result<VoteResponse<u64>, RaftError<u64>>),
+    #[cfg(feature = "cache")]
+    PreVoteCache(Result<VoteResponse<u64>, RaftError<u64>>),
+    /// Never written to a socket: the client's connection task answers a pre-vote with this when
+    /// the connected server did not advertise [`RAFT_PRE_VOTE_HEADER`].
+    PreVoteUnsupported,
 }
 
 #[derive(Debug)]
@@ -168,7 +204,8 @@ pub async fn stream_cache(
 
     tracing::info!("WebSocket cache stream request accepted");
 
-    let (response, socket) = ws.upgrade()?;
+    let (mut response, socket) = ws.upgrade()?;
+    advertise_pre_vote(&mut response);
     let task_status = state.snapshot_transport.clone();
     tokio::task::spawn(Box::pin(async move {
         let _task_guard = task_status.owned_async_task();
@@ -200,7 +237,8 @@ pub async fn stream_sqlite(
 
     tracing::info!("WebSocket sqlite stream request accepted");
 
-    let (response, socket) = ws.upgrade()?;
+    let (mut response, socket) = ws.upgrade()?;
+    advertise_pre_vote(&mut response);
     let task_status = state.snapshot_transport.clone();
     tokio::task::spawn(Box::pin(async move {
         let _task_guard = task_status.owned_async_task();
@@ -732,6 +770,11 @@ async fn execute_raft_request(
             (request_id, RaftStreamResponsePayload::VoteDB(result))
         }
         #[cfg(feature = "sqlite")]
+        RaftStreamRequest::PreVoteDB((request_id, request)) => {
+            let result = state.raft_db.raft.pre_vote(request).await;
+            (request_id, RaftStreamResponsePayload::PreVoteDB(result))
+        }
+        #[cfg(feature = "sqlite")]
         RaftStreamRequest::SnapshotDB((request_id, request)) => {
             let mut prepared_status = inbound_snapshot_status
                 .take()
@@ -781,6 +824,11 @@ async fn execute_raft_request(
         RaftStreamRequest::VoteCache((request_id, request)) => {
             let result = state.raft_cache.raft.vote(request).await;
             (request_id, RaftStreamResponsePayload::VoteCache(result))
+        }
+        #[cfg(feature = "cache")]
+        RaftStreamRequest::PreVoteCache((request_id, request)) => {
+            let result = state.raft_cache.raft.pre_vote(request).await;
+            (request_id, RaftStreamResponsePayload::PreVoteCache(result))
         }
         #[cfg(feature = "cache")]
         RaftStreamRequest::SnapshotCache((request_id, request)) => {
@@ -913,6 +961,83 @@ mod tests {
     use fastwebsockets::Role;
     use openraft::Vote;
     use openraft::raft::InstallSnapshotResponse;
+
+    fn tag<T: Serialize>(value: &T) -> u32 {
+        let bytes = crate::helpers::serialize(value).expect("serialize stream value");
+        u32::from_le_bytes(bytes[..4].try_into().expect("legacy bincode variant tag"))
+    }
+
+    /// Plurx patch 37: the pre-vote variants come after every deployed ordinal of the build Plurx
+    /// ships (both Raft groups), so an older peer decodes every value it can be sent.
+    #[cfg(all(feature = "sqlite", feature = "cache"))]
+    #[test]
+    fn pre_vote_variants_follow_every_deployed_raft_stream_ordinal() {
+        let vote = || VoteRequest::new(Vote::new(6, 1), None);
+        let answer = || Ok(VoteResponse::new(Vote::new(6, 1), None, true));
+
+        // Deployed requests: AppendDB 0, VoteDB 1, SnapshotDB 2, AppendCache 3, VoteCache 4,
+        // SnapshotCache 5, RemoveMembershipCache 6, FencedRemoveMembershipCache 7.
+        assert_eq!(1, tag(&RaftStreamRequest::VoteDB((0, vote()))));
+        assert_eq!(4, tag(&RaftStreamRequest::VoteCache((0, vote()))));
+        assert_eq!(6, tag(&RaftStreamRequest::RemoveMembershipCache(3)));
+        assert_eq!(8, tag(&RaftStreamRequest::PreVoteDB((0, vote()))));
+        assert_eq!(9, tag(&RaftStreamRequest::PreVoteCache((0, vote()))));
+
+        // Deployed responses: AppendDB 0, VoteDB 1, SnapshotDB 2, AppendCache 3, VoteCache 4,
+        // SnapshotCache 5.
+        assert_eq!(1, tag(&RaftStreamResponsePayload::VoteDB(answer())));
+        assert_eq!(4, tag(&RaftStreamResponsePayload::VoteCache(answer())));
+        assert_eq!(6, tag(&RaftStreamResponsePayload::PreVoteDB(answer())));
+        assert_eq!(7, tag(&RaftStreamResponsePayload::PreVoteCache(answer())));
+        assert_eq!(8, tag(&RaftStreamResponsePayload::PreVoteUnsupported));
+    }
+
+    /// Plurx patch 37: the real Raft stream handlers advertise pre-vote and dispatch it to
+    /// `Raft::pre_vote` for both groups. The transport tests use their own test servers, so
+    /// without this, dropping either half would fail nothing.
+    #[test]
+    fn both_raft_stream_handlers_advertise_and_answer_pre_vote() {
+        let source = include_str!("raft_server.rs");
+        let section = |start: &str, end: &str| {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("{start} not found"));
+            let rest = &source[from..];
+            &rest[..rest
+                .find(end)
+                .unwrap_or_else(|| panic!("{end} not found after {start}"))]
+        };
+        for (handler, next) in [
+            ("pub async fn stream_cache(", "pub async fn stream_sqlite("),
+            ("pub async fn stream_sqlite(", "async fn handle_socket("),
+        ] {
+            let body = section(handler, next);
+            assert!(
+                body.contains("advertise_pre_vote(&mut response);"),
+                "{handler} must advertise pre-vote"
+            );
+        }
+        let dispatch = section("async fn execute_raft_request(", "\n}\n");
+        assert!(dispatch.contains("state.raft_db.raft.pre_vote(request)"));
+        assert!(dispatch.contains("state.raft_cache.raft.pre_vote(request)"));
+    }
+
+    /// Plurx patch 37: only the exact v1 value advertises pre-vote.
+    #[test]
+    fn only_the_exact_header_value_advertises_pre_vote() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!peer_answers_pre_vote(&headers));
+        headers.insert(
+            RAFT_PRE_VOTE_HEADER,
+            axum::http::HeaderValue::from_static("v2"),
+        );
+        assert!(!peer_answers_pre_vote(&headers));
+        headers.insert(
+            RAFT_PRE_VOTE_HEADER,
+            axum::http::HeaderValue::from_static(RAFT_PRE_VOTE_V1),
+        );
+        assert!(peer_answers_pre_vote(&headers));
+    }
 
     fn track_inbound_attempt(
         status: &crate::LocalSnapshotTransportStatus,

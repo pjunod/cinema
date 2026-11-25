@@ -53,27 +53,31 @@ decides what a session costs. Every agent working here, Claude or GPT:
 - **Review the diff, not the repo.** An adversarial review gets the diff, the
   touched files' outlines and the relevant plan's head.
 
-## Landing on main: the merge train
+## Landing on main: the requested lane
 
-Read [docs/ci/MERGE-TRAIN.md](docs/ci/MERGE-TRAIN.md) before you merge
-anything into `main`. When the repository variable `MERGE_TRAIN` is `on`, you
-do not merge your own PR: take `WIP:` off its title and the merge train tests
-it with the PRs queued with it and merges it (`hold` keeps a ready PR out,
-`train:solo` sends a hotfix next, alone; putting `WIP:` back takes it off).
-The bot's single comment on the PR says where it stands. When `MERGE_TRAIN` is
-unset or `off`, land your PR yourself as below.
+Read [docs/ci/REQUESTED-LANE.md](docs/ci/REQUESTED-LANE.md) before you merge
+anything into `main`. Push freely: every push to a ready PR runs only the
+cheap gate (paperwork, scope, the fast Rust fmt/Clippy gate, web syntax and
+types, the Android compile). When the head is ready, ask for the full lane
+once: `ci-fleet lane request --pr N --head SHA` (or add the label `lane`),
+then `ci-fleet lane wait`. That one run carries the heavy jobs and the
+`Main promotion gate`. To rerun the same head, request again (ci-fleet removes
+and re-adds the label; receipts make it incremental). Never add or remove
+labels in a loop: each label change is a run, and any label change while
+`lane` is present restarts the requested run.
 
-An off-mode merge goes through `scripts/land <pr> --head <sha>`, never the raw
-merge API. `<sha>` is the full 40-character head you reviewed. The script
-refuses a draft, a moved head, a head whose `Main promotion gate` is not green
+A merge goes through `scripts/land <pr> --head <sha>`, never the raw merge
+API. `<sha>` is the full 40-character head you reviewed. The script refuses a
+draft, a moved head, a head with no green `Main promotion gate`
 (`--accept-untested '<reason>'` only when the owner ordered a direct merge;
 the reason is recorded in the landing commit) and a `Regression-Test:` line
-that does not resolve in the merge's tree; it merges with the merge train's
-message and reads the landing commit back. It exits 0 when landed, 1 when
-refused or conflicting and 2 on a usage or forge error (nothing merged in
-either case), and exits 3 when the merge happened but the landing commit is
-wrong and needs an errata row. `.github/workflows/landing-check.yml` fails on
-`main` for a landing made any other way that lost its lines.
+that does not resolve in the merge's tree; it merges with the description as
+the landing message and reads the landing commit back. It exits 0 when
+landed, 1 when refused or conflicting and 2 on a usage or forge error
+(nothing merged in either case), and exits 3 when the merge happened but the
+landing commit is wrong and needs an errata row.
+`.github/workflows/landing-check.yml` fails on `main` for a landing made any
+other way that lost its lines.
 
 ## Before you push: paperwork
 
@@ -91,7 +95,7 @@ mobile build number: both apps derive it at build time from `scripts/build-numbe
 in Markdown, missing index rows — and the lane does the
 same on its own: it pushes a `chore(paperwork)` commit to your branch instead
 of failing, so `git pull --rebase` before your next push. A new push cancels
-the PR's in-flight lane run; successes from earlier finished runs are still reused.
+the PR's in-flight lane run, a requested one included; successes from earlier finished runs are still reused.
 [docs/ci/CI-THROUGHPUT.md](docs/ci/CI-THROUGHPUT.md) says what to run before
 pushing and what reruns.
 

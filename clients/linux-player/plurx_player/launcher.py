@@ -208,8 +208,8 @@ def _redeem_and_play(args, deps, handoff, http, gate):
         if not binary:
             raise PlaybackError("mpv is not installed")
         caps = device_caps(VERSION, native_dovi=native_dovi_capable(binary))
-        runtime = tempfile.mkdtemp(prefix="plurx-player-", dir=_runtime_base(deps))
-        mpv = Mpv(binary, os.path.join(runtime, "mpv.sock"),
+        runtime = tempfile.mkdtemp(prefix=RUNTIME_PREFIX, dir=_runtime_base(deps))
+        mpv = Mpv(binary, os.path.join(runtime, SOCKET_NAME),
                   config_dir=os.path.join(deps.config_dir or default_config_dir(), "mpv"))
         mpv.start()
         from .cinema import Preferences
@@ -254,9 +254,27 @@ def _check_redeemed(redeemed, server):
         raise PlaybackError("the server's handoff named no file")
 
 
+# mpv binds its IPC socket at <base>/plurx-player-XXXXXXXX/mpv.sock, and a
+# Linux AF_UNIX path holds at most 107 bytes (103 on macOS, where developers
+# run the tests). A deep TMPDIR (a CI workspace, a sandboxed session) would
+# otherwise make mpv exit before it is ready.
+SOCKET_NAME = "mpv.sock"
+RUNTIME_PREFIX = "plurx-player-"
+SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
+_MKDTEMP_SUFFIX = 8
+
+
+def socket_fits(base):
+    path = os.path.join(os.path.abspath(base), RUNTIME_PREFIX + "x" * _MKDTEMP_SUFFIX, SOCKET_NAME)
+    return len(os.fsencode(path)) <= SUN_PATH_MAX
+
+
 def _runtime_base(deps):
-    base = deps.runtime_dir or os.environ.get("XDG_RUNTIME_DIR")
-    return base if base and os.path.isdir(base) else None
+    """The first private-capable directory whose socket path mpv can bind."""
+    for base in (deps.runtime_dir, os.environ.get("XDG_RUNTIME_DIR"), tempfile.gettempdir(), "/tmp"):
+        if base and os.path.isdir(base) and socket_fits(base):
+            return base
+    raise PlaybackError("no runtime directory is short enough for mpv's control socket")
 
 
 def _teardown(http, playback, mpv, runtime, deps):

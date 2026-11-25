@@ -299,6 +299,24 @@ class LandCase(unittest.TestCase):
         self.assertEqual(landing.gate_state([{"context": "main fast lane / Main promotion gate", "status": "pending"}])[0],
                          "pending")
 
+    def test_one_green_requested_run_of_the_head_is_its_receipt(self):
+        # docs/ci/REQUESTED-LANE.md: a later cheap or label-event run on the
+        # same head posts a newer skipped (or failed) gate; the pass stands.
+        green = {"id": 5, "context": GATE, "status": "success", "updated_at": "2026-11-15T10:00:00Z",
+                 "target_url": "green"}
+        skipped = {"id": 9, "context": GATE, "status": "skipped", "updated_at": "2026-11-15T11:00:00Z",
+                   "target_url": "skipped"}
+        failed = {"id": 12, "context": GATE + " (pull_request)", "status": "failure",
+                  "updated_at": "2026-11-15T12:00:00Z", "target_url": "failed"}
+        self.assertEqual(landing.gate_state([green, skipped]), ("success", "green"))
+        self.assertEqual(landing.gate_state([skipped, failed, green]), ("success", "green"))
+        # Without a pass the latest status still says where the gate stands.
+        self.assertEqual(landing.gate_state([skipped, failed]), ("failure", "failed"))
+        self.assertEqual(landing.gate_state([skipped]), ("skipped", "skipped"))
+        # A pass in another context is not this gate's pass.
+        other = {"id": 13, "context": "main fast lane / paperwork (pull_request)", "status": "success"}
+        self.assertEqual(landing.gate_state([skipped, other]), ("skipped", "skipped"))
+
     def test_an_untested_head_lands_only_with_a_reason_that_is_printed_and_recorded(self):
         forge = self.forge(gate="failure")
         sha = self.land(forge, untested="Paul ordered a direct merge of the hotfix")
@@ -500,15 +518,25 @@ class LandCase(unittest.TestCase):
             "delete_branch_after_merge": True,
         })
 
-    def test_the_gate_is_read_from_the_commit_status_of_the_head(self):
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = json.dumps({"state": "success", "statuses": [{"context": GATE, "status": "skipped"}]}).encode()
-        opener = mock.Mock(return_value=response)
+    def test_the_gate_is_read_from_every_status_of_the_head(self):
+        # The combined /status view keeps only the newest status per context:
+        # a later skipped gate would hide the requested run's green one.
+        pages = [[{"id": 9, "context": GATE, "status": "skipped"}] + [{"id": 100 + i, "context": "other", "status": "success"}
+                                                                       for i in range(49)],
+                 [{"id": 5, "context": GATE, "status": "success"}]]
+
+        def opener(request, timeout=None):
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps(pages[len(urls)]).encode()
+            urls.append(request.full_url)
+            return response
+
+        urls: list[str] = []
         forge = landing.Forge("https://forge.example", "owner/repo", "test-token", opener)
-        self.assertEqual(landing.gate_state(forge.statuses(self.head))[0], "skipped")
-        self.assertEqual(opener.call_args.args[0].full_url,
-                         f"https://forge.example/api/v1/repos/owner/repo/commits/{self.head}/status")
+        self.assertEqual(landing.gate_state(forge.statuses(self.head))[0], "success")
+        self.assertEqual(urls, [f"https://forge.example/api/v1/repos/owner/repo/commits/{self.head}/statuses?page={n}&limit=50"
+                                for n in (1, 2)])
 
     def test_the_token_never_follows_a_redirect(self):
         seen: list[tuple[str, str | None]] = []
@@ -713,11 +741,11 @@ class WiringCase(unittest.TestCase):
         self.assertIn("python3 -m validation.landing check", workflow)
         self.assertNotIn("--offline", workflow)
 
-    def test_scripts_land_is_the_documented_off_mode_path(self):
+    def test_scripts_land_is_the_documented_landing_path(self):
         script = ROOT / "scripts/land"
         self.assertTrue(script.stat().st_mode & 0o111, "scripts/land must be executable")
         self.assertIn("main_land", script.read_text(encoding="utf-8"))
-        for doc in ("AGENTS.md", "docs/ci/MERGE-TRAIN.md"):
+        for doc in ("AGENTS.md", "docs/ci/REQUESTED-LANE.md"):
             text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
             self.assertTrue("scripts/land <pr> --head <sha>" in text, doc)
             self.assertTrue("never the raw merge API" in text, doc)

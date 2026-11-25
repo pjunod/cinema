@@ -3073,9 +3073,12 @@
     {
       "id_prefix": "operations:test_vendor_audit_lock.",
       "inputs": [
-        "scripts/vendor-audit-lock"
+        "scripts/vendor-audit-lock",
+        "vendor/gemm-common/registry-provenance.lock",
+        "vendor/ksni/registry-provenance.lock",
+        "vendor/openraft/registry-provenance.lock"
       ],
-      "reason": "Loaded vendor-lock implementation operating on temporary synthetic manifests/locks."
+      "reason": "Loaded vendor-lock implementation operating on temporary synthetic manifests/locks, plus the committed registry provenance locks it merges."
     },
     {
       "id_prefix": "operations:test_vod_bframes_timeline_design.",
@@ -4455,6 +4458,8 @@
         "vendor/dolby_vision/PLURX-PATCH.md",
         "vendor/hiqlite-wal/PLURX-PATCH.md",
         "vendor/hiqlite/PLURX-PATCH.md",
+        "vendor/openraft/LICENSE-APACHE",
+        "vendor/openraft/PLURX-PATCH.md",
         "vendor/rust_decimal/PLURX-PATCH.md",
         "vendor/s3-simple/PLURX-PATCH.md"
       ],
