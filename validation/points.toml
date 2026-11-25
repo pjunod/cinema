@@ -1175,6 +1175,8 @@ paths = [
   "crates/plurx-core/src/fmp4/dvh1.rs",
   "crates/plurx-core/src/fmp4/dvh1_tests.rs",
   "crates/plurx-core/src/fmp4/track_projection.rs",
+  "crates/plurx-core/src/fmp4/trim.rs",
+  "crates/plurx-core/src/fmp4/trim_tests.rs",
   "crates/plurx-core/src/fmp4/video_splice.rs",
   "crates/plurx-core/src/fmp4/video_splice_format.rs",
   "crates/plurx-core/src/hevc_configuration.rs",

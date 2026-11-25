@@ -74,11 +74,26 @@ pub fn packet_size_frames_sample(
     bytes: Option<&[u8]>,
     video: &crate::fmp4::Track,
 ) -> bool {
-    packet_size == u64::from(sample.size)
+    packet_size_frames_kept_sample(packet_size, sample, bytes, video, 0)
+}
+
+/// [`packet_size_frames_sample`] for a sample kept without `dropped` bytes of
+/// slice data. Both framings count every unit's bytes once, so each size is
+/// the kept sample's plus what was dropped.
+fn packet_size_frames_kept_sample(
+    packet_size: u64,
+    sample: &crate::fmp4::Sample,
+    bytes: Option<&[u8]>,
+    video: &crate::fmp4::Track,
+    dropped: u32,
+) -> bool {
+    let dropped = u64::from(dropped);
+    packet_size == u64::from(sample.size) + dropped
         || (video.codec == Some(crate::fmp4::VideoCodec::Hevc)
             && bytes.is_some_and(|bytes| {
-                crate::fmp4::hevc_sample_cbs_annex_b_len(bytes, video.nal_length_size)
-                    .is_ok_and(|len| u64::try_from(len).is_ok_and(|len| len == packet_size))
+                crate::fmp4::hevc_sample_cbs_annex_b_len(bytes, video.nal_length_size).is_ok_and(
+                    |len| u64::try_from(len).is_ok_and(|len| len + dropped == packet_size),
+                )
             }))
 }
 
@@ -98,8 +113,8 @@ pub fn packet_size_frames_sample(
 /// `previous_muxed_dts` is the previous fragment's
 /// [`SourceFragmentClock::last_muxed_dts`] in this same child, `None` for its
 /// first fragment.
-pub fn associate_fragment_clock(
-    fragment: &crate::fmp4::Fragment,
+pub fn associate_fragment_clock<'a>(
+    fragment: impl Into<crate::fmp4::VideoOnlyFragment<'a>>,
     init: &crate::fmp4::Init,
     packets: &[SourcePacketObservation],
     expected_sequence: u64,
@@ -108,6 +123,8 @@ pub fn associate_fragment_clock(
     canonical_title_start: u64,
 ) -> Result<SourceFragmentClock, PacketClockError> {
     use super::ranges::{normalize_to_index_ticks, SourceTimestamp};
+    let canonical = fragment.into();
+    let fragment = canonical.fragment();
     let video = init.video().ok_or(PacketClockError::FragmentMismatch)?;
     if init.tracks.len() != 1 || fragment.tracks.len() != 1 {
         return Err(PacketClockError::FragmentMismatch);
@@ -143,14 +160,20 @@ pub fn associate_fragment_clock(
     // next fragment's first decode time, which range continuity checks
     // against this row's end.
     let samples = fragment.samples_with_bytes(video.id);
-    for (&(sample, bytes), packet) in samples.iter().zip(packets) {
+    for (index, (&(sample, bytes), packet)) in samples.iter().zip(packets).enumerate() {
         if packet.sequence != next_sequence
             || packet.time_base_num == 0
             || packet.time_base_den == 0
             || packet.time_base_num != first.time_base_num
             || packet.time_base_den != first.time_base_den
             || packet.duration == 0
-            || !packet_size_frames_sample(packet.size, sample, bytes, video)
+            || !packet_size_frames_kept_sample(
+                packet.size,
+                sample,
+                bytes,
+                video,
+                canonical.dropped_from(index),
+            )
             || sample.duration == 0
         {
             return Err(PacketClockError::FragmentMismatch);

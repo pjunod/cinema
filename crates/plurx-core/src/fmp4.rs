@@ -1146,8 +1146,9 @@ impl FragmentReader {
     }
 
     /// Drop what has been consumed. Only ever called right after a unit is
-    /// emitted, so the memmove covers one partial box, never the backlog.
-    fn compact(&mut self) {
+    /// emitted or a whole box is skipped, so the memmove covers one partial
+    /// box, never the backlog.
+    pub(crate) fn compact(&mut self) {
         if self.pos > 0 {
             self.buf.drain(..self.pos);
             self.pos = 0;
@@ -5186,14 +5187,7 @@ fn first_vcl_nal(sample: &[u8], length_size: u8, codec: VideoCodec) -> Option<u8
             nlen = (nlen << 8) | sample[q + i] as usize;
         }
         let head = *sample.get(q + lsz)?;
-        let ty = match codec {
-            VideoCodec::Hevc => (head >> 1) & 0x3f,
-            VideoCodec::H264 => head & 0x1f,
-        };
-        let is_vcl = match codec {
-            VideoCodec::Hevc => ty <= 31,
-            VideoCodec::H264 => (1..=5).contains(&ty),
-        };
+        let (ty, is_vcl) = vcl_nal_type(head, codec);
         if is_vcl {
             return Some(ty);
         }
@@ -5203,6 +5197,22 @@ fn first_vcl_nal(sample: &[u8], length_size: u8, codec: VideoCodec) -> Option<u8
         q = q.checked_add(lsz)?.checked_add(nlen)?;
     }
     None
+}
+
+/// A NAL unit's type, from its first byte, and whether it carries slice data.
+/// The one definition the classifier and [`FragmentTrimmer`] share: what the
+/// trimmer drops is exactly what the classifier stops at.
+fn vcl_nal_type(head: u8, codec: VideoCodec) -> (u8, bool) {
+    match codec {
+        VideoCodec::Hevc => {
+            let ty = (head >> 1) & 0x3f;
+            (ty, ty <= 31)
+        }
+        VideoCodec::H264 => {
+            let ty = head & 0x1f;
+            (ty, (1..=5).contains(&ty))
+        }
+    }
 }
 
 /// Does any sample in this fragment present before its first one?
@@ -7373,6 +7383,10 @@ pub fn playlist_entry(seconds: f64, name: &str) -> String {
 /// `seg00000.m4s` — five digits from zero, exactly what `-start_number 0` and
 /// `seg%05d.m4s` gave the muxer this replaces. The daemon's segment index
 /// parses these names.
+#[path = "fmp4/trim.rs"]
+mod trim;
+pub use trim::{FragmentTrimmer, TrimmedFragment, VideoOnlyFragment};
+
 pub fn segment_name(index: u64) -> String {
     format!("seg{index:05}.m4s")
 }

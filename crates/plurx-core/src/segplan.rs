@@ -624,21 +624,37 @@ impl IndexRow {
     /// the entire fragment's wire length, while `video_bytes` counts only the
     /// video payload. A multiplexed fragment's wire length cannot substitute
     /// for the canonical video-only measurement.
-    pub fn from_fragment(
-        fragment: &crate::fmp4::Fragment,
+    ///
+    /// A fragment kept without its slice data
+    /// ([`crate::fmp4::TrimmedFragment`]) gives the row of the whole fragment
+    /// it was: both byte counts add back what was dropped, and nothing else
+    /// in a row reads slice data.
+    pub fn from_fragment<'a>(
+        fragment: impl Into<crate::fmp4::VideoOnlyFragment<'a>>,
         init: &crate::fmp4::Init,
     ) -> Result<Self, &'static str> {
+        Self::from_video_only(fragment.into(), init)
+    }
+
+    fn from_video_only(
+        canonical: crate::fmp4::VideoOnlyFragment<'_>,
+        init: &crate::fmp4::Init,
+    ) -> Result<Self, &'static str> {
+        let fragment = canonical.fragment();
         let video = init.video().ok_or("the moov lost its video track")?;
         let track = fragment
             .track(video.id)
             .ok_or("a fragment carried no video track")?;
         // A row is an exact planning observation. Saturation would make
         // distinct fragments indistinguishable and publish a false byte budget.
-        let bytes = u32::try_from(fragment.len())
+        let bytes = u32::try_from(canonical.wire_len())
             .map_err(|_| "fragment wire bytes exceed the index row limit")?;
         let video_bytes = track
             .samples()
-            .try_fold(0u32, |total, sample| total.checked_add(sample.size))
+            .enumerate()
+            .try_fold(0u32, |total, (index, sample)| {
+                total.checked_add(u32::try_from(canonical.sample_size(index, sample.size)).ok()?)
+            })
             .ok_or("video payload bytes exceed the index row limit")?;
         let duration = track
             .samples()

@@ -6,7 +6,7 @@ use crate::{
     copy_normalization::{CopyNormalizationContract, CopyNormalizationError, CopyNormalizers},
 };
 use plurx_core::{
-    fmp4::{self, Fragment, FragmentReader, Init, Unit},
+    fmp4::{self, Fragment, FragmentReader, Init, TrimmedFragment, Unit},
     hevc_configuration::{PacketInspection, RangeInspection, Trace},
     segplan::{
         observed_range::{ObservedRangeAssembler, ObservedUnit},
@@ -76,11 +76,13 @@ const MAX_PACKETS: usize = 131072;
 /// inits it keeps are a few kilobytes and not counted.
 #[derive(Clone, Copy, Debug, Default)]
 struct HeldParts {
-    /// Pipe bytes not yet framed and fragments waiting for their pair.
+    /// Pipe bytes not yet framed and fragments waiting for their pair: an
+    /// AV fragment whole, a canonical one as what is kept of it.
     queued: usize,
     /// The AV reader's in-progress fragment.
     av_reader: usize,
-    /// The assembler's framing and its fragment waiting for a clock.
+    /// The assembler's framing and its fragment waiting for a clock, both
+    /// without the canonical slice data it drops as it frames.
     assembler: usize,
     /// The kernel's pending AV before a cut; a cut clones it once more.
     kernel_pending: usize,
@@ -134,7 +136,9 @@ pub(crate) struct ObservedCopyMux {
     av_init: Option<Init>,
     normalizers: Option<CopyNormalizers>,
     kernel: Option<VerifiedCopyKernel>,
-    canonical: VecDeque<(Fragment, SourceFragmentClock)>,
+    /// Canonical fragments waiting for their AV pair, kept without their
+    /// slice data: only the AV twin is ever served.
+    canonical: VecDeque<(TrimmedFragment, SourceFragmentClock)>,
     av: VecDeque<Fragment>,
     pending_media: VecDeque<(Vec<u8>, usize)>,
     pending_clock: VecDeque<(Vec<u8>, usize)>,
@@ -230,7 +234,8 @@ impl ObservedCopyMux {
     /// fragments waiting for their pair; the AV reader's in-progress
     /// fragment; the assembler's framing and its fragment waiting for a
     /// clock; the kernel's pending AV and its merge clone at a cut; and the
-    /// held packet inspections.
+    /// held packet inspections. A canonical fragment counts as what is kept
+    /// of it ([`TrimmedFragment::held_len`]), from its framing on.
     pub(crate) fn held(&self) -> u64 {
         HeldParts {
             queued: self.queued_bytes,
@@ -532,7 +537,7 @@ impl ObservedCopyMux {
                 }
             }
             ObservedUnit::Fragment { fragment, clock } => {
-                self.hold_fragment(fragment.len())?;
+                self.hold_fragment(fragment.held_len())?;
                 self.canonical.push_back((fragment, clock));
             }
         }
@@ -670,6 +675,7 @@ impl ObservedCopyMux {
                 .video()
                 .ok_or("copy_video_missing")?;
             let packets = canonical
+                .kept()
                 .track(video.id)
                 .ok_or("copy_video_missing")?
                 .sample_count();
@@ -715,11 +721,12 @@ impl ObservedCopyMux {
                 // pass scans it. Legacy scans after Dolby Vision conversion;
                 // conversion rewrites only RPU NAL units (type 62), never the
                 // prefix SEI that carries 137/144, so before is the same scan.
+                // Every SEI is kept whole in the canonical fragment.
                 // An unreadable SEI is a fact about the row, not a reason to
                 // end this viewer's copy: only the seal refuses it.
                 let mut hdr10 = fmp4::Hdr10IndexMetadata::default();
                 let hdr10_conflict = hdr10
-                    .observe_fragment(canonical, normalizers.canonical_init())
+                    .observe_fragment(canonical.kept(), normalizers.canonical_init())
                     .is_err();
                 if hdr10_conflict {
                     hdr10 = fmp4::Hdr10IndexMetadata::default();
@@ -738,7 +745,7 @@ impl ObservedCopyMux {
             let (mut canonical, clock) = self.canonical.pop_front().ok_or("copy_pair_missing")?;
             let mut av = self.av.pop_front().ok_or("copy_pair_missing")?;
             self.queued_fragments -= 2;
-            self.queued_bytes -= canonical.len() + av.len();
+            self.queued_bytes -= canonical.held_len() + av.len();
             if self.inspect_hevc {
                 self.inspected.drain(..packets);
             }
@@ -934,14 +941,23 @@ mod hold_tests {
 
     async fn mux_with(memory: Arc<crate::admission::CopyMemoryPermit>) -> ObservedCopyMux {
         let (_, _, init, fragment) = authored();
+        mux_of(&init, &fragment, memory)
+    }
+
+    /// A mux for the copy whose head is `init` and `fragment`.
+    fn mux_of(
+        init: &plurx_core::fmp4::Init,
+        fragment: &plurx_core::fmp4::Fragment,
+        memory: Arc<crate::admission::CopyMemoryPermit>,
+    ) -> ObservedCopyMux {
         let mut file = crate::copy_normalization::tests::non_dolby_file();
         file.size = AUTHORED.len() as i64;
         let contract = Arc::new(
             crate::copy_normalization::CopyNormalizationContract::from_head(
                 &file,
                 plurx_core::transcode::CopyVideoOptions::new(false, false),
-                &init,
-                &fragment,
+                init,
+                fragment,
             )
             .expect("contract"),
         );
@@ -986,9 +1002,10 @@ mod hold_tests {
     }
 
     /// The held figure counts every hold the mux has: here the AV pipe's
-    /// framed fragment waiting for its pair, then the canonical pipe's bytes
-    /// not yet framed. What accepting the next event needs adds its bytes
-    /// and two of the largest fragment seen, for the transient copies.
+    /// framed fragment waiting for its pair, then what is kept of the
+    /// canonical fragment being framed. What accepting the next event needs
+    /// adds its bytes and two of the largest fragment seen, for the
+    /// transient copies.
     #[tokio::test]
     async fn the_held_figure_counts_every_hold() {
         let (init, fragment, _, framed) = authored();
@@ -1013,9 +1030,86 @@ mod hold_tests {
             .all(|event| !matches!(event, CopyMuxEvent::Segment(_))));
         mux.feed(next).expect("half a canonical fragment");
         assert!(
-            mux.held() >= framed.len() as u64 + half.len() as u64,
-            "the canonical bytes being framed are held too"
+            mux.held() > framed.len() as u64 && mux.held() <= (framed.len() + half.len()) as u64,
+            "what is kept of the canonical fragment being framed is held too"
         );
+    }
+
+    /// The fragment with the most bytes across the Dolby Vision fixtures: a
+    /// video-only copy with a Profile 7 RPU after every sample's slices.
+    fn largest_dolby_fragment() -> (plurx_core::fmp4::Init, plurx_core::fmp4::Fragment) {
+        use plurx_core::testfixtures;
+        let mut largest = None;
+        for kind in ["closed-gop", "open-gop", "clean-cra"] {
+            let stream = testfixtures::with_dolby_vision_rpus(&testfixtures::video_only_pipe(kind));
+            let mut reader = FragmentReader::new();
+            reader.push(&stream);
+            let mut init = None;
+            while let Some(unit) = reader.next_unit().expect("the fixture parses") {
+                match unit {
+                    Unit::Init(value) => init = Some(value),
+                    Unit::Fragment(fragment) => {
+                        let size = fragment.len();
+                        if largest.as_ref().is_none_or(
+                            |(_, held): &(_, plurx_core::fmp4::Fragment)| held.len() < size,
+                        ) {
+                            largest = Some((init.clone().expect("init"), fragment));
+                        }
+                    }
+                    Unit::Trailer => {}
+                }
+            }
+        }
+        largest.expect("a fragment")
+    }
+
+    /// A canonical fragment is held as what is kept of it, without its slice
+    /// data: while it is framed, while it waits for its clock, and while it
+    /// waits for its AV pair. On the largest Dolby Vision fixture fragment
+    /// that is under a tenth of the fragment.
+    #[tokio::test]
+    async fn a_canonical_fragment_is_held_without_its_slice_data() {
+        let (init, whole) = largest_dolby_fragment();
+        let kept = plurx_core::testfixtures::trimmed(&init, &whole, usize::MAX).held_len() as u64;
+        assert!(kept * 10 < whole.len() as u64, "{kept} of {}", whole.len());
+        let pool = CopyMemoryPool::new(1 << 30);
+        let memory = pool
+            .acquire(1 << 29, CopyPriority::Live, tokio::time::Instant::now())
+            .await
+            .expect("memory");
+        let mut mux = mux_of(&init, &whole, Arc::new(memory));
+        mux.feed(CopyPipeEvent::Data(
+            CopyPipeKind::Canonical,
+            init.bytes.clone(),
+        ))
+        .expect("canonical init");
+        assert_eq!(mux.held(), 0);
+        for chunk in whole.bytes.chunks(4096) {
+            mux.feed(CopyPipeEvent::Data(CopyPipeKind::Canonical, chunk.to_vec()))
+                .expect("canonical chunk");
+            assert!(mux.held() <= kept + 8, "held {} while framing", mux.held());
+        }
+        assert_eq!(mux.held(), kept, "framed, waiting for its clock");
+        assert_eq!(mux.largest_fragment, 0);
+
+        let video = init.video().expect("video");
+        let mut clock = format!("#tb 0: 1/{}\n#media_type 0: video\n", video.timescale);
+        let mut dts = 0i64;
+        for sample in whole.track(video.id).expect("video").samples() {
+            clock.push_str(&format!(
+                "0, {}, {}, {}, {}, 0x00000000\n",
+                dts,
+                dts + sample.cto,
+                sample.duration,
+                sample.size
+            ));
+            dts += i64::from(sample.duration);
+        }
+        mux.feed(CopyPipeEvent::Data(CopyPipeKind::Clock, clock.into_bytes()))
+            .expect("its clock");
+        assert_eq!(mux.canonical.len(), 1, "released to wait for its AV pair");
+        assert_eq!(mux.held(), kept, "waiting for its AV pair");
+        assert_eq!(mux.largest_fragment as u64, kept);
     }
 
     /// Before an event is fed, the copy's charge is fitted to what it needs:
@@ -1192,8 +1286,11 @@ mod hold_tests {
                 .expect("canonical");
         }
         let clock = CopyPipeEvent::Data(CopyPipeKind::Clock, Vec::new());
+        // What is kept of the framed fragment, and the unframed one whole.
+        let backlog = (mux.assembler.held_bytes() + fragment.len()) as u64;
+        assert!(mux.assembler.held_bytes() > 0);
         assert!(
-            mux.need_for(&clock) >= mux.held() + 2 * 2 * fragment.len() as u64,
+            mux.need_for(&clock) >= mux.held() + 2 * backlog,
             "two fragments' backlog: {} over {}",
             mux.need_for(&clock),
             mux.held()
