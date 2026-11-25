@@ -150,7 +150,16 @@ static void metadata_observe(const AVFrame *frame, unsigned ordinal, const char 
     fprintf(f, "%s{\"pivots\":[", k ? "," : "");
     for (int j = 0; j < v->num_pivots; j++) fprintf(f, "%s%u",j?",":"",v->pivots[j]);
     fprintf(f, "],\"pieces\":[");
-    for (int j = 0; j < v->num_pivots-1; j++) fprintf(f, "%s{\"mapping_idc\":%d,\"poly_order\":%u,\"poly_coef\":[%"PRId64",%"PRId64",%"PRId64"]}",j?",":"",v->mapping_idc[j],v->poly_order[j],v->poly_coef[j][0],v->poly_coef[j][1],v->poly_coef[j][2]);
+    for (int j = 0; j < v->num_pivots-1; j++) {
+      fprintf(f, "%s{\"mapping_idc\":%d,\"poly_order\":%u,\"poly_coef\":[%"PRId64",%"PRId64",%"PRId64"]",j?",":"",v->mapping_idc[j],v->poly_order[j],v->poly_coef[j][0],v->poly_coef[j][1],v->poly_coef[j][2]);
+      if (v->mapping_idc[j] == AV_DOVI_MAPPING_MMR) {
+        fprintf(f, ",\"mmr_order\":%u,\"mmr_constant\":%"PRId64",\"mmr_coef\":[", v->mmr_order[j], v->mmr_constant[j]);
+        for (int o = 0; o < 3; o++)
+          for (int k = 0; k < 7; k++) fprintf(f, "%s%"PRId64, o || k ? "," : "", v->mmr_coef[j][o][k]);
+        fprintf(f, "]");
+      }
+      fprintf(f, "}");
+    }
     fprintf(f, "],\"nlq_offset\":%u,\"vdr_in_max\":%"PRIu64",\"slope\":%"PRIu64",\"threshold\":%"PRIu64"}",m->nlq[k].nlq_offset,m->nlq[k].vdr_in_max,m->nlq[k].linear_deadzone_slope,m->nlq[k].linear_deadzone_threshold);
   }
   fprintf(f, "]},\"color\":{\"signal_bit_depth\":%u,\"signal_color_space\":%u,\"signal_chroma_format\":%u,\"signal_full_range_flag\":%u,\"ycc_to_rgb_matrix\":[", c->signal_bit_depth,c->signal_color_space,c->signal_chroma_format,c->signal_full_range_flag);

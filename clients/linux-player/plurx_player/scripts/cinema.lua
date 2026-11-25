@@ -159,10 +159,11 @@ end
 local PILL = {res='6EA8FE', hdr='12B3A6', dv='C99A2B', audio='7F8FE0', enh='4BB9B2'}
 local RANGE_SHORT = {dolby_vision='DV', hdr10='HDR10', hlg='HLG', sdr='SDR'}
 local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
--- EL is this player's own fact: the dual-layer stream reached the private
--- build, which pairs its enhancement layer. Neither plurx nor mpv reports
--- whether that layer is full (FEL) or minimal (MEL), so FEL stays the server's
--- claim alone.
+-- EL is this player's own fact. The private mpv's native-dovi-target-state
+-- reports enhancement-layer-composed as a level: true while the picture its
+-- native Dolby renderer maps has the enhancement layer composed in. Neither
+-- plurx nor mpv reports whether that layer is full (FEL) or minimal (MEL), so
+-- FEL stays the server's claim alone.
 local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
 local function table_of(value) return type(value)=='table' and value or {} end
 -- One read of each property per render; the info timer runs at 5 Hz.
@@ -177,6 +178,7 @@ local function snapshot()
     view.source=table_of(view.facts.source)
     view.renderer=type(view.facts.renderer)=='table' and view.facts.renderer or nil
     view.enhancement=type(view.facts.enhancement)=='table' and view.facts.enhancement or nil
+    view.native=table_of(prop('native-dovi-target-state'))
     return view
 end
 -- detail/helpers.js resLabel, on the frame mpv decodes rather than the file.
@@ -277,7 +279,14 @@ local function enhancement_state(view)
         local now,was=delivered_profile(view.video),source_profile(s)
         if not (was==7 and now==8) then put('RPU',true,'RPU: reshaping applied on this device by '..how) end
         put('DYN',true,'DYN: per-shot Dolby display mapping on this device'..target..' by '..how)
-        if r and now==7 and s.dv_el_present==true then
+        -- The level speaks for the native renderer. Other renderers, and mpv
+        -- builds without the level, keep the inference from the stream.
+        local composed=view.native['enhancement-layer-composed']
+        if type(composed)=='boolean' and not (r and r.kind~='native') then
+            if composed then
+                put('EL',true,"EL: plurx Player's Dolby renderer composed the enhancement layer into the picture it is mapping (full or minimal is not reported)")
+            end
+        elseif r and now==7 and s.dv_el_present==true then
             put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer (full or minimal is not reported)')
         end
     end
@@ -756,7 +765,7 @@ for _, pair in ipairs({{'TAB','tab'},{'Shift+TAB','backtab'},{'ENTER','enter'},{
 end
 mp.add_forced_key_binding('WHEEL_UP','cinema-wheel-up',function() if S.menu then key('up') else mp.commandv('add','volume',5); activity() end end)
 mp.add_forced_key_binding('WHEEL_DOWN','cinema-wheel-down',function() if S.menu then key('down') else mp.commandv('add','volume',-5); activity() end end)
-for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params'}) do
+for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params','native-dovi-target-state'}) do
     mp.observe_property(name,'native',function() render() end)
 end
 mp.observe_property('user-data/cinema','native',function()

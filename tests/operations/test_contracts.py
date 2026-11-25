@@ -2453,11 +2453,12 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
         def enabled(expression, *, apple, desktop, retained, tv_adopted=False, native_adopted=False,
-                    preflight="success", train=False, scope_success=True, cancelled=False):
-            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained, "train_selected": train}
+                    preflight="success", requested=True, scope_success=True, cancelled=False):
+            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained,
+                      "lane_requested": requested}
             expression = re.sub(
                 r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
-                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|train_selected) (==|!=) 'true'",
+                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|lane_requested) (==|!=) 'true'",
                 lambda match: str(not tv_adopted) if match[1] else
                 str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
@@ -2505,8 +2506,12 @@ assert.equal(context.ACT_TIMER, null);
                                              preflight="failure"))
                     self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
                                              preflight="skipped"))
-                    self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True,
-                                            preflight="skipped", train=True))
+                    # Apple is a requested-lane job (docs/ci/REQUESTED-LANE.md):
+                    # a cheap push run never allocates the macOS runner.
+                    self.assertFalse(enabled(condition, apple=True, desktop=True, retained=False,
+                                             requested=False))
+                    self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
+                                             preflight="skipped", requested=False))
                     self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
                                              cancelled=True))
                     receipts = steps["Authenticate compatible original native test receipts"]
@@ -3053,6 +3058,14 @@ assert.equal(context.ACT_TIMER, null);
             "raft_transport_debug_logging_exposes_only_bounded_metadata",
             "production_api_reader_reports_malformed_frames",
             "silent_peer_cannot_hold_the_server_handshake_open",
+            "pre_vote_variants_follow_every_deployed_raft_stream_ordinal",
+            "only_the_exact_header_value_advertises_pre_vote",
+            "an_older_server_never_receives_a_pre_vote_and_keeps_its_stream",
+            "an_advertising_server_answers_the_pre_vote_itself",
+            "both_raft_stream_handlers_advertise_and_answer_pre_vote",
+            "a_local_only_answer_read_from_a_socket_is_refused",
+            "an_unreachable_peer_gives_no_pre_vote_answer",
+            "a_reconnect_renegotiates_pre_vote",
             "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
             "shutdown_reports_running_work_without_cancelling_it",
             "cancelled_shutdown_wait_retains_the_executor_handle",
@@ -3292,15 +3305,16 @@ assert.equal(context.ACT_TIMER, null);
         matching = [command for command in wal_commands if openraft_test in command]
         self.assertEqual(len(matching), 1)
         openraft_command = matching[0]
+        # OpenRaft is vendored (C4 pre-vote), so its regressions run from the tree.
         self.assertIn(
-            "cargo metadata --locked --manifest-path vendor/hiqlite/Cargo.toml",
-            openraft_command,
+            "cargo test --locked --manifest-path vendor/openraft/Cargo.toml", openraft_command
         )
-        self.assertIn('p["version"] == "0.9.25"', openraft_command)
-        self.assertIn("cargo test --locked", openraft_command)
-        self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
         self.assertIn("--features generic-snapshot-data", openraft_command)
         self.assertIn("--lib -- --exact", openraft_command)
+        pre_vote = [command for command in wal_commands if "engine::tests::pre_vote_test::" in command]
+        self.assertEqual(len(pre_vote), 1)
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=14", pre_vote[0])
+        self.assertIn("--manifest-path vendor/openraft/Cargo.toml", pre_vote[0])
         snapshot_metrics = [
             command
             for command in wal_commands
@@ -4858,7 +4872,8 @@ assert.equal(context.ACT_TIMER, null);
                 ):
                     expected = apple
                 elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
-                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
+                    # The plurxd test build needs ci.yml:check's 20 GiB pool.
+                    expected = "    runs-on: [incus, ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":

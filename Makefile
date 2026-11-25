@@ -268,6 +268,40 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::pre_vote_variants_follow_every_deployed_raft_stream_ordinal \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::only_the_exact_header_value_advertises_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_older_server_never_receives_a_pre_vote_and_keeps_its_stream \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_advertising_server_answers_the_pre_vote_itself \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::both_raft_stream_handlers_advertise_and_answer_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_local_only_answer_read_from_a_socket_is_refused \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_unreachable_peer_gives_no_pre_vote_answer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_reconnect_renegotiates_pre_vote \
+	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=14 $(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml \
+	  --features serde engine::tests::pre_vote_test:: --lib
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::frame_io::tests::real_tls_tail_backpressure_completes_for_every_payload_direction \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1092,11 +1126,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::startup_wait_logging_tests::immediate_watermark_errors_cannot_starve_due_startup_log \
 	  --lib -- --exact
-	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
-	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
-	  | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["manifest_path"] for p in data["packages"] if p["name"] == "openraft" and p["version"] == "0.9.25"))' )"; \
-	  CARGO_TARGET_DIR="$(CURDIR)/target/openraft-regression" $(CARGO) test --locked \
-	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
+	$(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
 	PLURX_EXPECT_TEST_COUNT=17 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \

@@ -16,6 +16,7 @@ VENDORED = (
     ("hiqlite", "0.14.0"),
     ("hiqlite-wal", "0.14.0"),
     ("ksni", "0.3.6"),
+    ("openraft", "0.9.25"),
     ("rust_decimal", "1.42.1"),
 )
 PACKAGE_HEADER = re.compile(r"(?m)^\[\[package\]\]\n")
@@ -164,7 +165,7 @@ def main() -> None:
     registry_evidence = merge_package_inventories(
         args.registry_evidence.read_text(encoding="utf-8"),
         [(root / f"vendor/{name}/registry-provenance.lock").read_text(encoding="utf-8")
-         for name in ("gemm-common", "ksni")],
+         for name in ("gemm-common", "ksni", "openraft")],
     )
     output = synthesize(
         args.root.read_text(encoding="utf-8"), registry_evidence

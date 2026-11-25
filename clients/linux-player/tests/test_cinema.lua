@@ -315,6 +315,33 @@ data=pills_case(dv,{kind='none',label='none (no Dolby Vision RPU)'})
 assert(not has(data,'RPU'));assert(not has(data,'EL'))
 -- A system mpv (no renderer line) still applies the RPU, but EL is not claimed.
 data=pills_case(dv,nil);assert(has(data,'RPU'));assert(has(data,'DYN'));assert(not has(data,'EL'))
+-- A named case runs at once; the name is what a Regression-Test field cites.
+local function test(name,body) body() end
+test('el_pill_follows_the_native_composition_level',function()
+    -- An mpv that reports enhancement-layer composition decides EL for its native
+    -- renderer as a level: the layer lost while mapping still succeeds clears it.
+    local function native_state(composed) return {active=true,generation=1,['enhancement-layer-composed']=composed} end
+    P['native-dovi-target-state']=native_state(false)
+    data=pills_case(dv,native);assert(not has(data,'EL'));assert(has(data,'RPU'));assert(has(data,'DYN'))
+    assert(watchers['native-dovi-target-state'],'the overlay follows the level')
+    P['native-dovi-target-state']=native_state(true)
+    for _,f in ipairs(watchers['native-dovi-target-state']) do f() end
+    assert(has(overlay.data,'EL'),'a change of the level redraws the pills')
+    -- The level attests composition by itself, before any renderer line arrives
+    -- and whatever the stream claims.
+    data=pills_case(dv,nil,{hdr='dolby_vision',dv_profile=7});assert(has(data,'EL'))
+    -- A renderer other than the native one keeps the inference from the stream.
+    P['native-dovi-target-state']=native_state(false)
+    data=pills_case(dv,{kind='closed_form',label='closed-form CM v4.0'});assert(has(data,'EL'))
+    -- An mpv whose property predates the level keeps the stream inference.
+    P['native-dovi-target-state']={active=true,generation=1}
+    data=pills_case(dv,native);assert(has(data,'EL'))
+    data=pills_case(dv,native,{hdr='dolby_vision',dv_profile=7});assert(not has(data,'EL'))
+    -- Still no EL without a Dolby Vision picture, whatever the level says.
+    P['native-dovi-target-state']=native_state(true)
+    data=pills_case({w=3840,h=2160,colormatrix='bt.2020-ncl',gamma='pq',profile=7},native);assert(not has(data,'EL'))
+    P['native-dovi-target-state']=nil
+end)
 -- A carried route's server pill holds only while mpv renders Dolby Vision.
 local carried={active={'DYN'},details={{badge='DYN',active=true,text='DYN: dynamic metadata reaches the display'}}}
 data=pills_case({w=1920,h=1080,gamma='pq'},nil,{hdr='dolby_vision',dv_profile=8},carried)
@@ -344,5 +371,9 @@ assert(overlay.data:find('Dolby Vision mapper: shared native Dolby renderer',1,t
 for i=1,4 do press('down') end
 assert(overlay.data:find('Dolby Vision enhancements: EL · RPU · DYN',1,true))
 assert(overlay.data:find('● EL: the dual-layer Profile 7 stream',1,true))
+P['native-dovi-target-state']={active=true,generation=1,['enhancement-layer-composed']=true}
+timers[1]()
+assert(overlay.data:find("● EL: plurx Player's Dolby renderer composed the enhancement layer",1,true))
+P['native-dovi-target-state']=nil
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
-print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 11 quality pill cases passed')
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 18 quality pill cases passed')
