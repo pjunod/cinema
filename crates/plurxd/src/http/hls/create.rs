@@ -7270,6 +7270,7 @@ pub(crate) async fn prepare_source_playback<
         catalog_query: Some(processed_query),
         display_target: None,
         display_target_note: None,
+        dv_row_facts: None,
     };
     let destination = if processed_upgrade.is_some() {
         match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(

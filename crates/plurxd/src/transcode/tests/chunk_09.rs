@@ -3048,6 +3048,7 @@ async fn graph_holding(
         display_target: None,
         display: None,
         display_target_note: None,
+        dv_row_facts: None,
         source_tick: (1, 1000),
         source_origin: DvSourceOrigin::observed_common(
             DvTimestamp::new(0, 1_000_000).expect("origin"),

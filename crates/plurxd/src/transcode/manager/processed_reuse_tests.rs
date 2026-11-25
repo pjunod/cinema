@@ -1885,6 +1885,7 @@ printf '%s\n' '{}'
         display_target,
         display: caps.display.clone(),
         display_target_note: display_target_note.clone(),
+        dv_row_facts: None,
         source_tick,
         source_origin,
         native_bl: (64, 64),

@@ -176,7 +176,9 @@ pub(super) async fn with_current_processing_header(
 const DV_ROWS_HEADER: &str = "x-plurx-dv-rows";
 
 /// This node's current processing report for the session, with the Playback
-/// info rows that describe it attached for the client response.
+/// info rows that describe it attached for the client response. The rows are
+/// built from facts read with the report under the same fences, so no await
+/// separates the report's final allowance check from the rows.
 pub(crate) async fn current_dv_report(
     state: &AppState,
     session_id: &str,
@@ -187,7 +189,7 @@ pub(crate) async fn current_dv_report(
         .dv_effective_report_with_display(session_id, incarnation_id)
         .await
     {
-        let rows = processing_rows(state, &report, &display).await;
+        let rows = processing_rows(&report, &display);
         return Some(report.with_rows(rows));
     }
     state
@@ -197,10 +199,9 @@ pub(crate) async fn current_dv_report(
 }
 
 /// Both rows of a processed HDR10 or SDR delivery, from its report, the
-/// session's display-target facts and the title's stored probe document.
-/// Observation only: nothing here reaches a decision.
-async fn processing_rows(
-    state: &AppState,
+/// session's display-target facts and the title facts frozen beside its
+/// policy. Observation only: nothing here reaches a decision.
+fn processing_rows(
     report: &plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
     display: &crate::vodserve::DvReportDisplay,
 ) -> Option<plurx_core::playback::dv_provenance::DvProcessingRows> {
@@ -216,40 +217,18 @@ async fn processing_rows(
         // rides the enhancement.
         _ => return None,
     };
-    let probe = state
-        .store
-        .get_file_probe_json(display.file_id)
-        .await
-        .ok()
-        .flatten();
-    let levels = plurx_core::scan::dv_levels::title_levels_from_probe(probe.as_deref());
-    let stats = probe
-        .as_deref()
-        .and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json);
+    let facts = display.facts.clone().unwrap_or_default();
     let caps = display.display.as_ref();
-    // The policy declines with "already fits" exactly when the reported peak
-    // has a bucket and the eligible title peaks at or under it; a missing
-    // note means targeting was off, which is its own reason.
-    let title_fits_nits = if sdr || display.note.is_none() {
-        None
-    } else {
-        caps.and_then(plurx_core::playback::caps::DisplayCaps::hdr10_target_bucket)
-            .filter(|bucket| {
-                stats.is_some_and(|stats| {
-                    plurx_core::transcode::dv_processing::title_fits_display(stats, *bucket)
-                })
-            })
-    };
     let rows = DvProcessingRows {
-        dv_metadata: dv_metadata_rows(&route, levels.as_ref())?,
+        dv_metadata: dv_metadata_rows(&route, facts.levels.as_ref())?,
         display_target: display_target_rows(&DisplayTargetFacts {
             reported_peak_nits: caps.and_then(|caps| caps.max_nits),
             peak_source: caps.and_then(|caps| caps.peak_source),
             mapped_nits: report.display_target_nits(),
             sdr,
-            title_fits_nits,
+            title_fits_nits: facts.title_fits_nits,
             decline_note: display.note.as_deref(),
-            title_peak_nits: stats.and_then(plurx_core::transcode::dv_processing::title_peak_nits),
+            title_peak_nits: facts.title_peak_nits,
         }),
     };
     rows.is_well_formed().then_some(rows)
@@ -362,6 +341,96 @@ mod dv_processing_wire_tests {
                 assert_eq!(public["effective_processing"]["generation"], incarnation);
             }
         }
+    }
+
+    /// The owner's rows come from the report plus the facts frozen beside the
+    /// session's policy: targeted, already fits and not targeted, and none for
+    /// a Profile 8.1 carrier.
+    #[test]
+    fn owner_rows_follow_the_report_and_the_frozen_policy_facts() {
+        use plurx_core::playback::dv_provenance::{DisplayTargetState, DvRowFacts};
+        let generation = "00000000-0000-0000-0000-000000000001";
+        let report = |operations: serde_json::Value| {
+            plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                serde_json::json!({"generation":generation,"hdr10_enhanced":true,"fel_contributed":false,
+                    "creative_trims_applied":false,"applied_operations":operations}).to_string().as_bytes(),
+                generation,
+                Some("hdr10"),
+            )
+            .expect("owner report")
+        };
+        let targeted = report(
+            serde_json::json!(["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1000}}]),
+        );
+        let master = report(serde_json::json!(["RpuColorConversion", "TargetMapping"]));
+        let display = |note: &str, facts: DvRowFacts| crate::vodserve::DvReportDisplay {
+            display: Some(plurx_core::playback::caps::DisplayCaps {
+                hdr: true,
+                max_nits: Some(1000),
+                ..Default::default()
+            }),
+            note: Some(note.to_owned()),
+            facts: Some(facts),
+        };
+        let levels = plurx_core::scan::dv_levels::DvTitleLevels {
+            levels: [1, 2, 8, 254].into(),
+            cm_v40: true,
+        };
+        let rows = processing_rows(
+            &targeted,
+            &display(
+                "HDR10-E: …",
+                DvRowFacts {
+                    levels: Some(levels.clone()),
+                    title_peak_nits: Some(1412),
+                    title_fits_nits: None,
+                },
+            ),
+        )
+        .expect("rows");
+        assert_eq!(
+            rows.display_target.state,
+            DisplayTargetState::Targeted { mapped_nits: 1000 }
+        );
+        assert_eq!(rows.dv_metadata.applied.text, "L1");
+        assert_eq!(rows.display_target.title_peak_text, "1412 nits");
+        let fits = processing_rows(
+            &master,
+            &display(
+                "this title already fits a 1000-nit display; master grade sent",
+                DvRowFacts {
+                    levels: Some(levels.clone()),
+                    title_peak_nits: Some(812),
+                    title_fits_nits: Some(1000),
+                },
+            ),
+        )
+        .expect("rows");
+        assert_eq!(
+            fits.display_target.state,
+            DisplayTargetState::AlreadyFits { bucket_nits: 1000 }
+        );
+        // A session that started before the scan says so, even if the title would fit now.
+        let unknown = processing_rows(
+            &master,
+            &display(
+                "complete-title Dolby Vision L1 scan unavailable; master grade sent",
+                DvRowFacts::default(),
+            ),
+        )
+        .expect("rows");
+        assert!(
+            matches!(unknown.display_target.state, DisplayTargetState::NotTargeted { ref reason } if reason.contains("scan unavailable"))
+        );
+        assert_eq!(unknown.dv_metadata.in_file.text, "Unavailable");
+        let p81 = plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+            serde_json::json!({"generation":generation,"hdr10_enhanced":false,"profile81_reconstructed":true,"fel_contributed":true,
+                "applied_operations":["RpuColorConversion","TargetMapping","LinearNlqResidual"]}).to_string().as_bytes(),
+            generation,
+            Some("dolby_vision"),
+        )
+        .expect("8.1 report");
+        assert!(processing_rows(&p81, &display("x", DvRowFacts::default())).is_none());
     }
 
     #[tokio::test]

@@ -44,11 +44,38 @@ pub struct PlaybackEnhancement {
     /// process. A processed delivery's row describes its current processing
     /// report, so it travels with that report (`effective_processing`), not
     /// here, and this is omitted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Decoded leniently: a row this build cannot read is dropped, never the
+    /// enhancement it rides in (a relayed start must not fail over a
+    /// diagnostic row).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_rows"
+    )]
     pub dv_metadata: Option<super::dv_provenance::DvMetadataRows>,
 }
 
+fn lenient_rows<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<super::dv_provenance::DvMetadataRows>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 impl PlaybackEnhancement {
+    /// Drop a Dolby Vision metadata row that is out of shape, keeping the
+    /// rest. A receiver calls this before relaying.
+    pub fn drop_ill_formed_rows(&mut self) {
+        if self
+            .dv_metadata
+            .as_ref()
+            .is_some_and(|rows| !rows.is_well_formed())
+        {
+            self.dv_metadata = None;
+        }
+    }
+
     /// Whether a decoded value has the shape [`playback_enhancement`] builds:
     /// at most one detail per badge, each with one bounded sentence, and
     /// `active` exactly the active details' badges in order. A receiver
@@ -67,10 +94,6 @@ impl PlaybackEnhancement {
             seen.push(detail.badge);
         }
         self.details.len() <= 3
-            && self
-                .dv_metadata
-                .as_ref()
-                .is_none_or(super::dv_provenance::DvMetadataRows::is_well_formed)
             && self
                 .details
                 .iter()
@@ -609,5 +632,38 @@ mod tests {
             serde_json::to_string(&[Fel, Rpu, Dyn]).expect("badges serialize"),
             r#"["FEL","RPU","DYN"]"#
         );
+    }
+
+    #[test]
+    fn an_unreadable_or_out_of_shape_metadata_row_never_costs_the_enhancement() {
+        let mut built =
+            playback_enhancement(&facts(EnhancementRoute::NativeDolbyVision)).expect("DV source");
+        let levels = crate::scan::dv_levels::DvTitleLevels {
+            levels: [1, 2, 6].into(),
+            cm_v40: false,
+        };
+        built.dv_metadata = crate::playback::dv_provenance::dv_metadata_rows(
+            &EnhancementRoute::NativeDolbyVision,
+            Some(&levels),
+        );
+        let mut wire = serde_json::to_value(&built).expect("serialize");
+        // A peer's row this build cannot read decodes to nothing.
+        wire["dv_metadata"] = serde_json::json!({"in_file": 7});
+        let decoded: PlaybackEnhancement = serde_json::from_value(wire.clone()).expect("decodes");
+        assert_eq!(decoded.dv_metadata, None);
+        assert!(decoded.is_well_formed());
+        // A newer peer's additive field is tolerated.
+        let mut newer = serde_json::to_value(&built).expect("serialize");
+        newer["dv_metadata"]["in_file"]["extra"] = serde_json::json!(true);
+        let decoded: PlaybackEnhancement = serde_json::from_value(newer).expect("decodes");
+        assert!(decoded.dv_metadata.is_some());
+        // An out-of-shape row is dropped and the rest relays.
+        let mut bad = serde_json::to_value(&built).expect("serialize");
+        bad["dv_metadata"]["applied"]["text"] = serde_json::json!("");
+        let mut decoded: PlaybackEnhancement = serde_json::from_value(bad).expect("decodes");
+        assert!(decoded.dv_metadata.is_some());
+        decoded.drop_ill_formed_rows();
+        assert_eq!(decoded.dv_metadata, None);
+        assert!(decoded.is_well_formed());
     }
 }

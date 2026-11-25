@@ -867,9 +867,11 @@ impl ProcessingActivity {
 #[derive(Debug, Clone)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct DvReportDisplay {
-    pub(crate) file_id: i64,
     pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
     pub(crate) note: Option<String>,
+    /// Frozen beside the policy at session start; `None` for a route that
+    /// carries no display-target policy.
+    pub(crate) facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

@@ -420,9 +420,9 @@ impl VodServe {
             Some((
                 report,
                 crate::vodserve::DvReportDisplay {
-                    file_id: rendition.recipe.file.id,
                     display: runtime.display.clone(),
                     note: runtime.display_target_note.clone(),
+                    facts: runtime.dv_row_facts.clone(),
                 },
             ))
         }

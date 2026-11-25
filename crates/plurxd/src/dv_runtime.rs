@@ -606,6 +606,9 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     /// Where the renderer was admitted to decode; it sized the graph's CPU debit.

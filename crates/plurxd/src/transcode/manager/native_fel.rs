@@ -358,6 +358,7 @@ impl TranscodeManager {
             display_target: None,
             display: None,
             display_target_note: None,
+            dv_row_facts: None,
             source_mastering: crate::decode_facts::mastering::source_mastering_metadata(stream),
             source_mastering_minimum: crate::decode_facts::mastering::source_mastering_minimum(
                 stream,

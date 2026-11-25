@@ -32,7 +32,6 @@ const MAX_LEVELS: usize = 32;
 
 /// `In the file`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InFileRow {
     /// `None` until the title's levels are recorded: unknown, never empty.
     #[serde(default)]
@@ -45,7 +44,6 @@ pub struct InFileRow {
 
 /// One level the served picture consumed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppliedLevel {
     /// `None` names the title's creative trims when its levels are not
     /// recorded, so which trim level was used cannot be said.
@@ -58,7 +56,6 @@ pub struct AppliedLevel {
 
 /// `Applied by Cinema`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppliedRow {
     pub levels: Vec<AppliedLevel>,
     pub text: String,
@@ -66,7 +63,6 @@ pub struct AppliedRow {
 
 /// `Left for the display`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LeftRow {
     /// The levels still in the delivered RPU; `None` when the delivery
     /// carries none (`delivered` says why) or the title's levels are unknown.
@@ -81,19 +77,25 @@ pub struct LeftRow {
 
 /// The `Dolby Vision metadata` row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DvMetadataRows {
     pub in_file: InFileRow,
     pub applied: AppliedRow,
     pub left_for_display: LeftRow,
 }
 
+/// "L1 · L2 · …", or "None" when no display-metadata level remains (a CM v4.0
+/// grade whose only block is L254), never an empty text.
 fn level_list(levels: impl IntoIterator<Item = u8>) -> String {
-    levels
+    let list = levels
         .into_iter()
         .map(|level| format!("L{level}"))
         .collect::<Vec<_>>()
-        .join(" · ")
+        .join(" · ");
+    if list.is_empty() {
+        "None".to_owned()
+    } else {
+        list
+    }
 }
 
 /// Which levels the server's display mapping consumes, defined once.
@@ -101,8 +103,8 @@ fn level_list(levels: impl IntoIterator<Item = u8>) -> String {
 /// The mapping follows the branch `dv_display_management` takes for every
 /// frame (`transcode/dv_processing/display_target.rs`): a display-target
 /// mapping always reads L1; its creative trims come from L8 on a CM v4.0
-/// grade (a frame with L254 or L8 takes that branch) and from L2 on a CM v2.9
-/// one. The base reshaping is the RPU's mapping curves, not a display level,
+/// grade (a frame with L254 or L8 takes that branch), with L10 for a target
+/// display that is not a preset, and from L2 on a CM v2.9 one. The base reshaping is the RPU's mapping curves, not a display level,
 /// so it adds none; L6's mastering floor and L9's primaries describe the
 /// output's static metadata and are not claimed here.
 fn applied_levels(
@@ -127,6 +129,14 @@ fn applied_levels(
         level: levels.map(|levels| if levels.cm_v40 { 8 } else { 2 }),
         partial,
     });
+    // CM v4.0 trims resolve a target display that is not a preset through
+    // its L10 description.
+    if levels.is_some_and(|levels| levels.cm_v40 && levels.levels.contains(&10)) {
+        applied.push(AppliedLevel {
+            level: Some(10),
+            partial,
+        });
+    }
     applied
 }
 
@@ -231,10 +241,22 @@ pub fn dv_metadata_rows(
     })
 }
 
+/// The title facts both rows report for one session, frozen beside its
+/// display-target policy from the same probe snapshot, so the rows describe
+/// what the policy saw rather than a later rescan.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DvRowFacts {
+    pub levels: Option<DvTitleLevels>,
+    /// The scanned L1 maximum of an eligible title, in nits.
+    pub title_peak_nits: Option<u32>,
+    /// The policy declined because the title already fits this bucket.
+    pub title_fits_nits: Option<u32>,
+}
+
 /// What the session's display-target policy concluded, without the client
 /// reconstructing it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum DisplayTargetState {
     /// The current report proves a mapping for this peak.
     Targeted { mapped_nits: u32 },
@@ -245,7 +267,6 @@ pub enum DisplayTargetState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReportedPeak {
     pub nits: u32,
     #[serde(default)]
@@ -254,7 +275,6 @@ pub struct ReportedPeak {
 
 /// The `Display target` row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DisplayTargetRows {
     #[serde(default)]
     pub reported_peak: Option<ReportedPeak>,
@@ -355,7 +375,6 @@ pub fn display_target_rows(facts: &DisplayTargetFacts<'_>) -> DisplayTargetRows 
 /// Both rows of a processed delivery, built by the session owner beside the
 /// processing report they describe and cleared with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DvProcessingRows {
     pub dv_metadata: DvMetadataRows,
     pub display_target: DisplayTargetRows,
@@ -376,7 +395,7 @@ impl DvMetadataRows {
             && text(&self.left_for_display.text)
             && list(&self.in_file.levels)
             && list(&self.left_for_display.levels)
-            && self.applied.levels.len() <= 2
+            && self.applied.levels.len() <= 3
             && self
                 .in_file
                 .cm_version
@@ -502,6 +521,16 @@ mod tests {
         )
         .expect("DV source");
         assert_eq!(rows.applied.text, "L1 · L2 (some shots)");
+        let with_l10 = DvTitleLevels {
+            levels: BTreeSet::from([1, 8, 10, 254]),
+            cm_v40: true,
+        };
+        let rows = dv_metadata_rows(
+            &processed(Some(1000), CreativeTrims::Partial),
+            Some(&with_l10),
+        )
+        .expect("DV source");
+        assert_eq!(rows.applied.text, "L1 · L8 (some shots) · L10 (some shots)");
         let rows = dv_metadata_rows(&processed(Some(600), CreativeTrims::None), Some(&cm40()))
             .expect("DV source");
         assert_eq!(rows.applied.text, "L1");
@@ -606,6 +635,19 @@ mod tests {
     }
 
     #[test]
+    fn a_grade_whose_only_block_is_l254_never_writes_an_empty_text() {
+        let levels = DvTitleLevels {
+            levels: BTreeSet::from([254]),
+            cm_v40: true,
+        };
+        let rows = dv_metadata_rows(&EnhancementRoute::NativeDolbyVision, Some(&levels))
+            .expect("DV source");
+        assert_eq!(rows.in_file.text, "None (CM v4.0)");
+        assert_eq!(rows.left_for_display.text, "None");
+        assert!(rows.is_well_formed());
+    }
+
+    #[test]
     fn a_missing_title_scan_is_unavailable_never_an_empty_list() {
         for route in [
             EnhancementRoute::NativeDolbyVision,
@@ -647,11 +689,12 @@ mod tests {
             DvProcessingRows::from_owner_wire(&serde_json::to_vec(&value).expect("json")),
             None
         );
+        // A newer owner's additive field is tolerated; the shape check still holds.
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         value["extra"] = serde_json::json!(1);
         assert_eq!(
             DvProcessingRows::from_owner_wire(&serde_json::to_vec(&value).expect("json")),
-            None
+            Some(rows.clone())
         );
         assert_eq!(DvProcessingRows::from_owner_wire(&[b' '; 5000]), None);
     }

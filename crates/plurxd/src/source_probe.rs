@@ -161,6 +161,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut levels: Option<levels_work::LevelsTask> = None;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut levels_after = 0;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let levels_backoff = levels_work::Backoff::default();
     #[cfg(target_os = "linux")]
     let mut live_title_after = 0;
     loop {
@@ -284,9 +286,10 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             false
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // A running DV levels read does not hold this block back: title scans
+        // and F+ fits feed decisions, the levels read only reports.
         if title.is_none()
             && refit.is_none()
-            && levels.is_none()
             && cursor.is_none()
             && !yielded
             && !published
@@ -311,11 +314,22 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     Err(error) => tracing::warn!(%error, "F+ demand unavailable"),
                 }
             }
-            if title.is_none() && refit.is_none() {
-                match levels_work::LevelsTask::start(&state, &mut levels_after).await {
+            if title.is_none() && refit.is_none() && levels.is_none() {
+                match levels_work::LevelsTask::start(&state, &mut levels_after, &levels_backoff)
+                    .await
+                {
                     Ok(work) => levels = work,
                     Err(error) => tracing::warn!(%error, "DV levels demand unavailable"),
                 }
+            }
+        }
+        // Any title scan or F+ fit that started this tick (maintenance, native
+        // prewarm or playback) takes the lane from a levels read at once, so
+        // the lane never runs two children.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if (title.is_some() || refit.is_some()) && levels.is_some() {
+            if let Some(work) = levels.take() {
+                work.stop().await;
             }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]

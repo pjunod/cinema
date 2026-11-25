@@ -160,6 +160,11 @@ impl DvTitleStats {
     /// Old or future probe documents are unknown, never eligible by default.
     pub fn from_probe_json(document: &str) -> Option<Self> {
         let document: serde_json::Value = serde_json::from_str(document).ok()?;
+        Self::from_probe_value(&document)
+    }
+
+    /// The same reading of an already parsed probe document.
+    pub fn from_probe_value(document: &serde_json::Value) -> Option<Self> {
         let stats: Self = serde_json::from_value(document.get(PROBE_FIELD)?.clone()).ok()?;
         (stats.schema == SCHEMA).then_some(stats)
     }

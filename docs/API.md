@@ -2358,7 +2358,8 @@ saved Developer preferences alone do not establish applied processing.
 A processed HDR10 or SDR report also carries the Playback info rows that
 describe it, built by the session owner and cleared with the report:
 `dv_metadata` (as in `enhancement`, with `applied` naming L1 for a display
-mapping and the grade's trim level, L8 on CM v4.0 or L2 on CM v2.9, marked
+mapping and the grade's trim level, L8 (with L10 when the title has it) on CM v4.0
+or L2 on CM v2.9, marked
 `partial` when only some shots were trimmed) and `display_target`:
 `{reported_peak: {nits, source}|null, reported_peak_text, state:
 {state: "targeted", mapped_nits} | {state: "already_fits", bucket_nits} |

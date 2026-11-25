@@ -1659,6 +1659,48 @@ impl TranscodeManager {
         Self::display_target_policy_with_source(enabled, display, probe, None, None)
     }
 
+    /// The title facts the Playback info rows report, read once beside
+    /// [`Self::display_target_policy`] from the same caps and probe snapshot:
+    /// the recorded levels, the scanned title peak, and whether the policy
+    /// declines because the eligible title already fits the reported bucket.
+    /// That `TitleFits` outcome only the HDR branch produces, and source
+    /// resolution never changes it. Decides nothing.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn dv_row_facts(
+        enabled: bool,
+        display: Option<&plurx_core::playback::caps::DisplayCaps>,
+        probe: Option<&str>,
+    ) -> plurx_core::playback::dv_provenance::DvRowFacts {
+        use plurx_core::transcode::dv_processing::{
+            DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline,
+        };
+        let document =
+            probe.and_then(|probe| serde_json::from_str::<serde_json::Value>(probe).ok());
+        let stats = document
+            .as_ref()
+            .and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_value);
+        let sdr = display.is_some_and(|display| !display.hdr && !display.dolby_vision);
+        let title_fits_nits = display
+            .and_then(|display| display.hdr10_target_bucket())
+            .filter(|_| enabled && !sdr)
+            .filter(|bucket| {
+                matches!(
+                    DvDisplayTarget::for_title(*bucket, stats),
+                    Ok(DvDisplayTargetChoice::Master {
+                        reason: DvDisplayTargetDecline::TitleFits { .. }
+                    })
+                )
+            });
+        plurx_core::playback::dv_provenance::DvRowFacts {
+            levels: document
+                .as_ref()
+                .and_then(plurx_core::scan::dv_levels::DvLevelsRecord::from_probe_value)
+                .and_then(|record| record.title_levels()),
+            title_peak_nits: stats.and_then(plurx_core::transcode::dv_processing::title_peak_nits),
+            title_fits_nits,
+        }
+    }
+
     #[cfg(any(target_os = "linux", test))]
     fn display_target_policy_with_source(
         enabled: bool,
@@ -2811,6 +2853,11 @@ impl TranscodeManager {
             .map_err(|_| {
                 "display-target source verification exceeded the preparation budget".to_owned()
             })??;
+            let dv_row_facts = Some(Self::dv_row_facts(
+                target_enabled,
+                caps.display.as_ref(),
+                planning.probe_json.as_deref(),
+            ));
             if destination == DvDestination::Sdr
                 && !display_target.is_some_and(|target| target.is_sdr())
             {
@@ -2823,6 +2870,7 @@ impl TranscodeManager {
                 context.required_fel_qualification = original.required_fel_qualification.clone();
                 context.display_target = display_target;
                 context.display_target_note = display_target_note.clone();
+                context.dv_row_facts = dv_row_facts.clone();
                 context.retained_output = None;
                 context.normalized_geometry = false;
                 context.profile = None;
@@ -2832,6 +2880,7 @@ impl TranscodeManager {
                 let mut ask = original.clone();
                 ask.display_target = display_target;
                 ask.display_target_note = display_target_note.clone();
+                ask.dv_row_facts = dv_row_facts.clone();
                 SourceProcessedWork {
                     ask,
                     authority: Arc::clone(&input.authority),
@@ -3043,6 +3092,7 @@ impl TranscodeManager {
             let mut context = Self::candidate_context(&candidate);
             context.display_target = display_target;
             context.display_target_note = display_target_note;
+            context.dv_row_facts = dv_row_facts.clone();
             context.catalog_query = original.catalog_query.clone();
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = Some(binding);
@@ -4229,6 +4279,7 @@ impl TranscodeManager {
                         display_target,
                         display: processed_work.and_then(|work| work.ask.canonical_caps.as_ref()).or_else(|| req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref())).and_then(|caps| caps.display.clone()),
                         display_target_note: processed_work.and_then(|work| work.ask.display_target_note.clone()).or_else(|| req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone())),
+                        dv_row_facts: processed_work.map_or_else(|| req.candidate_context.as_ref().and_then(|context| context.dv_row_facts.clone()), |work| work.ask.dv_row_facts.clone()),
                         source_mastering, source_mastering_minimum, source_master_metadata,
                         destination, mode, decode: renderer_decode, reconstruction_slot, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
@@ -7166,6 +7217,75 @@ mod display_target_policy_tests {
         playback::caps::{DisplayCaps, DisplayPeakSource},
         scan::dv_title::*,
     };
+
+    /// The row facts agree with the policy itself: "already fits" exactly when
+    /// the policy declines with TitleFits, never for an unscanned title, an
+    /// unsupported peak, an SDR display or targeting switched off.
+    #[test]
+    fn row_facts_report_already_fits_only_when_the_policy_declines_for_it() {
+        let stats = |max_l1_pq: u16| DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(max_l1_pq),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+            el_kind: TitleConstant::Unknown,
+        };
+        let hdr = |nits| DisplayCaps {
+            hdr: true,
+            max_nits: Some(nits),
+            peak_source: Some(DisplayPeakSource::Viewer),
+            ..Default::default()
+        };
+        let levels = serde_json::json!({"outcome":"recorded","schema":1,"levels":[1,2,6],"cm_v40":false,"rpus":2,"unparsed":0});
+        // A dim title (PQ 2081 is about 100 nits) fits a 1000-nit display.
+        let dim =
+            serde_json::json!({PROBE_FIELD: stats(2081), "plurx_dv_levels_v1": levels}).to_string();
+        let bright = serde_json::json!({PROBE_FIELD: stats(3696)}).to_string();
+        for (enabled, display, probe, fits) in [
+            (true, Some(hdr(1000)), Some(dim.as_str()), true),
+            (true, Some(hdr(1000)), Some(bright.as_str()), false),
+            (true, Some(hdr(1000)), None, false),
+            (true, Some(hdr(300)), Some(dim.as_str()), false),
+            (false, Some(hdr(1000)), Some(dim.as_str()), false),
+            (
+                true,
+                Some(DisplayCaps::default()),
+                Some(dim.as_str()),
+                false,
+            ),
+        ] {
+            let facts = TranscodeManager::dv_row_facts(enabled, display.as_ref(), probe);
+            // A targeted outcome may still refuse for unrelated mastering
+            // facts; that is not a TitleFits decline either.
+            let note = TranscodeManager::display_target_policy(enabled, display.as_ref(), probe)
+                .ok()
+                .and_then(|(_, note)| note);
+            let policy_fits = note
+                .as_deref()
+                .is_some_and(|note| note.contains("already fits"));
+            assert_eq!(
+                facts.title_fits_nits.is_some(),
+                fits,
+                "{enabled} {display:?} {probe:?}"
+            );
+            assert_eq!(policy_fits, fits, "the policy agrees: {note:?}");
+        }
+        let facts = TranscodeManager::dv_row_facts(true, Some(&hdr(1000)), Some(&dim));
+        assert_eq!(facts.title_fits_nits, Some(1000));
+        assert_eq!(facts.levels.expect("recorded").levels, [1, 2, 6].into());
+        assert!(facts
+            .title_peak_nits
+            .is_some_and(|nits| (95..=105).contains(&nits)));
+        assert_eq!(
+            TranscodeManager::dv_row_facts(true, Some(&hdr(1000)), Some(&bright)).levels,
+            None
+        );
+    }
     #[test]
     fn explicit_sdr_capability_uses_100_without_converting_unknown_hdr_peak_to_sdr() {
         use plurx_core::playback::caps::DisplayCaps;

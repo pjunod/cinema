@@ -635,6 +635,9 @@ pub(crate) struct ProcessedUpgradeAsk {
     pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
 }
 impl ProcessedUpgradeAsk {
     pub(crate) fn from_candidate(context: &CandidateExecutionContext) -> Self {
@@ -651,6 +654,7 @@ impl ProcessedUpgradeAsk {
             catalog_query: context.catalog_query.clone(),
             display_target: context.display_target,
             display_target_note: context.display_target_note.clone(),
+            dv_row_facts: context.dv_row_facts.clone(),
         }
     }
 }
