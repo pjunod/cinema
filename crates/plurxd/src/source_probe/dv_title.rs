@@ -92,6 +92,55 @@ pub(super) async fn scan(
     scan_owned(file, document, tools, runtime_cache, None)
         .await
         .map(|(stats, _)| stats)
+        .map_err(CensusScanError::into_message)
+}
+
+/// Why a complete-title scan ended without a verified aggregate.
+#[derive(Debug)]
+pub(super) enum CensusScanError {
+    /// Something a later attempt need not repeat: a busy or failed source
+    /// read, a signal or wall-time kill, a launch error, changed tools or a
+    /// changed source, or a census the daemon could not verify.
+    Transient(String),
+    /// The current scanner exited on its own after reading the whole held
+    /// source, which is still unchanged, and refused it. The same scanner
+    /// refuses the same source again, so retrying cannot settle it.
+    Refused(String),
+}
+
+impl CensusScanError {
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::Transient(message) | Self::Refused(message) => message,
+        }
+    }
+}
+
+impl From<String> for CensusScanError {
+    fn from(message: String) -> Self {
+        Self::Transient(message)
+    }
+}
+
+impl From<&str> for CensusScanError {
+    fn from(message: &str) -> Self {
+        Self::Transient(message.into())
+    }
+}
+
+/// A failed scan is a refusal only when the scanner exited by itself (not by
+/// a signal, which a wall-time kill or crash leaves) over inputs that are
+/// still current.
+fn classify_scan_failure(
+    output: &plurx_core::process::bounded::Output,
+    inputs_current: bool,
+) -> CensusScanError {
+    let message = scan_failure(output);
+    if inputs_current && output.status.code().is_some() {
+        CensusScanError::Refused(message)
+    } else {
+        CensusScanError::Transient(message)
+    }
 }
 
 /// Select the planned windows before the whole scan. Their actual source
@@ -102,7 +151,7 @@ pub(super) async fn scan_with_m7_census(
     tools: &ToolSet,
     runtime_cache: &Path,
     ranges: &[M7WindowRange],
-) -> Result<(DvTitleStats, VerifiedSourceCensus), String> {
+) -> Result<(DvTitleStats, VerifiedSourceCensus), CensusScanError> {
     let (stats, census) = scan_owned(file, document, tools, runtime_cache, Some(ranges)).await?;
     Ok((stats, census.ok_or("planned M7 census was not returned")?))
 }
@@ -113,7 +162,7 @@ async fn scan_owned(
     tools: &ToolSet,
     runtime_cache: &Path,
     ranges: Option<&[M7WindowRange]>,
-) -> Result<(DvTitleStats, Option<VerifiedSourceCensus>), String> {
+) -> Result<(DvTitleStats, Option<VerifiedSourceCensus>), CensusScanError> {
     let args = ranges.map(m7_census::arguments).transpose()?;
     let census_dir = ranges
         .map(|_| tempfile::tempdir_in(runtime_cache))
@@ -182,7 +231,11 @@ async fn scan_owned(
     }
     let output = output.map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err(scan_failure(&output));
+        let inputs_current = !source_read_failed
+            && tools.is_current().await
+            && source.unchanged()
+            && source.reopen(file).await.is_ok();
+        return Err(classify_scan_failure(&output, inputs_current));
     }
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
@@ -496,6 +549,34 @@ mod tests {
         assert!(!silent.contains("): "), "{silent}");
         let long = scan_failure(&output(1 << 8, &"é".repeat(2 * MAX_SCAN_FAILURE_BYTES)));
         assert!(long.len() <= 64 + MAX_SCAN_FAILURE_BYTES, "{}", long.len());
+    }
+
+    /// Eclipse's census refusal retried every maintenance pass because every
+    /// scan failure was a retry. Only the scanner's own exit over current
+    /// inputs is a refusal; a kill or stale inputs still retry.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_scanners_own_exit_over_current_inputs_is_a_refusal() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |status: i32| plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(status),
+            stdout: Vec::new(),
+            stderr: b"DV title scan refused: exact M7 census interval end\n".to_vec(),
+        };
+        let refused = classify_scan_failure(&output(1 << 8), true);
+        assert!(
+            matches!(&refused, CensusScanError::Refused(message)
+                if message.ends_with("exact M7 census interval end")),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            classify_scan_failure(&output(1 << 8), false),
+            CensusScanError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_scan_failure(&output(9), true),
+            CensusScanError::Transient(_)
+        ));
     }
 }
 

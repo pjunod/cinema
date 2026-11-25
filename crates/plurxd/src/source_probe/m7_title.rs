@@ -35,6 +35,17 @@ impl From<String> for EvaluationError {
     }
 }
 
+/// A scanner refusal of the unchanged source under current tools ends the
+/// title as unsupported; any other scan failure is retried.
+impl From<dv_title::CensusScanError> for EvaluationError {
+    fn from(error: dv_title::CensusScanError) -> Self {
+        match error {
+            dv_title::CensusScanError::Refused(message) => Self::Unsupported(message),
+            dv_title::CensusScanError::Transient(message) => Self::Deferred(message),
+        }
+    }
+}
+
 impl From<&str> for EvaluationError {
     fn from(error: &str) -> Self {
         Self::Deferred(error.into())
@@ -1447,6 +1458,16 @@ mod tests {
         let record = |evaluation: Evaluation| outcome_record(&evaluation, &identity);
         assert_eq!(record(Ok(Evaluated::Skipped)), None);
         assert_eq!(record(Err(EvaluationError::Deferred("busy".into()))), None);
+        assert_eq!(
+            record(Err(
+                dv_title::CensusScanError::Transient("killed".into()).into()
+            )),
+            None
+        );
+        assert!(matches!(
+            EvaluationError::from(dv_title::CensusScanError::Refused("refused".into())),
+            EvaluationError::Unsupported(message) if message == "refused"
+        ));
         for (evaluation, kind, gate) in [
             (
                 Ok(Evaluated::NotApplicable),
