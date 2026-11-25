@@ -1,7 +1,7 @@
 //! Concrete ordinary AVC writer. No caller future, descriptor export, or
 //! detached drain can enter this adapter. Completion remains metadata: the
 //! graph must join the original task and root and close every other owner.
-use super::{FiniteFile, FiniteOutput};
+use super::{FiniteControl, FiniteFile, FiniteOutput};
 use crate::adaptive_resources::physical_graph::finite_pipes::FiniteRootPipes;
 #[cfg(target_os = "linux")]
 use crate::adaptive_resources::{FamilyIdentity, ResourceLedger};
@@ -14,7 +14,10 @@ use crate::vod_generation::{
 use std::{
     io,
     mem::size_of,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tokio::io::AsyncReadExt;
@@ -230,6 +233,9 @@ pub(in crate::adaptive_resources) struct SoftwarePump {
     output: FiniteOutput,
     plan: SoftwareAvcPumpPlan,
     events: EventSender,
+    // The same registration an owner stops. Once it is requested, the writer
+    // arms no further publication: cleanup owns whatever is already durable.
+    stop: Arc<FiniteControl>,
     #[cfg(target_os = "linux")]
     history_context: Option<(telemetry::HistoryBasis, ResourceLedger, FamilyIdentity)>,
 }
@@ -315,7 +321,11 @@ impl SoftwarePump {
         if !output.has_encoded_process_metadata() {
             return Err(invalid("ordinary AVC requires encoded-process metadata"));
         }
-        Ok(Self::from_encoded_output(output, plan))
+        Ok(Self::from_encoded_output(
+            output,
+            plan,
+            Arc::new(FiniteControl::new()),
+        ))
     }
 
     /// The fixed preparation builder validates the encoded marker before R
@@ -323,6 +333,7 @@ impl SoftwarePump {
     pub(in crate::adaptive_resources::runtime) fn from_encoded_output(
         output: FiniteOutput,
         plan: SoftwareAvcPumpPlan,
+        stop: Arc<FiniteControl>,
     ) -> (Self, SoftwareVodEvents) {
         let (events, receiver) = events::channel();
         (
@@ -330,6 +341,7 @@ impl SoftwarePump {
                 output,
                 plan,
                 events,
+                stop,
                 #[cfg(target_os = "linux")]
                 history_context: None,
             },
@@ -434,6 +446,7 @@ impl SoftwarePump {
             &self.output,
             FiniteFile::EncodedProcessMetadata,
             &mut marker,
+            None,
         )
         .await?;
         let mut metadata = BoundedBytes::new(self.plan.metadata_bytes)?;
@@ -456,9 +469,10 @@ impl SoftwarePump {
             &self.output,
             FiniteFile::IdentityMetadata,
             &mut metadata.bytes,
+            None,
         )
         .await?;
-        publish(&self.output, FiniteFile::Init, &mut served.bytes).await?;
+        publish(&self.output, FiniteFile::Init, &mut served.bytes, None).await?;
         drop(served);
         self.events
             .send(initialized_event(&identity)?)
@@ -487,6 +501,7 @@ impl SoftwarePump {
         let sink = FiniteSink {
             output: &self.output,
             events: &self.events,
+            stop: &self.stop,
             complete,
             #[cfg(target_os = "linux")]
             telemetry: std::sync::Mutex::new(telemetry),
@@ -517,6 +532,7 @@ impl SoftwarePump {
 struct FiniteSink<'a> {
     output: &'a FiniteOutput,
     events: &'a EventSender,
+    stop: &'a FiniteControl,
     complete: &'a AtomicBool,
     #[cfg(target_os = "linux")]
     telemetry: std::sync::Mutex<FiniteTelemetry>,
@@ -527,7 +543,13 @@ impl Sink for FiniteSink<'_> {
         let count = u64::try_from(bytes.len()).map_err(|_| overflow())?;
         let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
         let entered_publish = Instant::now();
-        publish(self.output, FiniteFile::Segment(entry), &mut bytes).await?;
+        publish(
+            self.output,
+            FiniteFile::Segment(entry),
+            &mut bytes,
+            Some(self.stop),
+        )
+        .await?;
         #[cfg(target_os = "linux")]
         self.telemetry
             .lock()
@@ -562,8 +584,18 @@ impl Sink for FiniteSink<'_> {
 /// One bound for the whole segment: the queue, publication, sync queue and
 /// sync each wait out a reader's turn on the asset's single journaled I/O
 /// slot within it. Expiry surfaces as `TimedOut`, not as a sink fault.
-async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -> io::Result<()> {
+///
+/// With `stop`, a requested owner stop ends the generation before each
+/// durable arm, as the generation's ordinary session-gone end. Output that
+/// cleanup removes at once is never published or synced after the request.
+async fn publish(
+    output: &FiniteOutput,
+    file: FiniteFile,
+    bytes: &mut Vec<u8>,
+    stop: Option<&FiniteControl>,
+) -> io::Result<()> {
     output.validate_sources().await.map_err(io::Error::other)?;
+    stopping(stop)?;
     let deadline = deadline()?;
     let ticket = output
         .queue_file_wait(file, bytes, deadline)
@@ -573,6 +605,7 @@ async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -
         .finish(&ticket, deadline)
         .await
         .map_err(|error| error.into_io_error())?;
+    stopping(stop)?;
     let ticket = output
         .queue_sync_one_wait(file, deadline)
         .await
@@ -582,6 +615,16 @@ async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -
         .await
         .map_err(|error| error.into_io_error())?;
     output.validate_sources().await.map_err(io::Error::other)
+}
+fn stopping(stop: Option<&FiniteControl>) -> io::Result<()> {
+    if stop.is_some_and(FiniteControl::requested) {
+        // NotFound is the generation's session-gone end, reported as `Ran`.
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "finite producer stop requested",
+        ));
+    }
+    Ok(())
 }
 fn deadline() -> io::Result<Instant> {
     Instant::now()

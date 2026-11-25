@@ -2332,8 +2332,11 @@ impl NodeResourceRuntime {
                         encoded_process_marker: request.encoded_process_marker,
                         _app_guard: guard_for_output,
                     };
-                    let (pump, events) =
-                        pump::SoftwarePump::from_encoded_output(output, request.producer);
+                    let (pump, events) = pump::SoftwarePump::from_encoded_output(
+                        output,
+                        request.producer,
+                        Arc::clone(&control_for_launch),
+                    );
                     #[cfg(target_os = "linux")]
                     let pump = {
                         let mut pump = pump;
