@@ -1283,6 +1283,22 @@ mod tests {
             trial,
         }
     }
+    /// The same charge without a process root. Every nonzero `processes`
+    /// carries an unknown kernel-task peak and the ledger admits at most one
+    /// such producer at a time (fdda9a593), so a probe of another dimension
+    /// must not add a second root beside one that is already held.
+    fn without_root(value: u64) -> ResourceVector {
+        ResourceVector {
+            processes: 0,
+            ..vector(value)
+        }
+    }
+    fn rootless_demand(value: u64, trial: bool) -> WorkloadDemand {
+        WorkloadDemand {
+            resources: Metric::Known(without_root(value)),
+            ..demand(value, trial)
+        }
+    }
 
     #[test]
     fn reservation_rechecks_all_dimensions_and_epochs_atomically() {
@@ -1295,10 +1311,10 @@ mod tests {
         let (mut first, cleanup) = ledger.reserve(demand(1, false)).expect("first reservation");
         first.mark_spawn_possible().expect("spawn custody");
         assert!(matches!(
-            ledger.reserve(demand(2, false)),
+            ledger.reserve(rootless_demand(2, false)),
             Err(AdmissionRefusal::HardLimit(ResourceDimension::Cpu))
         ));
-        let mut memory = vector(1);
+        let mut memory = without_root(1);
         memory.peak_memory_bytes = 2;
         assert!(matches!(
             ledger.reserve(WorkloadDemand {
@@ -1338,7 +1354,7 @@ mod tests {
         drop(held);
         assert!(ledger.snapshot().expect("held snapshot").trial_held);
         assert!(matches!(
-            ledger.reserve(demand(1, true)),
+            ledger.reserve(rootless_demand(1, true)),
             Err(AdmissionRefusal::TrialAlreadyHeld)
         ));
         cleanup.mark_reaping().expect("same owner reaping");
@@ -1365,7 +1381,7 @@ mod tests {
             .expect("maximum vector");
         held.mark_spawn_possible().expect("spawn custody");
         assert!(matches!(
-            ledger.reserve(demand(1, false)),
+            ledger.reserve(rootless_demand(1, false)),
             Err(AdmissionRefusal::ArithmeticOverflow)
         ));
         assert!(matches!(
@@ -1567,7 +1583,7 @@ mod tests {
             .take(count)
             .map(|role| FamilyRoleDemand {
                 role,
-                demand: demand(1, trial),
+                demand: rootless_demand(1, trial),
                 retained: None,
             })
             .collect()
@@ -1595,7 +1611,7 @@ mod tests {
             assert_eq!(owned.len(), count * 2);
             assert_eq!(
                 ledger.snapshot().expect("snapshot").used,
-                vector((count * 2) as u64)
+                without_root((count * 2) as u64)
             );
             for (reservation, _) in &mut owned {
                 reservation.mark_spawn_possible().expect("spawn");
@@ -1683,7 +1699,7 @@ mod tests {
         let second = ledger.new_family().expect("second family");
         let initial = [FamilyRoleDemand {
             role: FamilyRole::Audio,
-            demand: demand(1, false),
+            demand: rootless_demand(1, false),
             retained: None,
         }];
         let mut audio = ledger
@@ -1697,12 +1713,12 @@ mod tests {
         let roles = [
             FamilyRoleDemand {
                 role: FamilyRole::Video,
-                demand: demand(1, false),
+                demand: rootless_demand(1, false),
                 retained: None,
             },
             FamilyRoleDemand {
                 role: FamilyRole::Audio,
-                demand: demand(1, false),
+                demand: rootless_demand(1, false),
                 retained: Some(audio.retained_role()),
             },
         ];
@@ -1719,7 +1735,7 @@ mod tests {
             ])
             .expect("two missing videos only");
         assert_eq!(owned.len(), 2);
-        assert_eq!(ledger.snapshot().expect("all roles").used, vector(3));
+        assert_eq!(ledger.snapshot().expect("all roles").used, without_root(3));
         assert_eq!(
             ledger
                 .inner
@@ -1740,10 +1756,13 @@ mod tests {
         ));
         assert_eq!(
             ledger.snapshot().expect("duplicate refused").used,
-            vector(3)
+            without_root(3)
         );
         drop(owned); // Never spawned: only the original audio remains.
-        assert_eq!(ledger.snapshot().expect("no-spawn refund").used, vector(1));
+        assert_eq!(
+            ledger.snapshot().expect("no-spawn refund").used,
+            without_root(1)
+        );
     }
 
     #[test]
