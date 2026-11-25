@@ -881,10 +881,6 @@ impl Cluster {
         self.access.local().admission().await
     }
 
-    pub(crate) fn local_membership(&self) -> plurx_core::cluster::membership::LocalNode {
-        self.access.local()
-    }
-
     pub(crate) fn maintenance_active(&self) -> bool {
         self.access.local().maintenance_fence()
     }
