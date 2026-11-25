@@ -2,6 +2,15 @@
 local script = arg[1] or 'plurx_player/scripts/cinema.lua'
 local P, bindings, watchers, events, commands, timers, overlay = {}, {}, {}, {}, {}, {}, {}
 local reads, read_overrides = {}, {}
+-- mpv's Lua loop (player/lua/defaults.lua) handles one event, then, once the
+-- queue is empty, runs due timers and the idle handlers. Each event delivered
+-- here is followed by that drain; watchers and raw_timers keep the bare callbacks so a test can
+-- model a queue that holds several events at once.
+local idles, raw_timers = {}, {}
+local function drain() for _,f in ipairs(idles) do f() end end
+local function drained(f) return function(...) f(...); drain() end end
+-- Each overlay update or removal is one render; render_cost models its time.
+local render_cost = 0
 local now, mx, my, width, height = 0, 0, 0, 1280, 720
 package.preload['mp'] = function() return {
     get_property_native=function(n)
@@ -12,16 +21,20 @@ package.preload['mp'] = function() return {
     set_property=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     set_property_number=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     commandv=function(...) commands[#commands+1]={...} end,
-    create_osd_overlay=function() overlay.update=function() overlay.removed=false end; overlay.remove=function() overlay.removed=true end; return overlay end,
+    create_osd_overlay=function() overlay.renders=0
+        overlay.update=function() overlay.removed=false; overlay.renders=overlay.renders+1; now=now+render_cost end
+        overlay.remove=function() overlay.removed=true; overlay.renders=overlay.renders+1; now=now+render_cost end
+        return overlay end,
     get_osd_size=function() return width,height end,
     get_mouse_pos=function() return mx,my end,
     get_time=function() return now end,
-    add_forced_key_binding=function(k,n,f) bindings[n]=f end,
-    add_key_binding=function(k,n,f) bindings[n]=f end,
+    add_forced_key_binding=function(k,n,f) bindings[n]=drained(f) end,
+    add_key_binding=function(k,n,f) bindings[n]=drained(f) end,
     remove_key_binding=function(n) bindings[n]=nil end,
     observe_property=function(n,t,f) watchers[n]=watchers[n] or {}; table.insert(watchers[n],f) end,
-    register_event=function(n,f) events[n]=f end,
-    add_periodic_timer=function(t,f) timers[#timers+1]=f end,
+    register_event=function(n,f) events[n]=drained(f) end,
+    add_periodic_timer=function(t,f) raw_timers[#raw_timers+1]={period=t,f=f}; timers[#timers+1]=drained(f) end,
+    register_idle=function(f) idles[#idles+1]=f end,
 } end
 package.preload['mp.options'] = function() return {read_options=function() end} end
 package.preload['mp.assdraw'] = function() return {ass_new=function()
@@ -35,6 +48,7 @@ P={['time-pos']=5,duration=30,pause=false,['user-data/osc/film']={origin=60,dura
    ['track-list']={{type='audio',id=1,lang='eng',selected=true},{type='audio',id=2,lang='fra'},
                   {type='sub',id=3,lang='eng',selected=true}},sid=3}
 dofile(script)
+drain()
 local function press(n) assert(bindings['cinema-'..n],n)() end
 local function move(x,y) mx=x;my=y;press('move') end
 local function down(x,y) move(x,y); assert(bindings['cinema-click'],'click target')( {event='down'} ) end
@@ -91,6 +105,7 @@ reset();click(222,681);eq(last()[1],'seek');eq(last()[2],110)
 local function update(name,value)
     P[name]=value
     for _,callback in ipairs(watchers[name] or {}) do callback(name,value) end
+    drain()
 end
 local function context(extra)
     local value={metadata={title='Pilot {\\bord99}',series_title='The Expedition',kind='episode',
@@ -381,4 +396,41 @@ update('native-dovi-target-state',nil)
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
 -- No path, including the Info panel's 5 Hz refresh, ever reads the level synchronously.
 eq(reads['native-dovi-target-state'],nil)
-print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 18 quality pill cases passed')
+test('renders_coalesce_so_a_slow_render_cannot_starve_the_hide_timer',function()
+    width=1280;P.pause=false;update('user-data/cinema',{});reset()
+    local function deliver(name) for _,callback in ipairs(watchers[name]) do callback(name,P[name]) end end
+    -- A burst of per-frame property changes queued together draws one frame,
+    -- and only once the queue has drained.
+    local before=overlay.renders
+    for i=1,50 do
+        P['time-pos']=i
+        for _,name in ipairs({'time-pos','video-target-params','demuxer-cache-state','native-dovi-target-state'}) do deliver(name) end
+    end
+    eq(overlay.renders,before)
+    drain();eq(overlay.renders,before+1);assert(overlay.data:find('}0:50\n',1,true),'the drawn frame is current')
+    drain();eq(overlay.renders,before+1)
+    -- mpv's loop at 24 fps with two property changes per frame, each render
+    -- costing a whole frame (40 ms): synchronous renders never let the queue
+    -- drain, so the hide timer never ran. Coalesced, it hides on time.
+    render_cost=0.04
+    local timer,frame=raw_timers[1],1/24
+    local queue,next_frame,due,start={},now,now+timer.period,now
+    while now<start+20 and not overlay.removed do
+        while next_frame<=now do
+            queue[#queue+1]='time-pos';queue[#queue+1]='video-target-params'
+            next_frame=next_frame+frame
+        end
+        if #queue>0 then
+            local name=table.remove(queue,1);P['time-pos']=now;deliver(name)
+        else
+            if now>=due then due=now+timer.period;timer.f() end
+            drain()
+            if next_frame>now and due>now then now=math.min(next_frame,due) end
+        end
+    end
+    render_cost=0
+    eq(overlay.removed,true)
+    assert(now-start<4+timer.period+0.1,'hidden after '..(now-start)..' s')
+    reset()
+end)
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions, 18 quality pill cases and render coalescing passed')
