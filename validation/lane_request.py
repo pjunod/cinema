@@ -55,7 +55,7 @@ def scope(lines: list[str], event: dict) -> list[str]:
     for output in ALWAYS_ON:
         # Rust tests can read files compile scope ignores; the unit selector
         # must see every requested run and no-ops on unchanged content keys.
-        values.setdefault(output, 'true')
+        values[output] = 'true'
     values['lane_requested'] = 'true' if requested(event) else 'false'
     return [f'{key}={value}' for key, value in values.items()]
 

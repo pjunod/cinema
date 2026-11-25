@@ -74,8 +74,11 @@ is one, so its passes are adoptable like a push's
   label is a label event that still carries `lane`: it cancels the running
   requested run and starts another. Receipts make that rerun incremental, but
   it is still a rerun; leave other labels alone while a requested run is going.
-- **Removing `lane` cancels the in-flight run** (the removal is a label event
-  in the same concurrency group) and starts nothing.
+- **Removing `lane` starts nothing.** When other labels remain, the removal is
+  a label event in the same concurrency group and cancels an in-flight
+  requested run. When `lane` was the only label, Forgejo sends
+  `label_cleared`, which matches no trigger and cancels nothing, so
+  `ci-fleet lane leave` also cancels the requested run through the API.
 
 ## Manual source gate
 

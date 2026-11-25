@@ -71,6 +71,16 @@ class RequestedCase(unittest.TestCase):
         self.assertEqual({k: v for k, v in cheap.items() if k != "lane_requested"},
                          {k: v for k, v in out.items() if k != "lane_requested"})
 
+    def test_a_requested_run_always_selects_preflight_and_the_worker_proof(self):
+        # The gate accepts skipped jobs; a scope that switched preflight off would
+        # otherwise skip every job behind it and still go green.
+        lines = SCOPE_LINES + ["preflight=false", "worker_control=false", "rust_units=false"]
+        out = dict(line.split("=", 1) for line in scope(lines, event()))
+        self.assertEqual((out["preflight"], out["worker_control"], out["rust_units"]), ("true", "true", "true"))
+
+    def test_the_gate_requires_the_requested_preflight_to_pass(self):
+        self.assertIn('if [ "$PREFLIGHT_RESULT" != success ]', job_block("promotion_gate"))
+
     def test_the_command_writes_github_output_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "event.json"

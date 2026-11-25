@@ -138,10 +138,21 @@ class Forge:
         return self._call("GET", f"/pulls/{number}")
 
     def statuses(self, sha: str) -> list[dict]:
-        """The latest commit status per context for `sha`."""
+        """Every commit status reported for `sha`, newest first.
 
-        combined = self._call("GET", f"/commits/{sha}/status") or {}
-        return list(combined.get("statuses") or [])
+        The full list, not the combined `/status` view: that keeps only the
+        newest status per context, so a later run on the same head (a cheap
+        push-event run, a label tidy-up) posting a skipped gate would hide the
+        requested run's green one, which `gate_state` accepts.
+        """
+
+        statuses: list[dict] = []
+        for page in range(1, 21):
+            rows = self._call("GET", f"/commits/{sha}/statuses?page={page}&limit=50") or []
+            statuses.extend(rows)
+            if len(rows) < 50:
+                break
+        return statuses
 
     def source_gate(self, number, head, main, root, run_id):
         from validation import source_gate_landing

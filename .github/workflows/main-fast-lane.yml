@@ -842,6 +842,11 @@ jobs:
           if [ "$PAPERWORK_RESULT" != success ]; then
             echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
           fi
+          # The gate runs only on a requested run, where preflight is always
+          # selected (validation/lane_request.py): it must have run and passed.
+          if [ "$PREFLIGHT_RESULT" != success ]; then
+            echo "The requested run's preflight ended with: $PREFLIGHT_RESULT"; exit 1
+          fi
           if [ "$WORKER_CONTROL_RESULT" != success ]; then
             echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
             exit 1

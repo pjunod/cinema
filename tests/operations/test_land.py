@@ -518,15 +518,25 @@ class LandCase(unittest.TestCase):
             "delete_branch_after_merge": True,
         })
 
-    def test_the_gate_is_read_from_the_commit_status_of_the_head(self):
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = json.dumps({"state": "success", "statuses": [{"context": GATE, "status": "skipped"}]}).encode()
-        opener = mock.Mock(return_value=response)
+    def test_the_gate_is_read_from_every_status_of_the_head(self):
+        # The combined /status view keeps only the newest status per context:
+        # a later skipped gate would hide the requested run's green one.
+        pages = [[{"id": 9, "context": GATE, "status": "skipped"}] + [{"id": 100 + i, "context": "other", "status": "success"}
+                                                                       for i in range(49)],
+                 [{"id": 5, "context": GATE, "status": "success"}]]
+
+        def opener(request, timeout=None):
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps(pages[len(urls)]).encode()
+            urls.append(request.full_url)
+            return response
+
+        urls: list[str] = []
         forge = landing.Forge("https://forge.example", "owner/repo", "test-token", opener)
-        self.assertEqual(landing.gate_state(forge.statuses(self.head))[0], "skipped")
-        self.assertEqual(opener.call_args.args[0].full_url,
-                         f"https://forge.example/api/v1/repos/owner/repo/commits/{self.head}/status")
+        self.assertEqual(landing.gate_state(forge.statuses(self.head))[0], "success")
+        self.assertEqual(urls, [f"https://forge.example/api/v1/repos/owner/repo/commits/{self.head}/statuses?page={n}&limit=50"
+                                for n in (1, 2)])
 
     def test_the_token_never_follows_a_redirect(self):
         seen: list[tuple[str, str | None]] = []
