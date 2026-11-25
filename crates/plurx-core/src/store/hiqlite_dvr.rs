@@ -889,17 +889,21 @@ impl DvrStore for HiqliteAuthStore {
         &self,
         deadline: tokio::time::Instant,
     ) -> Result<Option<super::DvrTrialExclusion>, StoreError> {
+        let unavailable = |reason: &'static str| {
+            tracing::debug!(target: "plurx_core::store", reason, "local DVR trial exclusion unavailable");
+            Ok(None)
+        };
         let Some(owner) = self
             .client()
             .try_hold_local_singleton_write_authority(deadline)
             .await?
         else {
-            return Ok(None);
+            return unavailable("local singleton write authority not held");
         };
         // Watch before the single census snapshot. All ordinary SQL can
         // still commit, including settings, rules and the trial's own rows.
         let Some(changes) = self.client().dvr_trial_watch() else {
-            return Ok(None);
+            return unavailable("no DVR trial change watch");
         };
         // authority: census recordings and rules together before native trial entry.
         let snapshot = self.client().query_consistent_map::<CountRow, _>(
@@ -907,20 +911,32 @@ impl DvrStore for HiqliteAuthStore {
             super::DVR_TRIAL_OBLIGATIONS_CLEAR_SQL,
             params!(),
         );
+        let started = tokio::time::Instant::now();
         let Ok(rows) = tokio::time::timeout_at(deadline, snapshot).await else {
+            tracing::debug!(target: "plurx_core::store",
+                waited_ms = started.elapsed().as_millis(),
+                "local DVR trial exclusion census missed its deadline");
             return Ok(None);
         };
         let rows = rows?;
-        Ok((matches!(rows.as_slice(), [row] if row.count == 1)
-            && tokio::time::Instant::now() < deadline
-            && !changes.moved()
-            && owner.is_current())
-        .then(|| {
-            super::DvrTrialExclusion(super::DvrTrialExclusionKind::Replicated {
+        if !matches!(rows.as_slice(), [row] if row.count == 1) {
+            return unavailable("DVR obligations are not clear");
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return unavailable("deadline passed after the census");
+        }
+        if changes.moved() {
+            return unavailable("DVR state changed during the census");
+        }
+        if !owner.is_current() {
+            return unavailable("singleton write authority changed");
+        }
+        Ok(Some(super::DvrTrialExclusion(
+            super::DvrTrialExclusionKind::Replicated {
                 owner,
                 changes: std::sync::Arc::new(changes),
-            })
-        }))
+            },
+        )))
     }
 
     async fn list_dvr_rules(&self) -> Result<Vec<DvrRule>, StoreError> {
