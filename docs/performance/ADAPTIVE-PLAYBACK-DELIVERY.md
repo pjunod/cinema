@@ -389,9 +389,22 @@ excludes their live tasks, so incumbents are conservatively counted twice. The
 durable row keeps the existing `bounded_active` memory key; the task ceiling is
 not persisted, so restart reconstruction derives an unknown task peak for every
 restored root and serializes new producers exactly as before. Uncontained and
-legacy roots are unchanged. Sibling leaves still share the delegated parent's
-own ceilings, so one contained producer can starve another inside that parent;
-this bounds the node, not the producers' mutual service.
+legacy roots are unchanged.
+
+Sibling leaves share the delegated parent's own `memory.max` and `pids.max`, and
+kernel enforcement is hierarchical: a leaf whose ceiling fits only the node can
+still be starved or OOM-killed by a sibling. Coexistence therefore also requires
+that the summed leaf ceilings of every contained producer fit the parent's
+ceilings, read at startup and reverified at each entry; otherwise admission
+refuses and the request stays on ordinary admission. The standing native reaper
+is a daemon thread outside that parent and is charged against node headroom.
+While every leaf is configured with the parent's own ceilings, as today, no two
+contained producers fit and they keep serializing.
+
+Ephemeral support remains an unknown member, but it may join several producers
+when every one is contained: the unknown component is then support alone, no
+larger than the support-plus-one-producer mix admission already permits, and
+everything added beside it is kernel-bounded and counted against headroom.
 
 For unknown claims this is the conservative cold-producer policy, like the
 approved unknown-memory path. It permits one producer without promising that the

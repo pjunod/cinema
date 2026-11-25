@@ -507,8 +507,9 @@ fn contained_video_reservation(
         }],
         Some(&[MemoryClaim::UnknownProducerPeak]),
         false,
-        Some(ContainedProducerBound::from_limits(
+        Some(ContainedProducerBound::new(
             crate::process::containment::NativeDomainLimits::new(1, 1).expect("fixture limits"),
+            crate::process::containment::NativeDomainLimits::new(4, 4).expect("fixture parent"),
         )),
     )
 }
@@ -557,7 +558,7 @@ fn restored_bounded_active_root_has_an_unknown_task_peak_and_serializes_containe
         Err(AdmissionRefusal::InsufficientEvidence)
     ));
     assert_eq!(
-        ledger.contained_incumbents(),
+        ledger.contained_incumbents(None),
         Err(AdmissionRefusal::InsufficientEvidence)
     );
     assert_eq!(ledger.snapshot().expect("unchanged").used, vector(2));

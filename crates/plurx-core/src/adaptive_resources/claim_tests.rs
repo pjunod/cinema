@@ -337,11 +337,15 @@ fn older_concurrent_sample_cannot_replace_newer_lower_headroom() {
     assert_eq!(ledger.snapshot().unwrap().held, 0);
 }
 
+fn limits(memory: u64, tasks: u32) -> crate::process::containment::NativeDomainLimits {
+    crate::process::containment::NativeDomainLimits::new(memory, tasks)
+        .expect("finite fixture limits")
+}
+
+/// A leaf inside a delegated parent large enough that only node capacity
+/// decides; the parent fit has its own tests.
 fn contained(memory: u64, tasks: u32) -> ContainedProducerBound {
-    ContainedProducerBound::from_limits(
-        crate::process::containment::NativeDomainLimits::new(memory, tasks)
-            .expect("finite fixture limits"),
-    )
+    ContainedProducerBound::new(limits(memory, tasks), limits(1000, 1000))
 }
 
 fn reserve_contained(
@@ -494,7 +498,10 @@ fn contained_trial_is_admitted_beside_a_contained_incumbent_only() {
     let ledger = ledger(Metric::Known(100), Metric::Known(100));
     let mut incumbent =
         reserve_contained(&ledger, demand(1, 1, 8), contained(4, 40)).expect("contained incumbent");
-    assert_eq!(ledger.contained_incumbents(), Ok(true));
+    assert_eq!(
+        ledger.contained_incumbents(Some(contained(4, 40))),
+        Ok(true)
+    );
     let mut trial = reserve_contained(&ledger, trial_demand(1, 1, 8), contained(4, 40))
         .expect("contained trial beside the incumbent");
     let snapshot = ledger.snapshot().expect("both held");
@@ -517,7 +524,7 @@ fn contained_trial_is_admitted_beside_a_contained_incumbent_only() {
     )
     .expect("unknown incumbent");
     assert_eq!(
-        ledger.contained_incumbents(),
+        ledger.contained_incumbents(Some(contained(4, 4))),
         Err(AdmissionRefusal::InsufficientEvidence)
     );
     assert!(matches!(
@@ -526,7 +533,7 @@ fn contained_trial_is_admitted_beside_a_contained_incumbent_only() {
     ));
     assert!(!ledger.snapshot().unwrap().trial_held);
     drop(incumbent.pop());
-    assert_eq!(ledger.contained_incumbents(), Ok(false));
+    assert_eq!(ledger.contained_incumbents(None), Ok(false));
 }
 
 #[test]
@@ -546,4 +553,53 @@ fn contained_trial_with_unknown_capacity_still_requires_no_active_producer() {
         .expect("serialized trial alone");
     assert!(ledger.snapshot().unwrap().trial_held);
     drop(trial.pop());
+}
+
+#[test]
+fn contained_siblings_must_fit_their_delegated_parent_together() {
+    // Leaves sized like the parent itself can starve or OOM each other.
+    let ledger = self::ledger(Metric::Known(100), Metric::Known(100));
+    let whole = ContainedProducerBound::new(limits(4, 40), limits(4, 40));
+    let mut incumbent =
+        reserve_contained(&ledger, demand(1, 1, 8), whole).expect("one leaf fills its parent");
+    assert_eq!(
+        ledger.contained_incumbents(Some(whole)),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
+    );
+    assert!(matches!(
+        reserve_contained(&ledger, trial_demand(1, 1, 8), whole),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
+    ));
+    assert!(!ledger.snapshot().unwrap().trial_held);
+    drop(incumbent.pop());
+
+    // Half-parent leaves coexist; a third does not.
+    let half = ContainedProducerBound::new(limits(2, 20), limits(4, 40));
+    let mut first = reserve_contained(&ledger, demand(1, 1, 8), half).expect("first half");
+    assert_eq!(ledger.contained_incumbents(Some(half)), Ok(true));
+    let mut second =
+        reserve_contained(&ledger, trial_demand(1, 1, 8), half).expect("trial in the second half");
+    assert!(matches!(
+        reserve_contained(&ledger, demand(1, 1, 8), half),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
+    ));
+    assert_eq!(ledger.snapshot().unwrap().held, 2);
+    drop(second.pop());
+    drop(first.pop());
+
+    // The parent's pids.max is checked independently of node headroom.
+    let tasks = ContainedProducerBound::new(limits(1, 30), limits(100, 40));
+    let mut first = reserve_contained(&ledger, demand(1, 1, 8), tasks).expect("first leaf");
+    assert!(matches!(
+        reserve_contained(&ledger, demand(1, 1, 8), tasks),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::KernelTasks))
+    ));
+    // A leaf of another delegated parent is not comparable evidence.
+    let foreign = ContainedProducerBound::new(limits(1, 1), limits(100, 100));
+    assert!(matches!(
+        reserve_contained(&ledger, demand(1, 1, 8), foreign),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(first.pop());
+    assert_eq!(ledger.snapshot().unwrap().held, 0);
 }

@@ -358,6 +358,9 @@ struct Entry {
     // limits. Not persisted; reconstruction re-derives it from the process
     // count, which makes every restored root an unknown peak again.
     task_claim: TaskClaim,
+    // Present exactly while the claims above are the contained known pair:
+    // the leaf ceilings this producer occupies inside its delegated parent.
+    contained: Option<ContainedProducerBound>,
     state: ReservationState,
     custody: Option<Arc<physical_graph::GraphCustody>>,
     // Private operation identity, never a disk/wire refund capability. Present
@@ -554,6 +557,40 @@ impl State {
             Metric::Known(_) => Err(AdmissionRefusal::HardLimit(ResourceDimension::KernelTasks)),
             Metric::Unknown(_) => Err(AdmissionRefusal::InsufficientEvidence),
         }
+    }
+    /// Sibling leaves share their delegated parent's own memory.max and
+    /// pids.max. Kernel enforcement is hierarchical, so a leaf can be starved
+    /// or OOM-killed by a sibling unless every leaf ceiling fits the parent
+    /// together. The standing native reaper is a daemon thread outside that
+    /// parent and is charged against node headroom instead.
+    fn contained_domains_fit(
+        &self,
+        candidate: Option<ContainedProducerBound>,
+    ) -> Result<(), AdmissionRefusal> {
+        let Some(candidate) = candidate else {
+            return Ok(());
+        };
+        let parent = candidate.parent();
+        let mut memory = candidate.memory_bytes();
+        let mut tasks = candidate.tasks();
+        for held in self.entries.values().filter_map(|entry| entry.contained) {
+            if held.parent() != parent {
+                return Err(AdmissionRefusal::InsufficientEvidence);
+            }
+            memory = memory
+                .checked_add(held.memory_bytes())
+                .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
+            tasks = tasks
+                .checked_add(held.tasks())
+                .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
+        }
+        if memory > parent.memory_bytes() {
+            return Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory));
+        }
+        if tasks > u64::from(parent.tasks()) {
+            return Err(AdmissionRefusal::HardLimit(ResourceDimension::KernelTasks));
+        }
+        Ok(())
     }
     /// Contained native ceilings replace an unknown producer peak only while
     /// both node memory and task capacity are known; otherwise the producer
@@ -945,6 +982,8 @@ impl ResourceLedger {
             .map(|((_, demand), claim)| state.producer_claims(*demand, *claim, contained))
             .collect::<Result<Vec<_>, _>>()?;
         let claims: Vec<_> = pairs.iter().map(|(memory, _)| *memory).collect();
+        // `contained` names exactly one missing role (checked above).
+        let contained = contained.filter(|_| contained_claims(pairs[0].0, pairs[0].1));
         // A contained trial whose own peak stays unknown still requires that
         // no other producer is active. With known contained ceilings the
         // ordinary claim checks below decide coexistence with incumbents.
@@ -984,6 +1023,7 @@ impl ResourceLedger {
             })
             .collect::<Result<_, _>>()?;
         state.task_claims_fit(&pairs)?;
+        state.contained_domains_fit(contained)?;
         let total = resources
             .iter()
             .try_fold(ResourceVector::default(), |sum, role| {
@@ -1027,6 +1067,7 @@ impl ResourceLedger {
                     resources,
                     memory_claim,
                     task_claim,
+                    contained,
                     state: ReservationState::Reserved,
                     custody: None,
                     durable: None,
@@ -1186,14 +1227,18 @@ impl ResourceLedger {
 
     /// Advisory only, before a contained trial is attempted: `Ok(false)` when
     /// no producer is active, `Ok(true)` when every active producer holds
-    /// known contained memory and task claims, and a refusal when any active
+    /// known contained memory and task claims and the `prospective` leaf also
+    /// fits their shared delegated parent, and a refusal when any active
     /// producer would still serialize against a new one. The reservation
     /// itself rechecks every claim and capacity under its own lock.
     #[cfg_attr(
         not(target_os = "linux"),
         allow(dead_code, reason = "Only the Linux finite trial path asks this.")
     )]
-    pub(crate) fn contained_incumbents(&self) -> Result<bool, AdmissionRefusal> {
+    pub(crate) fn contained_incumbents(
+        &self,
+        prospective: Option<ContainedProducerBound>,
+    ) -> Result<bool, AdmissionRefusal> {
         let state = self
             .inner
             .lock()
@@ -1213,6 +1258,11 @@ impl ResourceLedger {
                 || !matches!(state.cap.kernel_tasks, Metric::Known(_)))
         {
             return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        if active {
+            state.contained_domains_fit(Some(
+                prospective.ok_or(AdmissionRefusal::InsufficientEvidence)?,
+            ))?;
         }
         Ok(active)
     }

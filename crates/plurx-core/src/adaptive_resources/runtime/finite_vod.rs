@@ -347,11 +347,13 @@ impl NodeResourceRuntime {
         // request on ordinary admission, which serializes unknown peaks.
         let beside_incumbents = self
             .ledger
-            .contained_incumbents()
+            .contained_incumbents(
+                request
+                    .native_plan
+                    .as_ref()
+                    .and_then(|plan| self.contained_producer_bound(plan)),
+            )
             .map_err(|_| TrialRefusal::InsufficientEvidence)?;
-        if beside_incumbents && request.native_plan.is_none() {
-            return Err(TrialRefusal::InsufficientEvidence);
-        }
         // History is keyed by the exact incumbent mix and is never recorded
         // beside another active producer, so no measured hint can already
         // cover a concurrent placement.
@@ -2391,9 +2393,10 @@ impl NodeResourceRuntime {
         // this producer's own domain. Entry writes and rereads them before
         // any child enters, and an uncontained launch is impossible here.
         #[cfg(target_os = "linux")]
-        let contained = request.native_plan.as_ref().map(|plan| {
-            crate::adaptive_resources::ContainedProducerBound::from_limits(plan.limits)
-        });
+        let contained = request
+            .native_plan
+            .as_ref()
+            .and_then(|plan| self.contained_producer_bound(plan));
         #[cfg(not(target_os = "linux"))]
         let contained = None;
         let (preparation, events) = match self

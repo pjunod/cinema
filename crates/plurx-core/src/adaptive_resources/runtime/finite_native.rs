@@ -230,6 +230,20 @@ fn finite_graph_allowance(
     Some(allowance)
 }
 
+impl NodeResourceRuntime {
+    /// The plan's leaf ceilings inside this runtime's delegated parent, whose
+    /// own ceilings were read at startup and are reverified at every entry.
+    pub(super) fn contained_producer_bound(
+        &self,
+        plan: &FiniteNativePlan,
+    ) -> Option<crate::adaptive_resources::ContainedProducerBound> {
+        let root = self.native_root.as_ref()?;
+        (plan.ledger == self.ledger.id).then(|| {
+            crate::adaptive_resources::ContainedProducerBound::new(plan.limits, root.limits)
+        })
+    }
+}
+
 impl FiniteNativePlan {
     /// Extra handles over the trusted three-pipe root and requested bytes
     /// including the original kernel memory ceiling. The producer claim still

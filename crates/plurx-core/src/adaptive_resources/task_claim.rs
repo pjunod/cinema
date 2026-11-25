@@ -40,13 +40,15 @@ impl TaskClaim {
     }
 }
 
-/// Kernel ceilings of one producer's own delegated native domain, taken from
-/// the request's native plan before admission. The ledger turns these into
-/// known memory and task claims only while it also has known node capacity.
+/// Kernel ceilings of one producer's own delegated native leaf, taken from
+/// the request's native plan before admission, and of the delegated parent
+/// that holds every sibling leaf. The ledger turns these into known memory and
+/// task claims only while it also has known node capacity, and admits siblings
+/// only while their summed leaf ceilings fit the parent's own ceilings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ContainedProducerBound {
-    memory_bytes: u64,
-    tasks: u32,
+    leaf: NativeDomainLimits,
+    parent: NativeDomainLimits,
 }
 
 impl ContainedProducerBound {
@@ -57,18 +59,19 @@ impl ContainedProducerBound {
             reason = "Only the Linux finite native plan selects a contained domain."
         )
     )]
-    pub(crate) fn from_limits(limits: NativeDomainLimits) -> Self {
-        Self {
-            memory_bytes: limits.memory_bytes(),
-            tasks: limits.tasks(),
-        }
+    pub(crate) fn new(leaf: NativeDomainLimits, parent: NativeDomainLimits) -> Self {
+        Self { leaf, parent }
     }
 
     pub(crate) fn memory_bytes(self) -> u64 {
-        self.memory_bytes
+        self.leaf.memory_bytes()
     }
 
     pub(crate) fn tasks(self) -> u64 {
-        u64::from(self.tasks)
+        u64::from(self.leaf.tasks())
+    }
+
+    pub(crate) fn parent(self) -> NativeDomainLimits {
+        self.parent
     }
 }

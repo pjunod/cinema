@@ -232,12 +232,16 @@ fn support_joins_several_producers_only_when_each_has_contained_ceilings() {
             contained,
         )
     };
-    let bound = ContainedProducerBound::from_limits(
+    let bound = ContainedProducerBound::new(
         crate::process::containment::NativeDomainLimits::new(4, 10).expect("fixture limits"),
+        crate::process::containment::NativeDomainLimits::new(8, 20).expect("fixture parent"),
     );
     let first = reserve(Some(bound)).expect("contained producer beside support");
     let second = reserve(Some(bound)).expect("second contained producer beside support");
-    assert_eq!(ledger.contained_incumbents(), Ok(true));
+    assert_eq!(
+        ledger.contained_incumbents(Some(bound)),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
+    );
     // Support still serializes every producer without contained ceilings.
     assert_eq!(
         reserve(None).err(),

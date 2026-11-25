@@ -596,6 +596,7 @@ fn restore_accounting(
                     // Contained ceilings are not persisted, so a restored
                     // root never proves its task bound and stays serialized.
                     task_claim: TaskClaim::from_processes(record.resources.processes),
+                    contained: None,
                     state: ReservationState::UnknownHeld,
                     custody: None,
                     durable: Some(record.obligation_id),

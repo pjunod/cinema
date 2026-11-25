@@ -239,6 +239,7 @@ fn actual_mix_refuses_another_active_role_and_unknown_held_state() {
                     active_producer: true,
                 },
                 task_claim: TaskClaim::from_processes(resources.processes),
+                contained: None,
                 state: ReservationState::Reserved,
                 custody: None,
                 durable: None,

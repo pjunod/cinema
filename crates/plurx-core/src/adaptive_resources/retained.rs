@@ -199,6 +199,7 @@ impl ResourceLedger {
                     active_producer: false,
                 },
                 task_claim: TaskClaim::NoProducer,
+                contained: None,
                 state: ReservationState::Reaping,
                 custody: None,
                 durable: Some(swap.target_durable),
