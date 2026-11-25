@@ -266,6 +266,36 @@ struct PlaysOnList: View {
     }
 }
 
+#if os(tvOS)
+/// The selected version's Dolby Vision line and how it plays on each device,
+/// in the quiet style of the cost notice above it: the tvOS hero has no media
+/// section, so this is where the facts the iOS Media section shows live.
+struct TVVersionDolbyVision: View {
+    let file: MediaFile
+
+    var body: some View {
+        let rows = file.playsOn ?? []
+        if file.dvFacts != nil || !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                if let facts = file.dvFacts {
+                    Text("Dolby Vision · \(facts)").lineLimit(2)
+                }
+                ForEach(rows) { row in
+                    if row.isCaution {
+                        Label("\(row.deviceName) · \(row.label)", systemImage: "exclamationmark.triangle.fill").lineLimit(1)
+                    } else {
+                        Text("\(row.deviceName) · \(row.label)").lineLimit(1)
+                    }
+                }
+            }
+            .font(.system(size: 22, weight: .medium))
+            .foregroundStyle(Palette.muted)
+            .frame(maxWidth: 1500, alignment: .leading)
+        }
+    }
+}
+#endif
+
 struct EpisodeMediaInfoRow: Equatable, Identifiable {
     let label: String
     let value: String
@@ -1682,6 +1712,8 @@ struct DetailView: View {
 
                     if let file, item.isPlayable, !item.isBook {
                         tvCostNotice(file)
+                            .padding(.top, 14)
+                        TVVersionDolbyVision(file: file)
                             .padding(.top, 14)
                     }
 
