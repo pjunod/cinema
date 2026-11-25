@@ -11,6 +11,8 @@ local function drain() for _,f in ipairs(idles) do f() end end
 local function drained(f) return function(...) f(...); drain() end end
 -- Each overlay update or removal is one render; render_cost models its time.
 local render_cost = 0
+-- mpv applies binding changes only at a flush, which it runs before this script's idle handlers.
+local flushes = 0
 local now, mx, my, width, height = 0, 0, 0, 1280, 720
 package.preload['mp'] = function() return {
     get_property_native=function(n)
@@ -35,6 +37,7 @@ package.preload['mp'] = function() return {
     register_event=function(n,f) events[n]=drained(f) end,
     add_periodic_timer=function(t,f) raw_timers[#raw_timers+1]={period=t,f=f}; timers[#timers+1]=drained(f) end,
     register_idle=function(f) idles[#idles+1]=f end,
+    flush_keybindings=function() flushes=flushes+1 end,
 } end
 package.preload['mp.options'] = function() return {read_options=function() end} end
 package.preload['mp.assdraw'] = function() return {ass_new=function()
@@ -409,9 +412,15 @@ test('renders_coalesce_so_a_slow_render_cannot_starve_the_hide_timer',function()
     eq(overlay.renders,before)
     drain();eq(overlay.renders,before+1);assert(overlay.data:find('}0:50\n',1,true),'the drawn frame is current')
     drain();eq(overlay.renders,before+1)
+    -- The click binding a frame adds or removes reaches mpv in that same pass.
+    move(0,360);assert(not bindings['cinema-click'])
+    local flushed=flushes;move(780,681);assert(bindings['cinema-click']);assert(flushes>flushed,'binding flushed')
+    flushed=flushes;move(0,360);assert(not bindings['cinema-click']);assert(flushes>flushed,'unbinding flushed')
     -- mpv's loop at 24 fps with two property changes per frame, each render
     -- costing a whole frame (40 ms): synchronous renders never let the queue
     -- drain, so the hide timer never ran. Coalesced, it hides on time.
+    -- (mpv coalesces a property's pending notifications; queuing each one
+    -- here only lengthens the old backlog, as each render outlives a frame.)
     render_cost=0.04
     local timer,frame=raw_timers[1],1/24
     local queue,next_frame,due,start={},now,now+timer.period,now

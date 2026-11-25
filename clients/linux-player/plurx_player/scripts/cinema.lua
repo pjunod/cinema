@@ -550,6 +550,10 @@ local function bind_mouse(wanted)
     else
         mp.remove_key_binding('cinema-click'); mp.remove_key_binding('cinema-double')
     end
+    -- Renders run from an idle handler, after mpv's own idle flush of key
+    -- bindings: flush now, or a click right after the pointer stops would
+    -- still reach the binding of the frame before.
+    mp.flush_keybindings()
 end
 render = function()
     local w, h = mp.get_osd_size()
