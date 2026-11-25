@@ -326,6 +326,25 @@ static void test_params_check(void) {
   p = identity_params();
   p.map[2].pivot_value[0] = -1;
   assert(frc_params_check(&p) != NULL);
+  // Clause 5.3.3.2: poly_coef_int in -64..63, so fp in [-64, 64) << denom.
+  p = identity_params();
+  p.map[0].piece[0].poly_coef[0] = (INT64_C(64) << 23) - 1;
+  assert(frc_params_check(&p) == NULL);
+  p.map[0].piece[0].poly_coef[0] = INT64_C(64) << 23;
+  assert(frc_params_check(&p) != NULL);
+  p.map[0].piece[0].poly_coef[0] = -(INT64_C(64) << 23);
+  assert(frc_params_check(&p) == NULL);
+  // Clause 5.3.3.3: MMR integer parts in -65536..65535.
+  p = identity_params();
+  p.map[1].piece[0].mapping_idc = FRC_MAPPING_MMR;
+  p.map[1].piece[0].mmr_order = 3;
+  p.map[1].piece[0].mmr_coef[2][6] = (INT64_C(65536) << 23) - 1;
+  assert(frc_params_check(&p) == NULL);
+  p.map[1].piece[0].mmr_coef[2][6] = -(INT64_C(65536) << 23) - 1;
+  assert(frc_params_check(&p) != NULL);
+  p.map[1].piece[0].mmr_coef[2][6] = 0;
+  p.map[1].piece[0].mmr_constant = INT64_C(65536) << 23;
+  assert(frc_params_check(&p) != NULL);
 }
 
 static void test_compose_el_routing(void) {

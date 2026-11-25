@@ -115,16 +115,29 @@ static inline const char *frc_params_check(const struct frc_params *p) {
     if (m->pivot_value[0] < 0 ||
         m->pivot_value[m->num_pivots - 1] > (1 << p->bl_bit_depth) - 1)
       return "pivot values outside 0..2^BL_bit_depth-1 (clause 5.3.2)";
+    // Clause 5.3.3's integer-part ranges bound every fp coefficient; inside
+    // them the polynomial sum stays below 2^60, so int64 is exact.
+    const int64_t poly_limit = INT64_C(64) << p->coefficient_log2_denom;
+    const int64_t mmr_limit = INT64_C(65536) << p->coefficient_log2_denom;
     for (int k = 0; k < m->num_pivots - 1; k++) {
       const struct frc_piece *piece = &m->piece[k];
       if (piece->mapping_idc == FRC_MAPPING_POLYNOMIAL) {
         if (piece->poly_order < 1 || piece->poly_order > 2)
           return "poly_order_minus1 outside 0..1 (clause 5.3.3.2)";
+        for (int i = 0; i <= piece->poly_order; i++)
+          if (piece->poly_coef[i] < -poly_limit || piece->poly_coef[i] >= poly_limit)
+            return "poly_coef_int outside -64..63 (clause 5.3.3.2)";
       } else if (piece->mapping_idc == FRC_MAPPING_MMR) {
         if (cmp == 0)
           return "luma mapping_idc must be 0 (clause 5.3.3.1)";
         if (piece->mmr_order < 1 || piece->mmr_order > 3)
           return "mmr_order_minus1 outside 0..2 (clause 5.3.3.3)";
+        if (piece->mmr_constant < -mmr_limit || piece->mmr_constant >= mmr_limit)
+          return "mmr_constant_int outside -65536..65535 (clause 5.3.3.3)";
+        for (int i = 0; i < piece->mmr_order; i++)
+          for (int j = 0; j < 7; j++)
+            if (piece->mmr_coef[i][j] < -mmr_limit || piece->mmr_coef[i][j] >= mmr_limit)
+              return "mmr_coef_int outside -65536..65535 (clause 5.3.3.3)";
       } else {
         return "mapping_idc must be 0 or 1 (table 1)";
       }

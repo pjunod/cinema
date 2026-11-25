@@ -198,7 +198,7 @@ def code_stats(err):
     return s
 
 
-def measure_frame(args, meta, pair, w, h, ew, eh):
+def measure_frame(args, meta, pair, w, h, ew, eh, composition='libplacebo-bilinear'):
     frame = pair['frame']
     params = args.work / f'params-{frame:03d}.txt'
     params.write_text(params_text(meta))
@@ -214,8 +214,10 @@ def measure_frame(args, meta, pair, w, h, ew, eh):
     raw.unlink()
     unrounded_raw.unlink()
     bl, el = planes(args.capture / 'bl.yuv', frame, w, h), planes(args.capture / 'el.yuv', frame, ew, eh)
-    modelled = all(len(cv['pieces']) == 1 and cv['pieces'][0]['mapping_idc'] == 0
-                   for cv in meta['mapping']['curves'])
+    # The model is of libplacebo's bilinear composition; a pq-ccm001-* render
+    # (fel_compose.h) is compared with the reference directly instead.
+    modelled = composition == 'libplacebo-bilinear' and all(
+        len(cv['pieces']) == 1 and cv['pieces'][0]['mapping_idc'] == 0 for cv in meta['mapping']['curves'])
     today = today_composition(meta, bl, el, w, h, ew) if modelled else None
     reference = reference_planes(ref, w, h)
     # The reference before clause 5.4.3.3 rounds to 12 bits: v + r in the
@@ -375,13 +377,15 @@ def main():
         ap.error('--helper-frames is required unless --unclamped-capture is given')
     report = [json.loads(line) for line in args.helper_report.read_text().splitlines() if line.startswith('{')]
     helper_rpus = [r['rpu_sha256'] for r in report if r['kind'] == 'accepted_source_pair']
+    composition = next((r.get('composition', 'libplacebo-bilinear') for r in report
+                        if r['kind'] == 'rendered_frame'), 'libplacebo-bilinear')
     rows = []
     for frame in args.frames:
         pair, meta = pairs[frame], metas[frame]
         # Bind the helper's picture to the captured layers by the RPU it rendered.
         assert helper_rpus[frame] == meta['rpu_sha256'] == pair['rpu_sha256'], f'frame {frame} is not the same picture'
         w, h, ew, eh = pair['bl_width'], pair['bl_height'], pair['el_width'], pair['el_height']
-        rows.append(measure_frame(args, meta, pair, w, h, ew, eh))
+        rows.append(measure_frame(args, meta, pair, w, h, ew, eh, composition))
         print(json.dumps({'frame': frame, 'validation': rows[-1]['validation'],
                           'delta_e_itp': rows[-1]['delta_e_itp']['all']}), flush=True)
     reasons = decide(rows)
@@ -391,6 +395,7 @@ def main():
         'capture': {name: sha(args.capture / name) for name in ('bl.yuv', 'el.yuv', 'metadata.jsonl', 'events.jsonl')},
         'helper_frames_sha256': {f'{n:03d}': sha(args.helper_frames / f'frame-{n:03d}.rgb48le') for n in args.frames},
         'oracle': 'tools/dv_processing/fel_reference_composer.h via diagnostics/fel_quality/fel_reference_compose.c',
+        'helper_composition': composition,
         'thresholds': THRESHOLDS,
         'frames': rows,
         'above_threshold': reasons,

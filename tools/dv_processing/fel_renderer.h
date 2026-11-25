@@ -12,6 +12,7 @@
 
 #include "nlq_clipping.h"
 #include "dv_metadata.h"
+#include "fel_compose.h"
 #include "dv_trace.h"
 #include "rgb48.h"
 #include "yuv420p10.h"
@@ -29,6 +30,14 @@ static int WIDTH, HEIGHT, ELWIDTH, ELHEIGHT;
 static int EXPORT_WIDTH, EXPORT_HEIGHT;
 // pq-bilinear-yuv420p10-v1: the export leaves the GPU as BT.2020 NCL limited 4:2:0 10-bit.
 static bool EXPORT_YUV10;
+// pq-ccm001-*: the BL and EL are composed by fel_compose.h (ETSI GS CCM 001,
+// exact integers on the 4:2:0 grids) instead of by libplacebo's bilinear
+// planes; everything after composition is unchanged. pq-bilinear-* keep
+// libplacebo's composition. The exact parameters are taken from each frame's
+// RPU during admission, and fel_ccm001_ready ties a render to that mapping.
+static bool FEL_CCM001;
+static struct fel_compose_params fel_ccm001_params;
+static bool fel_ccm001_ready;
 #define FLOAT_COUNT ((size_t)WIDTH * (size_t)HEIGHT * 4)
 #define EXPORT_FLOAT_COUNT ((size_t)EXPORT_WIDTH * (size_t)EXPORT_HEIGHT * 4)
 
@@ -224,10 +233,16 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
           nlq->vdr_in_max_int[component] + nlq->vdr_in_max[component] / denominator;
     }
   }
+  require(!FEL_CCM001 || frame, "CCM 001 composition needs decoder-attached metadata");
   if (frame) {
     require_content(dv_map_decoded_metadata(frame, 7, true, &decoded),
             "bounded decoder-derived FEL metadata mapping");
     *out = decoded.dovi;
+    if (FEL_CCM001) {
+      const char *why = fel_compose_from_avdovi(decoded.source, &fel_ccm001_params);
+      require_content(why == NULL, why ? why : "");
+      fel_ccm001_ready = true;
+    }
     for (int component = 0; component < 3; component++) {
       const DoviRpuDataNlq *nlq = mapping->nlq;
       const AVDOVINLQParams *actual =
@@ -348,6 +363,12 @@ static void save_frame(const char *test, const char *stage, const float *rgba) {
   length = snprintf(path, sizeof(path), "outputs/%s-%s.rgb48le", test, stage);
   require(length > 0 && (size_t)length < sizeof(path), "integer output path");
   save_rgb48le(path, rgba);
+}
+
+// The rendered_frame field naming the composition, only for the pq-ccm001-*
+// identities, so the existing identities' reports are unchanged.
+static const char *fel_composition_field(void) {
+  return FEL_CCM001 ? ",\"composition\":\"" FEL_COMPOSE_METHOD "\"" : "";
 }
 
 struct segment_gpu {
@@ -569,6 +590,36 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   }
   pl_frame_set_chroma_location(&source, bl_chroma);
   pl_frame_set_chroma_location(&enhancement_frame, el_chroma);
+  struct pl_dovi_metadata composed_dovi;
+  if (FEL_CCM001) {
+    // Compose from whichever planes are live (host upload or mapped decoder
+    // surfaces); both carry the 10-bit code in the top bits of 16.
+    require(fel_ccm001_ready, "CCM 001 parameters mapped for this frame");
+    fel_ccm001_ready = false;
+    struct fel_compose_layer layers[2] = {0};
+    for (int layer = 0; layer < 2; layer++) {
+      const struct pl_frame *frame = layer ? &enhancement_frame : &source;
+      require(frame->repr.bits.sample_depth == 16 && frame->repr.bits.color_depth == 10 &&
+                  frame->repr.bits.bit_shift == 6,
+              "CCM 001 composition reads 10-bit codes held in 16 bits");
+      for (int c = 0; c < 3; c++) {
+        layers[layer].tex[c] = NULL;
+        for (int p = 0; p < frame->num_planes; p++)
+          for (int k = 0; k < frame->planes[p].components; k++)
+            if (frame->planes[p].component_mapping[k] == c) {
+              layers[layer].tex[c] = frame->planes[p].texture;
+              layers[layer].channel[c] = k;
+            }
+        require(layers[layer].tex[c] != NULL, "CCM 001 composition: every component has a plane");
+      }
+    }
+    pl_tex luma, chroma;
+    const char *why = fel_compose_render(context.log, gpu, &fel_ccm001_params, &layers[0], &layers[1],
+                                         WIDTH, HEIGHT, ELWIDTH, ELHEIGHT, &luma, &chroma);
+    require(why == NULL, why ? why : "");
+    source = fel_compose_frame(luma, chroma, fel_ccm001_params.hdr_bit_depth, &metadata, &composed_dovi);
+    pl_frame_set_chroma_location(&source, bl_chroma);
+  }
   // One sampling contract with the native player (its reconstruct() in the
   // mpv patch series): every BL and EL plane is sampled bilinearly at its own
   // siting, and libplacebo rounds the resampled EL code before LINEAR_DZ.
@@ -629,9 +680,9 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     }
     printf("{\"kind\":\"rendered_frame\",\"frame\":%d,\"width\":%d,\"height\":%d,"
            "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":true,\"nlq_active\":"
-           "true%s,\"render_errors\":%u,\"polynomial_segments\":%d,\"mmr_segments\":%d,\"production_qualified\":false}\n",
+           "true%s,\"render_errors\":%u,\"polynomial_segments\":%d,\"mmr_segments\":%d,\"production_qualified\":false%s}\n",
            frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, yuv10_field,
-           errors.errors, polynomial_segments, mmr_segments);
+           errors.errors, polynomial_segments, mmr_segments, fel_composition_field());
     return;
   }
   require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = output_texture,
@@ -665,8 +716,9 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   free(packed);
   printf("{\"kind\":\"rendered_frame\",\"frame\":%d,\"width\":%d,\"height\":%d,"
          "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":true,\"nlq_active\":"
-         "true%s,\"render_errors\":%u,\"polynomial_segments\":%d,\"mmr_segments\":%d,\"production_qualified\":false}\n",
-         frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, rgb_field, errors.errors, polynomial_segments, mmr_segments);
+         "true%s,\"render_errors\":%u,\"polynomial_segments\":%d,\"mmr_segments\":%d,\"production_qualified\":false%s}\n",
+         frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, rgb_field, errors.errors, polynomial_segments, mmr_segments,
+         fel_composition_field());
 }
 // Compatibility entry point for direct synthetic textures without AVFrames.
 static inline void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
@@ -681,6 +733,7 @@ static inline void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
 }
 static void gpu_close(void) {
   dv_target_destroy(context.gpu);
+  fel_compose_destroy(context.gpu);
   for (int layer = 0; layer < 2; layer++) {
     for (int c = 0; c < 3; c++)
       pl_tex_destroy(context.gpu, &context.textures[layer][c]);
