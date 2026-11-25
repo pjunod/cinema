@@ -2850,7 +2850,6 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
         processed_dv_profile: None,
         processed_fel: None,
         degraded_processing: None,
-        processing_note: None,
         audio_delivery: prepared.request().audio_delivery.clone(),
         retained_output: None,
         session_id: session.clone(),

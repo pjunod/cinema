@@ -1990,6 +1990,7 @@ printf '%s\n' '{}'
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
         retain_output: None,
         dv_refit_digest: None,

@@ -1164,6 +1164,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         audio_claim: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         control_sequence: None,
         file_id: 1,
         playback_id: "source-start-budget".into(),
@@ -4461,6 +4462,7 @@ fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> Ses
         audio_claim: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         control_sequence: None,
         file_id: 1,
         playback_id: "source-delivery-policy".into(),
@@ -4789,21 +4791,19 @@ fn source_compatible_base_encode_never_renders_a_processed_window_in_the_start()
     // What `vod_dv_processing_from_snapshot` answers for a compatible-base
     // Dolby Vision encode on a node with DV processing on.
     let awaiting = DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow);
-    // A Source Start carries no candidate context and is no processed trial.
+    // A Source Start never renders one, trial or not.
     assert!(!TranscodeManager::start_renders_a_processed_window(
-        &awaiting, false, false, true
+        &awaiting, false, true
     ));
     assert!(!TranscodeManager::start_renders_a_processed_window(
-        &awaiting, false, true, true
+        &awaiting, true, true
     ));
-    // Local keeps its legacy first-window arm and its trial.
+    // Locally only the upgrade's own trial renders one. An ordinary start,
+    // Auto or not, waits for the post-first-frame upgrade (plan ruling 3).
     assert!(TranscodeManager::start_renders_a_processed_window(
-        &awaiting, false, false, false
-    ));
-    assert!(TranscodeManager::start_renders_a_processed_window(
-        &awaiting, true, true, false
+        &awaiting, true, false
     ));
     assert!(!TranscodeManager::start_renders_a_processed_window(
-        &awaiting, true, false, false
+        &awaiting, false, false
     ));
 }
