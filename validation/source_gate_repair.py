@@ -77,7 +77,9 @@ WORKFLOW = 'ci.yml'
 # changes -- it drops the merge-target fetch and the stored-counter comparison
 # and runs `python3 -m validation.mobile_versions` on the checked-out tree.
 # preflight, check and every other job are byte-identical.
-WORKFLOW_SHA256 = 'ec49904464984e8316820cf9e3c97bb0dd29e4dce310bd368a09ec07430c7db2'
+# Re-reviewed for the TV navigation evidence retention: only that upload
+# step's `retention-days` (90 -> 14) and its comment change.
+WORKFLOW_SHA256 = '0df1c936967170b171ba9229fb0bb95897534381a868f45570694d2d408bc11d'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

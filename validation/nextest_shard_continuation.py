@@ -107,8 +107,10 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 # requested lane (docs/ci/REQUESTED-LANE.md): job conditions now key on
 # `lane_requested` and the merge train's named-test path is gone; every
 # compile and test command, image and resource bound is unchanged.
+# main-fast-lane.yml re-reviewed for the TV navigation evidence retention
+# (90 -> 14 days on its upload step); no compile or test step changes.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
- '.github/workflows/main-fast-lane.yml': 'a8b463033b006e0fc5ef8d110ce085f65a45b0c4651d33c8ef0dc080b8984847',
+ '.github/workflows/main-fast-lane.yml': 'c4d8859c5702af12a963a1976857f1257b1ff69f9998ed33d2d31b351c9a3349',
  '.github/workflows/rust-units.yml': '9bac3e8aebfe7fc16025588bef9283799f3c396a68c318f4efcf559422488548',
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
  'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
