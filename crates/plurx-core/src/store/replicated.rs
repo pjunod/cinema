@@ -1404,10 +1404,21 @@ mod tests {
         ("watch.rs", include_str!("sqlite/watch.rs")),
     ];
 
+    /// Production code is everything before the file's first test *module*.
+    /// A `#[cfg(test)]` that gates something else (a `#[path]` module such as
+    /// `adaptive_attempt_tests` declared near the top of `sessions.rs`, a
+    /// test-only `fn` or `impl`) must not truncate the scan, or every site
+    /// after it is reported missing.
     fn production_source(source: &str) -> &str {
+        const MARKER: &str = "\n#[cfg(test)]\n";
         source
-            .split_once("\n#[cfg(test)]")
-            .map_or(source, |(code, _)| code)
+            .match_indices(MARKER)
+            .find_map(|(at, _)| {
+                let next = &source[at + MARKER.len()..];
+                (next.starts_with("mod ") || next.starts_with("pub mod "))
+                    .then_some(&source[..at])
+            })
+            .unwrap_or(source)
     }
 
     fn source_for(module: &str) -> &'static str {
