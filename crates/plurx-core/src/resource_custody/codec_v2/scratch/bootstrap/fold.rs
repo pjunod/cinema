@@ -677,6 +677,11 @@ impl BootstrapFold {
             codec::text(error_class)?;
         }
         let completed = result.outcome == NativeOutcomeV1::Completed;
+        if result.parent_synced
+            && !(completed && matches!(operation, BootstrapIoV1::RemoveRenditionChild { .. }))
+        {
+            return Err(codec::invalid());
+        }
         let mut definite_failure = false;
         let mut all_held_copies = self.held_copies();
         if let Some(directory) = &self.output.state.directory {
@@ -922,7 +927,9 @@ impl BootstrapFold {
                     return Err(codec::invalid());
                 }
                 if completed {
-                    self.bootstrap.retained_parent_synced = false;
+                    // A failed parent fsync in the same step leaves the
+                    // ordinary SyncRetainedParent owed.
+                    self.bootstrap.retained_parent_synced = result.parent_synced;
                     self.bootstrap.phase = BootstrapPhase::RetainedChildRemoved;
                 }
             }

@@ -116,6 +116,7 @@ fn held_fixture(path: &Path, plan: &ScratchPlanV3) -> RootCell {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         }),
     }

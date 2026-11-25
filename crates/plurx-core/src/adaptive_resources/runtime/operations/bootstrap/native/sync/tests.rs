@@ -65,6 +65,7 @@ fn held_root(path: &Path) -> (RootCell, DirectoryObservedV1, i32) {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::Created,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         }),
         failed_join: false,

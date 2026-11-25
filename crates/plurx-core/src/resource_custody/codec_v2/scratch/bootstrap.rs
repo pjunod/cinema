@@ -224,6 +224,11 @@ pub(crate) struct BootstrapResultV1 {
     pub closed_copy_ids: Vec<Id>,
     pub child_effect: ChildEffect,
     pub inventory: InventoryCertainty,
+    /// Only a completed RemoveRenditionChild may set this: the same native
+    /// step fsynced the configured parent after the child left it, so no
+    /// separate SyncRetainedParent is owed. Absent in earlier records.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parent_synced: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]

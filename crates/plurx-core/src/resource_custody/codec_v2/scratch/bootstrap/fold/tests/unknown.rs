@@ -32,6 +32,7 @@ fn unknown_native_inventory_keeps_the_armed_copy_and_closes_it_only_by_exact_res
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Unknown,
+                parent_synced: false,
             },
         },
     )
@@ -65,6 +66,7 @@ fn unknown_native_inventory_keeps_the_armed_copy_and_closes_it_only_by_exact_res
                 closed_copy_ids: vec![copy],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -120,6 +122,7 @@ fn unknown_child_copy_cannot_be_reopened_under_the_same_logical_slot() {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::Unknown,
                 inventory: InventoryCertainty::Unknown,
+                parent_synced: false,
             },
         },
     )

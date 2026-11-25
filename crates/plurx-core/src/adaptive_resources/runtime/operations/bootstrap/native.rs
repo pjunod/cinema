@@ -128,6 +128,7 @@ impl RootCell {
                     closed_copy_ids: vec![],
                     child_effect: ChildEffect::Unchanged,
                     inventory: InventoryCertainty::Exact,
+                    parent_synced: false,
                 },
             }),
             failed_join: false,
@@ -416,6 +417,7 @@ impl RootCell {
                         closed_copy_ids: vec![],
                         child_effect: ChildEffect::None,
                         inventory: InventoryCertainty::Exact,
+                        parent_synced: false,
                     },
                 };
             }
@@ -515,6 +517,7 @@ fn open_root(
             closed_copy_ids: vec![],
             child_effect: ChildEffect::None,
             inventory: InventoryCertainty::Exact,
+            parent_synced: false,
         },
     };
     // The Linux namespace must be actually observed in THIS original job. A path,
@@ -580,6 +583,7 @@ fn open_root(
             closed_copy_ids: vec![],
             child_effect: ChildEffect::None,
             inventory: InventoryCertainty::Exact,
+            parent_synced: false,
         },
     }
 }

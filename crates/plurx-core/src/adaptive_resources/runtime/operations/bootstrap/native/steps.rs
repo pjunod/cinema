@@ -44,6 +44,7 @@ fn empty_audit(outcome: v2::scratch::NativeOutcomeV1) -> BootstrapResultV1 {
         closed_copy_ids: vec![],
         child_effect: ChildEffect::None,
         inventory: InventoryCertainty::Exact,
+        parent_synced: false,
     }
 }
 fn failed(class: &str) -> v2::scratch::NativeOutcomeV1 {

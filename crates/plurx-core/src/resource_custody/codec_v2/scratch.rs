@@ -329,6 +329,12 @@ pub(crate) enum AssetIoV1 {
     SyncFiles {
         file_ids: Vec<Id>,
     },
+    /// Retirement only: unlink every owned file, in the fold's file order,
+    /// with each file's exact recorded identity, then fsync the child. One
+    /// durable arm and observe regardless of how many files the asset holds.
+    RemoveAllOwned {
+        file_count: u32,
+    },
     OpenReader {
         lease: ReaderLeaseV1,
     },
@@ -362,6 +368,17 @@ pub(crate) enum AssetObservationV1 {
     },
     RemovalUnresolved {
         file_id: Id,
+    },
+    /// Every armed file was removed. `synced` reports the child fsync that
+    /// followed; when false, the ordinary SyncFiles retirement step is owed.
+    RemovedAll {
+        file_count: u32,
+        synced: bool,
+    },
+    /// The first `removed` files in fold order are gone; the next one has
+    /// an unresolved effect and every later file was never attempted.
+    RemovalSetUnresolved {
+        removed: u32,
     },
     Synced,
     ReaderOpened {

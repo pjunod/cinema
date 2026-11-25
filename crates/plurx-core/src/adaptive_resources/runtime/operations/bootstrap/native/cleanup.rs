@@ -11,12 +11,23 @@ use v2::scratch::{
 };
 
 #[derive(Clone)]
+struct OwnedRemoval {
+    basename: CString,
+    native: v2::NativeObject,
+    len: u64,
+}
+
+#[derive(Clone)]
 enum CleanupAction {
     RemoveFile {
         file_id: v2::Id,
         basename: CString,
         native: v2::NativeObject,
         len: u64,
+    },
+    /// The fold's whole owned file set, in fold order, then the child fsync.
+    RemoveAll {
+        files: Vec<OwnedRemoval>,
     },
     SyncChild,
     RemoveChild {
@@ -124,7 +135,9 @@ impl CleanupCell {
     fn fixture_kind(&self) -> super::super::super::native_result_fixture::Kind {
         use super::super::super::native_result_fixture::Kind;
         match &self.action {
-            CleanupAction::RemoveFile { .. } => Kind::CleanupRemoveFile,
+            CleanupAction::RemoveFile { .. } | CleanupAction::RemoveAll { .. } => {
+                Kind::CleanupRemoveFile
+            }
             CleanupAction::SyncChild => Kind::CleanupSyncChild,
             CleanupAction::RemoveChild { .. } => Kind::CleanupRemoveChild,
             CleanupAction::SyncParent => Kind::CleanupSyncParent,
@@ -211,6 +224,38 @@ impl CleanupCell {
                 native: file.native_object.clone(),
                 len: file.logical_len,
             },
+            vec![child.clone()],
+        ))
+    }
+    /// One native step for the whole retirement file set. Every file must be
+    /// a published, uncopied regular file in the child's filesystem domain.
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn remove_all_owned(
+        files: &[FileObservedV1],
+        child: &DirectoryObservedV1,
+    ) -> Result<Self, OperationError> {
+        single_copy(child)?;
+        if files.is_empty() {
+            return Err(invalid());
+        }
+        let files = files
+            .iter()
+            .map(|file| {
+                if file.temporary
+                    || !file.held_copy_ids.is_empty()
+                    || file.native_object.file_type != v2::FileType::Regular
+                    || file.native_object.filesystem_domain != child.native_object.filesystem_domain
+                {
+                    return Err(invalid());
+                }
+                Ok(OwnedRemoval {
+                    basename: basename(file.published.ok_or_else(invalid)?)?,
+                    native: file.native_object.clone(),
+                    len: file.logical_len,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::new(
+            CleanupAction::RemoveAll { files },
             vec![child.clone()],
         ))
     }
@@ -422,7 +467,9 @@ impl CleanupCell {
 
 fn never_entered_fact(action: &CleanupAction) -> CleanupFact {
     match action {
-        CleanupAction::RemoveFile { .. } | CleanupAction::SyncChild => CleanupFact::Asset {
+        CleanupAction::RemoveFile { .. }
+        | CleanupAction::RemoveAll { .. }
+        | CleanupAction::SyncChild => CleanupFact::Asset {
             outcome: NativeOutcomeV1::NeverEntered,
             observation: AssetObservationV1::NoAcquisition,
         },
@@ -434,6 +481,7 @@ fn never_entered_fact(action: &CleanupAction) -> CleanupFact {
             closed_copy_ids: vec![],
             child_effect: ChildEffect::None,
             inventory: InventoryCertainty::Exact,
+            parent_synced: false,
         }),
     }
 }
@@ -478,6 +526,39 @@ fn run(
                 },
             });
         }
+        CleanupAction::RemoveAll { files } => {
+            let child = held(&result.directories, &observed[0]);
+            let mut removed = 0_u32;
+            for file in &files {
+                // Same identity precheck and single unlink as RemoveFile. The
+                // first failure stops the step: later files stay untouched.
+                let valid =
+                    entry_matches(child, &file.basename, &file.native, file.len, libc::S_IFREG);
+                if !valid
+                    || unsafe { libc::unlinkat(child.as_raw_fd(), file.basename.as_ptr(), 0) } != 0
+                {
+                    break;
+                }
+                removed += 1;
+            }
+            let all = usize::try_from(removed).ok() == Some(files.len());
+            result.fact = Some(CleanupFact::Asset {
+                outcome: if all {
+                    NativeOutcomeV1::Completed
+                } else {
+                    failed()
+                },
+                observation: if all {
+                    AssetObservationV1::RemovedAll {
+                        file_count: removed,
+                        // SAFETY: the lent child descriptor stays owned here.
+                        synced: unsafe { libc::fsync(child.as_raw_fd()) } == 0,
+                    }
+                } else {
+                    AssetObservationV1::RemovalSetUnresolved { removed }
+                },
+            });
+        }
         CleanupAction::SyncChild => {
             let child = held(&result.directories, &observed[0]);
             let synced = unsafe { libc::fsync(child.as_raw_fd()) } == 0;
@@ -502,6 +583,9 @@ fn run(
                 && unsafe {
                     libc::unlinkat(parent.as_raw_fd(), component.as_ptr(), libc::AT_REMOVEDIR)
                 } == 0;
+            // The parent sync the fold would otherwise arm separately. A
+            // failure leaves that ordinary SyncRetainedParent step owed.
+            let parent_synced = removed && unsafe { libc::fsync(parent.as_raw_fd()) } == 0;
             result.fact = Some(CleanupFact::Bootstrap(BootstrapResultV1 {
                 outcome: if removed {
                     NativeOutcomeV1::Completed
@@ -522,6 +606,7 @@ fn run(
                 } else {
                     InventoryCertainty::Unknown
                 },
+                parent_synced,
             }));
         }
         CleanupAction::SyncParent => {
@@ -541,6 +626,7 @@ fn run(
                 } else {
                     InventoryCertainty::Unknown
                 },
+                parent_synced: false,
             }));
         }
         CleanupAction::CloseHandles { exact_ids } => {
@@ -574,6 +660,7 @@ fn run(
                 } else {
                     InventoryCertainty::Unknown
                 },
+                parent_synced: false,
             }));
         }
     }

@@ -108,6 +108,7 @@ fn observe(
                 closed_copy_ids: closed,
                 child_effect: child,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -355,6 +356,7 @@ fn entered_partial_mkdir_is_held_and_never_replayed_as_never_entered() {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::Created,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -394,6 +396,7 @@ fn bootstrap_never_entered_cannot_erase_an_actual_acquired_descriptor() {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             }
         }
     )
@@ -463,6 +466,7 @@ fn bootstrap_same_device_is_not_same_mount_and_foreign_refs_do_not_borrow_a_base
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::Created,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             }
         }
     )

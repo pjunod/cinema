@@ -272,6 +272,7 @@ fn frozen_source_fixture_for_schema(v6: bool) -> FrozenSourceFixture {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     );
@@ -323,6 +324,7 @@ fn frozen_source_fixture_for_schema(v6: bool) -> FrozenSourceFixture {
                 closed_copy_ids: vec![root_copy],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     );
@@ -378,6 +380,7 @@ fn frozen_source_fixture_for_schema(v6: bool) -> FrozenSourceFixture {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::Created,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     );
@@ -452,6 +455,7 @@ fn frozen_source_fixture_for_schema(v6: bool) -> FrozenSourceFixture {
                 closed_copy_ids: parent_copies,
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     );
@@ -609,6 +613,7 @@ fn scratch_v3_unknownheld_blocks_new_root_but_allows_exact_neverentered_result()
                         closed_copy_ids: vec![],
                         child_effect: ChildEffect::None,
                         inventory: InventoryCertainty::Exact,
+                        parent_synced: false,
                     },
                 },
             },

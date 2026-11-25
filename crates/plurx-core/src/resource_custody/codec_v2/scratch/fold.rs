@@ -183,7 +183,9 @@ impl ScratchFold {
                 let retirement_io = self.state.lifecycle == ScratchLifecycleV1::Retiring
                     && matches!(
                         operation,
-                        AssetIoV1::RemoveOwned { .. } | AssetIoV1::SyncFiles { .. }
+                        AssetIoV1::RemoveOwned { .. }
+                            | AssetIoV1::SyncFiles { .. }
+                            | AssetIoV1::RemoveAllOwned { .. }
                     );
                 if (self.state.lifecycle != ScratchLifecycleV1::Open
                     && !read_only
@@ -287,6 +289,24 @@ impl ScratchFold {
                                 .is_some_and(|expected| expected != &f.native_object)
                             || (self.state.lifecycle == ScratchLifecycleV1::Retiring
                                 && expected_native_object.as_ref() != Some(&f.native_object))
+                        {
+                            return Err(codec::invalid());
+                        }
+                    }
+                    AssetIoV1::RemoveAllOwned { file_count } => {
+                        // The arm binds the fold's own file set; each exact
+                        // native identity comes from these recorded files.
+                        if self.state.lifecycle != ScratchLifecycleV1::Retiring
+                            || self.state.directory.is_none()
+                            || self.files.is_empty()
+                            || usize::try_from(*file_count).ok() != Some(self.files.len())
+                            || self.files.iter().any(|f| {
+                                !f.held_copy_ids.is_empty()
+                                    || self
+                                        .readers
+                                        .iter()
+                                        .any(|reader| reader.file_id == f.file_id)
+                            })
                         {
                             return Err(codec::invalid());
                         }
@@ -537,6 +557,41 @@ impl ScratchFold {
                         self.state.lifecycle = ScratchLifecycleV1::RetirementUncertain;
                         self.state.directory_synced = false;
                     }
+                    (
+                        AssetIoV1::RemoveAllOwned { file_count },
+                        AssetObservationV1::RemovedAll {
+                            file_count: removed,
+                            synced,
+                        },
+                    ) => {
+                        if file_count != removed
+                            || usize::try_from(*file_count).ok() != Some(self.files.len())
+                            || !matches!(outcome, NativeOutcomeV1::Completed)
+                        {
+                            return Err(codec::invalid());
+                        }
+                        self.files.clear();
+                        self.state.directory_synced = *synced;
+                    }
+                    (
+                        AssetIoV1::RemoveAllOwned { file_count },
+                        AssetObservationV1::RemovalSetUnresolved { removed },
+                    ) => {
+                        let removed = usize::try_from(*removed).map_err(|_| codec::invalid())?;
+                        if removed >= self.files.len()
+                            || usize::try_from(*file_count).ok() != Some(self.files.len())
+                            || self.state.lifecycle != ScratchLifecycleV1::Retiring
+                            || !matches!(outcome, NativeOutcomeV1::Failed { .. })
+                        {
+                            return Err(codec::invalid());
+                        }
+                        // The definite removals leave custody; the unresolved
+                        // file and every unattempted one keep their charge.
+                        // No retry is admitted after an unresolved effect.
+                        self.files.drain(..removed);
+                        self.state.lifecycle = ScratchLifecycleV1::RetirementUncertain;
+                        self.state.directory_synced = false;
+                    }
                     (AssetIoV1::SyncFiles { .. }, AssetObservationV1::Synced) => {
                         if !matches!(
                             outcome,
@@ -699,7 +754,7 @@ impl ScratchFold {
                         .checked_add(1)
                         .ok_or_else(codec::invalid)?;
                 }
-                AssetIoV1::RemoveOwned { .. } => {}
+                AssetIoV1::RemoveOwned { .. } | AssetIoV1::RemoveAllOwned { .. } => {}
                 AssetIoV1::OpenReader { lease } => {
                     totals.handles_reserved = totals
                         .handles_reserved

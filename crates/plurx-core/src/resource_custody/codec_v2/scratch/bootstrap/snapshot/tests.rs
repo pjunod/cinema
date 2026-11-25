@@ -119,6 +119,7 @@ fn observe(
                 closed_copy_ids: closed,
                 child_effect: effect,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     };

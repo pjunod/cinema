@@ -296,6 +296,7 @@ fn remove_child(fold: BootstrapFold, plan: &ScratchPlanV3) -> BootstrapFold {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::Removed,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -334,6 +335,7 @@ fn sync_parent(fold: BootstrapFold, plan: &ScratchPlanV3) -> BootstrapFold {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -380,6 +382,7 @@ fn close_retained(fold: BootstrapFold, plan: &ScratchPlanV3) -> BootstrapFold {
                 closed_copy_ids: copy_ids,
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -638,6 +641,7 @@ fn unstarted_root_requires_observed_never_entry_before_terminal_cancel() {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -707,6 +711,7 @@ fn partial_producer_cancel_closes_exact_parent_and_refuses_possible_child() {
                 closed_copy_ids: copy_ids,
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -835,6 +840,7 @@ fn traversing_producer_cancel_closes_only_the_original_anchor() {
                 closed_copy_ids: vec![anchor_copy],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -886,6 +892,7 @@ fn possible_child_never_entered_must_be_observed_before_partial_cancel() {
                 closed_copy_ids: vec![],
                 child_effect: ChildEffect::None,
                 inventory: InventoryCertainty::Exact,
+                parent_synced: false,
             },
         },
     )
@@ -948,4 +955,259 @@ fn retained_child_removal_requires_prior_sync_and_consumes_quiescent_sync_marker
             );
         }
     }
+}
+
+fn retiring(plan: &ScratchPlanV3) -> BootstrapFold {
+    let (fold, _, _) = retained(plan, false);
+    begin_retirement(fold, plan)
+}
+
+fn removed_all(plan: &ScratchPlanV3, synced: bool) -> BootstrapFold {
+    let (fold, io_id) = arm_remove_all(retiring(plan), plan, 1).unwrap();
+    observe_asset(
+        fold,
+        plan,
+        io_id,
+        NativeOutcomeV1::Completed,
+        AssetObservationV1::RemovedAll {
+            file_count: 1,
+            synced,
+        },
+    )
+}
+
+fn arm_remove_all(
+    fold: BootstrapFold,
+    plan: &ScratchPlanV3,
+    file_count: u32,
+) -> Result<(BootstrapFold, Id), CustodyError> {
+    let io_id = id();
+    output_event(
+        fold,
+        plan,
+        io_id,
+        AssetEventV1::ArmIo {
+            io_id,
+            operation: AssetIoV1::RemoveAllOwned { file_count },
+        },
+    )
+    .map(|fold| (fold, io_id))
+}
+
+fn remove_child_result(
+    fold: BootstrapFold,
+    plan: &ScratchPlanV3,
+    result: BootstrapResultV1,
+) -> Result<BootstrapFold, CustodyError> {
+    let parent = fold.bootstrap.parent.as_ref().unwrap();
+    let parent_ref = OwnedDirectoryRefV1 {
+        owning_obligation: fold.obligation,
+        member_id: fold.member,
+        directory_id: parent.observed.directory_id,
+    };
+    let child_directory_id = fold.output.state.directory.as_ref().unwrap().directory_id;
+    let child_component = plan.bootstrap().child_component.clone();
+    let io_id = id();
+    let fold = apply(
+        fold,
+        plan,
+        io_id,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id,
+            operation: BootstrapIoV1::RemoveRenditionChild {
+                parent: parent_ref,
+                child_directory_id,
+                child_component,
+            },
+        },
+    )?;
+    apply(
+        fold,
+        plan,
+        id(),
+        AssetEventV3::ObserveBootstrapV1 {
+            io_id,
+            native_join_operation_id: id(),
+            result,
+        },
+    )
+}
+
+fn removed_child(parent_synced: bool) -> BootstrapResultV1 {
+    BootstrapResultV1 {
+        outcome: NativeOutcomeV1::Completed,
+        acquired: None,
+        closed_copy_ids: vec![],
+        child_effect: ChildEffect::Removed,
+        inventory: InventoryCertainty::Exact,
+        parent_synced,
+    }
+}
+
+#[test]
+fn batched_retirement_removes_the_owned_set_and_syncs_child_and_parent_in_its_own_steps() {
+    let plan = plan();
+    let (fold, _, _) = retained(&plan, false);
+    let fold = begin_retirement(fold, &plan);
+    let (fold, io_id) = arm_remove_all(fold, &plan, 1).unwrap();
+    assert_eq!(fold.state().asset.totals.pending_jobs, 1);
+    let fold = observe_asset(
+        fold,
+        &plan,
+        io_id,
+        NativeOutcomeV1::Completed,
+        AssetObservationV1::RemovedAll {
+            file_count: 1,
+            synced: true,
+        },
+    );
+    assert!(fold.output.files.is_empty());
+    assert!(fold.output.state.directory_synced);
+    let fold = remove_child_result(fold, &plan, removed_child(true)).unwrap();
+    assert_eq!(fold.bootstrap.phase, BootstrapPhase::RetainedChildRemoved);
+    assert!(fold.bootstrap.retained_parent_synced);
+    let fold = close_retained(fold, &plan);
+    assert_eq!(
+        fold.state().asset.lifecycle,
+        ScratchLifecycleV1::RetiredClosed
+    );
+    assert_eq!(fold.state().asset.totals.pending_jobs, 0);
+}
+
+#[test]
+fn batched_removal_with_a_failed_child_fsync_still_owes_the_ordinary_sync_steps() {
+    let plan = plan();
+    let fold = removed_all(&plan, false);
+    assert!(fold.output.files.is_empty());
+    assert!(!fold.output.state.directory_synced);
+    // Child removal still requires the durable child sync first.
+    assert!(remove_child_result(fold, &plan, removed_child(false)).is_err());
+    let fold = sync_child_directory(removed_all(&plan, false), &plan);
+    let fold = remove_child_result(fold, &plan, removed_child(false)).unwrap();
+    assert!(!fold.bootstrap.retained_parent_synced);
+    let fold = sync_parent(fold, &plan);
+    assert!(fold.bootstrap.retained_parent_synced);
+}
+
+#[test]
+fn batched_removal_refuses_a_wrong_count_an_unretired_asset_or_a_mismatched_observation() {
+    let plan = plan();
+    let (fold, _, _) = retained(&plan, false);
+    // Retained read-only, not yet retiring.
+    assert!(arm_remove_all(fold, &plan, 1).is_err());
+    assert!(arm_remove_all(retiring(&plan), &plan, 0).is_err());
+    assert!(arm_remove_all(retiring(&plan), &plan, 2).is_err());
+    for (outcome, observation) in [
+        (
+            NativeOutcomeV1::Completed,
+            AssetObservationV1::RemovedAll {
+                file_count: 2,
+                synced: true,
+            },
+        ),
+        (
+            NativeOutcomeV1::Failed {
+                error_class: "unlink-unresolved".into(),
+            },
+            AssetObservationV1::RemovedAll {
+                file_count: 1,
+                synced: true,
+            },
+        ),
+        (
+            NativeOutcomeV1::Failed {
+                error_class: "unlink-unresolved".into(),
+            },
+            AssetObservationV1::RemovalSetUnresolved { removed: 1 },
+        ),
+        (
+            NativeOutcomeV1::Completed,
+            AssetObservationV1::RemovalSetUnresolved { removed: 0 },
+        ),
+    ] {
+        let (armed, io_id) = arm_remove_all(retiring(&plan), &plan, 1).unwrap();
+        assert!(output_event(
+            armed,
+            &plan,
+            id(),
+            AssetEventV1::ObserveIo {
+                io_id,
+                native_join_operation_id: id(),
+                outcome,
+                observation,
+            },
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn unresolved_batched_removal_keeps_every_unremoved_charge_and_admits_no_retry() {
+    let plan = plan();
+    let (fold, _, _) = retained(&plan, false);
+    let before = fold.state().asset.totals.charged_storage_bytes;
+    let fold = begin_retirement(fold, &plan);
+    let (fold, io_id) = arm_remove_all(fold, &plan, 1).unwrap();
+    let fold = observe_asset(
+        fold,
+        &plan,
+        io_id,
+        NativeOutcomeV1::Failed {
+            error_class: "unlink-unresolved".into(),
+        },
+        AssetObservationV1::RemovalSetUnresolved { removed: 0 },
+    );
+    assert_eq!(
+        fold.state().asset.lifecycle,
+        ScratchLifecycleV1::RetirementUncertain
+    );
+    assert_eq!(fold.output.files.len(), 1);
+    assert_eq!(fold.state().asset.totals.charged_storage_bytes, before);
+    assert!(arm_remove_all(fold, &plan, 1).is_err());
+}
+
+#[test]
+fn only_a_completed_child_removal_may_report_a_parent_sync() {
+    let plan = plan();
+    let unresolved = BootstrapResultV1 {
+        outcome: NativeOutcomeV1::Failed {
+            error_class: "rmdir-unresolved".into(),
+        },
+        child_effect: ChildEffect::Unknown,
+        inventory: InventoryCertainty::Unknown,
+        ..removed_child(true)
+    };
+    assert!(remove_child_result(removed_all(&plan, true), &plan, unresolved).is_err());
+    let fold = remove_child_result(removed_all(&plan, true), &plan, removed_child(false)).unwrap();
+    let parent = fold.bootstrap.parent.as_ref().unwrap();
+    let parent_ref = OwnedDirectoryRefV1 {
+        owning_obligation: fold.obligation,
+        member_id: fold.member,
+        directory_id: parent.observed.directory_id,
+    };
+    let io_id = id();
+    let fold = apply(
+        fold,
+        &plan,
+        io_id,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id,
+            operation: BootstrapIoV1::SyncRetainedParent { parent: parent_ref },
+        },
+    )
+    .unwrap();
+    assert!(apply(
+        fold,
+        &plan,
+        id(),
+        AssetEventV3::ObserveBootstrapV1 {
+            io_id,
+            native_join_operation_id: id(),
+            result: BootstrapResultV1 {
+                child_effect: ChildEffect::None,
+                ..removed_child(true)
+            },
+        },
+    )
+    .is_err());
 }

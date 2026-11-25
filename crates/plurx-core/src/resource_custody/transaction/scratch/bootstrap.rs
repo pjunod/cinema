@@ -171,6 +171,7 @@ pub(in crate::resource_custody::transaction) fn change(
             operation,
             AssetIoV1::CloseReader { .. }
                 | AssetIoV1::RemoveOwned { .. }
+                | AssetIoV1::RemoveAllOwned { .. }
                 | AssetIoV1::SyncFiles { .. }
         ),
         _ => false,

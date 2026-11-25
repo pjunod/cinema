@@ -227,13 +227,13 @@ fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationErr
         .directory
         .as_ref()
         .ok_or(OperationError::State)?;
-    if let Some(file) = fold.files().first() {
+    if !fold.files().is_empty() {
+        // One durable arm/observe for the whole owned set, not two per file.
         return io(
-            CleanupOperation::Output(AssetIoV1::RemoveOwned {
-                file_id: file.file_id,
-                expected_native_object: Some(file.native_object.clone()),
+            CleanupOperation::Output(AssetIoV1::RemoveAllOwned {
+                file_count: u32::try_from(fold.files().len()).map_err(|_| OperationError::State)?,
             }),
-            CleanupCell::remove_owned_file(file, child)?,
+            CleanupCell::remove_all_owned(fold.files(), child)?,
         );
     }
     if state.bootstrap.phase == BootstrapPhase::SinkReady && !state.asset.directory_synced {
@@ -1017,7 +1017,9 @@ impl NodeResourceRuntime {
                 *outcome == NativeOutcomeV1::Completed
                     && matches!(
                         observation,
-                        AssetObservationV1::Removed { .. } | AssetObservationV1::Synced
+                        AssetObservationV1::Removed { .. }
+                            | AssetObservationV1::RemovedAll { .. }
+                            | AssetObservationV1::Synced
                     )
             }
             CleanupFact::Bootstrap(result) => result.outcome == NativeOutcomeV1::Completed,
