@@ -260,7 +260,7 @@ fn restored_binding_is_fresh_and_an_old_receipt_cannot_refund_it() {
 }
 
 #[test]
-fn daemon_owner_uses_actual_graph_process_instance_without_continuity_claim() {
+fn daemon_owner_uses_actual_graph_process_instance_and_only_pid_namespace_continuity() {
     let owner = daemon_owner("fixture-node".into(), "fixture-cluster".into());
     let ledger = ResourceLedger::new(1, Metric::Known(vector(100))).expect("ledger");
     let (reservation, _) = ledger
@@ -274,7 +274,14 @@ fn daemon_owner_uses_actual_graph_process_instance_without_continuity_claim() {
     assert_eq!(owner.owner_id, graph.identity().process_instance);
     assert_eq!(owner.daemon_process.pid, std::process::id());
     assert!(owner.platform_domain.host_identity.is_none());
-    assert!(owner.platform_domain.continuity_provider.is_none());
+    // fdda9a593: the only continuity claimed is the observed PID namespace,
+    // never a host identity, configured node ID or sampled wall clock.
+    #[cfg(target_os = "linux")]
+    let expected = crate::resource_custody::recovery::current_pid_namespace_token()
+        .map(|_| crate::resource_custody::recovery::PID_NAMESPACE_PROVIDER.to_owned());
+    #[cfg(not(target_os = "linux"))]
+    let expected: Option<String> = None;
+    assert_eq!(owner.platform_domain.continuity_provider, expected);
 }
 
 pub(super) fn options(
