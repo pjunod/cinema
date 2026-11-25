@@ -1012,6 +1012,9 @@ struct EffectiveProcessingReport: Equatable, Codable {
     var appliedOperations: [String]
     /// Some, but not every, served frame applied creative trims.
     var creativeTrimsPartial: Bool = false
+    /// Server-written Playback info rows riding this report; they clear with it.
+    var dvMetadata: DolbyVisionMetadataRows?
+    var displayTarget: DisplayTargetRows?
 
     func matches(generation active: String?, delivered: String?) -> Bool {
         ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) && active == generation
@@ -1044,7 +1047,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
             name = "DisplayTargetMapping:\(nits)"
         }
     }
-    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial }
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial, dvMetadata, displayTarget }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
@@ -1054,6 +1057,8 @@ struct EffectiveProcessingReport: Equatable, Codable {
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
         appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
         creativeTrimsPartial = (try? values?.decode(Bool.self, forKey: .creativeTrimsPartial)) == true
+        dvMetadata = try? values?.decode(DolbyVisionMetadataRows.self, forKey: .dvMetadata)
+        displayTarget = try? values?.decode(DisplayTargetRows.self, forKey: .displayTarget)
         if appliedOperations.contains(where: { $0.hasPrefix("DisplayTargetMapping:") && ($0 == "DisplayTargetMapping:100") != sdrProcessed }) { appliedOperations = [] }
     }
 
@@ -1064,6 +1069,59 @@ struct EffectiveProcessingReport: Equatable, Codable {
         self.felContributed = felContributed
         self.appliedOperations = appliedOperations
     }
+}
+
+/// The server-written text of one Playback info sub-row. Only the text is
+/// read; the levels beside it are the server's own bookkeeping.
+struct ServerRowText: Equatable, Codable {
+    var text: String?
+    private enum CodingKeys: String, CodingKey { case text }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        text = try? values?.decode(String.self, forKey: .text)
+    }
+    init(text: String?) { self.text = text }
+}
+
+/// `dv_metadata`: the three sub-rows of the Dolby Vision metadata row.
+struct DolbyVisionMetadataRows: Equatable, Codable {
+    var inFile: ServerRowText?
+    var applied: ServerRowText?
+    var leftForDisplay: ServerRowText?
+    private enum CodingKeys: String, CodingKey { case inFile, applied, leftForDisplay }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        inFile = try? values?.decode(ServerRowText.self, forKey: .inFile)
+        applied = try? values?.decode(ServerRowText.self, forKey: .applied)
+        leftForDisplay = try? values?.decode(ServerRowText.self, forKey: .leftForDisplay)
+    }
+    init(inFile: String?, applied: String?, leftForDisplay: String?) {
+        self.inFile = ServerRowText(text: inFile)
+        self.applied = ServerRowText(text: applied)
+        self.leftForDisplay = ServerRowText(text: leftForDisplay)
+    }
+    /// Sub-row texts in contract order: in the file, applied, left for the display.
+    var texts: [String?] { [inFile?.text, applied?.text, leftForDisplay?.text] }
+}
+
+/// `display_target`: the three sub-rows of the Display target row.
+struct DisplayTargetRows: Equatable, Codable {
+    var reportedPeakText: String?
+    var mappedForText: String?
+    var titlePeakText: String?
+    private enum CodingKeys: String, CodingKey { case reportedPeakText, mappedForText, titlePeakText }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        reportedPeakText = try? values?.decode(String.self, forKey: .reportedPeakText)
+        mappedForText = try? values?.decode(String.self, forKey: .mappedForText)
+        titlePeakText = try? values?.decode(String.self, forKey: .titlePeakText)
+    }
+    init(reportedPeakText: String?, mappedForText: String?, titlePeakText: String?) {
+        self.reportedPeakText = reportedPeakText
+        self.mappedForText = mappedForText
+        self.titlePeakText = titlePeakText
+    }
+    var texts: [String?] { [reportedPeakText, mappedForText, titlePeakText] }
 }
 
 /// A bounded owner-authored reason why this session's optional enhancement
@@ -1135,8 +1193,10 @@ struct PlaybackEnhancement: Equatable, Codable {
     /// while the player holds a current, generation-matching
     /// `EffectiveProcessingReport`. Omitted by the server when false.
     var requiresEffectiveProcessing: Bool
+    /// The Playback info `Dolby Vision metadata` row of an unprocessed delivery.
+    var dvMetadata: DolbyVisionMetadataRows?
 
-    private enum CodingKeys: String, CodingKey { case active, details, requiresEffectiveProcessing }
+    private enum CodingKeys: String, CodingKey { case active, details, requiresEffectiveProcessing, dvMetadata }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         var seen = Set<Badge>()
@@ -1145,12 +1205,15 @@ struct PlaybackEnhancement: Equatable, Codable {
             .filter { seen.insert($0).inserted }
         details = (try? values?.decode([Detail].self, forKey: .details)) ?? []
         requiresEffectiveProcessing = (try? values?.decode(Bool.self, forKey: .requiresEffectiveProcessing)) ?? false
+        dvMetadata = try? values?.decode(DolbyVisionMetadataRows.self, forKey: .dvMetadata)
     }
 
-    init(active: [Badge], details: [Detail], requiresEffectiveProcessing: Bool = false) {
+    init(active: [Badge], details: [Detail], requiresEffectiveProcessing: Bool = false,
+         dvMetadata: DolbyVisionMetadataRows? = nil) {
         self.active = active
         self.details = details
         self.requiresEffectiveProcessing = requiresEffectiveProcessing
+        self.dvMetadata = dvMetadata
     }
 
     func explainingSkip(_ skip: ProcessingSkip?, generation: String?) -> PlaybackEnhancement {

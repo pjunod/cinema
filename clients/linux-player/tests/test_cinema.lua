@@ -344,5 +344,58 @@ assert(overlay.data:find('Dolby Vision mapper: shared native Dolby renderer',1,t
 for i=1,4 do press('down') end
 assert(overlay.data:find('Dolby Vision enhancements: EL · RPU · DYN',1,true))
 assert(overlay.data:find('● EL: the dual-layer Profile 7 stream',1,true))
+-- The server's Dolby Vision metadata and display target rows, under the three
+-- headings. Every page of the panel is gathered; first occurrences give order.
+local function info_text(provenance)
+    P['video-params']=dv;reset()
+    update('user-data/cinema-video',{source={hdr='dolby_vision',dv_profile=7,dv_el_present=true},
+        renderer=native,provenance=provenance})
+    click(1125,681)
+    local pieces={overlay.data}
+    for i=1,80 do press('down');pieces[#pieces+1]=overlay.data end
+    for i=1,80 do press('up') end
+    press('escape')
+    return table.concat(pieces,'\n')
+end
+local function at(text,part) return assert(text:find(part,1,true),part..' missing') end
+local metadata={value='HDR10+ dynamic metadata applied',rows={
+    {label='In the file',text='Dolby Vision RPU, CM v4.0, L1 and L2 trims'},
+    {label='Applied by Cinema',text='HDR10+ dynamic metadata applied'},
+    {label='Left for the display',text='Nothing: the picture is fully mapped'}}}
+local function target(mapped,reported,title)
+    return {value=mapped,rows={{label='Reported peak',text=reported or '800 nits'},
+        {label='Mapped for',text=mapped},{label='Title peak',text=title or '4000 nits'}}}
+end
+-- Targeted, not targeted and already fits.
+for _,mapped in ipairs({'1000 nits','Not targeted — the display did not report a peak',
+        'Not needed — the title already fits a 1000-nit display'}) do
+    local text=info_text({dv_metadata=metadata,display_target=target(mapped)})
+    at(text,'Dolby Vision metadata: HDR10+ dynamic metadata applied')
+    at(text,'In the file: Dolby Vision RPU, CM v4.0')
+    at(text,'Applied by Cinema: HDR10+ dynamic metadata applied')
+    at(text,'Left for the display: Nothing')
+    at(text,'Display target: '..mapped)
+    at(text,'Reported peak: 800 nits');at(text,'Mapped for: '..mapped);at(text,'Title peak: 4000 nits')
+    assert(at(text,'Dolby Vision metadata:')<at(text,'Display target:'))
+    assert(at(text,'Left for the display:')<at(text,'Display target:'))
+    assert(at(text,'Display target:')<at(text,'Renderer:'))
+end
+-- An unprocessed delivery has metadata and no display target; neither row says Unavailable.
+local text=info_text({dv_metadata=metadata})
+at(text,'Dolby Vision metadata:');assert(not text:find('Display target',1,true))
+assert(not text:find('Dolby Vision metadata: Unavailable',1,true))
+-- A missing or stale report leaves both rows out.
+for _,none in ipairs({{},false}) do
+    text=info_text(none or nil)
+    assert(not text:find('Dolby Vision metadata',1,true));assert(not text:find('Display target',1,true))
+    assert(not text:find('Left for the display',1,true))
+end
+-- Headings in order, with the new rows under Processing.
+text=info_text({dv_metadata=metadata,display_target=target('1000 nits')})
+local i,pr,o=at(text,'Input'),at(text,'Processing'),at(text,'Output')
+assert(i<pr and pr<o)
+assert(at(text,'Source dynamic range:')>i and at(text,'Source dynamic range:')<pr)
+assert(at(text,'Dolby Vision metadata:')>pr and at(text,'Display target:')>pr and at(text,'Title peak:')<o)
+assert(at(text,'Renderer:')>pr and at(text,'Renderer:')<o and at(text,'Player window size:')>o)
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
-print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 11 quality pill cases passed')
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions, 11 quality pill cases and the provenance rows passed')
