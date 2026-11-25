@@ -343,7 +343,7 @@ private fun convertedDolbyVisionMark(
  * arrow — the badge stays exactly what it was before this feature.
  */
 internal fun sourceDolbyVisionProfile(file: MediaFileDto?): Int? {
-    file?.dolby_vision?.profile?.let { return it }
+    file?.dv_profile?.let { return it }
     val match = Regex("""profile\s*(\d+)""", RegexOption.IGNORE_CASE)
         .find(file?.hdr_format.orEmpty())
     return match?.groupValues?.get(1)?.toIntOrNull()
@@ -425,4 +425,20 @@ private fun videoCodecLabel(codec: String): String = when (codec.lowercase()) {
     "vc1" -> "VC-1"
     "mpeg2video" -> "MPEG-2"
     else -> codec.uppercase()
+}
+
+/**
+ * One device's line under a version: who it is and how the version plays
+ * there, both as the server judged and worded them. [caution] marks a
+ * fallback or a dropped enhancement layer, matching the web's
+ * `plays-caution` rows.
+ */
+internal data class PlaysOnLine(val device: String, val outcome: String, val caution: Boolean)
+
+internal fun playsOnLines(file: MediaFileDto): List<PlaysOnLine> = file.plays_on.map {
+    PlaysOnLine(
+        device = it.device ?: it.client ?: "Device",
+        outcome = it.label,
+        caution = !it.full_quality || it.el_dropped,
+    )
 }

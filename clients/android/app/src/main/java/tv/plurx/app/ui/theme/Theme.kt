@@ -112,6 +112,9 @@ val Muted: Color
     @Composable @ReadOnlyComposable get() = LocalViewerColors.current.muted
 val Outline: Color
     @Composable @ReadOnlyComposable get() = LocalViewerColors.current.outline
+/** A caution: a fallback or a dropped layer that should be seen, not hidden. */
+val Warning: Color
+    @Composable @ReadOnlyComposable get() = LocalViewerColors.current.warning
 
 private fun typography(theme: ThemeId): Typography {
     val family = if (theme == ThemeId.Terminal) FontFamily.Monospace else FontFamily.SansSerif

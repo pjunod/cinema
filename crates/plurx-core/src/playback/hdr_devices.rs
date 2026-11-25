@@ -154,6 +154,38 @@ pub fn plays_on(file: &MediaFile, el_kind: Option<TitleElKind>, d: &Decision) ->
     }
 }
 
+/// A version's Dolby Vision facts as one line, the same on every client:
+/// "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base".
+/// `el_kind` is what the complete-title scan found, when it has run; until
+/// then a present enhancement layer is named without a type. `None` for a
+/// version with no Dolby Vision profile.
+pub fn dv_facts_line(
+    dv: &crate::domain::DolbyVisionFacts,
+    el_kind: Option<TitleElKind>,
+) -> Option<String> {
+    let profile = dv.profile?;
+    let mut parts = vec![format!("Profile {profile}")];
+    match (el_kind, dv.el_present) {
+        (Some(TitleElKind::Fel), _) => parts.push("FEL · full enhancement layer".to_owned()),
+        (Some(TitleElKind::Mel), _) => parts.push("MEL · minimal enhancement layer".to_owned()),
+        (None, Some(true)) => parts.push("enhancement layer, type not yet scanned".to_owned()),
+        (None, _) => {}
+    }
+    if let Some(level) = dv.level {
+        parts.push(format!("level {level}"));
+    }
+    if let Some(bl) = dv.bl_compat_id {
+        parts.push(match bl {
+            0 => "no base layer".to_owned(),
+            1 | 6 => "HDR10 base".to_owned(),
+            2 => "SDR base".to_owned(),
+            4 => "HLG base".to_owned(),
+            other => format!("base {other}"),
+        });
+    }
+    Some(parts.join(" · "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +207,41 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_versions_dolby_vision_reads_as_one_line() {
+        use crate::domain::DolbyVisionFacts;
+        let fel = DolbyVisionFacts {
+            profile: Some(7),
+            level: Some(6),
+            bl_compat_id: Some(6),
+            el_present: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            dv_facts_line(&fel, Some(TitleElKind::Fel)).as_deref(),
+            Some("Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base")
+        );
+        let unscanned = DolbyVisionFacts {
+            profile: Some(7),
+            el_present: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            dv_facts_line(&unscanned, None).as_deref(),
+            Some("Profile 7 · enhancement layer, type not yet scanned")
+        );
+        let p5 = DolbyVisionFacts {
+            profile: Some(5),
+            bl_compat_id: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            dv_facts_line(&p5, None).as_deref(),
+            Some("Profile 5 · no base layer")
+        );
+        assert_eq!(dv_facts_line(&DolbyVisionFacts::default(), None), None);
     }
 
     #[test]
