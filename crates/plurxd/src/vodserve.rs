@@ -1587,6 +1587,12 @@ struct Shared {
     /// registry. A same-key build must observe this under its build gate.
     #[cfg(target_os = "linux")]
     finite_closing: Mutex<std::collections::BTreeMap<String, shared::FiniteClosingRef>>,
+    /// A collected finite close signals this when it starts waiting for its
+    /// application owners. The transcode manager then reconciles adaptive
+    /// attempts at once, so an attempt's application lease is released on that
+    /// event rather than on the next repair tick.
+    #[cfg(target_os = "linux")]
+    finite_application_release: Arc<Notify>,
     head_regeneration_slots: Arc<Semaphore>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.

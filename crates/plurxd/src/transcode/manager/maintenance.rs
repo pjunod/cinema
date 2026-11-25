@@ -824,11 +824,20 @@ impl TranscodeManager {
     /// prune played-past segments, and hold sessions that have run ahead.
     pub async fn reap_loop(self: Arc<Self>) {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
+        #[cfg(target_os = "linux")]
+        let application_release = self.vod.finite_application_release_signal();
+        #[cfg(not(target_os = "linux"))]
+        let application_release = Arc::new(tokio::sync::Notify::new());
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
                 () = self.scratch_starved.notified() => {
                     self.evaluate_starved_sessions().await;
+                    continue;
+                }
+                () = application_release.notified() => {
+                    #[cfg(target_os = "linux")]
+                    self.reconcile_adaptive_attempt_tasks().await;
                     continue;
                 }
             }

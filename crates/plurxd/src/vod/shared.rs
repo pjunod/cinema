@@ -3324,6 +3324,9 @@ impl Shared {
         }
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             "collected finite close stage=ticket_installed");
+        // An adaptive attempt may still hold this producer's application
+        // lease. Wake its reconciliation now instead of waiting for a tick.
+        self.finite_application_release.notify_one();
         let releasing = Instant::now();
         loop {
             let probe = (Instant::now() + Duration::from_millis(500)).min(deadline);
