@@ -29,11 +29,17 @@ static inline bool dv_metadata_coefficient(int64_t value) {
   return value >= -(INT64_C(1) << 54) && value < (INT64_C(1) << 54);
 }
 
+// fel: DV_BL_ONLY, DV_FEL_UNCLAMPED (the pq-bilinear-* composition, which
+// has no vdr_in_max clamp and so admits only a clamp that cannot bind) or
+// DV_FEL_CLAMPED (pq-ccm001-*, which clamps as clause 5.4.3.2 specifies).
+enum { DV_BL_ONLY = 0, DV_FEL_UNCLAMPED = 1, DV_FEL_CLAMPED = 2 };
+
 static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
-                                   int profile, bool fel,
+                                   int profile, int fel,
                                    struct dv_decoded_mapping *out) {
   if (!data || (uintptr_t)data % _Alignof(AVDOVIMetadata) || !out ||
       (profile != 5 && profile != 7 && profile != 8) ||
+      fel < DV_BL_ONLY || fel > DV_FEL_CLAMPED ||
       (fel && profile != 7) || size < sizeof(*data) || size > 65536 ||
       size < sizeof(AVDOVIRpuDataHeader) || size < sizeof(AVDOVIDataMapping) ||
       size < sizeof(AVDOVIColorMetadata))
@@ -114,9 +120,11 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
     if (fel) {
       const AVDOVINLQParams *n = &m->nlq[comp];
       const uint64_t mask = (UINT64_C(1) << 23) - 1;
-      if (!nlq_clip_is_nonbinding(n->nlq_offset, n->linear_deadzone_slope,
-                                  n->linear_deadzone_threshold,
-                                  n->vdr_in_max >> 23, n->vdr_in_max & mask))
+      bool (*admit)(uint16_t, uint64_t, uint64_t, uint64_t, uint64_t) =
+          fel == DV_FEL_CLAMPED ? nlq_clip_is_bounded : nlq_clip_is_nonbinding;
+      if (!admit(n->nlq_offset, n->linear_deadzone_slope,
+                 n->linear_deadzone_threshold, n->vdr_in_max >> 23,
+                 n->vdr_in_max & mask))
         return false;
     }
   }
@@ -128,7 +136,7 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
   // pivot clamp and matrix. The public shader reshapes BL before adding NLQ
   // residuals, then performs the nonlinear/linear color transforms.
   pl_map_dovi_metadata(&result.dovi, data);
-  result.dovi.nlq_active = fel;
+  result.dovi.nlq_active = fel != DV_BL_ONLY;
   for (int comp = 0; comp < 3; comp++) {
     if (!isfinite(result.dovi.nonlinear_offset[comp]) ||
         (fel && (!isfinite(result.dovi.nlq[comp].offset) ||
@@ -164,7 +172,7 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
 }
 
 static inline bool dv_map_decoded_metadata(const AVFrame *frame, int profile,
-                                           bool fel,
+                                           int fel,
                                            struct dv_decoded_mapping *out) {
   if (!frame)
     return false;

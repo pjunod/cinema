@@ -5,16 +5,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Admission for the supported 10-bit LINEAR_DZ subset. The renderer does not
-// implement vdr_in_max clipping, so admit only a limit which cannot bind for
-// ANY decoded EL code, not just the pixels observed in a sample frame.
+// The supported 10-bit LINEAR_DZ subset: offset an EL code, slope and
+// threshold fractions of 2^23, vdr_in_max at most 2 - 2^-23. The pq-ccm001-*
+// composition (fel_compose.h) applies clause 5.4.3.2's vdr_in_max clamp, so
+// this is all it needs.
+static inline bool nlq_clip_is_bounded(uint16_t offset, uint64_t slope,
+                                       uint64_t threshold,
+                                       uint64_t maximum_integer,
+                                       uint64_t maximum_fraction) {
+  const uint64_t denominator = UINT64_C(1) << 23;
+  return offset <= 1023 && slope < denominator && threshold < denominator &&
+         maximum_integer <= 1 && maximum_fraction < denominator;
+}
+
+// Admission for the pq-bilinear-* composition, which does not implement
+// vdr_in_max clipping: admit only a limit which cannot bind for ANY decoded
+// EL code, not just the pixels observed in a sample frame.
 static inline bool nlq_clip_is_nonbinding(uint16_t offset, uint64_t slope,
                                          uint64_t threshold,
                                          uint64_t maximum_integer,
                                          uint64_t maximum_fraction) {
   const uint64_t denominator = UINT64_C(1) << 23;
-  if (offset > 1023 || slope >= denominator || threshold >= denominator ||
-      maximum_integer > 1 || maximum_fraction >= denominator)
+  if (!nlq_clip_is_bounded(offset, slope, threshold, maximum_integer,
+                           maximum_fraction))
     return false;
   uint64_t distance = offset > 1023 - offset ? offset : 1023 - offset;
   // For a nonzero integer distance d, |residual| = ((d - 1/2)*S + T)/2^23.
