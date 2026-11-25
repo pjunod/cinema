@@ -761,6 +761,10 @@ pub(super) struct AttemptEntry {
     /// handle then completes at once, so reconciliation may join it.
     coordinator_returned: Arc<std::sync::atomic::AtomicBool>,
     control_returned: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when this attempt's Prepare failed. Only a failed attempt wakes
+    /// reconciliation when its task returns: a prepared attempt must stay
+    /// untouched until its Adopt or loss is decided.
+    prepare_failed: Arc<std::sync::atomic::AtomicBool>,
     task_returned: Arc<tokio::sync::Notify>,
 }
 
@@ -996,6 +1000,7 @@ impl AdaptiveAttemptRegistry {
                 local_activation_cutoff,
                 coordinator_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 control_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                prepare_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 task_returned: Arc::clone(&self.task_returned),
             })
             .map_err(|_| "adaptive attempt root allocation refused")?;
@@ -1268,12 +1273,15 @@ impl AttemptEntry {
         let returned = Arc::clone(&self.coordinator_returned);
         returned.store(false, std::sync::atomic::Ordering::Release);
         let task_returned = Arc::clone(&self.task_returned);
+        let failed = Arc::clone(&self.prepare_failed);
         let original = async move {
             if start_rx.await.is_ok() {
                 future.await;
             }
             returned.store(true, std::sync::atomic::Ordering::Release);
-            task_returned.notify_one();
+            if failed.load(std::sync::atomic::Ordering::Acquire) {
+                task_returned.notify_one();
+            }
         };
         self.coordinator_frame_bytes.store(
             std::mem::size_of_val(&original),
@@ -1343,6 +1351,11 @@ impl AttemptEntry {
     /// The task was spawned only after this entry was visible in the fixed
     /// table. Its handle stays here through request cancellation and is joined
     /// by the existing manager maintenance cadence.
+    fn mark_prepare_failed(&self) {
+        self.prepare_failed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     async fn join_finished_original(&self, coordinator: bool) -> Result<(), &'static str> {
         // A returned future's handle completes immediately; wait for it rather
         // than skipping it until a later pass.
@@ -1409,12 +1422,15 @@ impl AttemptEntry {
         let returned = Arc::clone(&self.control_returned);
         returned.store(false, std::sync::atomic::Ordering::Release);
         let task_returned = Arc::clone(&self.task_returned);
+        let failed = Arc::clone(&self.prepare_failed);
         let original = async move {
             if start_rx.await.is_ok() {
                 future.await;
             }
             returned.store(true, std::sync::atomic::Ordering::Release);
-            task_returned.notify_one();
+            if failed.load(std::sync::atomic::Ordering::Acquire) {
+                task_returned.notify_one();
+            }
         };
         if std::mem::size_of_val(&original)
             > self
@@ -1497,12 +1513,15 @@ impl AttemptEntry {
         let returned = Arc::clone(&self.coordinator_returned);
         returned.store(false, std::sync::atomic::Ordering::Release);
         let task_returned = Arc::clone(&self.task_returned);
+        let failed = Arc::clone(&self.prepare_failed);
         let original = async move {
             if start_rx.await.is_ok() {
                 future.await;
             }
             returned.store(true, std::sync::atomic::Ordering::Release);
-            task_returned.notify_one();
+            if failed.load(std::sync::atomic::Ordering::Acquire) {
+                task_returned.notify_one();
+            }
         };
         let frame_bytes = std::mem::size_of_val(&original);
         if std::mem::size_of_val(&original) > attempt_root::COORDINATOR_BYTES {
@@ -2245,6 +2264,9 @@ impl super::TranscodeManager {
                             ),
                         )
                         .await;
+                    if result.is_err() {
+                        original.mark_prepare_failed();
+                    }
                     let _ = reply_tx.send(result.map_err(|error| original.prepare_error(error)));
                 },
                 frame_tx,
@@ -4257,25 +4279,6 @@ impl super::TranscodeManager {
             AttemptState::Adopted(_) => "adopted",
             AttemptState::Closed => "closed",
             AttemptState::Unknown => "unknown_held",
-        }
-    }
-
-    /// Join original tasks that have just returned and drop an application
-    /// fence they no longer need. Unlike full reconciliation this takes no
-    /// attempt state lock and starts no Store work, so it is safe to run while
-    /// an Adopt is still publishing the same attempt.
-    pub(super) async fn release_returned_adaptive_tasks(&self) {
-        for entry in self.adaptive_attempts.entries().into_iter().flatten() {
-            for coordinator in [true, false] {
-                if let Err(error) = entry.join_finished_original(coordinator).await {
-                    entry.mark_unknown();
-                    tracing::error!(attempt_id = %entry.attempt_id(), error, "adaptive original task failure remains held");
-                }
-            }
-            if let Err(error) = entry.release_finished_application(&entry) {
-                tracing::warn!(attempt_id = %entry.attempt_id(), error,
-                    "adaptive application fence remains held");
-            }
         }
     }
 
