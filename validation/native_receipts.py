@@ -99,7 +99,9 @@ BUILD_SPECS = {
     # hiqlite pre-vote tests, the vendored OpenRaft pre-vote module, and the
     # OpenRaft snapshot regression run from vendor/openraft instead of the
     # registry package located through cargo metadata; no native recipe changes.
-    'Makefile': '8355f6bea67a7f4c7f74e00137dad4a40b7f5ca76e141d1476299f43d2bfaea8',
+    # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
+    # the web-unit-check recipe (a Node web test); no native recipe changes.
+    'Makefile': '562fe36a23271d6bbf6654768af01d3fbf226bcaea9e9de1b8857f05e3f946b9',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,

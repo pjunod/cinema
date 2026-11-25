@@ -328,6 +328,9 @@ pub async fn revoke_self(
 pub struct PlaybackPrincipal {
     pub user: User,
     pub handoff: Option<PlaybackHandoffTokenScope>,
+    /// The digest of the native login token that authenticated a user
+    /// principal; `None` for a handoff token.
+    pub login_token_hash: Option<String>,
 }
 
 impl PlaybackPrincipal {
@@ -363,6 +366,7 @@ impl FromRequestParts<AppState> for PlaybackPrincipal {
             Ok(user) => Ok(Self {
                 user,
                 handoff: None,
+                login_token_hash: Some(auth::hash_token(&token)),
             }),
             // Not a native bearer: it may still be a live handoff token.
             Err(ApiError::Unauthorized) => {
@@ -370,6 +374,7 @@ impl FromRequestParts<AppState> for PlaybackPrincipal {
                 Ok(Self {
                     user: handoff.user,
                     handoff: Some(handoff.scope),
+                    login_token_hash: None,
                 })
             }
             Err(error) => Err(error),
@@ -415,7 +420,17 @@ pub async fn scoped_decision_post(
     body: Json<super::stream::DecisionBody>,
 ) -> Result<Json<super::stream::DecisionResponse>, ApiError> {
     principal.require_file(id)?;
-    super::stream::decision_post(
+    // A signed-in device's capabilities, kept for the title page and for
+    // Curator once the decision made from them succeeded: a document the
+    // server refused, or one sent for a missing file, is never kept. A
+    // handoff token is a borrowed screen, not a device of the account, so
+    // it is not recorded.
+    let record = principal
+        .login_token_hash
+        .clone()
+        .map(|hash| (hash, body.caps.clone()));
+    let recorder = state.0.clone();
+    let decision = super::stream::decision_post(
         AuthUser(principal.user),
         state,
         AxPath(id),
@@ -424,7 +439,11 @@ pub async fn scoped_decision_post(
         remote,
         body,
     )
-    .await
+    .await?;
+    if let Some((hash, caps)) = record {
+        super::playback_devices::record_device_caps(&recorder, &hash, &caps).await;
+    }
+    Ok(decision)
 }
 
 /// GET /api/v1/files/{id}/direct — the original bytes, for direct play.

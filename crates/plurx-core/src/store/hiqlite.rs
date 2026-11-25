@@ -29,8 +29,8 @@ use super::telemetry::NodeLocalTelemetry;
 use super::{
     bounded_device_label, keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence,
     CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore,
-    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenAuthentication,
-    TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
+    PlaybackDeviceCaps, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore,
+    TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -2407,6 +2407,7 @@ impl HiqliteAuthStore {
         store.install_source_arbitration_schema(None).await?;
         store.install_analysis_coordination_schema(None).await?;
         store.install_playback_input_keys_schema(None).await?;
+        store.install_playback_device_caps_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_subtitle_text_translation_schema(None).await?;
@@ -2622,6 +2623,7 @@ impl HiqliteAuthStore {
                     self.install_source_arbitration_schema(admission).await?;
                     self.install_analysis_coordination_schema(admission).await?;
                     self.install_playback_input_keys_schema(admission).await?;
+                    self.install_playback_device_caps_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_subtitle_text_translation_schema(admission)
@@ -4455,6 +4457,62 @@ impl HiqliteAuthStore {
         let marker=self.client().query_consistent_map::<CountRow,_>("playback_input_keys_shape", "SELECT count(*) AS count FROM playback_input_keys_schema WHERE singleton=1 AND version>=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
+
+    /// The device-capability extension (Curator ADR 0031 §5): its table,
+    /// index and marker. `None` when none exist, `Some(true)` when all match
+    /// exactly and the marker is committed; a partial shape is refused.
+    async fn playback_device_caps_shape(&self) -> Result<Option<bool>, StoreError> {
+        let expected = super::playback_device_caps::schema_objects()?;
+        let names = super::playback_device_caps::object_name_list();
+        // authority: the device-capability objects must match the committed extension exactly before the shape is trusted.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>("playback_device_caps_shape", format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "playback device caps extension has incompatible shape".into(),
+            ));
+        }
+        // authority: the committed marker closes the extension; shape alone is not admission.
+        let marker=self.client().query_consistent_map::<CountRow,_>("playback_device_caps_shape", "SELECT count(*) AS count FROM playback_device_caps_schema WHERE singleton=1 AND version>=1",params!()).await?;
+        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+    }
+
+    async fn install_playback_device_caps_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        match self.playback_device_caps_shape().await? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(StoreError::Migration(
+                    "playback device caps marker missing".into(),
+                ))
+            }
+            None => {}
+        }
+        let raced=format!("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({})) THEN 1 ELSE json('playback device caps extension raced') END",super::playback_device_caps::object_name_list());
+        let mut statements = vec![(raced, params!())];
+        statements.extend(
+            super::playback_device_caps::statements().map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.playback_device_caps_shape().await? == Some(true) {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "playback device caps extension did not settle".into(),
+        ))
+    }
+
     async fn install_playback_input_keys_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -8027,6 +8085,82 @@ impl UserStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn put_device_caps(
+        &self,
+        token_hash: &str,
+        caps: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        // This replica's copy decides whether to write at all: an unchanged
+        // document is the common case, and it must not cost a Raft entry.
+        // The upsert's own predicate is what holds across replicas.
+        let current = self
+            .client()
+            .query_map::<DeviceCapsCurrentRow, _>(
+                "put_device_caps",
+                super::playback_device_caps::CURRENT,
+                params!(token_hash),
+            )
+            .await?;
+        if current.first().map(|row| row.caps.as_str()) == Some(caps) {
+            return Ok(false);
+        }
+        Ok(self
+            .execute_idempotent(
+                "put_device_caps",
+                super::playback_device_caps::UPSERT,
+                params!(caps, now, token_hash),
+            )
+            .await?
+            > 0)
+    }
+
+    async fn device_caps_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<DeviceCapsListRow, _>(
+                "device_caps_for_user",
+                super::playback_device_caps::list_for_user_sql(),
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    user_id,
+                    TOKEN_SUMMARY_MAX as i64
+                ),
+            )
+            .await?;
+        Ok(super::playback_device_caps::live(
+            rows.into_iter().map(|row| row.0).collect(),
+            self.now()?,
+        ))
+    }
+
+    async fn device_caps_for_all_users(&self) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<DeviceCapsListRow, _>(
+                "device_caps_for_all_users",
+                super::playback_device_caps::list_all_sql(),
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    super::playback_device_caps::DEVICE_CAPS_LIST_MAX as i64
+                ),
+            )
+            .await?;
+        Ok(super::playback_device_caps::live(
+            rows.into_iter().map(|row| row.0).collect(),
+            self.now()?,
+        ))
+    }
+
     async fn delete_token_by_prefix_for_user(
         &self,
         user_id: i64,
@@ -8783,6 +8917,39 @@ struct TokenUserRow {
     user: UserRow,
     last_seen_at: i64,
     expiry: Option<crate::auth::TokenIdlePolicy>,
+}
+
+struct DeviceCapsCurrentRow {
+    caps: String,
+}
+
+impl From<&mut Row<'_>> for DeviceCapsCurrentRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            caps: row.get("caps"),
+        }
+    }
+}
+
+struct DeviceCapsListRow(super::playback_device_caps::ListedDeviceCaps);
+
+impl From<&mut Row<'_>> for DeviceCapsListRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(super::playback_device_caps::ListedDeviceCaps {
+            record: PlaybackDeviceCaps {
+                token_prefix: row.get("token_prefix"),
+                device: row.get("device"),
+                user_id: row.get("user_id"),
+                username: row.get("username"),
+                last_seen_at: row.get("last_seen_at"),
+                caps: row.get("caps"),
+                updated_at: row.get("updated_at"),
+            },
+            expiry_enabled: row.get("expiry_enabled"),
+            idle_days: row.get("idle_days"),
+            expiry_since: row.get("expiry_since"),
+        })
+    }
 }
 
 struct TokenSummaryRow {

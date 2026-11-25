@@ -17,6 +17,8 @@
 
 pub mod analysis_coordination;
 mod copy_index_v3;
+pub mod playback_device_caps;
+pub use playback_device_caps::PlaybackDeviceCaps;
 pub mod playback_input_keys;
 pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
@@ -2922,6 +2924,29 @@ pub trait UserStore: Send + Sync + 'static {
     /// List a bounded, oldest-first inventory without exposing full token
     /// digests to the HTTP layer.
     async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError>;
+    /// Keep the playback capability document a native login token's device
+    /// just sent (Curator ADR 0031 §5), as that token's record. Compared
+    /// against this node's copy first and written only when it differs, so an
+    /// ordinary Play is not a replicated write. Returns whether it wrote. A
+    /// token that is unknown or a Jellyfin compatibility login records
+    /// nothing. The record is removed with its token
+    /// ([`playback_device_caps`]).
+    async fn put_device_caps(
+        &self,
+        token_hash: &str,
+        caps: &str,
+        now: i64,
+    ) -> Result<bool, StoreError>;
+    /// One account's recorded devices whose sign-in is still live (present
+    /// and not idle-expired), most recently used first, at most
+    /// [`TOKEN_SUMMARY_MAX`]. A local read: a presentation answer.
+    async fn device_caps_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError>;
+    /// Every account's live recorded devices, most recently used first, at
+    /// most [`playback_device_caps::DEVICE_CAPS_LIST_MAX`].
+    async fn device_caps_for_all_users(&self) -> Result<Vec<PlaybackDeviceCaps>, StoreError>;
     /// Delete exactly one token selected by an eight-hex prefix. Ambiguous
     /// prefixes are never accepted, and clustered writes retain the exact
     /// cache-admin mutation claim.
