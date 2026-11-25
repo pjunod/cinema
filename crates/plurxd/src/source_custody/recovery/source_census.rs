@@ -418,13 +418,20 @@ pub(super) async fn replay(
     let kernel = reader::kernel_instance().ok_or("source census kernel identity unavailable")?;
     // Library roots on local disk must also have been scanned; an unreadable
     // root leaves the teardown path unavailable rather than narrower.
-    let storage = store.list_libraries().await.ok().and_then(|libraries| {
-        let roots: Vec<_> = libraries
-            .iter()
-            .flat_map(|library| library.paths.iter().cloned())
-            .collect();
-        storage_devices(&roots)
-    });
+    let storage = match store.list_libraries().await {
+        Ok(libraries) => {
+            let roots: Vec<_> = libraries
+                .iter()
+                .flat_map(|library| library.paths.iter().cloned())
+                .collect();
+            // Resolving and stating each root reaches the media mount.
+            plurx_core::media_io::blocking(move || storage_devices(&roots))
+                .await
+                .ok()
+                .flatten()
+        }
+        Err(_) => None,
+    };
     let started = crate::source_custody::process_started_ms()
         .or_else(process_started_ms)
         .ok_or("daemon process start time unavailable")?;
@@ -681,7 +688,10 @@ pub(super) async fn apply(
             .ok_or("census source file row unavailable")?;
         // The daemon's own view of the same physical file: inode, size and
         // mtime, on a superblock the census actually counted.
-        let seen = std::fs::metadata(&file.path).map_err(|e| e.to_string())?;
+        let source_path = file.path.clone();
+        let seen = plurx_core::media_io::blocking_io(move || std::fs::metadata(source_path))
+            .await
+            .map_err(|e| e.to_string())?;
         if witness.source.is_some_and(|opened| {
             !proof.opened_source_counted(opened, Some((seen.dev(), seen.ino())))
         }) {
