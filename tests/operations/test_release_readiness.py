@@ -171,6 +171,15 @@ class ReleaseReadinessCase(unittest.TestCase):
             self.assertIn('test "$(readlink -f "$(command -v ffmpeg)")" = "$PLURX_FFMPEG"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffprobe)")" = "$PLURX_FFPROBE"', readiness.BOOTSTRAP)
 
+    def test_the_dropped_uid_has_an_account_whose_home_is_home_before_any_drop(self):
+        """Path.home() with HOME cleared reads the passwd entry; the image has none for the uid."""
+        bootstrap = readiness.BOOTSTRAP
+        register = bootstrap.index('useradd --uid "$READINESS_UID" --gid "$READINESS_GID" --home-dir "$HOME"')
+        verify = bootstrap.index('test "$(getent passwd "$READINESS_UID" | cut -d: -f6)" = "$HOME"')
+        self.assertLess(bootstrap.index('if ! getent passwd "$READINESS_UID"'), register)
+        self.assertLess(register, verify)
+        self.assertLess(verify, bootstrap.index("setpriv --reuid"), "no command runs as the uid before it has a home")
+
     def test_nightly_options_reach_container_without_consuming_command_flags(self):
         with patch.object(readiness, "build_image", return_value="sha256:" + "a" * 64), \
              patch.object(readiness, "container_command", return_value=["docker", "run"]) as command, \
