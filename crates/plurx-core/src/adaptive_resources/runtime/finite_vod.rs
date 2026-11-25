@@ -599,6 +599,15 @@ impl SoftwareVodControl {
         }
     }
 
+    /// The driver was parked from `parked` until its session publication
+    /// activated it at `activated`.
+    #[cfg(target_os = "linux")]
+    pub fn publication_waited(&self, parked: Instant, activated: Instant) {
+        if let Ok(mut timing) = self.control.timing.lock() {
+            timing.publication_waited(parked, activated);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub fn qualification_stop(&self, scope: FiniteQualificationWindow) {
         if let Ok(mut timing) = self.control.timing.lock() {

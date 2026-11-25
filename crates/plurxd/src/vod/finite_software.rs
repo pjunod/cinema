@@ -1498,6 +1498,7 @@ async fn run_body(
 ) {
     // The same registered per-rendition driver waits for demand; it does not
     // create a detached retry loop or one native producer per response.
+    let parked = Instant::now();
     loop {
         // Register before the closed check: abandonment may happen before
         // this newly registered task receives its first poll.
@@ -1518,7 +1519,15 @@ async fn run_body(
             break;
         }
     }
+    let activated = Instant::now();
     let mut owner = producer.owner.lock().await;
+    // A trial would have started here without waiting for publication.
+    #[cfg(target_os = "linux")]
+    if producer.trial.is_none() {
+        owner.control().publication_waited(parked, activated);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (parked, activated);
     if rendition.closed.load(Acquire) {
         // This driver still owns the rendition's metadata lease. Final
         // cancellation waits for that lease, so only the existing compact

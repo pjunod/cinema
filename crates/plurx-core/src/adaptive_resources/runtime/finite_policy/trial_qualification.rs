@@ -51,6 +51,10 @@ pub(in crate::adaptive_resources::runtime) struct FiniteTimingWitness {
     // Writer time blocked on the producer's output before the first verified
     // segment; excluded from the startup bound.
     producer_wait: Duration,
+    // An ordinary producer parked until its session publication activated
+    // its driver. A trial starts without that wait and publishes only after
+    // verified output, so this time is excluded from the startup bound too.
+    publication_wait: Duration,
     startup_proved: bool,
     stop_requested: Option<Instant>,
     startup_scope: Option<FiniteQualificationWindow>,
@@ -99,11 +103,23 @@ impl FiniteTimingWitness {
         }
     }
 
+    pub(in crate::adaptive_resources::runtime) fn publication_waited(
+        &mut self,
+        parked: Instant,
+        activated: Instant,
+    ) {
+        if let Some(started) = self.started {
+            let wait = activated.saturating_duration_since(parked.max(started));
+            self.publication_wait = self.publication_wait.saturating_add(wait);
+        }
+    }
+
     pub(in crate::adaptive_resources::runtime) fn verified_publish(&mut self, now: Instant) {
         if let Some(started) = self.started {
             tracing::debug!(target: "plurx_core::adaptive_resources",
                 startup_ms = now.saturating_duration_since(started).as_millis(),
                 producer_wait_ms = self.producer_wait.as_millis(),
+                publication_wait_ms = self.publication_wait.as_millis(),
                 scope_unchanged = self.startup_scope.as_ref().is_some_and(|scope| scope.unchanged()),
                 stopped = self.stop_requested.is_some(),
                 "finite trial startup witness");
@@ -114,10 +130,13 @@ impl FiniteTimingWitness {
                 .take()
                 .is_some_and(|scope| scope.unchanged())
                 && self.stop_requested.is_none()
-                && now
-                    .checked_duration_since(started)
-                    .is_some_and(|time| time.saturating_sub(self.producer_wait) <= STARTUP_BOUND);
+                && now.checked_duration_since(started).is_some_and(|time| {
+                    time.saturating_sub(self.producer_wait)
+                        .saturating_sub(self.publication_wait)
+                        <= STARTUP_BOUND
+                });
             self.producer_wait = Duration::ZERO;
+            self.publication_wait = Duration::ZERO;
         }
     }
 
@@ -352,6 +371,37 @@ mod tests {
             Duration::from_millis(1600)
         ));
         assert!(!proved(Duration::ZERO, Duration::from_millis(1001)));
+    }
+
+    #[test]
+    fn startup_bound_excludes_only_the_publication_wait_after_its_start() {
+        let epoch = Arc::new(AtomicU64::new(1));
+        let key = FiniteTrialKey {
+            workload: [1; 32],
+            recipe: [2; 32],
+            executable: [3; 32],
+            limit_epoch: 1,
+            native_memory: 64 * 1024 * 1024,
+            native_tasks: 4,
+        };
+        let start = Instant::now() + Duration::from_secs(1);
+        let ms = Duration::from_millis;
+        let proved = |parked: Instant, activated: Instant, published: Duration| {
+            let mut witness = FiniteTimingWitness::new(Some(key));
+            witness.set_start_scope(FiniteQualificationWindow::capture(Arc::clone(&epoch)));
+            witness.start(start);
+            witness.publication_waited(parked, activated);
+            witness.verified_publish(start + published);
+            witness.set_stop_scope(FiniteQualificationWindow::capture(Arc::clone(&epoch)));
+            witness.stop(start + published + ms(10));
+            witness.take_stopped().is_some()
+        };
+        // 1.6 s with 0.6 s parked for publication is 1.0 s of startup.
+        assert!(proved(start, start + ms(600), ms(1600)));
+        assert!(!proved(start, start + ms(500), ms(1600)));
+        // Parking that began before the start only counts from the start.
+        assert!(!proved(start - ms(400), start + ms(200), ms(1600)));
+        assert!(proved(start - ms(400), start + ms(600), ms(1600)));
     }
 
     #[test]
