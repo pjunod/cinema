@@ -520,10 +520,18 @@ impl VodServe {
                 "original static Store publication command conflicts with its retained S".into(),
             );
         }
+        // The Store's result_ref is the exact published output object, as its
+        // publication statement serialized it, not the bare artifact id.
+        let records_expected = |result_ref: &str| {
+            serde_json::from_str::<plurx_core::store::background_jobs::CopyOutputJobOutput>(
+                result_ref,
+            )
+            .is_ok_and(|output| output == expected)
+        };
         let positive = matches!(record.result,
             JobPublishOutcome::Published { ref job_id, ref result_ref }
                 | JobPublishOutcome::AlreadyPublished { ref job_id, ref result_ref }
-                if job_id == &original.job_id && result_ref == &expected.artifact_id);
+                if job_id == &original.job_id && records_expected(result_ref));
         if !positive {
             return Ok(Some(false));
         }
@@ -535,7 +543,7 @@ impl VodServe {
             .map_err(|error| error.to_string())?;
         Ok(Some(job.is_some_and(|job| {
             job.state == JobState::Succeeded
-                && job.result_ref.as_deref() == Some(expected.artifact_id.as_str())
+                && job.result_ref.as_deref().is_some_and(records_expected)
         })))
     }
 
