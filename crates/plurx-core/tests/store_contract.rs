@@ -449,6 +449,9 @@ const USER_METHODS: &[&str] = &[
     "authenticate_token",
     "authenticate_token_for",
     "authenticate_token_proof_for",
+    "put_device_caps",
+    "device_caps_for_user",
+    "device_caps_for_all_users",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -21852,7 +21855,13 @@ fn contract_inventory_matches_every_store_method() {
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 638, "review the Store method count");
+    // 638 -> 641 for per-device playback capabilities (PR #1907): `UserStore`'s
+    // `put_device_caps`, `device_caps_for_user` and `device_caps_for_all_users`
+    // keep each sign-in's capability document in the additive
+    // `playback_device_caps_r1` extension, removed with its token. Named in
+    // USER_METHODS and exercised on both backends by
+    // playback_device_caps::a_device_capability_record_lives_and_dies_with_its_sign_in.
+    assert_eq!(declared.len(), 641, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
