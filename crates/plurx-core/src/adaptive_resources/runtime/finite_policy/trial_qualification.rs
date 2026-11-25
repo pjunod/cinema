@@ -88,6 +88,13 @@ impl FiniteTimingWitness {
     }
 
     pub(in crate::adaptive_resources::runtime) fn verified_publish(&mut self, now: Instant) {
+        if let Some(started) = self.started {
+            tracing::debug!(target: "plurx_core::adaptive_resources",
+                startup_ms = now.saturating_duration_since(started).as_millis(),
+                scope_unchanged = self.startup_scope.as_ref().is_some_and(|scope| scope.unchanged()),
+                stopped = self.stop_requested.is_some(),
+                "finite trial startup witness");
+        }
         if let Some(started) = self.started.take() {
             self.startup_proved = self
                 .startup_scope
