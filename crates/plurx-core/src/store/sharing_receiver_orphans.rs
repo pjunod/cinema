@@ -474,7 +474,7 @@ mod tests {
                             // included: claims run adaptive maintenance, which
                             // refuses a principal route layout whose attempt
                             // authority was never rebound.
-                            super::super::sharing_source_schema::adaptive_layout_statements()
+                            super::super::sharing_source_layout::adaptive_layout_statements()
                                 .into_iter()
                                 .map(|sql| (sql, vec![]))
                                 .collect(),

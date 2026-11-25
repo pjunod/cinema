@@ -795,7 +795,7 @@ mod pending_request_tests {
                                 // Production Source rebuild with the adaptive
                                 // rebind, so claims' maintenance finds ready
                                 // principal attempt authority.
-                                super::super::sharing_source_schema::adaptive_layout_statements()
+                                super::super::sharing_source_layout::adaptive_layout_statements()
                                     .into_iter()
                                     .map(|sql| (sql, vec![]))
                                     .collect(),

@@ -53,6 +53,8 @@ pub mod sharing_receiver_retirement;
 pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
 pub mod sharing_receiver_sessions;
 pub use sharing_receiver_progress::SharingReceiverProgressStore;
+#[cfg(any(test, feature = "hiqlite-store"))]
+pub(crate) mod sharing_source_layout;
 #[cfg(feature = "hiqlite-store")]
 pub(crate) mod sharing_source_schema;
 pub use sharing_receiver_sessions::SharingReceiverSessionStore;
