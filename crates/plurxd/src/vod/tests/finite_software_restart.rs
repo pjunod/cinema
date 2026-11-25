@@ -757,6 +757,7 @@ async fn finite_restart_attach(
                 admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 soundtrack: None,
+                split_soundtracks: Vec::new(),
                 companion: None,
                 request: &request_selected,
                 encoding: Some(encoding),

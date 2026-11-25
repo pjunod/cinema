@@ -153,6 +153,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
                 admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 soundtrack: None,
+                split_soundtracks: Vec::new(),
                 companion: None,
                 request: &request_selected,
                 encoding: Some(encoding),
