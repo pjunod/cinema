@@ -2812,6 +2812,9 @@ pattern = "rendition_build_gate"
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
 # Shared cache eviction takes this same keyed gate before retiring a title.
+# 01ef84352 (drop the temporary finite close traces): -1 in vod/shared.rs. The
+# operator-stop diagnostic stopped probing this gate with try_lock_owned to
+# report whether a build held it; no acquisition that owns work changed.
 [module_symbols.occurrences]
 "crates/plurxd/src/vod/cache_budget.rs" = 1
 "crates/plurxd/src/vod/copy_preparation.rs" = 1
@@ -2824,7 +2827,7 @@ pattern = "rendition_build_gate"
 "crates/plurxd/src/vod/serve/delivery.rs" = 3
 "crates/plurxd/src/vod/serve/quality.rs" = 1
 "crates/plurxd/src/vod/serve/serve.rs" = 1
-"crates/plurxd/src/vod/shared.rs" = 7
+"crates/plurxd/src/vod/shared.rs" = 6
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 16
 "crates/plurxd/src/vod/tests/chunk_03.rs" = 1
@@ -4906,6 +4909,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # copy's production loop (a tokio::time::sleep bounding the one stall report in
 # copyrange::meter::await_reporting_stall, and the observation Instants). They
 # only time and report; no wait, deadline or retry changes. No new task.
+# 0d3acd9de (reserve time for a verified local trial to be adopted): +1 net in
+# vod/finite_software.rs for the trial observer's new adoption deadline
+# (`adopt_by`), awaited beside the existing stop deadline in the same select.
+# It owns no task, timer task or process.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 17
 "crates/plurx-core/src/process/bounded/pause.rs" = 18
@@ -5216,7 +5223,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/vod/copy_preparation.rs" = 1
 "crates/plurxd/src/vod/driver.rs" = 6
 "crates/plurxd/src/vod/finite_finalizer.rs" = 4
-"crates/plurxd/src/vod/finite_software.rs" = 11
+"crates/plurxd/src/vod/finite_software.rs" = 12
 "crates/plurxd/src/vod/generation.rs" = 3
 "crates/plurxd/src/vod/generation/owner.rs" = 1
 "crates/plurxd/src/vod/init.rs" = 1
