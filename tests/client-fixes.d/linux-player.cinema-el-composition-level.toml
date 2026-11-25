@@ -1,8 +1,0 @@
-# PR #1918: Cinema's EL pill follows mpv's enhancement-layer composition level.
-[[fixes]]
-id = "linux-player.cinema-el-composition-level"
-commits = ["1abb8e3a6fc78319fecb0ef4fcc7ca292ccd7592"]
-source = "clients/linux-player/plurx_player/scripts/cinema.lua"
-source_anchor = "local composed=view.native['enhancement-layer-composed']"
-test = "clients/linux-player/tests/test_cinema.lua"
-test_anchor = "el_pill_follows_the_native_composition_level"

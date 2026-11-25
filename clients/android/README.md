@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.9.0**; the build number is derived at build time by
+> Status: **v0.9.1**; the build number is derived at build time by
 > [`scripts/build-number`](../../scripts/build-number). A prepared quality
 > switch the viewer asked for is recorded as presented, so a later
 > replacement plan does not reopen it.
