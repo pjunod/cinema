@@ -1,0 +1,9 @@
+# Cinema drew on every property notification; a render costing about a frame
+# kept mpv's Lua event queue from draining, so the hide timer never ran.
+[[fixes]]
+id = "linux-player.cinema-coalesced-renders"
+commits = ["5f4b662b04b890521ee799054d9537cfc18f321d"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "    if dirty then dirty=false; render() end"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test('renders_coalesce_so_a_slow_render_cannot_starve_the_hide_timer',function()"
