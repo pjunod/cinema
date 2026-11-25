@@ -343,7 +343,8 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     file.dolby_vision.profile=Some(7);file.dolby_vision.el_present=Some(true);
     let wait=super::processed_upgrade::pending_qualification_fixture(file.id,file.size,file.mtime,0,"private-held-object");
     let private=crate::transcode::pending_fel_qualification_error(wait);
-    let public=crate::transcode::ordinary_processing_decline(private);
+    // What the upgrade reports while it waits: the explanation, never the token.
+    let public=crate::transcode::pending_fel_qualification(&private).expect("token").reason().to_owned();
     let kind=crate::transcode::SessionKind::Copy {aac:false,preserve_dolby_vision:true,
         convert_dolby_vision:true,dual_layer_as_copied:false};
     let enhancement=session_enhancement(Some(&file),&kind,plurx_core::transcode::OutputGrade::Hdr10,
@@ -353,7 +354,6 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     for private in ["private-held-object","source_object_version","settings_generation","backend_identity","fel_qualification_pending"] {
         assert!(!wire.contains(private),"private continuation data must not enter Playback Info: {wire}");
     }
-    assert_eq!(crate::transcode::ordinary_processing_decline("the decoder refused the window".into()),"the decoder refused the window");
 }
 
 /// A repeat upgrade of the same playback: this node described the processed

@@ -480,7 +480,7 @@ async fn resolve_current(
     };
     let current = state
         .transcode
-        .validate_candidate_planning_binding(&fresh, None, None)
+        .processed_planning_authority(&fresh)
         .await
         .map_err(|_| ())?;
     if current.as_ref().is_none_or(|current| {

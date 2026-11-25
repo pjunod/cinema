@@ -224,15 +224,6 @@ pub(crate) fn pending_fel_qualification(error: &str) -> Option<PendingFelQualifi
     wait.valid().then_some(wait)
 }
 
-/// Ordinary delivery reports an explanation, never the private continuation
-/// data that a deferred upgrade alone is allowed to consume.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-pub(crate) fn ordinary_processing_decline(reason: String) -> String {
-    pending_fel_qualification(&reason)
-        .map(|wait| wait.reason().to_owned())
-        .unwrap_or(reason)
-}
-
 /// Catalog evidence became unavailable before dispatch; the existing create
 /// owner may retry discovery, while request identity and selection remain.
 pub(crate) fn catalog_input_error(message: impl AsRef<str>) -> String {

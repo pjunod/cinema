@@ -2111,7 +2111,6 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
-                processing_note: None,
                 session_id: session_id.into(),
                 // A split copy's entry point is its family master: the
                 // video-only index alone would play without any soundtrack.

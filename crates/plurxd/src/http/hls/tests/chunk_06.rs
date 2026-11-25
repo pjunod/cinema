@@ -5923,18 +5923,22 @@ async fn an_original_copy_without_a_candidate_is_offered_fel_reconstruction() {
     assert!(request.candidate_context.is_none(), "Original binds no candidate");
     let ask = request.accepted_processed_ask.as_deref().expect("create derives the accepted ask");
     assert_eq!(ask.route, plurx_core::playback::candidate::CandidateRoute::Remux);
+    // A copy runs the source raster, not the Auto fallback rung planning
+    // resolved; the FEL qualification continuation compares this same height.
+    let source_height = u32::try_from(file.height.expect("source height")).expect("height");
+    assert_eq!(ask.target_height, source_height);
+    assert_eq!(request.processed_ask_target_height(), Some(source_height));
     assert_eq!(
         ask.catalog_query.as_ref().and_then(|query| query.copy_contract).map(|contract| contract.2),
         Some(true),
         "the reviewed conversion scope, frozen before the body is consumed"
     );
+    // Without the ask (the start as it was before) the gates skipped it in silence.
     let mut bare = request.clone();
     bare.accepted_processed_ask = None;
-    assert!(bare.processed_upgrade_ask().is_none(), "before this fix the start had no ask");
     #[cfg(target_os = "linux")]
-    assert_eq!(TranscodeManager::processed_upgrade_gates(&bare, &snapshot, false), Ok(None),
-        "and the gates skipped it in silence");
-    let height = 2160_i64.min(file.height.unwrap_or(2160)) & !1;
+    assert_eq!(TranscodeManager::processed_upgrade_gates(&bare, &snapshot, false), Ok(None));
+    let height = i64::from(source_height) & !1;
     let (trial, _) = TranscodeManager::processed_qualification_input(&snapshot, &request, height)
         .expect("an accepted Original copy reaches FEL qualification");
     assert_eq!(trial.kind, SessionKind::Transcode { height });
@@ -5945,6 +5949,28 @@ async fn an_original_copy_without_a_candidate_is_offered_fel_reconstruction() {
         Ok(Some(DvDestination::Profile81)),
         "the create registers the upgrade instead of skipping it"
     );
+    // A legacy-Auto stall reopen (no intent, no quality answer) is stepped
+    // down a rung by the manager after create, so no ask can describe it: it
+    // carries none, and its plan says why.
+    let stalled = resolve_plan(
+        PlanInputs {
+            snapshot: None, state: &state, user_id: 7, file_id: file.id, source: Some(&file),
+            network_prior: None, network_identity: None, incumbent_receipt: None,
+        },
+        Some(review()),
+        CreateSession {
+            quality_auto: None,
+            previous_session_id: Some("4f6b2c1e-8d3a-4b7f-9c2e-1a5d6e7f8091".into()),
+            reopen_reason: Some(crate::transcode::ReopenReason::Stall),
+            ..body()
+        },
+    )
+    .await
+    .expect("stall reopen plan");
+    assert!(stalled.request.automatic);
+    assert!(stalled.request.accepted_processed_ask.is_none());
+    assert!(stalled.plan_notes.iter().any(|note| note.contains("stall recovery")),
+        "{:?}", stalled.plan_notes);
 }
 
 /// Exercise the very helpers resolve_plan uses, then the real qualification

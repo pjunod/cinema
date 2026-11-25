@@ -1560,13 +1560,6 @@ pub(super) async fn burn_would_discard_this_session_hdr(
     .await
 }
 
-/// The dynamic range this session puts on the wire, read off the session it
-/// actually built rather than the decision that suggested it — a burn or a
-/// forced rung produces a transcode `/decision` never promised, and the
-/// badge has to follow the session (MEDIA-BADGES-PLAN §3.2).
-///
-/// `None` only when the source row could not be loaded; there is nothing
-/// honest to say about a file we cannot see.
 /// The grade an ordinary start delivers, by the same rule its Start reports
 /// as `delivered_dynamic_range`: HDR10 only when that is what it sends.
 fn ordinary_delivered_grade(
@@ -1586,6 +1579,27 @@ fn ordinary_delivered_grade(
     }
 }
 
+/// The height of the rendition an ordinary start runs. A copy runs the
+/// source raster, whatever fallback rung planning resolved for it; a
+/// transcode runs its rung.
+fn ordinary_rendition_height(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> Option<u32> {
+    let height = match request.kind {
+        crate::transcode::SessionKind::Copy { .. } => source?.height?,
+        crate::transcode::SessionKind::Transcode { height } => height,
+    };
+    u32::try_from(height).ok().filter(|height| *height > 0)
+}
+
+/// The dynamic range this session puts on the wire, read off the session it
+/// actually built rather than the decision that suggested it — a burn or a
+/// forced rung produces a transcode `/decision` never promised, and the
+/// badge has to follow the session (MEDIA-BADGES-PLAN §3.2).
+///
+/// `None` only when the source row could not be loaded; there is nothing
+/// honest to say about a file we cannot see.
 pub(super) fn session_delivered_dynamic_range(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
@@ -2672,7 +2686,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(principal);
-    let plan_notes = match review {
+    let mut plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
@@ -2681,16 +2695,28 @@ async fn resolve_plan_for_principal_with_local_evidence(
     reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
     // Described after plan review, so the grade and route are the ones this
     // start will actually run.
-    if let Some((caps, query)) = accepted_processed {
-        request.accepted_processed_ask = u32::try_from(height).ok().map(|target_height| {
-            Box::new(crate::transcode::ProcessedUpgradeAsk::accepted(
-                caps,
-                target_height,
-                ordinary_delivered_grade(source, &request),
-                matches!(request.kind, crate::transcode::SessionKind::Copy { .. }),
-                query,
-            ))
-        });
+    if accepted_processed.is_some()
+        && request.reopen_reason == Some(crate::transcode::ReopenReason::Stall)
+        && request.automatic
+    {
+        // The manager steps this recovery down a rung after create
+        // (`normalize_claimed_request`), so no ask frozen here can describe
+        // the rendition it will run; an upgrade from it would restore the
+        // rung that stalled. Its processing waits for the next start.
+        plan_notes.push(processing_declined_note(
+            "a stall recovery may step this start down a rung; its processed upgrade waits for the next start",
+        ));
+    } else if let Some((caps, query)) = accepted_processed {
+        request.accepted_processed_ask =
+            ordinary_rendition_height(source, &request).map(|target_height| {
+                Box::new(crate::transcode::ProcessedUpgradeAsk::accepted(
+                    caps,
+                    target_height,
+                    ordinary_delivered_grade(source, &request),
+                    matches!(request.kind, crate::transcode::SessionKind::Copy { .. }),
+                    query,
+                ))
+            });
     }
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
@@ -4669,8 +4695,7 @@ async fn create_with_purpose_attempt(
                     replacement,
                     created,
                 } = started;
-                let degraded_processing =
-                    (info.degraded_processing.take(), info.processing_note.take());
+                let degraded_processing = info.degraded_processing.take();
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -4794,7 +4819,7 @@ async fn create_with_purpose_attempt(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation), (None, None)))
+                    Ok((started.info, guard, Some(target_generation), None))
                 }
                 // The worker cannot take this start now. Every 503 its start
                 // route answers is one a retry can outlive, so it is the
@@ -4860,13 +4885,7 @@ async fn create_with_purpose_attempt(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((
-        owner_node_id,
-        info,
-        guard,
-        local_serving_generation,
-        (degraded_processing, processing_note),
-    )) = started
+    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
     else {
         return Err(last_error
             .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
@@ -4910,13 +4929,6 @@ async fn create_with_purpose_attempt(
         let mut worker_request = request.clone();
         worker_request.request_id = Some(incarnation_id.clone());
         remote_request.request = worker_request;
-    }
-    if let Some(reason) = processing_note {
-        // This start's own processing was declined inside the worker (its
-        // FEL verdict, a busy reconstruction slot, a refused window): the
-        // enhancement detail names that reason, not a generic fallback.
-        processing_decline.get_or_insert_with(|| reason.clone());
-        plan_notes.push(processing_declined_note(&reason));
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
@@ -7225,7 +7237,8 @@ pub(crate) async fn prepare_source_playback<
     // candidate, when it has one, still names the route it runs.
     let mut processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk::accepted(
         caps.clone(),
-        u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
+        ordinary_rendition_height(Some(&file), &resolved.request)
+            .ok_or_else(|| refused("processed_height"))?,
         ordinary_delivered_grade(Some(&file), &resolved.request),
         matches!(
             resolved.request.kind,

@@ -276,7 +276,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             crate::transcode::errors::pending_fel_qualification(&reason).is_some(),
             "missing measurement must leave an exact pending continuation: {reason}"
         );
-        let reason = crate::transcode::errors::ordinary_processing_decline(reason);
+        let reason = crate::transcode::errors::pending_fel_qualification(&reason)
+            .expect("pending continuation")
+            .reason()
+            .to_owned();
         assert!(
             reason.contains("quality measurement"),
             "missing measurement must be named: {reason}"
