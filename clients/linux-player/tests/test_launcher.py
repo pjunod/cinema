@@ -28,6 +28,7 @@ class RuntimeSocket(LauncherCase):
     def test_a_runtime_dir_too_deep_for_the_socket_is_passed_over(self):
         deep = os.path.join(self.tmp, *(["d" * 40] * 3))
         os.makedirs(deep, mode=0o700)
+        os.rmdir(self.runtime)
         self.runtime = deep
         self.close_at(12)
         self.assertEqual(self.run_launcher(), 0, self.errors)

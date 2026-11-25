@@ -50,15 +50,16 @@ rustc --version | grep -F 'rustc 1.97.1 '
 python3 -c 'import importlib.metadata; assert importlib.metadata.version("playwright") == "1.62.0"'
 export PLURX_PLAYBACK_CHROME="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
 test -x "$PLURX_PLAYBACK_CHROME"
-# The checkout owner's uid has no account in this image. Give it one whose
-# home is $HOME, as on any host: code that looks the user up (Path.home()
-# with HOME unset, ~ expansion, getpwuid) must find a home, not fail.
+# The checkout owner's uid normally has no account in this image. Give it one
+# whose home is $HOME, as on any host: code that looks the user up
+# (Path.home() with HOME unset, ~ expansion, getpwuid) must find a home, not
+# fail. A uid the image already knows keeps its own entry.
 if ! getent passwd "$READINESS_UID" >/dev/null; then
   getent group "$READINESS_GID" >/dev/null || groupadd --gid "$READINESS_GID" readiness
   useradd --uid "$READINESS_UID" --gid "$READINESS_GID" --home-dir "$HOME" --no-create-home \
     --shell /bin/bash readiness
+  test "$(getent passwd "$READINESS_UID" | cut -d: -f6)" = "$HOME"
 fi
-test "$(getent passwd "$READINESS_UID" | cut -d: -f6)" = "$HOME"
 # The image keeps its toolchain; only build/dependency caches are host-mounted.
 # Check the host client against the daemon after dropping root, too. The
 # Bookworm docker.io client is too old for this fleet's Docker 29 API.

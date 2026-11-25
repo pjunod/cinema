@@ -255,11 +255,12 @@ def _check_redeemed(redeemed, server):
 
 
 # mpv binds its IPC socket at <base>/plurx-player-XXXXXXXX/mpv.sock, and a
-# Linux AF_UNIX path holds at most 107 bytes. A deep TMPDIR (a CI workspace,
-# a sandboxed session) would otherwise make mpv exit before it is ready.
+# Linux AF_UNIX path holds at most 107 bytes (103 on macOS, where developers
+# run the tests). A deep TMPDIR (a CI workspace, a sandboxed session) would
+# otherwise make mpv exit before it is ready.
 SOCKET_NAME = "mpv.sock"
 RUNTIME_PREFIX = "plurx-player-"
-SUN_PATH_MAX = 107
+SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
 _MKDTEMP_SUFFIX = 8
 
 
