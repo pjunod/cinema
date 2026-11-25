@@ -392,9 +392,15 @@ class PrDescriptionTransportCase(unittest.TestCase):
                 self.assertNotIn("PR_TITLE:", source)
                 step = source.split("- name: Check index rows, release counters, names and Regression-Test fields", 1)[1]
                 step = step.split("\n      - ", 1)[0]
-                self.assertIn('PR_BODY_FROM_EVENT: "1"', step)
                 self.assertIn("scripts/paperwork", step)
                 self.assertIn("--body-env", step)
+                # main-fast-lane.yml is owned by main's reviewed HARNESS pin
+                # (validation/nextest_shard_continuation.py) and must stay
+                # byte-equal to main; it reads the event file through
+                # pr_event's default path. The fail-closed opt-in is
+                # paperwork.yml's.
+                if name == "paperwork.yml":
+                    self.assertIn('PR_BODY_FROM_EVENT: "1"', step)
 
 
 
