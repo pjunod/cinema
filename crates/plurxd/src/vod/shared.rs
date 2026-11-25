@@ -3194,6 +3194,7 @@ impl Shared {
         let deadline = Instant::now() + Duration::from_secs(30);
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             envelope = closing.is_some(), "collected finite close stage=started");
+        let mut rich_watch: Option<Weak<Rendition>> = None;
         if let Some(closing) = closing.as_ref() {
             if !closing.cleanup_ready.load(Acquire) {
                 return Err("original finite builder still owns its close arm".into());
@@ -3203,6 +3204,7 @@ impl Shared {
             let producer = closing.producer.lock().await.as_ref().cloned();
             let rich = closing.rich.lock().await.as_ref().cloned();
             let rich_weak = rich.as_ref().map(Arc::downgrade);
+            rich_watch = rich_weak.clone();
             if let Some(rendition) = rich.as_ref() {
                 rendition.closed.store(true, Release);
                 rendition.kick();
@@ -3320,10 +3322,28 @@ impl Shared {
         }
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             "collected finite close stage=ticket_installed");
-        port.wait_application_release(work, deadline)
-            .await
-            .map_err(|error| error.to_string())?;
+        let releasing = Instant::now();
+        loop {
+            let probe = (Instant::now() + Duration::from_millis(500)).min(deadline);
+            if port.wait_application_release(work, probe).await.is_ok() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("finite application release deadline elapsed".into());
+            }
+            let survivor = rich_watch.as_ref().and_then(Weak::upgrade);
+            let readers = match survivor.as_ref() {
+                Some(r) => Some(r.readers.lock().await.len()),
+                None => None,
+            };
+            let rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1);
+            drop(survivor);
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                ?rich_strong, ?readers, waited_ms = releasing.elapsed().as_millis(),
+                "collected finite close still waits for application release");
+        }
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            waited_ms = releasing.elapsed().as_millis(),
             "collected finite close stage=applications_released");
         let gate = port
             .gate(work)
