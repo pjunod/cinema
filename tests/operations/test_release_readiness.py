@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,7 @@ class ReleaseReadinessCase(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release-readiness.yml").read_text()
         check = workflow.split("\n  release-check:\n", 1)[1].split("\n  tag:\n", 1)[0]
         self.assertNotIn("ffmpeg-6", check)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]", check)
+        self.assertIn("runs-on: [incus, ci-nonvoter-heavy-amd64]", check)
         saved = check.index('cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"')
         checkout = check.index('git checkout -q --detach "$RELEASE_SHA"')
         self.assertLess(saved, checkout)
@@ -170,6 +171,14 @@ class ReleaseReadinessCase(unittest.TestCase):
             self.assertIn('exec setpriv --reuid "$READINESS_UID"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffmpeg)")" = "$PLURX_FFMPEG"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffprobe)")" = "$PLURX_FFPROBE"', readiness.BOOTSTRAP)
+
+    def test_the_release_gate_container_holds_a_plurxd_test_build_without_swap(self):
+        """The plurxd test build peaks near 15.3 GiB; 16 GiB killed it (run 9325)."""
+        self.assertEqual(readiness.MEMORY_GB, (8, 18))
+        with self.assertRaisesRegex(ValueError, "8 or 18 GiB"):
+            readiness.container_command("sha256:" + "a" * 64, ["true"], "test-release", memory_gb=16)
+        parser_default = inspect.signature(readiness.container_command).parameters["memory_gb"].default
+        self.assertEqual(parser_default, 18)
 
     def test_the_dropped_uid_has_an_account_whose_home_is_home_before_any_drop(self):
         """Path.home() with HOME cleared reads the passwd entry; the image has none for the uid."""

@@ -250,6 +250,9 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
         jobs.extend((".github/workflows/validation-nightly.yml", name,
                      self.job(".github/workflows/validation-nightly.yml", name))
                     for name in ("deep-validation", "mutation"))
+        # The weekly release gate compiles plurxd's tests in its own container.
+        jobs.append((".github/workflows/release-readiness.yml", "release-check",
+                     self.job(".github/workflows/release-readiness.yml", "release-check")))
         jobs.append((".github/workflows/publish-release.yml", "image",
                      self.job(".github/workflows/publish-release.yml", "image")))
         jobs.append((self.WORKFLOWS[0], "publish_main", self.job(self.WORKFLOWS[0], "publish_main")))
@@ -344,7 +347,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                 if name in {"package_smoke", "image", "platform"}:
                     self.assertIn("runs_on: '[\"ci-nonvoter-heavy-amd64\"]'", header)
                 else:
-                    expected_route = ("[incus, ci-nonvoter-heavy-amd64]" if name in {"deep-validation", "mutation"}
+                    expected_route = ("[incus, ci-nonvoter-heavy-amd64]"
+                                      if name in {"deep-validation", "mutation", "release-check"}
                                       else self.COMPILE_ROUTE if name in self.COMPILE_JOBS else self.ROUTE)
                     self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [expected_route])
                     if "    container:\n" in header:
@@ -352,7 +356,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                             header, daemon_identity_mounts=(path, name) == (self.WORKFLOWS[0], "cluster_daemon")
                         )
                     else:
-                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main", "worker_control_proof"})
+                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "release-check",
+                                             "publish_main", "worker_control_proof"})
                     if (path, name) in self.SIZED_JOBS:
                         self.assertNotIn("CARGO_BUILD_JOBS:", header)
                         self.assertIn("      - name: Size Cargo parallelism from the container's limits\n"
@@ -360,8 +365,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                     elif name not in {"publish_main", "worker_control_proof"}:
                         self.assertIn('      CARGO_BUILD_JOBS: "1"\n', header)
                 scripts.append(self.verifier(job, name in {"package_smoke", "image", "platform"}))
-        self.assertEqual(len(scripts), 18)
-        self.assertEqual(len(set(scripts)), 1, "all eighteen routes must execute the same actual cgroup checks")
+        self.assertEqual(len(scripts), 19)
+        self.assertEqual(len(set(scripts)), 1, "all nineteen routes must execute the same actual cgroup checks")
 
     def test_actual_posix_verifier_accepts_private_and_host_service_cgroups(self):
         for path, name, job in self.guarded_jobs():

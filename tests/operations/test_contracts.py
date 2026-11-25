@@ -4858,7 +4858,8 @@ assert.equal(context.ACT_TIMER, null);
                 ):
                     expected = apple
                 elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
-                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
+                    # The plurxd test build needs ci.yml:check's 20 GiB pool.
+                    expected = "    runs-on: [incus, ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":

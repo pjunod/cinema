@@ -28,8 +28,12 @@ jobs:
   release-check:
     name: current version is ready to tag
     # Use the shipped media runtime, independently of the host's FFmpeg.
-    # The complete Rust suite needs the same memory pool as ci.yml:check.
-    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
+    # The complete Rust suite needs the same memory pool as ci.yml:check: the
+    # plurxd test build alone peaks near 15.3 GiB, which a 16 GiB container on
+    # the unit-memory-16g carrier killed (run 9325). The heavy nonvoter VM is
+    # the host-mode pool with a verified 20 GiB swapless bound, as for the
+    # nightly sweep; release-readiness runs its container at 18 GiB there.
+    runs-on: [incus, ci-nonvoter-heavy-amd64]
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
@@ -40,6 +44,33 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       sha: ${{ steps.release.outputs.sha }}
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false

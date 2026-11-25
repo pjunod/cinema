@@ -191,9 +191,17 @@ def run_owned(args: list[str], *, check: bool = True) -> int:
     return status
 
 
-def container_command(image: str, command: list[str], name: str, *, host_network: bool = False, memory_gb: int = 16) -> list[str]:
-    if memory_gb not in (8, 16):
-        raise ValueError("runtime memory must be 8 or 16 GiB")
+# The complete strict sweep compiles plurxd's test binary, whose rustc alone
+# peaks near 15.3 GiB resident (measured 2026-11-24); a 16 GiB container
+# killed it. 18 GiB without swap runs inside the heavy nonvoter's 20 GiB,
+# swapless slice and leaves the rest to the runner and dockerd. 8 GiB is the
+# nightly media sweep, which compiles no plurxd tests.
+MEMORY_GB = (8, 18)
+
+
+def container_command(image: str, command: list[str], name: str, *, host_network: bool = False, memory_gb: int = 18) -> list[str]:
+    if memory_gb not in MEMORY_GB:
+        raise ValueError("runtime memory must be 8 or 18 GiB")
     workspace = Path.cwd().resolve()
     if not (workspace / "Cargo.toml").is_file() or not (workspace / ".git").exists():
         raise ValueError("run from the checked-out repository root")
@@ -207,7 +215,7 @@ def container_command(image: str, command: list[str], name: str, *, host_network
     args = [
         "docker", "run", "--rm", "--init", "--pull=never", "--name", name,
         "--cpus", "3", "--memory", f"{memory_gb}g",
-        "--memory-swap", "8g" if memory_gb == 8 else "18g", "--pids-limit", "4096",
+        "--memory-swap", f"{memory_gb}g", "--pids-limit", "4096",
         "--workdir", str(workspace),
     ]
     if host_network:
@@ -256,7 +264,7 @@ def container_command(image: str, command: list[str], name: str, *, host_network
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host-network", action="store_true")
-    parser.add_argument("--memory-gb", type=int, choices=(8, 16), default=16)
+    parser.add_argument("--memory-gb", type=int, choices=MEMORY_GB, default=18)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     options = parser.parse_args(argv)
     if not options.command:
