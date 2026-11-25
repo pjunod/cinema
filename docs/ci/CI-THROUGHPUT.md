@@ -42,6 +42,11 @@ head guard anyway (33 of the 117 analysed preflight failures). It is now
 The receipt rules treat a cancelled preflight as a terminal job, so a cancel
 never wedges a PR ([PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md)).
 
+Since 2026-11-24 a push runs only the cheap gate; the heavy jobs run once per
+head on request (the `lane` label, [REQUESTED-LANE.md](REQUESTED-LANE.md)). A
+push still cancels an in-flight requested run, whose head is then stale, and so
+does any label change while `lane` is present; request again for the new head.
+
 ### 1a. A job retry can erase the run's artifacts
 
 The inspected Forgejo 17 job-rerun implementation shares the run reset in

@@ -1,28 +1,37 @@
 name: main fast lane
 
-# Every main-bound pull request, as soon as it is ready. `ready_for_review`
-# is what starts the lane now — a PR that is marked ready and merged can no
-# longer skip the gate, which is what an opt-in label allowed.
+# Every main-bound pull request, in two halves (docs/ci/REQUESTED-LANE.md).
 #
-# With the merge train on (repository variable MERGE_TRAIN = on) the lane's
-# heavy jobs run only on the train's own pull requests: head
-# `train/...`, opened by the train's bot (MERGE_TRAIN_BOT, default train-bot).
-# A train PR is main plus the boarded PRs, so its promotion gate is the gate
-# for every one of them; a per-PR run would test a tree that never lands.
-# Ordinary ready PRs still run the lightweight scope job to read the switch
-# exactly. Off (unset or anything but `on`), every PR runs the whole lane.
-# docs/ci/MERGE-TRAIN.md.
+# Every push to a ready PR (opened, synchronize, reopened, ready_for_review)
+# runs only the cheap gate: paperwork, scope, the fast Rust fmt/Clippy gate,
+# web syntax and types, and the Android compile. The heavy jobs -- preflight,
+# the worker controller proof, the Rust unit fan-out, the Apple compile and
+# native TV journeys, the Node unit suite -- and the promotion gate run once
+# per head, when a session asks: ci-fleet (or a person) adds the label `lane`
+# to the PR. validation/lane_request.py decides `lane_requested` from the event
+# payload: a label event on a ready PR whose labels include `lane`.
+#
+# Forgejo sends every PR label change as payload action `label_updated`,
+# matched by `labeled` below. A push cancels an in-flight requested run
+# through the concurrency group: that head is stale, and its gate would refuse
+# it anyway. To request again on the same head (after a failure, or after a
+# cancellation), remove the label and add it back; ci-fleet does this, and
+# receipts make the rerun incremental. Known cost: any other label change while
+# `lane` is present is also a label event carrying `lane`, so it cancels and
+# restarts the requested run. A label event without `lane` skips every job,
+# paperwork included.
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled]
 
 env:
   CARGO_TERM_COLOR: always
 
-# A new push (or a draft/ready change) cancels the PR's in-flight run. That
-# run's head is superseded: its promotion gate would refuse the moved head, so
-# finishing it only held the PR's queue slot. Successes recorded by earlier
+# A new push (or a draft/ready change, or a label change) cancels the PR's
+# in-flight run. After a push that run's head is superseded: its promotion
+# gate would refuse the moved head, so finishing it only held the PR's queue
+# slot. Successes recorded by earlier
 # finished runs stay adoptable; what a cancelled job had newly proved is not
 # adopted (it publishes no final journal) and simply runs again
 # (docs/ci/PYTHON-UNIT-PR-RECEIPTS.md, docs/ci/CI-THROUGHPUT.md).
@@ -37,6 +46,13 @@ jobs:
   # pre-push hook; docs/ci/PAPERWORK.md lists the rules and their fixes.
   paperwork:
     name: paperwork
+    # A label event is free unless it is the request itself: without `lane`
+    # among the PR's labels (an unrelated label, or `lane` being removed)
+    # nothing runs. Every other event runs paperwork as before.
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'label_updated') ||
+      (github.event.pull_request.draft == false &&
+       contains(github.event.pull_request.labels.*.name, 'lane'))
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -90,10 +106,9 @@ jobs:
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
-    # Python compares MERGE_TRAIN exactly: Forgejo expressions fold string
-    # case, so comparing the variable in job conditions would treat ON as on.
-    # Scope runs for every ready PR and switches off heavy outputs for ordinary
-    # PRs only when the variable is exactly on.
+    # validation/lane_request.py reads the event payload and says whether this
+    # run is the requested full lane (`lane_requested`); job conditions below
+    # only compare that output.
     if: >-
       github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -120,9 +135,7 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       preflight: ${{ steps.scope.outputs.preflight }}
       worker_control: ${{ steps.scope.outputs.worker_control }}
-      train_selected: ${{ steps.scope.outputs.train_selected }}
-      run_lane: ${{ steps.scope.outputs.run_lane }}
-      train_tests: ${{ steps.scope.outputs.train_tests }}
+      lane_requested: ${{ steps.scope.outputs.lane_requested }}
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -134,15 +147,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
-          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
-          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}
-        # validation/merge_train.py: on a merge-train probe only its
-        # `Train-Jobs:` run (and `Train-Tests:` narrows rust_units to exactly
-        # those tests); anywhere else the scope passes through.
+        # validation/lane_request.py adds `lane_requested` (and applies an
+        # authenticated Manual-Source-Gate: claim, validation/manual_source.py).
         run: |
           set -euo pipefail
           python3 -m validation.ci_scope --event pull_request --base "$VALIDATION_BASE" \
-            | python3 -m validation.merge_train scope >> "$GITHUB_OUTPUT"
+            | python3 -m validation.lane_request scope >> "$GITHUB_OUTPUT"
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
@@ -152,7 +162,9 @@ jobs:
   worker_control_proof:
     name: production worker controller proof
     needs: scope
-    if: github.event.pull_request.draft == false && needs.scope.outputs.worker_control == 'true'
+    if: >-
+      github.event.pull_request.draft == false && needs.scope.outputs.lane_requested == 'true' &&
+      needs.scope.outputs.worker_control == 'true'
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
@@ -299,7 +311,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    if: needs.scope.outputs.preflight == 'true'
+    if: needs.scope.outputs.lane_requested == 'true' && needs.scope.outputs.preflight == 'true'
     # History and bounded TLC share this job; use high-cpu general workers.
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container:
@@ -465,12 +477,12 @@ jobs:
   rust_compile:
     name: fast Rust gate
     needs: [scope, preflight]
-    # A probe runs exactly its selected jobs, so preflight may be skipped.
-    # Normal runs still require a successful preflight before allocating work.
+    # Cheap gate: every ready push. A requested run still waits for its
+    # preflight to pass before allocating this job.
     if: >-
       !cancelled() && needs.scope.result == 'success' &&
       (needs.preflight.result == 'success' ||
-       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+       (needs.scope.outputs.lane_requested != 'true' && needs.preflight.result == 'skipped')) &&
       (needs.scope.outputs.rust == 'true')
     # The nonvoter compile pool, in the pinned rust-gate image: no per-run apt
     # or toolchain downloads. The container's limits are the job's bound on
@@ -568,28 +580,25 @@ jobs:
   rust_units:
     name: Rust unit tests
     needs: [scope, preflight]
-    # A probe runs exactly its selected jobs, so preflight may be skipped.
-    # Normal runs still require a successful preflight before allocating work.
+    # Requested lane only: its preflight ran and passed.
     if: >-
       !cancelled() && needs.scope.result == 'success' &&
-      (needs.preflight.result == 'success' ||
-       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      needs.scope.outputs.lane_requested == 'true' && needs.preflight.result == 'success' &&
       (needs.scope.outputs.rust_units == 'true')
     uses: ./.github/workflows/rust-units.yml
     with:
       base: ${{ github.event.pull_request.base.sha }}
-      tests: ${{ needs.scope.outputs.train_tests }}
     secrets: inherit
 
   web_compile:
     name: fast web syntax gate
     needs: [scope, preflight]
-    # A probe runs exactly its selected jobs, so preflight may be skipped.
-    # Normal runs still require a successful preflight before allocating work.
+    # Cheap gate: every ready push. A requested run still waits for its
+    # preflight to pass before allocating this job.
     if: >-
       !cancelled() && needs.scope.result == 'success' &&
       (needs.preflight.result == 'success' ||
-       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+       (needs.scope.outputs.lane_requested != 'true' && needs.preflight.result == 'skipped')) &&
       (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -632,8 +641,10 @@ jobs:
       # Every Node web and playback test, the same list `make web-check` runs
       # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
       # two of them here and the rest ran only when someone typed make; a stale
-      # assertion sat red on main for two days that way.
+      # assertion sat red on main for two days that way. It is the requested
+      # lane's unit suite; a cheap push run stops at syntax and types.
       - name: Run every Node web and playback test
+        if: needs.scope.outputs.lane_requested == 'true'
         env:
           TMPDIR: /tmp
           GITHUB_TOKEN: ${{ github.token }}
@@ -655,12 +666,10 @@ jobs:
   apple_compile:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
-    # A probe runs exactly its selected jobs, so preflight may be skipped.
-    # Normal runs still require a successful preflight before allocating work.
+    # Requested lane only: its preflight ran and passed.
     if: >-
       !cancelled() && needs.scope.result == 'success' &&
-      (needs.preflight.result == 'success' ||
-       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      needs.scope.outputs.lane_requested == 'true' && needs.preflight.result == 'success' &&
       (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
@@ -746,12 +755,12 @@ jobs:
   android_compile:
     name: fast Android compile
     needs: [scope, preflight]
-    # A probe runs exactly its selected jobs, so preflight may be skipped.
-    # Normal runs still require a successful preflight before allocating work.
+    # Cheap gate: every ready push. A requested run still waits for its
+    # preflight to pass before allocating this job.
     if: >-
       !cancelled() && needs.scope.result == 'success' &&
       (needs.preflight.result == 'success' ||
-       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+       (needs.scope.outputs.lane_requested != 'true' && needs.preflight.result == 'skipped')) &&
       (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
@@ -788,13 +797,12 @@ jobs:
 
   promotion_gate:
     name: Main promotion gate
-    # Not on a merge-train probe (it runs a few jobs only, and the train
-    # judges those itself), and with the train on only on the train's PRs.
+    # Only on the requested run: a cheap push run has no gate (scripts/land
+    # refuses a skipped one), and a requested run must pass every heavy job.
     if: >-
       always() &&
       github.event.pull_request.draft == false &&
-      needs.scope.outputs.train_selected != 'true' &&
-      needs.scope.outputs.run_lane != 'false'
+      needs.scope.outputs.lane_requested == 'true'
     needs:
       - paperwork
       - scope
@@ -833,6 +841,11 @@ jobs:
           # skipped, and a skipped job is otherwise accepted here.
           if [ "$PAPERWORK_RESULT" != success ]; then
             echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
+          fi
+          # The gate runs only on a requested run, where preflight is always
+          # selected (validation/lane_request.py): it must have run and passed.
+          if [ "$PREFLIGHT_RESULT" != success ]; then
+            echo "The requested run's preflight ended with: $PREFLIGHT_RESULT"; exit 1
           fi
           if [ "$WORKER_CONTROL_RESULT" != success ]; then
             echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
