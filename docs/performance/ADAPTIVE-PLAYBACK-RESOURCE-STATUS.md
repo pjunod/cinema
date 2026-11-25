@@ -153,7 +153,7 @@ bridge, static, driver and collector evidence is preserved in the
 ## 2026-10-29 checkpoint — historical source-bound evidence
 
 The earlier implementation and receipt identities are preserved in the
-[finite-delivery checkpoint](ADAPTIVE-PLAYBACK-DELIVERY.md#2026-10-29-checkpoint--historical-source-bound-evidence).
+[finite-delivery checkpoint](ADAPTIVE-PLAYBACK-IMPLEMENTATION-HISTORY.md#2026-10-29-checkpoint--historical-source-bound-evidence).
 They establish only the stated source/scope, not current acceptance.
 
 The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and

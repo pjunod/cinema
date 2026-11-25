@@ -722,18 +722,6 @@ from the landing commits into the dated section below. -->
   predecessor clocks and buffers, and all frame consumers share one callback
   subscription per video element with discontinuity renewal.
 
-- Ordinary finite VOD retains its original driver before entry and keeps failed
-  joins unresolved on every cleanup retry.
-
-- Selected static background planning keeps its original application charge
-  through actual controller, inline future, and escaped entry destruction.
-
-- Adaptive playback keeps selected work in its owner inventory through cleanup,
-  recovery and producer-to-retained-output transfer.
-
-- Adaptive VOD preparation retains its original driver through adoption and
-  cancellation, and keeps resource charges when that task cannot be joined.
-
 - Nightly deep validation and mutation tests use the app's shipped FFmpeg
   package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
 
