@@ -2,7 +2,7 @@
 # kept mpv's Lua event queue from draining, so the hide timer never ran.
 [[fixes]]
 id = "linux-player.cinema-coalesced-renders"
-commits = ["5f4b662b04b890521ee799054d9537cfc18f321d"]
+commits = ["5f4b662b04b890521ee799054d9537cfc18f321d", "3e80babc51bd9db2054b880f5f7e1ccbebfb703b"]
 source = "clients/linux-player/plurx_player/scripts/cinema.lua"
 source_anchor = "    if dirty then dirty=false; render() end"
 test = "clients/linux-player/tests/test_cinema.lua"

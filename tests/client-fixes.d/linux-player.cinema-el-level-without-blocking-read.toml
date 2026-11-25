@@ -4,6 +4,6 @@
 id = "linux-player.cinema-el-level-without-blocking-read"
 commits = ["d531b8af8ac5c515e6874dde43c57b29183a4937"]
 source = "clients/linux-player/plurx_player/scripts/cinema.lua"
-source_anchor = "mp.observe_property('native-dovi-target-state','native',function(_,value) S.native=table_of(value); render() end)"
+source_anchor = "mp.observe_property('native-dovi-target-state','native',function(_,value) S.native=table_of(value); invalidate() end)"
 test = "clients/linux-player/tests/test_cinema.lua"
 test_anchor = "read_overrides['native-dovi-target-state']=function() error('native-dovi-target-state read on render') end"
