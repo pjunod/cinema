@@ -6,13 +6,35 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.plurx.app.data.AudioTrack
-import tv.plurx.app.data.DolbyVisionFactsDto
 import tv.plurx.app.data.DynamicRange
 import tv.plurx.app.data.HdrType
 import tv.plurx.app.data.MediaFileDto
+import tv.plurx.app.data.PlaysOnDto
 import tv.plurx.app.player.renderedRange
 
 class MediaFactsTest {
+    @Test
+    fun eachDeviceSaysHowTheVersionPlaysAndAFallbackIsACaution() {
+        val file = MediaFileDto(
+            id = 6_200,
+            filename = "fel.mkv",
+            plays_on = listOf(
+                PlaysOnDto(id = "a", device = "Living room", label = "Full FEL", full_quality = true, el_dropped = false),
+                PlaysOnDto(id = "b", device = "Phone", label = "EL dropped · plays as 8.1", full_quality = false, el_dropped = true),
+                PlaysOnDto(id = "c", client = "plurx-android", label = "HDR10 base layer", full_quality = false),
+            ),
+        )
+        assertEquals(
+            listOf(
+                PlaysOnLine("Living room", "Full FEL", caution = false),
+                PlaysOnLine("Phone", "EL dropped · plays as 8.1", caution = true),
+                PlaysOnLine("plurx-android", "HDR10 base layer", caution = true),
+            ),
+            playsOnLines(file),
+        )
+        assertEquals(emptyList<PlaysOnLine>(), playsOnLines(MediaFileDto(id = 1, filename = "sdr.mkv")))
+    }
+
     @Test
     fun toneMappingPillRequiresActiveProcessingEvidence() {
         val generation = "11111111-1111-4111-8111-111111111111"
@@ -387,7 +409,7 @@ class MediaFactsTest {
         video_codec = "hevc",
         hdr = "dolby_vision",
         hdr_format = format,
-        dolby_vision = profile?.let { DolbyVisionFactsDto(profile = it) },
+        dv_profile = profile,
     )
 
     private fun hdr10() = MediaFileDto(

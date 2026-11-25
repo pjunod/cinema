@@ -11,11 +11,10 @@ Read this before adding a cache to any workflow, and before believing a
 
 ## Current runner roles and reserved labels
 
-The roster reconciliation records the existing Forgejo
-registrations. Neutral names in `validation/runner-fleet.toml` describe logical
-placements; the fleet collector maps live host names through its private alias
-configuration. Keep the existing registration IDs and UUIDs when reconciling
-names.
+The roster records the existing Forgejo registrations. Neutral names in
+`validation/runner-fleet.toml` describe logical placements; the fleet collector
+maps live host names through its private alias configuration. Keep registration
+IDs and UUIDs when reconciling names.
 
 On `maca`, `gha-maca-linux-arm-01` serves `release-arm64`. CI packaging uses
 `gha-maca-linux-arm-02` with `ci-arm64`, one slot, four vCPUs, 8 GiB RAM,
@@ -28,11 +27,10 @@ Keep `async-proof-owned` on the existing `gha-lab5-general-03` slot.
 The owning `codex/async-store-refinement` branch records its target-only
 provisioning in commit `f14b400bc` (2026-10-29): one dedicated-label carrier,
 preserved registration identity and a private durable proof-storage binding.
-That branch owns the dispatch identity, resource admission and proof
-qualification rules. The main-branch roster records the observed label; it
-imports no proof workflow, activates no proof session and grants no proof
-credit. Removing the label because main has no requesting workflow would break
-its existing branch consumer.
+That branch owns its dispatch identity, resource admission and proof
+qualification rules. Main's roster only records the observed label: no proof
+workflow, session or credit. Removing it because main has no requesting
+workflow would break that branch's consumer.
 
 `unit-memory-12g`, `ci-coverage`, `primary` and `backup` also retain their
 documented compatibility, diagnostic or operational roles. A current workflow

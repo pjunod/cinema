@@ -64,7 +64,10 @@ then `ci-fleet lane wait`. That one run carries the heavy jobs and the
 `Main promotion gate`. To rerun the same head, request again (ci-fleet removes
 and re-adds the label; receipts make it incremental). Never add or remove
 labels in a loop: each label change is a run, and any label change while
-`lane` is present restarts the requested run.
+`lane` is present restarts the requested run. ci-fleet may run several
+requested heads together as one `lane-batch/` pull request; a member's verdict
+then arrives as a `Main promotion gate (batch)` status that `scripts/land`
+verifies (REQUESTED-LANE.md, "Batches"). Nothing changes for a session.
 
 A merge goes through `scripts/land <pr> --head <sha>`, never the raw merge
 API. `<sha>` is the full 40-character head you reviewed. The script refuses a

@@ -366,6 +366,13 @@ async fn plays_on_reaches_the_verdict_play_does_for_a_4k_profile_7_on_a_1080p_de
 
     let (status, item) = call(&app, get(&format!("/api/v1/items/{movie}"), Some(&tv))).await;
     assert_eq!(status, StatusCode::OK, "{item}");
+    // The facts line every client shows as sent, worded once here: the
+    // complete-title scan has not run, so the layer has no type yet.
+    assert_eq!(
+        item["files"][0]["dv_facts"],
+        "Profile 7 · enhancement layer, type not yet scanned · level 6 · HDR10 base",
+        "{item}"
+    );
     let line = &item["files"][0]["plays_on"][0];
     assert_eq!(line["device"], "1080p TV", "{item}");
     assert_eq!(line["method"], play["method"], "{item}");
