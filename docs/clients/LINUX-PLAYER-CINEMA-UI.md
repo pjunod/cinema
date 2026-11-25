@@ -33,8 +33,12 @@ presented instant was mapped with the enhancement layer composed in; off when
 that frame maps without it, after a failed or blank render, and after a
 frame-queue reset until a composed frame is presented again. mpv errs toward
 off next to a frame it read without mapping. The overlay
-reads the property itself and redraws on its notification, so the pill does
-not depend on catching the renderer's one-time success line. An mpv without
+takes the property from its own notification and redraws, so the pill does
+not depend on catching the renderer's one-time success line. It never reads
+the property while drawing: mpv answers such a read on its video-output
+thread, about a frame later. Cinema redraws on every frame, so those reads
+kept its event queue from draining, and mpv runs the hide timer only when it
+does; the controls then stayed on screen. An mpv without
 the field, or a non-native renderer, keeps the earlier inference: a Profile 7
 track whose source has an enhancement layer, with a renderer line present. FEL stays the server's claim, because no fact distinguishes a full
 from a minimal layer on this path. A carried route's server pills hold only
