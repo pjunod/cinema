@@ -379,7 +379,10 @@ mod tests {
         });
         // The reads must really be parked on the sidecar, or an on-time
         // heartbeat says nothing.
-        assert_eq!(verdict.parked, 4, "the sidecar reads did not hang: {verdict:?}");
+        assert_eq!(
+            verdict.parked, 4,
+            "the sidecar reads did not hang: {verdict:?}"
+        );
         assert!(
             verdict.worst < std::time::Duration::from_millis(500),
             "the heartbeat was late while sidecar reads were hung: {verdict:?}"

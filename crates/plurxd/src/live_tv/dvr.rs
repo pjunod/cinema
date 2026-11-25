@@ -2451,9 +2451,12 @@ impl LiveTvManager {
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
             ));
         }
-        if super::free_space_bytes(&dvr.root).await.is_some_and(|free| {
-            free < (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
-        }) {
+        if super::free_space_bytes(&dvr.root)
+            .await
+            .is_some_and(|free| {
+                free < (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
+            })
+        {
             return Err(LiveTvError::Capacity(
                 "this worker's recording storage is below its free-space floor".into(),
             ));

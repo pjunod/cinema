@@ -377,6 +377,9 @@ mod tests {
     async fn results_pass_through() {
         assert_eq!(blocking(|| 7).await.expect("ran"), 7);
         let missing = blocking_io(|| std::fs::read("/nonexistent/plurx-media-io")).await;
-        assert_eq!(missing.expect_err("missing").kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            missing.expect_err("missing").kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }
