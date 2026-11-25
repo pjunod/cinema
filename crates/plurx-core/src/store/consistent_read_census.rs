@@ -61,7 +61,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Curation (tags, rows, Home layouts) checks its shape and marker: two more.
     // F+ curve fits check their extension shape and marker: two more.
     // Fragment publication (#1827) checks its trigger shape before startup.
-    ("hiqlite.rs", 81),
+    // Device capabilities (Curator ADR 0031 §5) check their shape and marker: two more.
+    ("hiqlite.rs", 83),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -577,6 +578,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),
     ("offloaded_column_present", STARTUP),
+    ("playback_device_caps_shape", STARTUP),
     ("playback_handoffs_schema_version", STARTUP),
     ("playback_input_keys_shape", STARTUP),
     ("pointer_desired_revision_column_present", STARTUP),

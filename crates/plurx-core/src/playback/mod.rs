@@ -20,6 +20,7 @@ pub mod continuous_quality;
 pub mod desired;
 pub mod enhancement;
 pub mod geometry;
+pub mod hdr_devices;
 pub mod intent;
 use crate::transcode::OutputGrade;
 pub use audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute, AudioSink, DownmixMatrix};

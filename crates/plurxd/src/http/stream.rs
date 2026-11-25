@@ -742,6 +742,133 @@ fn routes_through_processed_hdr10(
         && caps.is_some_and(|caps| caps.transports.iter().any(|transport| transport == "hls"))
 }
 
+/// Route a Dolby Vision source a non-DV client receives as HDR10 over HLS
+/// while Dolby Vision-enhanced HDR10 is on ([`routes_through_processed_hdr10`]).
+/// Returns whether it did.
+fn apply_processed_hdr10(
+    decision: &mut Decision,
+    file: &MediaFile,
+    caps: Option<&playback::DeviceCaps>,
+    processing_enabled: bool,
+) -> bool {
+    if !routes_through_processed_hdr10(file, decision, caps, processing_enabled) {
+        return false;
+    }
+    // The same source bytes, copied into HLS instead of served as a file.
+    decision.method = playback::PlaybackMethod::Remux;
+    decision.reasons.push(
+        "served over HLS so the server can apply Dolby Vision-enhanced HDR10 (Developer setting)"
+            .into(),
+    );
+    true
+}
+
+/// The audio track the server's language policy plays when the viewer chose
+/// none.
+fn policy_audio_index(file: &MediaFile, prefs: &plurx_core::tracks::LangPrefs) -> Option<i64> {
+    plurx_core::tracks::select_tracks(
+        &file.audio_streams,
+        &file.subtitle_streams,
+        prefers_original_audio(&file.audio_streams),
+        prefs,
+    )
+    .audio_index
+}
+
+/// Whether a capability document limits decoder width or cadence, so the
+/// verdict needs the source's measured geometry.
+pub(super) fn caps_limit_geometry(caps: Option<&playback::DeviceCaps>) -> bool {
+    caps.is_some_and(|caps| {
+        caps.video
+            .iter()
+            .any(|entry| entry.max_width.is_some() || entry.max_frame_rate.is_some())
+    })
+}
+
+/// Play's capability verdict for `file`, whose audio defaults already name
+/// the track playback will carry: the device profile with only the learned
+/// limits still in force at `now_ms` ([`Caps::profile`]), this node's
+/// producers narrowed to the transports the document offers
+/// ([`decision_render_caps`]), and the decoder geometry measured from the
+/// source (`geometry`, when the document limits it). Pure: the decision
+/// route and the title page's per-device line both reach their answer here.
+fn capability_verdict(
+    file: &MediaFile,
+    q: &Caps,
+    node: playback::RenderCaps,
+    now_ms: i64,
+    geometry: Option<&plurx_core::transcode::DecodeFacts>,
+) -> Decision {
+    let node = decision_render_caps(node, q.caps_v2.as_ref());
+    let mut decision = q.decide(file, &node, now_ms);
+    let (Some(caps), Some(facts)) = (q.caps_v2.as_ref(), geometry) else {
+        return decision;
+    };
+    if !caps_limit_geometry(Some(caps)) {
+        return decision;
+    }
+    let (Some(width), Some(height)) = (facts.width(), facts.height()) else {
+        return decision;
+    };
+    let rate = facts
+        .frame_rate()
+        .value()
+        .map(|rate| (rate.numerator(), rate.denominator()));
+    let geometry_fits = caps
+        .video
+        .iter()
+        .filter(|entry| file.video_codec.as_deref() == Some(entry.codec.as_str()))
+        .any(|entry| {
+            entry.geometry_admission(width, height, rate) != Some(false)
+                && (entry.max_frame_rate.is_none() || rate.is_some())
+        });
+    if !geometry_fits && decision.method != playback::PlaybackMethod::Transcode {
+        decision.method = playback::PlaybackMethod::Transcode;
+        decision.preserve_dolby_vision = false;
+        decision.convert_dolby_vision = false;
+        decision.delivered_dynamic_range = "sdr";
+        decision.delivered_dolby_vision_profile = None;
+        decision.reasons.push(
+            "the measured coded frame exceeds the current decoder geometry or cadence".to_owned(),
+        );
+    }
+    decision
+}
+
+/// What Play's verdict reads besides the file and the device's document.
+pub(super) struct PlayVerdictInputs {
+    /// This node's producers ([`render_caps`]).
+    pub node: playback::RenderCaps,
+    /// The server's language policy, which picks the audio track judged.
+    pub prefs: plurx_core::tracks::LangPrefs,
+    /// The Developer switch for Dolby Vision-enhanced HDR10.
+    pub dv_hdr_processing: bool,
+    pub now_ms: i64,
+}
+
+/// The verdict Play would give a device with `caps` for `file` when the
+/// viewer picks no audio or subtitle track — the same steps
+/// [`decision_for_file`] takes, through the same functions, so a title page
+/// that shows it cannot disagree with Play. `geometry` is the source's
+/// measured decode facts, needed only when [`caps_limit_geometry`].
+pub(super) fn default_play_verdict(
+    file: &MediaFile,
+    caps: &playback::DeviceCaps,
+    inputs: &PlayVerdictInputs,
+    geometry: Option<&plurx_core::transcode::DecodeFacts>,
+) -> Decision {
+    let mut file = file.clone();
+    let audio = policy_audio_index(&file, &inputs.prefs);
+    set_selected_audio_default(&mut file.audio_streams, audio);
+    let q = Caps {
+        caps_v2: Some(caps.clone()),
+        ..Caps::default()
+    };
+    let mut decision = capability_verdict(&file, &q, inputs.node, inputs.now_ms, geometry);
+    apply_processed_hdr10(&mut decision, &file, Some(caps), inputs.dv_hdr_processing);
+    decision
+}
+
 fn remux_requires_hls(
     file: &MediaFile,
     decision: &Decision,
@@ -871,19 +998,32 @@ pub struct DecisionResponse {
 /// into the real encoder, so `false` means this node has not been shown to
 /// produce those bytes — never that it refuses to.
 pub(super) async fn render_caps(state: &AppState) -> playback::RenderCaps {
-    playback::RenderCaps {
-        dv_strippable: state.system.dovi_rpu,
-        dolby_vision_p5_render: state.system.dovi_passthrough,
-        hdr10_passthrough: state.system.hdr10_passthrough,
+    render_caps_with(
+        state,
         // Asked of the transcoder rather than derived here: the ceiling
         // depends on which encoder this node will actually choose, which is a
         // runtime answer the system snapshot does not carry.
-        hdr10_max_height: state.transcode.hdr10_ceiling().await,
+        state.transcode.hdr10_ceiling().await,
         // Asked of the transcoder for the same reason as the ceiling above:
         // the operator can turn the conversion off in Settings, and a value
         // latched at boot would keep telling clients this node converts long
         // after it stopped.
-        dolby_vision_convert: state.transcode.dv_convert_enabled().await,
+        state.transcode.dv_convert_enabled().await,
+    )
+}
+
+/// [`render_caps`] from the two settings answers a caller already read.
+pub(super) fn render_caps_with(
+    state: &AppState,
+    hdr10_max_height: i64,
+    dolby_vision_convert: bool,
+) -> playback::RenderCaps {
+    playback::RenderCaps {
+        dv_strippable: state.system.dovi_rpu,
+        dolby_vision_p5_render: state.system.dovi_passthrough,
+        hdr10_passthrough: state.system.hdr10_passthrough,
+        hdr10_max_height,
+        dolby_vision_convert,
     }
 }
 
@@ -891,25 +1031,23 @@ pub(super) fn render_caps_from_snapshot(
     state: &AppState,
     snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
 ) -> playback::RenderCaps {
-    playback::RenderCaps {
-        dv_strippable: state.system.dovi_rpu,
-        dolby_vision_p5_render: state.system.dovi_passthrough,
-        hdr10_passthrough: state.system.hdr10_passthrough,
-        hdr10_max_height: state.transcode.hdr10_ceiling_with_preference(
+    render_caps_with(
+        state,
+        state.transcode.hdr10_ceiling_with_preference(
             snapshot
                 .settings
                 .get(plurx_core::store::keys::HWACCEL)
                 .map(String::as_str)
                 .unwrap_or_default(),
         ),
-        dolby_vision_convert: plurx_core::store::stored_switch(
+        plurx_core::store::stored_switch(
             snapshot
                 .settings
                 .get(plurx_core::store::keys::DV_CONVERT)
                 .map(String::as_str),
             true,
         ),
-    }
+    )
 }
 
 /// Narrow one request's producer facts without changing the persisted switch.
@@ -2410,13 +2548,7 @@ async fn decision_for_file(
     // selected by the same language policy exposed to the clients below.
     let prefs = state.transcode.lang_prefs().await;
     let prefer_original = prefers_original_audio(&file.audio_streams);
-    let policy_audio = plurx_core::tracks::select_tracks(
-        &file.audio_streams,
-        &file.subtitle_streams,
-        prefer_original,
-        &prefs,
-    )
-    .audio_index;
+    let policy_audio = policy_audio_index(&file, &prefs);
     let selected_audio = effective_audio_selection(&file, q.audio, policy_audio)?;
     let selection_requested = q.audio.is_some() || q.subtitle.is_some();
     // One read, two answers. `overlay_served` is this process: can a PGS track
@@ -2444,42 +2576,21 @@ async fn decision_for_file(
     // therefore about whether `Auto` wants full subtitles at all.
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let node = decision_render_caps(render_caps(state).await, q.caps_v2.as_ref());
     let decision_now_ms = crate::media_sessions::unix_ms();
-    let mut decision = q.decide(&file, &node, decision_now_ms);
-    if let Some(caps) = q.caps_v2.as_ref().filter(|caps| {
-        caps.video
-            .iter()
-            .any(|entry| entry.max_width.is_some() || entry.max_frame_rate.is_some())
-    }) {
-        if let Some(facts) = state.transcode.quality_source_facts(&file).await {
-            if let (Some(width), Some(height)) = (facts.width(), facts.height()) {
-                let rate = facts
-                    .frame_rate()
-                    .value()
-                    .map(|rate| (rate.numerator(), rate.denominator()));
-                let geometry_fits = caps
-                    .video
-                    .iter()
-                    .filter(|entry| file.video_codec.as_deref() == Some(entry.codec.as_str()))
-                    .any(|entry| {
-                        entry.geometry_admission(width, height, rate) != Some(false)
-                            && (entry.max_frame_rate.is_none() || rate.is_some())
-                    });
-                if !geometry_fits && decision.method != playback::PlaybackMethod::Transcode {
-                    decision.method = playback::PlaybackMethod::Transcode;
-                    decision.preserve_dolby_vision = false;
-                    decision.convert_dolby_vision = false;
-                    decision.delivered_dynamic_range = "sdr";
-                    decision.delivered_dolby_vision_profile = None;
-                    decision.reasons.push(
-                        "the measured coded frame exceeds the current decoder geometry or cadence"
-                            .to_owned(),
-                    );
-                }
-            }
-        }
-    }
+    // The decoder geometry is measured from the stored probe, read only when
+    // the document carries a width or cadence limit for it to answer.
+    let geometry = if caps_limit_geometry(q.caps_v2.as_ref()) {
+        state.transcode.quality_source_facts(&file).await
+    } else {
+        None
+    };
+    let mut decision = capability_verdict(
+        &file,
+        &q,
+        render_caps(state).await,
+        decision_now_ms,
+        geometry.as_ref(),
+    );
 
     // The grade of the plan **with no subtitle burn**. Read here, before
     // `apply_selected_subtitle` can rewrite it, because both users below are
@@ -2537,9 +2648,9 @@ async fn decision_for_file(
         requested_audio,
         container_default_audio,
     );
-    let processed_hdr10 = routes_through_processed_hdr10(
+    let processed_hdr10 = apply_processed_hdr10(
+        &mut decision,
         &file,
-        &decision,
         q.caps_v2.as_ref(),
         plurx_core::store::stored_switch(
             state
@@ -2550,14 +2661,6 @@ async fn decision_for_file(
             false,
         ),
     );
-    if processed_hdr10 {
-        // The same source bytes, copied into HLS instead of served as a file.
-        decision.method = playback::PlaybackMethod::Remux;
-        decision.reasons.push(
-            "served over HLS so the server can apply Dolby Vision-enhanced HDR10 (Developer setting)"
-                .into(),
-        );
-    }
     // Subtitle burn and an explicit non-default track can change the method
     // after the pure decision ran. Resolve audio again against that final
     // method. The legacy bool intentionally keeps its old compatibility

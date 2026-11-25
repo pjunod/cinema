@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-19, plurx has 445 routes declared by the ordinary listener's
+As of 2026-11-24, plurx has 446 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 445 routes across the registered routers.
+plurx has 446 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -169,27 +169,29 @@ peer revocation.
 
 ### 2.3 Scopes
 
-`plurx_core::domain::scopes` is the complete, closed list — two entries:
+`plurx_core::domain::scopes` is the complete, closed list — three entries:
 
 ```rust
-pub const SCAN_TRIGGER: &str = "scan:trigger";
-pub const STATUS_READ:  &str = "status:read";
+pub const SCAN_TRIGGER:  &str = "scan:trigger";
+pub const STATUS_READ:   &str = "status:read";
+pub const PLAYBACK_READ: &str = "playback:read";
 ```
 
 Matching is exact string equality: no prefixes, no wildcards, and `disabled`
-beats every scope. Two routes accept a key, and nothing else in the codebase
+beats every scope. Three routes accept a key, and nothing else in the codebase
 calls `ScopedKey::require`:
 
 | Route | Scope |
 |---|---|
 | `POST /api/v1/scan` | `scan:trigger` |
 | `GET /api/v1/scan/requests/{id}` | `status:read`, or `scan:trigger` for a request that key created |
+| `GET /api/v1/playback/devices` | `playback:read` (every account's devices); a signed-in user sees their own |
 
 `POST /api/v1/keys` rejects an unknown scope at creation rather than storing
 it, because a typo'd scope would otherwise produce a key that looks correct in
 the settings UI, authorizes nothing, and surfaces as a 403 inside another
 application hours later. Every scope is a promise about what a stolen key can
-do, which is why there are two of them and not twenty.
+do, which is why there are three of them and not twenty.
 
 A key's `last_used_at` is refreshed at most once every 60 seconds, so a busy
 integration does not append a Raft log entry per request. It never affects
@@ -394,6 +396,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | GET | `/api/v1/features` | bearer | Which optional sections to list in navigation: `live_tv`, `recordings` (the DVR switch), `shared_libraries`, `library_channels`. Presentation only — the routes stay reachable |
 | GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` (null while sign-ins do not expire) and `expired` |
 | DELETE | `/api/v1/me/devices/{prefix}` | bearer | Revokes one other device through the cluster revocation fence; the current device must use logout |
+| GET | `/api/v1/playback/devices` | bearer, or scoped key `playback:read` | Signed-in devices with the capabilities each last sent on a `POST /files/{id}/decision` that succeeded: `devices[{id (token prefix), user, device, client, last_seen_at, recorded_at (when the abilities last changed), hdr{dolby_vision, dv_profiles, fel, profile5, hdr10, hlg, hdr10plus}}]`, most recently used first. A user sees their own (at most 256); the key sees every account's (at most 1024), for Curator's HDR ranking (Curator ADR 0031). The record is a row owned by the native login token (`playback_device_caps_r1`, foreign keys cascading from `tokens` and `users`): logout, `DELETE /me/devices/{prefix}`, a password reset and deleting the user remove it with the token; an idle-expired sign-in is not listed. A handoff token and a Jellyfin login record nothing; volatile fields (client build and user agent, window size, peak provenance, learned-limit wording) are not kept, and a document over 16 KiB is not kept |
 | GET | `/api/v1/users` | admin | Every user; never any password hash |
 | POST | `/api/v1/users` | admin | Creates a user |
 | PUT | `/api/v1/users/{id}` | admin | Sets password and/or admin flag |
@@ -988,7 +991,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | GET | `/api/v1/libraries/{id}/items` | bearer | Paged, sorted, optionally genre-filtered grid |
 | POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application; also the `probe_paths` connection test |
 | GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read`, or the creating `scan:trigger` key | Polls one targeted-scan request |
-| GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading |
+| GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading. Each video file carries its Dolby Vision record (`dv_profile`, `dv_level`, `dv_bl_compat_id`, `dv_el_present`, and `dv_el_kind` `fel`/`mel` once the complete-title scan found it) and `plays_on[{id, device, client, label, method, el_dropped, full_quality}]`: how it plays on each of the caller's signed-in devices with no track chosen, from the same verdict function `POST /files/{id}/decision` uses (transport-narrowed conversion, learned limits still in force, decoder geometry, the language policy's audio track) |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
 | POST | `/api/v1/items/{id}/refresh-artwork` | admin | Forces an artwork re-fetch for the item and its ancestors |
