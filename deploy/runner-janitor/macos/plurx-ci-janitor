@@ -134,19 +134,40 @@ user_for_plist() {
     sed 's|\\/|/|g' | sed -n 's/.*"UserName":"\([^"]*\)".*/\1/p'
 }
 
-# Which users run a runner daemon here, and which of them have one that may be
-# in a job. Unloaded is not busy (nothing is running); loaded and not provably
-# idle is.
-sim_users=" "; busy_users=" "; sim_probe=/
+working_directory_for_plist() {
+  plutil -convert json -o - "$1" 2>/dev/null |
+    sed 's|\\/|/|g' | sed -n 's/.*"WorkingDirectory":"\([^"]*\)".*/\1/p'
+}
+
+# Every runner daemon here as `user|label|root`, one per line. The root is the
+# daemon's WorkingDirectory, else its config's directory, else empty -- and a
+# loaded daemon whose root is unknown is never idle.
+sim_users=" "; sim_daemons=
 note_simulator_owner() {
-  local label plist root user
-  label=$1; plist=$2; root=$3
+  local label plist config user root
+  label=$1; plist=$2; config=$3
   user=$(user_for_plist "$plist")
   [ -n "$user" ] || return 0
-  sim_probe=$root
+  root=$(working_directory_for_plist "$plist")
+  [ -n "$root" ] || { [ -n "$config" ] && root=$(dirname -- "$config"); }
   case "$sim_users" in *" $user "*) ;; *) sim_users="$sim_users$user " ;; esac
-  launchctl print "system/$label" >/dev/null 2>&1 || return 0
-  daemon_is_idle "$label" "$root" || busy_users="$busy_users$user "
+  sim_daemons="$sim_daemons$user|$label|$root
+"
+}
+
+# Asked again just before listing and before each delete, not sampled once:
+# a daemon can pick up a job while this pass resets another runner's cache.
+# Unloaded is idle (nothing runs); loaded and not provably idle is busy.
+user_runners_idle() {
+  local want user label root
+  want=$1
+  while IFS='|' read -r user label root; do
+    [ "$user" = "$want" ] || continue
+    launchctl print "system/$label" >/dev/null 2>&1 || continue
+    [ -n "$root" ] || return 1
+    daemon_is_idle "$label" "$root" || return 1
+  done <<<"$sim_daemons"
+  return 0
 }
 
 reset_cache() {
@@ -202,6 +223,10 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   label=$(label_for_plist "$plist")
   [ -n "${label:-}" ] || continue
   config=$(config_for_plist "$plist")
+  # Every runner daemon, before any cache filter: one skipped below is still a
+  # daemon whose job may own simulators, and a maintenance-disabled one may
+  # still be finishing a job.
+  note_simulator_owner "$label" "$plist" "${config:-}"
   [ -n "${config:-}" ] && [ -f "$config" ] || continue
   dir=$(cache_dir_for_config "$config")
   [ -n "${dir:-}" ] || continue
@@ -210,9 +235,6 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   # directory whole, so the path check is the entire safety argument.
   case "$dir" in */*runner*/cache) ;; *) continue ;; esac
   [ ! -L "$dir" ] || continue
-  # Before the maintenance check: a disabled daemon may still be finishing a
-  # job, and its simulators are that job's.
-  note_simulator_owner "$label" "$plist" "$(dirname -- "$dir")"
   # Intentional maintenance is persistent: never undo launchctl disable.
   if launchctl print-disabled system 2>/dev/null | grep -F "\"$label\" => true" >/dev/null; then
     say "$label is disabled for maintenance"
@@ -264,41 +286,65 @@ done
 # the same test the cache reset uses, so no live job can own one; a busy user
 # keeps them until the next pass.
 SIM_NAMES='^(plurx CI (iPhone|iPad|Apple TV) [1-9][0-9]*-[1-9][0-9]*|Plurx navigation isolated)$'
+# And untouched for longer than any Apple job runs (120 minutes, the
+# `timeout-minutes` of every Apple lane), so a device a job created in the
+# moment between the idle check and the delete is never one of them.
+SIM_AGE=${PLURX_JANITOR_SIMULATOR_AGE_SECONDS:-10800}
+[[ "$SIM_AGE" =~ ^[0-9]+$ ]] || {
+  echo "plurx-ci-janitor: simulator age must be whole seconds" >&2; exit 2
+}
 orphan_simulators=0
 for user in $sim_users; do
-  case "$busy_users" in
-    *" $user "*) say "a runner of $user is running a job; leaving its CI simulators for the next pass"; continue ;;
-  esac
-  before_kb=$(available_kb_for "$sim_probe")
+  if ! user_runners_idle "$user"; then
+    say "a runner of $user is running a job; leaving its CI simulators for the next pass"
+    continue
+  fi
+  probe=$(printf '%s' "$sim_daemons" | awk -F'|' -v u="$user" '$1 == u && $3 != "" { print $3; exit }')
+  [ -d "${probe:-}" ] || probe=/
+  before_kb=$(available_kb_for "$probe" 2>/dev/null) || before_kb=0
   ids=$(sudo -n -H -u "$user" xcrun simctl list devices --json 2>/dev/null |
     python3 -c '
-import json, re, sys
-pattern = re.compile(sys.argv[1])
+import json, os, re, sys, time
+pattern, cutoff = re.compile(sys.argv[1]), time.time() - int(sys.argv[2])
 try:
     devices = json.load(sys.stdin).get("devices", {})
 except ValueError:
     sys.exit(0)
 for runtime in devices.values():
     for device in runtime if isinstance(runtime, list) else []:
-        name, udid = device.get("name"), device.get("udid")
-        if isinstance(name, str) and isinstance(udid, str) and pattern.match(name):
+        name, udid, data = device.get("name"), device.get("udid"), device.get("dataPath")
+        if not (isinstance(name, str) and isinstance(udid, str) and pattern.match(name)):
+            continue
+        # The device directory, which simctl rewrites on every state change.
+        try:
+            touched = os.stat(os.path.dirname(data)).st_mtime
+        except (OSError, TypeError):
+            continue
+        if touched <= cutoff:
             print(udid)
-' "$SIM_NAMES") || ids=
+' "$SIM_NAMES" "$SIM_AGE") || ids=
+  deleted_here=0
   for udid in $ids; do
     if [ "$dry_run" = true ]; then
       say "would delete $user's orphaned CI simulator $udid"
       orphan_simulators=$((orphan_simulators + 1))
       continue
     fi
+    if ! user_runners_idle "$user"; then
+      say "a runner of $user picked up a job; leaving its remaining CI simulators for the next pass"
+      break
+    fi
     sudo -n -H -u "$user" xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
     if sudo -n -H -u "$user" xcrun simctl delete "$udid" >/dev/null 2>&1; then
       orphan_simulators=$((orphan_simulators + 1))
+      deleted_here=$((deleted_here + 1))
     fi
   done
-  if [ "$dry_run" != true ] && [ -n "$ids" ]; then
-    after_kb=$(available_kb_for "$sim_probe")
-    [ "$after_kb" -gt "$before_kb" ] && reclaimed_kb=$((reclaimed_kb + after_kb - before_kb))
-    say "deleted $orphan_simulators of $user's orphaned CI simulators, $((after_kb / 1024 / 1024))G free"
+  if [ "$deleted_here" -gt 0 ]; then
+    after_kb=$(available_kb_for "$probe" 2>/dev/null) || after_kb=0
+    [ "$before_kb" -gt 0 ] && [ "$after_kb" -gt "$before_kb" ] &&
+      reclaimed_kb=$((reclaimed_kb + after_kb - before_kb))
+    say "deleted $deleted_here of $user's orphaned CI simulators, $((after_kb / 1024 / 1024))G free"
   fi
 done
 

@@ -136,7 +136,7 @@ case "$1 $2" in
     exit 0 ;;
   "volume inspect")
     for name do :; done
-    printf '%s\\n' "$FIXTURE_VOLUMES" | awk -v n="$name" '$1 == n { print $1, $2 }'
+    printf '%s\\n' "$FIXTURE_VOLUMES" | awk -v n="$name" '$1 == n { print $1, ($2 == "EMPTY" ? "" : $2) }'
     exit 0 ;;
   "volume rm")
     printf '%s\\n' "$*" >> "$FIXTURE_DOCKER_LOG"
@@ -524,6 +524,8 @@ class JanitorContractCase(unittest.TestCase):
                 f"33bf885db66455efdc5308f989a4e1e1 {fresh} 0",
                 f"buildx_buildkit_plurx-gha-lab6-general-02-forgejo-runner0_state {old} 0",
                 f"{'e' * 64} {old} 0",
+                # A CreatedAt that never arrived is not "midnight today".
+                f"{'d' * 32} EMPTY 0",
             )
         )
 
@@ -1438,8 +1440,12 @@ class MacosJanitorContractCase(unittest.TestCase):
         self.bin.mkdir()
         self.log = fixture / "launchctl.log"
         tools = {
+            # A plist file holding JSON speaks for itself; the others are the
+            # fixture's one runner.
             "plutil": (
-                "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_PLIST_JSON\"\n"
+                "#!/bin/sh\nfor file do :; done\n"
+                'case "$(head -c 1 "$file" 2>/dev/null)" in \'{\') cat "$file"; exit 0 ;; esac\n'
+                "printf '%s\\n' \"$FIXTURE_PLIST_JSON\"\n"
             ),
             "launchctl": (
                 "#!/bin/sh\n"
@@ -1471,7 +1477,14 @@ class MacosJanitorContractCase(unittest.TestCase):
             # reads `-f` as --file-system, so on a Linux runner the real binary
             # answers a "File: ..." block that bash then evaluates
             # arithmetically. Faked so the quiet window can be tested at all.
-            "stat": "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_WORK_MTIME\"\n",
+            # A work root named by FIXTURE_BUSY_WORK, or every root once
+            # FIXTURE_BUSY_MARK exists, was touched just now: a job is running.
+            "stat": (
+                "#!/bin/sh\nfor path do :; done\n"
+                'if [ -n "${FIXTURE_BUSY_MARK:-}" ] && [ -f "$FIXTURE_BUSY_MARK" ]; then date +%s; exit 0; fi\n'
+                'case "$path" in *"${FIXTURE_BUSY_WORK:-/nonexistent/}"*) date +%s; exit 0 ;; esac\n'
+                "printf '%s\\n' \"$FIXTURE_WORK_MTIME\"\n"
+            ),
         }
         for name, body in tools.items():
             path = self.bin / name
@@ -1717,15 +1730,23 @@ class MacosJanitorContractCase(unittest.TestCase):
     KEPT = {
         "iPhone 17 Pro": "11111111-2222-3333-4444-555555555555",
         "plurx CI iPhone draft": "66666666-7777-8888-9999-000000000000",
+        # A CI name, but created moments ago: no dead job is that young.
+        "plurx CI iPad 9500-1": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
     }
 
     def with_simulators(self):
         fixture = Path(self._directory.name)
         self.simctl_log = fixture / "simctl.log"
-        devices = [
-            {"name": name, "udid": udid, "state": "Booted"}
-            for name, udid in {**self.LEFT_BEHIND, **self.KEPT}.items()
-        ]
+        devices = []
+        for name, udid in {**self.LEFT_BEHIND, **self.KEPT}.items():
+            device = fixture / "Devices" / udid
+            (device / "data").mkdir(parents=True)
+            if udid != self.KEPT["plurx CI iPad 9500-1"]:
+                old = time.time() - 6 * 3600
+                os.utime(device, (old, old))
+            devices.append(
+                {"name": name, "udid": udid, "state": "Booted", "dataPath": str(device / "data")}
+            )
         tools = {
             # Root runs the janitor and acts as the runner's user: the fake
             # drops the sudo options and runs the command, and records who.
@@ -1740,6 +1761,9 @@ class MacosJanitorContractCase(unittest.TestCase):
                 "#!/bin/sh\n"
                 'case "$2" in\n'
                 '  list) printf \'%s\\n\' "$FIXTURE_SIMCTL_JSON" ;;\n'
+                # A job that arrives mid-pass: the first shutdown starts it.
+                '  shutdown) [ -z "${FIXTURE_JOB_ON_SHUTDOWN:-}" ] || : > "$FIXTURE_BUSY_MARK"\n'
+                '    printf \'%s %s\\n\' "$2" "$3" >> "$FIXTURE_SIMCTL_LOG" ;;\n'
                 '  *) printf \'%s %s\\n\' "$2" "$3" >> "$FIXTURE_SIMCTL_LOG" ;;\n'
                 "esac\n"
             ),
@@ -1749,6 +1773,7 @@ class MacosJanitorContractCase(unittest.TestCase):
             path.write_text(body, encoding="utf-8")
             path.chmod(0o755)
         self.environment["FIXTURE_SIMCTL_LOG"] = str(self.simctl_log)
+        self.environment["FIXTURE_BUSY_MARK"] = str(fixture / "busy")
         self.environment["FIXTURE_SIMCTL_JSON"] = json.dumps(
             {"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-2": devices}}
         )
@@ -1784,6 +1809,44 @@ class MacosJanitorContractCase(unittest.TestCase):
         self.assertEqual([c for c in self.simctl_calls() if not c.startswith("as ")], [])
         self.assertIn("leaving its CI simulators for the next pass", result.stdout)
         self.assertEqual(self.last_run()["orphan_simulators"], 0)
+
+    def test_a_busy_daemon_the_cache_pass_skips_still_holds_its_users_simulators(self):
+        """A second daemon of the same user with no cache server of its own is
+        skipped by every cache filter, and is the one running the job."""
+        self.with_simulators()
+        other = Path(self._directory.name) / "Users/githubrunner/forgejo-runner-mobile"
+        (other / "_work").mkdir(parents=True)
+        (self.daemons / "org.forgejo.actions.runner.plurx.gha-maca-mobile-01.plist").write_text(
+            json.dumps(
+                {
+                    "Label": "org.forgejo.actions.runner.plurx.gha-maca-mobile-01",
+                    "UserName": "githubrunner",
+                    "WorkingDirectory": str(other),
+                    "ProgramArguments": ["forgejo-runner", "daemon", "-c", str(other / "missing.yml")],
+                },
+                # `plutil -convert json` writes no spaces.
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        self.environment["FIXTURE_BUSY_WORK"] = str(other)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c for c in self.simctl_calls() if not c.startswith("as ")], [])
+        self.assertIn("leaving its CI simulators for the next pass", result.stdout)
+
+    def test_a_job_that_starts_mid_pass_stops_the_deletes(self):
+        self.with_simulators()
+        self.environment["FIXTURE_JOB_ON_SHUTDOWN"] = "1"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deleted = [c for c in self.simctl_calls() if c.startswith("delete ")]
+        self.assertEqual(len(deleted), 1)
+        self.assertIn("picked up a job", result.stdout)
 
     def test_dry_run_names_orphaned_simulators_and_deletes_none(self):
         self.with_simulators()

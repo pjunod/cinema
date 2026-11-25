@@ -481,6 +481,9 @@ ORPHAN_VOLUME_AGE=${PLURX_JANITOR_ORPHAN_VOLUME_AGE_SECONDS:-3600}
 [[ "$ORPHAN_VOLUME_AGE" =~ ^[0-9]+$ ]] || {
   echo "plurx-ci-janitor: orphan volume age must be whole seconds" >&2; exit 2
 }
+# Removing a 36G volume is a long unlink, not a query: bounded apart, so a
+# slow delete is not killed and miscounted as a failure.
+ORPHAN_VOLUME_RM_TIMEOUT=${PLURX_JANITOR_ORPHAN_VOLUME_RM_TIMEOUT:-600}
 orphan_volumes=0
 docker_bounded() {
   if command -v timeout >/dev/null 2>&1; then
@@ -496,12 +499,18 @@ if command -v "$DOCKER" >/dev/null 2>&1 && docker_bounded info >/dev/null 2>&1; 
   orphan_cutoff=$(($(date +%s) - ORPHAN_VOLUME_AGE))
   while read -r volume created; do
     [[ "$volume" =~ ^[0-9a-f]{32}(-env)?$ ]] || continue
+    # GNU `date -d ""` is midnight today, not an error.
+    [ -n "${created:-}" ] || continue
     created_s=$(date -d "$created" +%s 2>/dev/null) || continue
     [ "$created_s" -le "$orphan_cutoff" ] || continue
     if [ "$dry_run" = true ]; then
       say "would remove orphaned job volume $volume (created $created)"
       orphan_volumes=$((orphan_volumes + 1))
-    elif docker_bounded volume rm "$volume" >/dev/null 2>&1; then
+    elif if command -v timeout >/dev/null 2>&1; then
+        timeout "$ORPHAN_VOLUME_RM_TIMEOUT" "$DOCKER" volume rm "$volume"
+      else
+        "$DOCKER" volume rm "$volume"
+      fi >/dev/null 2>&1; then
       orphan_volumes=$((orphan_volumes + 1))
     fi
   done < <(docker_bounded volume ls -q --filter dangling=true 2>/dev/null |

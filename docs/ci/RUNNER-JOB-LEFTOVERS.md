@@ -44,9 +44,13 @@ for the next job.
 
 The [macOS janitor](../../deploy/runner-janitor/macos/plurx-ci-janitor)
 deletes simulators with those names, acting as the runner daemon's
-`UserName`. It does so only while every runner daemon of that user passes the
-idle test the cache reset uses (no child processes, `_work` quiet for two
-minutes). A user with a busy daemon keeps its simulators until the next pass.
+`UserName`. It takes only devices whose directory has been untouched for
+three hours (`PLURX_JANITOR_SIMULATOR_AGE_SECONDS`), longer than any Apple
+job's 120-minute timeout. It also requires every runner daemon of that user to
+pass the idle test the cache reset uses (no child processes, `_work` quiet for
+two minutes). That test covers every runner plist, including ones the cache
+pass skips, and it runs again before each delete. A user with a busy daemon
+keeps its simulators until the next pass.
 
 ## Reading it
 
