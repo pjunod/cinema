@@ -5922,16 +5922,6 @@ async fn create_with_purpose_attempt(
     let needs_adaptive_software_prepare = |offer: &crate::media_pool::MediaOffer| {
         // The ordinary local start revalidates the selected cache and binds
         // the real retained owner. Adaptive prepare only owns a new R.
-        if offer.node_id == state.node_id {
-            tracing::debug!(
-                target: "plurxd::vodserve",
-                eligible = offer.eligible,
-                encoder = %offer.encoder,
-                cache_hit = offer.cache_hit,
-                refusal = ?offer.refusal_code,
-                "local media offer considered for adaptive software prepare"
-            );
-        }
         offer.eligible
             && offer.encoder == "software"
             && !(offer.node_id == state.node_id && offer.cache_hit)
@@ -6026,8 +6016,6 @@ async fn create_with_purpose_attempt(
             plan.setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED) == Some("1")
         });
     #[cfg(target_os = "linux")]
-    let ranked_software_offers_seen = ranked_software_offers.is_some();
-    #[cfg(target_os = "linux")]
     let adaptive_software_offers: std::collections::HashSet<String> = if let Some(offers) =
         ranked_software_offers
     {
@@ -6075,17 +6063,6 @@ async fn create_with_purpose_attempt(
     // and only after its own actual pre-native capacity refusal.
     #[cfg(target_os = "linux")]
     let software_owns_start = adaptive_software_offers.contains(&state.node_id);
-    #[cfg(target_os = "linux")]
-    tracing::debug!(
-        target: "plurxd::vodserve",
-        adaptive_source = adaptive_software_source.is_some(),
-        planning_snapshot = planning_snapshot.is_some(),
-        ranked = ranked_software_offers_seen,
-        software_owns_start,
-        exact_fel,
-        candidates = ?owner_candidates,
-        "create adaptive software placement inputs"
-    );
     #[cfg(not(target_os = "linux"))]
     let software_owns_start = false;
     let compatible_hardware_peers: std::collections::HashSet<_> =

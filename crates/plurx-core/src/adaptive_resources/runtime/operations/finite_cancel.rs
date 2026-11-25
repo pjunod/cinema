@@ -287,7 +287,6 @@ impl NodeResourceRuntime {
                 return Err(OperationError::State);
             }
         }
-        let timer = Instant::now();
         #[cfg(target_os = "linux")]
         {
             let refused_graph = {
@@ -313,12 +312,10 @@ impl NodeResourceRuntime {
         )
         .await
         .map_err(|_| OperationError::Deadline)??;
-        tracing::debug!(target: "plurx_core::adaptive_resources", stage = "reconciled_acquisition", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
         // Join a check abandoned by a cancelled prelaunch or publication
         // waiter before deciding that no native work remains. Unknown close
         // or panic retains the original full R and refuses typed settlement.
         self.reconcile_finite_engine_check(owner, index).await?;
-        tracing::debug!(target: "plurx_core::adaptive_resources", stage = "engine_check", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
         let initial_member = {
             let bundle = owner.state.lock().await;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
@@ -347,7 +344,6 @@ impl NodeResourceRuntime {
                 .await?;
         }
         let never_root = self.close_finite_never_root(owner, index).await?;
-        tracing::debug!(target: "plurx_core::adaptive_resources", stage = "never_root", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
         let member = if never_root {
             let member = {
                 let bundle = owner.state.lock().await;
@@ -364,7 +360,6 @@ impl NodeResourceRuntime {
             // writer retains its distinct joined proof. Neither can be
             // invented from the other when this wait is interrupted.
             let joined = self.join_finite_producer(owner, index).await;
-            tracing::debug!(target: "plurx_core::adaptive_resources", stage = "producer_joined", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
             let member = {
                 let bundle = owner.state.lock().await;
                 let role = bundle.roles.get(index).ok_or(OperationError::State)?;
@@ -381,10 +376,8 @@ impl NodeResourceRuntime {
             // choosing a cleanup action. This never advances to a new child.
             self.observe_finite_bootstrap_arm(owner, index, member, deadline)
                 .await?;
-            tracing::debug!(target: "plurx_core::adaptive_resources", stage = "bootstrap_observed", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
             self.close_producer_finite_native(owner, index, member, deadline)
                 .await?;
-            tracing::debug!(target: "plurx_core::adaptive_resources", stage = "native_closed", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
             Some(member)
         };
         let (needs_seal, held_native_no_root) = {
@@ -407,7 +400,6 @@ impl NodeResourceRuntime {
         if needs_seal {
             self.seal_role(owner, index, deadline).await?;
         }
-        tracing::debug!(target: "plurx_core::adaptive_resources", stage = "sealed", elapsed_ms = timer.elapsed().as_millis(), "finite cancel stage timing");
         let mut bundle = owner.state.lock().await;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded {

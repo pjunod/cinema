@@ -94,9 +94,6 @@ pub(in crate::resource_custody) fn restore(
     }
     let mut fold = BootstrapFold::empty(plan, v2::Id::new(obligation)?, member)?;
     let mut prior_sequence = 0;
-    let restore_timer = std::time::Instant::now();
-    let mut rows_scanned = 0_u64;
-    let mut records_folded = 0_u64;
     let indexed = membership::indexed(connection)?;
     let mut statement = connection.prepare(membership::history_sql(indexed))?;
     let mut rows = if indexed {
@@ -105,7 +102,6 @@ pub(in crate::resource_custody) fn restore(
         statement.query([])?
     };
     while let Some(row) = rows.next()? {
-        rows_scanned += 1;
         let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
         if indexed {
@@ -133,14 +129,10 @@ pub(in crate::resource_custody) fn restore(
         }
         prior_sequence = record.ack.sequence;
         fold = fold.apply(plan, v2::Id::new(operation)?, &record.change)?;
-        records_folded += 1;
         if fold.state() != record.after {
             return Err(codec::invalid());
         }
     }
-    tracing::debug!(target: "plurx_core::adaptive_resources", indexed, rows_scanned,
-        records_folded, elapsed_ms = restore_timer.elapsed().as_millis(),
-        "custody scratch history restored");
     let state = fold.state();
     if expected.is_some_and(|expected| *expected != state)
         || (expected.is_none() && state.asset.revision != 0)

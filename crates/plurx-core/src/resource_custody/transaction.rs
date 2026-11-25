@@ -1019,7 +1019,6 @@ pub(super) fn execute(
     operation: &QueuedOperation,
     owner: Uuid,
 ) -> Result<OperationResult, CustodyError> {
-    let execute_timer = Instant::now();
     scratch::bootstrap::discard_staged_fold();
     storage.verify()?;
     let remaining = operation
@@ -1127,13 +1126,7 @@ pub(super) fn execute(
     // Errors before COMMIT are a rollback (Transaction's drop performs it).
     // COMMIT errors are deliberately Unknown, even SQLite errors that usually
     // mean rollback. The exact operation is retained for positive reread/retry.
-    let body_ms = execute_timer.elapsed().as_millis();
-    let commit_timer = Instant::now();
-    let committed = tx.commit();
-    tracing::debug!(target: "plurx_core::adaptive_resources", body_ms,
-        commit_ms = commit_timer.elapsed().as_millis(),
-        "custody transaction timing");
-    if let Err(_error) = committed {
+    if let Err(_error) = tx.commit() {
         let mut error = CustodyError::new(ErrorKind::Storage, "custody commit result uncertain");
         error.certainty = CommitCertainty::Unknown;
         return Err(error);

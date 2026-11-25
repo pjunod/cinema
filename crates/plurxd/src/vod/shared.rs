@@ -2544,52 +2544,8 @@ impl Shared {
         key: &str,
         original: Weak<Rendition>,
     ) {
-        self.purge_dormant_inner(key, Duration::ZERO, false, Some(original.clone()))
+        self.purge_dormant_inner(key, Duration::ZERO, false, Some(original))
             .await;
-        // Say why an operator Stop left its finite rendition registered, so a
-        // retained output is explained rather than silently kept.
-        let Some(rendition) = original.upgrade() else {
-            return;
-        };
-        let registered = self
-            .renditions
-            .lock()
-            .await
-            .get(key)
-            .is_some_and(|current| Arc::ptr_eq(current, &rendition));
-        let closing = self.finite_closing.lock().await.contains_key(key);
-        if !registered || closing {
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key, registered,
-                cleanup = closing, "operator stop handed its finite rendition to cleanup");
-            return;
-        }
-        let build_gate_held = !self
-            .rendition_build_gate(key)
-            .is_ok_and(|gate| gate.try_lock_owned().is_ok());
-        let readers = rendition.readers.lock().await.len();
-        let dormant = rendition
-            .dormant_since
-            .lock()
-            .expect("dormant lock")
-            .is_some();
-        let (admitted, materialized) = {
-            let manifest = rendition.manifest.lock().await;
-            (manifest.is_admitted(), manifest.materialized_count())
-        };
-        tracing::debug!(
-            target: "plurxd::vodserve",
-            rendition = %key,
-            build_gate_held,
-            readers,
-            dormant,
-            admitted,
-            materialized,
-            plan = rendition.plan.len(),
-            preparation = rendition.preparation().is_some(),
-            private_storage = rendition.private_storage.is_some(),
-            finite_producer = rendition.dir.finite_producer().is_some(),
-            "operator stop left its finite rendition registered"
-        );
     }
 
     async fn purge_dormant_inner(
@@ -2764,8 +2720,6 @@ impl Shared {
                     // The paid original service owns completion. Maintenance
                     // does not become a second cleanup future while an alias
                     // or application lease still holds the native close.
-                    tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                        "dormant finite close requested from its collector");
                     slot.request_close();
                 } else {
                     self.retry_finite_closing(key.to_owned(), closing).await;
@@ -3193,10 +3147,6 @@ impl Shared {
         let key = work.key();
         let closing = self.finite_closing.lock().await.get(key).cloned();
         let deadline = Instant::now() + Duration::from_secs(30);
-        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-            envelope = closing.is_some(), "collected finite close stage=started");
-        let mut rich_watch: Option<Weak<Rendition>> = None;
-        let mut producer_watch: Option<Weak<super::finite_software::FiniteSoftwareProducer>> = None;
         if let Some(closing) = closing.as_ref() {
             if !closing.cleanup_ready.load(Acquire) {
                 return Err("original finite builder still owns its close arm".into());
@@ -3205,9 +3155,6 @@ impl Shared {
             // registration observation and any application-release wait.
             let producer = closing.producer.lock().await.as_ref().cloned();
             let rich = closing.rich.lock().await.as_ref().cloned();
-            let rich_weak = rich.as_ref().map(Arc::downgrade);
-            rich_watch = rich_weak.clone();
-            producer_watch = producer.as_ref().map(Arc::downgrade);
             if let Some(rendition) = rich.as_ref() {
                 rendition.closed.store(true, Release);
                 rendition.kick();
@@ -3232,8 +3179,6 @@ impl Shared {
                 drop(rendition);
             }
             drop(producer);
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                "collected finite close stage=driver_joined");
             port.mark_abandon_registered(work)
                 .map_err(|error| format!("finite registration observation: {error:?}"))?;
             if !port
@@ -3249,27 +3194,10 @@ impl Shared {
                 // This rendition's terminal records still hold client slots in
                 // the partition the wait below drains.
                 self.release_terminal_records(Some(key)).await;
-                let waited = Instant::now();
-                let first = (Instant::now() + Duration::from_millis(200)).min(deadline);
-                if output.wait_allocations_release(first).await.is_err() {
-                    let survivor = rich_weak.as_ref().and_then(Weak::upgrade);
-                    let readers = match survivor.as_ref() {
-                        Some(r) => Some(r.readers.lock().await.len()),
-                        None => None,
-                    };
-                    let rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1);
-                    let producer_strong = producer.as_ref().map(Arc::strong_count);
-                    tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                        ?rich_strong, ?readers, ?producer_strong,
-                        "collected finite close waits for its allocations");
-                    drop(survivor);
-                }
                 output
                     .wait_allocations_release(deadline)
                     .await
                     .map_err(|error| error.to_string())?;
-                let allocations_ms = waited.elapsed().as_millis();
-                let terminating = Instant::now();
                 let ticket = if let Some(producer) = producer.as_ref() {
                     producer
                         .prepare_terminate(deadline)
@@ -3281,17 +3209,11 @@ impl Shared {
                         .await
                         .map_err(|error| error.to_string())?
                 };
-                let terminate_ms = terminating.elapsed().as_millis();
-                let installing = Instant::now();
                 // Core owns the exact ticket before any rich selector is
                 // cleared. Cancellation cannot drop the only original ticket.
                 port.install_ticket(work, ticket)
                     .await
                     .map_err(|error| error.to_string())?;
-                tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                    allocations_ms, terminate_ms,
-                    install_ms = installing.elapsed().as_millis(),
-                    "collected finite close stage timings");
                 if let Some(producer) = producer.as_ref() {
                     if let Some(compatibility) = producer.take_compatibility() {
                         *closing
@@ -3323,35 +3245,12 @@ impl Shared {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-            "collected finite close stage=ticket_installed");
         // An adaptive attempt may still hold this producer's application
         // lease. Wake its reconciliation now instead of waiting for a tick.
         self.finite_close_progress.notify_one();
-        let releasing = Instant::now();
-        loop {
-            let probe = (Instant::now() + Duration::from_millis(500)).min(deadline);
-            if port.wait_application_release(work, probe).await.is_ok() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("finite application release deadline elapsed".into());
-            }
-            let survivor = rich_watch.as_ref().and_then(Weak::upgrade);
-            let readers = match survivor.as_ref() {
-                Some(r) => Some(r.readers.lock().await.len()),
-                None => None,
-            };
-            let rich_strong = survivor.as_ref().map(|r| Arc::strong_count(r) - 1);
-            drop(survivor);
-            let producer_strong = producer_watch.as_ref().map(Weak::strong_count);
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-                ?rich_strong, ?readers, ?producer_strong, waited_ms = releasing.elapsed().as_millis(),
-                "collected finite close still waits for application release");
-        }
-        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-            waited_ms = releasing.elapsed().as_millis(),
-            "collected finite close stage=applications_released");
+        port.wait_application_release(work, deadline)
+            .await
+            .map_err(|error| error.to_string())?;
         let gate = port
             .gate(work)
             .map_err(|error| format!("original finite finalization gate: {error:?}"))?;
@@ -3359,8 +3258,6 @@ impl Shared {
         port.finish_retirement(work, deadline)
             .await
             .map_err(|error| error.to_string())?;
-        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
-            "collected finite close stage=retired");
         // The ticket was consumed only after real native/application close.
         // Any surviving empty daemon envelope remains independently charged
         // until its outer reference drops the actual Arc/header completely.
@@ -3426,7 +3323,6 @@ impl Shared {
 
     #[cfg(target_os = "linux")]
     async fn drive_finite_closing(self: &Arc<Shared>, key: &str, closing: &FiniteClosingRef) {
-        tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "started", "finite cleanup stage");
         let rich = closing.rich.lock().await.as_ref().cloned();
         if let Some(rendition) = rich {
             let producer = closing.producer.lock().await.as_ref().cloned();
@@ -3475,7 +3371,6 @@ impl Shared {
             closing.rich.lock().await.take();
             drop(rendition);
             drop(producer);
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "driver_joined", "finite cleanup stage");
         }
 
         if !closing.known_closed.load(Acquire) {
@@ -3532,7 +3427,6 @@ impl Shared {
                     }
                 }
                 *closing.ticket.lock().await = Some(ticket);
-                tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "ticket_prepared", "finite cleanup stage");
                 drop(producer);
                 drop(output);
                 closing.producer.lock().await.take();
@@ -3550,7 +3444,6 @@ impl Shared {
                     return;
                 }
             }
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "applications_released", "finite cleanup stage");
         }
 
         // The rich metadata and every application selector have drained. The
@@ -3572,7 +3465,6 @@ impl Shared {
                     %error, "finite terminal close remains charged for retry");
                 return;
             }
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key, stage = "retired", "finite cleanup stage");
 
             if let Some(compatibility) = closing
                 .compatibility

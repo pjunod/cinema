@@ -313,10 +313,7 @@ impl Shared {
 /// allocated. Shared is an independently rooted graph; no Arc envelope is a
 /// claim about the complete memory/CPU peak of that graph.
 async fn slot_service(port: CoreServicePort, shared: Arc<Shared>) {
-    tracing::debug!(target: "plurxd::vodserve", "ordinary finite collector service started");
     while let Some(work) = port.wait_work().await {
-        tracing::debug!(target: "plurxd::vodserve", rendition = %work.key(),
-            "ordinary finite collector received close work");
         loop {
             let result = shared.drive_collected_closing(&port, &work).await;
             match result {

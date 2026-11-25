@@ -609,10 +609,7 @@ impl FiniteSoftwareProducer {
         deadline: Instant,
     ) -> io::Result<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket> {
         self.control.request_stop()?;
-        let timer = Instant::now();
         let owner = self.owner.lock().await;
-        tracing::debug!(target: "plurxd::vodserve", stage = self.stage.load(Acquire),
-            elapsed_ms = timer.elapsed().as_millis(), "finite terminate owner locked");
         if self.stage.load(Acquire) == RETIRING {
             owner
                 .retire_output(deadline)
