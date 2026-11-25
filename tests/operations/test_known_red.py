@@ -221,6 +221,9 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/tests/adaptive_two_node/singleton_trial.rs::"
             "singleton_trial::activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_trial":
                 "requires private noswap tmpfs, delegated cgroup v2, non-root clone3 and Landlock ABI6, and native FFmpeg/FFprobe",
+            "crates/plurxd/tests/adaptive_two_node/singleton_trial.rs::"
+            "singleton_trial::activated_hiqlite_singleton_adopts_a_native_vod_trial_beside_a_playing_incumbent":
+                "requires private noswap tmpfs, delegated cgroup v2, non-root clone3 and Landlock ABI6, and native FFmpeg/FFprobe",
         }
         self.assertEqual(
             {
