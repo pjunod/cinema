@@ -631,7 +631,10 @@ pub(super) fn snapshot(
                     || source.3 != Phase::Settled
                     || source.0 != operation_id
                     || target.2 < ack.sequence
-                    || source.4 != target.4
+                    // A retained target is created outside any trial group
+                    // (43f648b3d); older journals inherited the source's
+                    // group, which must then still match exactly.
+                    || (target.4.is_some() && source.4 != target.4)
                 {
                     return Err(codec::invalid());
                 }
