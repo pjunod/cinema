@@ -1910,10 +1910,6 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
     }
 }
 
-/// Wind a current test database back across the durable-queue introduction.
-/// This touches the common queue and its v87 analysis-source reservations,
-/// never production migration.
-#[allow(dead_code)]
 /// Remove the empty unversioned extensions installed after the ordinal
 /// migrations before a rewind rewrites the tables they guard: the adaptive
 /// resource authority, the adaptive source scope that depends on it, and the
@@ -1955,6 +1951,10 @@ pub(crate) fn remove_empty_post_migration_extensions(connection: &rusqlite::Conn
     }
 }
 
+/// Wind a current test database back across the durable-queue introduction.
+/// This touches the common queue and its v87 analysis-source reservations,
+/// never production migration.
+#[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
     // Refuse to discard managed subtitle model receipts before any rewind,
     // even in a bare fixture that carries only the receipt table.
