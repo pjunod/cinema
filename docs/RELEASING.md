@@ -339,10 +339,14 @@ newer moving aliases remain unchanged. Never delete or move the release tag to
 make recovery pass; a mismatch is an incident to investigate, not an alias to
 overwrite.
 
-The weekly release-readiness run is described above. A red run means the
-gate failed on `main`'s tip or, for a pending release, on the release commit
-(or that `--pending` refused the release commit, or that the tag push could
-not happen); it is never a reason to move or overwrite an existing tag.
+The weekly release-readiness run is described above. A red run means
+`--pending` refused the release commit, `validation.release_evidence` found no
+green gate for it (a missing, skipped or red gate; a landing admitted by a
+manual source gate, which posts no gate status; or a landing whose message
+carries a `Landed-Untested:` line or more than one `Reviewed-on:` line, which
+includes such text quoted in the release pull request's description), the
+forge could not be read, or the tag push could not happen. It is never a
+reason to move or overwrite an existing tag.
 
 ## Checking what a build reports
 

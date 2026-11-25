@@ -20,20 +20,12 @@ loader.exec_module(readiness)
 
 
 class ReleaseReadinessCase(unittest.TestCase):
-    def test_both_release_paths_use_candidate_runtime_after_checkout(self):
+    def test_the_runner_builds_the_ci_and_runtime_media_stages(self):
+        # The weekly tag no longer runs this helper: it reads the release's
+        # existing gate (tests/operations/test_release_cut.py). The nightly
+        # sweeps still run it, on the shipped media stages.
         workflow = (ROOT / ".github/workflows/release-readiness.yml").read_text()
-        check = workflow.split("\n  release-check:\n", 1)[1].split("\n  tag:\n", 1)[0]
-        self.assertNotIn("ffmpeg-6", check)
-        self.assertIn("runs-on: [incus, ci-nonvoter-heavy-amd64]", check)
-        saved = check.index('cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"')
-        checkout = check.index('git checkout -q --detach "$RELEASE_SHA"')
-        self.assertLess(saved, checkout)
-        for command in ("make release-check", "scripts/validate run --profile ci --all --strict"):
-            invocation = f'python3 "$RUNNER_TEMP/release-readiness" {command}'
-            self.assertIn(invocation, check)
-            self.assertLess(checkout, check.index(invocation))
-        self.assertIn("lane: release-readiness", check)
-        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", check)
+        self.assertNotIn('release-readiness"', workflow)
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertIn("FROM runtime-assets AS ci", dockerfile)
         self.assertIn("FROM runtime-assets AS runtime", dockerfile)
