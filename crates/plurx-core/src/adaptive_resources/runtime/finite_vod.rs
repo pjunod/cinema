@@ -385,6 +385,11 @@ impl NodeResourceRuntime {
             tracing::debug!(target: "plurx_core::adaptive_resources",
                 capacity = ?accounting.capacity.memory_bytes,
                 used = accounting.used.peak_memory_bytes, charged,
+                peak = resources.peak_memory_bytes,
+                reserved_storage = request.output.reserved_storage_bytes,
+                segments = request.segment_count,
+                application_owner = request.application_owner_bytes,
+                resident_memory = request.output.resident_memory_bytes,
                 "finite trial memory does not fit the ledger");
             return Err(TrialRefusal::UnknownMemory);
         }
