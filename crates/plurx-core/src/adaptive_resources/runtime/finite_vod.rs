@@ -1353,7 +1353,11 @@ impl SoftwareVodOwner {
         {
             return pressured("admission capacity refresh failed");
         }
-        match self.runtime.finite_trial_native_pressure(&self.preparation) {
+        match self
+            .runtime
+            .finite_trial_native_pressure(&self.preparation, deadline)
+            .await
+        {
             Ok(false) => {}
             Ok(true) => return pressured("native pressure"),
             Err(error) => {

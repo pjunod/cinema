@@ -51,12 +51,18 @@ enum PrecloneRefusal {
 }
 
 impl OwnedPhysicalGraph {
-    pub(in crate::adaptive_resources) fn finite_trial_hard_pressure(&self) -> io::Result<bool> {
+    /// Waits for the graph's members, bounded by `deadline`: a busy graph is
+    /// not pressure, and only a missed cutoff or real limit events abort.
+    pub(in crate::adaptive_resources) async fn finite_trial_hard_pressure(
+        &self,
+        deadline: Instant,
+    ) -> io::Result<bool> {
         let custody = self.custody();
-        let members = custody
-            .members
-            .try_lock()
-            .map_err(|_| io::Error::other("original finite native graph is busy"))?;
+        let members = tokio::time::timeout_at(deadline.into(), custody.members.lock())
+            .await
+            .map_err(|_| {
+                io::Error::other("original finite native graph stayed busy past the trial cutoff")
+            })?;
         let [original] = members.roots.as_slice() else {
             return Err(io::Error::other(
                 "original finite trial root is unavailable",

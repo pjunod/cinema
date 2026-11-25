@@ -115,12 +115,17 @@ impl FiniteTaskDisposition {
 
 impl NodeResourceRuntime {
     #[cfg(target_os = "linux")]
-    pub(in crate::adaptive_resources::runtime) fn finite_trial_native_pressure(
+    pub(in crate::adaptive_resources::runtime) async fn finite_trial_native_pressure(
         &self,
         owner: &OwnedPreparation,
+        deadline: Instant,
     ) -> Result<bool, OperationError> {
         self.validate_preparation(owner)?;
-        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        // Other original operations hold this bundle while they work. Wait for
+        // it within the trial's cutoff instead of reading a busy lock as pressure.
+        let bundle = tokio::time::timeout_at(deadline.into(), owner.state.lock())
+            .await
+            .map_err(|_| OperationError::Deadline)?;
         let [role] = bundle.roles.as_slice() else {
             return Err(OperationError::State);
         };
@@ -130,7 +135,8 @@ impl NodeResourceRuntime {
         role.graph
             .as_ref()
             .ok_or(OperationError::State)?
-            .finite_trial_hard_pressure()
+            .finite_trial_hard_pressure(deadline)
+            .await
             .map_err(Into::into)
     }
 
