@@ -772,9 +772,9 @@ class JanitorContractCase(unittest.TestCase):
         `vod_web` asks for 45 G because it carries Playwright browsers and an
         ffmpeg build on top of the workspace. Nothing reclaims the gap between
         25 G and 45 G on its behalf; that lane needs a runner with the room,
-        which is placement rather than pruning. `release-check` uses the same
-        45 G bar for the audited SDK export, candidate-built media/CI image,
-        and complete browser suite.
+        which is placement rather than pruning. Nightly deep validation and
+        mutation use the same 45 G bar for the audited SDK export and the
+        shipping runtime CI images.
 
         The exception is counted, not just named. Keying on the value alone
         let a *second*, unrelated lane copy `disk-gb: "45"` and pass in
@@ -784,8 +784,8 @@ class JanitorContractCase(unittest.TestCase):
         known_larger = {
             "45": (
                 "vod_web: Playwright browsers plus an ffmpeg build; "
-                "release-check, nightly-deep, nightly-mutation: audited SDK export and shipping runtime CI images",
-                4,
+                "nightly-deep, nightly-mutation: audited SDK export and shipping runtime CI images",
+                3,
             ),
         }
 

@@ -121,13 +121,14 @@ CI passes the tag name automatically when it publishes an image.
    required checks, and merge it. The commit that lands it on `main` is the
    **release commit**: the first commit on `main`'s first-parent line whose
    `CHANGELOG.md` carries the dated `## [X.Y.Z]` heading. The next scheduled
-   release-readiness run (below) checks that commit out, runs
-   `make release-check` there, and pushes the annotated tag onto it only if it
-   is green, however many pull requests have merged on top of it since.
-   Tagging by hand remains possible and is the same act the workflow performs:
+   release-readiness run (below) confirms that commit landed with a green
+   `Main promotion gate` and pushes the annotated tag onto it, however many
+   pull requests have merged on top of it since. Nothing is retested to tag
+   it. Tagging by hand remains possible and is the same act the workflow
+   performs:
 
    ```sh
-   make release-check
+   python3 -m validation.release_evidence --sha <release commit>
    git tag -a v0.3.1 -m "v0.3.1"
    git push origin v0.3.1
    ```
@@ -147,7 +148,7 @@ CI passes the tag name automatically when it publishes an image.
 
 ### The weekly release tag
 
-Releases are cut **weekly, from a green scheduled run** — the cadence Paul
+Releases are cut **weekly, by a scheduled run** — the cadence Paul
 chose on 2026-09-23 ([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 §3.5 option (a)). `.github/workflows/release-readiness.yml` runs every Monday
 at 06:00 UTC and starts from `main`'s tip:
@@ -161,23 +162,18 @@ at 06:00 UTC and starts from `main`'s tip:
   fails, when that commit is not one the changelog describes: it does not
   declare the version, it still has entries under `[Unreleased]`, or `main`
   has since edited the release's section.
-- If a release is waiting, the run checks the release commit out and the gate
-  there is `make release-check`; if not, the gate on the tip is the same
-  `scripts/validate run --profile ci --all --strict` sweep, so every week
-  answers "is `main` releasable" whether or not anything is waiting.
-- Both checks build the checked-out commit's CI tooling on the media assets
-  selected by release publication, then run the resulting immutable image ID.
-  On amd64 this includes exporting and installing the audited Dolby media
-  package through `runtime-assets-dolby-amd64`; older sources without that
-  contract use `runtime-assets`:
-  `PLURX_FFMPEG`, `PLURX_FFPROBE` and bare shell commands all use the shipped
-  Jellyfin FFmpeg 8 executables. The host needs Docker and the Rust-suite
-  memory pool, with no host FFmpeg requirement. The source is mounted at its
-  host path so Android's sibling containers read the same checkout; checks
-  run as the runner user and reuse the bounded Cargo cache. The current
-  execution helper is retained before checking out a historical release.
-- Only when that gate is green, on a scheduled run, for a pending release,
-  does the `tag` job push the annotated tag, onto the release commit the gate
+- If a release is waiting, the run reads the evidence the release commit
+  already carries instead of retesting it (Paul, 2026-11-25: tested code is
+  tested once, when it merges). `python3 -m validation.release_evidence`
+  accepts the release commit only when it is a two-parent `scripts/land`
+  landing with one `Reviewed-on:` pull request and no `Landed-Untested:`
+  trailer, the forge reports that pull request merged as this commit from the
+  commit's second parent, and that head carries a green
+  `main fast lane / Main promotion gate` status. Anything else refuses, and
+  nothing is tagged. It runs in seconds on a general runner. If no release is
+  waiting, the run says so and stops; `main` is tested where it merges.
+- Only when that evidence is found, on a scheduled run, for a pending release,
+  does the `tag` job push the annotated tag, onto the release commit whose gate
   passed. The tag starts `ci.yml`'s full sweep and the image publication in
   step 6.
 

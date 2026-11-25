@@ -644,10 +644,8 @@ moves.
 `disk-gb` is a per-lane input and the janitor has one number for the host, so
 a lane asking for more than the janitor reserves keeps a band of its own.
 **`vod_web` asks for 45 G** for Playwright browsers and an ffmpeg build.
-**Release readiness's `release-check` also asks for 45 G** for its audited
-SDK package export, candidate-built shipping media/CI image, and full browser
-suite. Nightly deep validation and mutation also reserve 45 G for that
-same package export and shipping runtime build. All four lanes need this
+Nightly deep validation and mutation also reserve 45 G for their audited
+SDK package export and shipping runtime build. All three lanes need this
 room on top of the workspace; nothing reclaims the
 25–45 G gap on their behalf. Raising `REQUIRED_GB` to 45 would put it over
 half a 78 GB guest, so that demand would be reported and ignored. Placement
