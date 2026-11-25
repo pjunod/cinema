@@ -344,7 +344,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                 if name in {"package_smoke", "image", "platform"}:
                     self.assertIn("runs_on: '[\"ci-nonvoter-heavy-amd64\"]'", header)
                 else:
-                    expected_route = ("[incus, ci-nonvoter-heavy-amd64]" if name in {"deep-validation", "mutation"}
+                    expected_route = ("[incus, ci-nonvoter-heavy-amd64]"
+                                      if name in {"deep-validation", "mutation"}
                                       else self.COMPILE_ROUTE if name in self.COMPILE_JOBS else self.ROUTE)
                     self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [expected_route])
                     if "    container:\n" in header:
@@ -352,7 +353,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                             header, daemon_identity_mounts=(path, name) == (self.WORKFLOWS[0], "cluster_daemon")
                         )
                     else:
-                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main", "worker_control_proof"})
+                        self.assertIn(name, {"cluster_wal", "deep-validation", "mutation",
+                                             "publish_main", "worker_control_proof"})
                     if (path, name) in self.SIZED_JOBS:
                         self.assertNotIn("CARGO_BUILD_JOBS:", header)
                         self.assertIn("      - name: Size Cargo parallelism from the container's limits\n"

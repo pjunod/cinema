@@ -131,7 +131,9 @@ command = "make ci-rust-gate"
 profiles = ["ci"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 1800
+# The same suite as ci.yml:check, which needs its 180-minute budget on the
+# four-CPU nonvoter (run 7243 measured ~175 minutes).
+timeout_seconds = 10800
 
 [[checks]]
 id = "unit-core"
@@ -159,7 +161,10 @@ command = "make web-check"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node", "npm", "python3"]
 missing = "fail"
-timeout_seconds = 120
+# make web-check now runs the Node web suite, two browser checks and tsc: 94 s
+# on a fast workstation (2026-11-24), past 120 s in the release gate's
+# 3-CPU container. Five times the measured run.
+timeout_seconds = 480
 
 [[checks]]
 id = "web-layout"
@@ -588,6 +593,7 @@ paths = [
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
   "crates/plurx-core/src/store/source_checkpoints.sql",
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
+  "crates/plurx-core/src/store/encoded_output_publications.{rs,sql}",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
   "crates/plurx-core/src/store/quality_cancellation.rs",
@@ -735,11 +741,14 @@ paths = [
   "crates/plurx-core/src/store/applied_view.rs",
   "crates/plurx-core/src/store/playback_input_keys.rs",
   "crates/plurx-core/src/store/playback_input_keys.sql",
+  "crates/plurx-core/src/store/playback_device_caps.rs",
+  "crates/plurx-core/src/store/playback_device_caps.sql",
   "crates/plurx-core/src/store/playback_handoffs.sql",
   "crates/plurx-core/src/store/hiqlite_playback_handoffs.rs",
   "crates/plurx-core/src/store/sqlite/playback_handoffs.rs",
   "crates/plurx-core/tests/store_contract/library_schedule.rs",
   "crates/plurx-core/tests/store_contract/playback_handoffs.rs",
+  "crates/plurx-core/tests/store_contract/playback_device_caps.rs",
   "crates/plurx-core/tests/store_contract/applied_view.rs",
   "crates/plurxd/src/http/applied_settings_inventory.rs",
   "crates/plurxd/src/http/applied_route_inventory.rs",
@@ -795,6 +804,7 @@ paths = [
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
   "crates/plurx-core/src/store/source_checkpoints.sql",
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
+  "crates/plurx-core/src/store/encoded_output_publications.{rs,sql}",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
   "crates/plurx-core/src/store/hiqlite_annotations.rs",
@@ -857,6 +867,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "vendor/hiqlite/**",
   "vendor/hiqlite-wal/**",
+  "vendor/openraft/**",
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
@@ -1332,6 +1343,8 @@ paths = [
   "crates/plurxd/src/media_sessions/**",
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/playback_devices.rs",
+  "crates/plurxd/src/http/tests/playback_devices.rs",
   "crates/plurxd/src/http/hls/**",
   "crates/plurxd/src/http/tests/public_copy_wire.rs",
   "crates/plurxd/src/web/playback-policy.js",
@@ -1898,6 +1911,7 @@ paths = [
   "crates/plurx-core/tests/store_contract/sharing_receiver_sessions.rs",
   "crates/plurx-core/src/sharing_source_sessions.rs",
   "crates/plurx-core/src/store/sharing_source_sessions.rs",
+  "crates/plurx-core/src/store/sharing_source_layout.rs",
   "crates/plurx-core/src/store/sharing_source_ingress_custody.rs",
   "crates/plurx-core/src/store/sharing_source_schema.rs",
   "crates/plurx-core/src/store/sharing_source_legacy_schema.json",

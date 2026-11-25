@@ -315,6 +315,65 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
     .await;
 }
 
+/// A scanner verdict (`title_scan_refused`) fails the title job once, with
+/// attempts to spare, and closes only that probe revision under that
+/// scanner: a new scanner or a changed file demands the title again.
+#[tokio::test]
+async fn title_scan_refusal_settles_the_demand_until_the_source_or_scanner_changes() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed(&store, "title-refused").await;
+        let (demand, job) = active(&store, file.id, &scanner, 1_000).await;
+        assert!(
+            store
+                .settle_job(SettleJob {
+                    token: job.token.clone().expect("token"),
+                    settlement: JobSettlement::Fail {
+                        error_code: "title_scan_refused".into(),
+                    },
+                    now_ms: 1_001,
+                })
+                .await
+                .expect("verdict"),
+            "{backend}"
+        );
+        let failed = store
+            .background_job(&job.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(failed.state, JobState::Failed, "{backend}");
+        assert!(failed.failed_attempts < failed.attempt_limit, "{backend}");
+        assert_eq!(
+            failed.last_error_code.as_deref(),
+            Some("title_scan_refused")
+        );
+        let open = |scanner: String| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .dv_title_demands(&scanner, 0, 2_000)
+                    .await
+                    .expect("demands")
+                    .into_iter()
+                    .find(|d| d.file_id == file.id)
+            }
+        };
+        assert!(
+            open(scanner.clone()).await.is_none(),
+            "{backend}: the refused revision is not scanned again by the same scanner"
+        );
+        assert!(
+            open("b".repeat(64)).await.is_some(),
+            "{backend}: a new scanner demands the title again"
+        );
+        reprobe(&store, &file).await;
+        let reopened = open(scanner.clone()).await.expect("a changed file reopens");
+        assert!(reopened.probe_revision > demand.probe_revision, "{backend}");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn title_scheduler_yield_releases_resources_and_retains_exact_demand() {
     for_each_backend(|store, backend| async move {

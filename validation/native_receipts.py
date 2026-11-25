@@ -95,7 +95,13 @@ BUILD_SPECS = {
     # the paperwork help and comment, and make android-release hand the
     # host-derived build number to Gradle as a project property; no native
     # recipe changes.
-    'Makefile': '7d7b9cb5a429c7c185cb7d8cb23c5b42b60bee749c6097a071b469659b163e7a',
+    # C4 pre-vote (#1904) changes only cluster-wal-check: eight exact vendored
+    # hiqlite pre-vote tests, the vendored OpenRaft pre-vote module, and the
+    # OpenRaft snapshot regression run from vendor/openraft instead of the
+    # registry package located through cargo metadata; no native recipe changes.
+    # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
+    # the web-unit-check recipe (a Node web test); no native recipe changes.
+    'Makefile': '562fe36a23271d6bbf6654768af01d3fbf226bcaea9e9de1b8857f05e3f946b9',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
@@ -104,7 +110,8 @@ BUILD_SPECS = {
     # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
     # fingerprints and case compatibility. Resource, script, or flag changes
     # require a newly reviewed boundary, not counter normalization.
-    'clients/apple/project.yml': 'a7bc734f070f8001c1b8063ad1dcfac35e3448dec2f0bf24378e59abadb7ca7d',
+    # release: v0.9.1 changes only MARKETING_VERSION "0.9.0" -> "0.9.1".
+    'clients/apple/project.yml': '05b2c38d0513958e4edcc30eca9abaa749525be0f1099e3ffd9c0c03390135c2',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -143,7 +150,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "6727fdbb3e7cc765438b8978b8e3268785b9df1ea874b6affcd696e650af30a1"
+APPLE_PROJECT_SHAPE = "a8ff2ff4d55f5224a9b60e1432b39a2363e53901dae3967dadfd3e38614c27d8"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 

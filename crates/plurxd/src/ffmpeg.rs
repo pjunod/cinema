@@ -974,7 +974,7 @@ pub(crate) async fn held_source_index_probe_json(
     source: &std::fs::File,
     budget: Duration,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, HeldMetadataProbeError> {
     let document = held_source_probe_json_with_limits(
         source,
         Duration::from_secs(30).min(budget),
@@ -1010,12 +1010,36 @@ pub(crate) struct HeldPacketProbeRequest {
     pub packet_limit: Option<u32>,
 }
 
+/// Whether a probe child that exited with `status` was killed by a SIGKILL
+/// its runner did not send — the kernel's OOM killer, or an operator's stop
+/// from Activity (`http::system::stop_process`).
+///
+/// Every held-source probe runner here settles its own deadline and
+/// cancellation as an error before it has an exit status, so a SIGKILL
+/// status is never the runner's own. Either way it says nothing about the
+/// media: the same read may succeed later, and its retries stay bounded by
+/// the index retry window and attempt limit, as the index pipe's do.
+pub(crate) fn killed_externally(status: std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(libc::SIGKILL)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HeldPacketProbeError {
     Timeout,
     OutputLimit,
     Source(String),
     Process(String),
+    /// [`killed_externally`]: the probe was killed, not refused.
+    Interrupted(String),
 }
 
 impl HeldPacketProbeError {
@@ -1023,7 +1047,52 @@ impl HeldPacketProbeError {
         match self {
             Self::Timeout => "packet probe timed out".to_owned(),
             Self::OutputLimit => "packet probe exceeded its output bound".to_owned(),
-            Self::Source(reason) | Self::Process(reason) => reason.clone(),
+            Self::Source(reason) | Self::Process(reason) | Self::Interrupted(reason) => {
+                reason.clone()
+            }
+        }
+    }
+
+    fn exited(status: std::process::ExitStatus, stderr: &[u8]) -> Self {
+        let reason = format!(
+            "packet probe exited {status}: {}",
+            String::from_utf8_lossy(stderr).trim()
+        );
+        if killed_externally(status) {
+            Self::Interrupted(reason)
+        } else {
+            Self::Process(reason)
+        }
+    }
+}
+
+/// Why the held-source metadata probe returned no document.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HeldMetadataProbeError {
+    /// Its own deadline stopped it.
+    Timeout(String),
+    /// [`killed_externally`]: the probe was killed, not refused.
+    Interrupted(String),
+    Failed(String),
+}
+
+impl HeldMetadataProbeError {
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::Timeout(reason) | Self::Interrupted(reason) | Self::Failed(reason) => reason,
+        }
+    }
+}
+
+impl From<String> for HeldMetadataProbeError {
+    /// The bounded runner reports its own deadline in words
+    /// (`bounded_command_capture_cancellable`); every other text error is a
+    /// failure. An external kill never arrives as text: it is an exit status.
+    fn from(reason: String) -> Self {
+        if reason.contains("timed out after") {
+            Self::Timeout(reason)
+        } else {
+            Self::Failed(reason)
         }
     }
 }
@@ -1144,11 +1213,7 @@ pub(crate) async fn held_source_packet_probe_json(
             return Err(HeldPacketProbeError::OutputLimit);
         }
         if !output.status.success() {
-            return Err(HeldPacketProbeError::Process(format!(
-                "packet probe exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(HeldPacketProbeError::exited(output.status, &output.stderr));
         }
         return Ok(output.stdout);
     }
@@ -1177,10 +1242,7 @@ pub(crate) async fn held_source_packet_probe_json(
     let collected = tokio::time::timeout(timeout, collect).await;
     let result = match collected {
         Ok(Ok((stdout, _stderr, status))) if status.success() => Ok(stdout),
-        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::Process(format!(
-            "packet probe exited {status}: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        ))),
+        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::exited(status, &stderr)),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(HeldPacketProbeError::Timeout),
     };
@@ -1325,7 +1387,7 @@ async fn held_source_probe_json_with_limits(
     label: &'static str,
     work: crate::process_control::ChildWork,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, HeldMetadataProbeError> {
     if let Some(budget) = crate::background_jobs::source_budget() {
         let input = crate::source_input::SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(source)?,
@@ -1346,15 +1408,13 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
             input.url(),
         ]);
-        let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await;
+        let output = metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await;
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining held probe source input: {error}"))?;
         return String::from_utf8(output?.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into());
     }
 
     #[cfg(windows)]
@@ -1369,7 +1429,9 @@ async fn held_source_probe_json_with_limits(
             .map_err(|error| format!("reading reopened source identity: {error}"))?
             != held_identity
         {
-            return Err("held source path changed before FFprobe launch".to_owned());
+            return Err("held source path changed before FFprobe launch"
+                .to_owned()
+                .into());
         }
         let mut command = tokio::process::Command::new(ffprobe_bin());
         command.args([
@@ -1383,13 +1445,12 @@ async fn held_source_probe_json_with_limits(
         ]);
         command.arg(&source_path);
         let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await?;
+            metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
         if plurx_core::fs_secure::std_file_identity(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
         {
-            return Err("held source changed during FFprobe".to_owned());
+            return Err("held source changed during FFprobe".to_owned().into());
         }
         let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
             .map_err(|error| format!("reopening probed source path: {error}"))?;
@@ -1397,10 +1458,10 @@ async fn held_source_probe_json_with_limits(
             .map_err(|error| format!("reading probed source identity: {error}"))?
             != held_identity
         {
-            return Err("held source path changed during FFprobe".to_owned());
+            return Err("held source path changed during FFprobe".to_owned().into());
         }
         return String::from_utf8(output.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into());
     }
     #[cfg(unix)]
     {
@@ -1417,11 +1478,34 @@ async fn held_source_probe_json_with_limits(
             "/dev/fd/3",
         ]);
         let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await?;
+            metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
         String::from_utf8(output.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into())
     }
+}
+
+/// [`bounded_command_output_cancellable`] for the metadata probe, keeping
+/// the exit status long enough to tell a refusal from an external kill.
+async fn metadata_probe_output(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedOutput, HeldMetadataProbeError> {
+    let outcome =
+        bounded_command_capture_cancellable(command, timeout, max_bytes, label, cancel, work)
+            .await?;
+    if !outcome.status.success() {
+        let reason = format!("{label} exited {}", outcome.status);
+        return Err(if killed_externally(outcome.status) {
+            HeldMetadataProbeError::Interrupted(reason)
+        } else {
+            HeldMetadataProbeError::Failed(reason)
+        });
+    }
+    Ok(outcome.output?)
 }
 
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {

@@ -4831,6 +4831,7 @@ function detailHarness({ decisions = {}, admin = false } = {}) {
       shippedSource("trackChip"),
       shippedSource("trackFactRow"),
       shippedSource("preferredLanguageNote"),
+      shippedSource("playsOnRow"),
       shippedSource("analysisFileControl"),
       shippedSource("specBlock"),
       shippedBinding("let", "PREPLAY"),

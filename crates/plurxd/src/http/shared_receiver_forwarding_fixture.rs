@@ -95,11 +95,10 @@ async fn actual_nonowner_b(
         .await
         .expect("B worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    drop(worker_listener); // Preserve the chosen origin for the startup socket owner.
     let fixture = real_receiver_fixture_at(
         address,
         SourceFixtureMode::Copy,
-        worker_address,
+        worker_listener,
         fixture_body_budget,
     )
     .await;

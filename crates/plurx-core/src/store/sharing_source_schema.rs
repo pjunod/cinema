@@ -311,8 +311,6 @@ pub(crate) fn adaptive_predecessor_guard_for(
 
 // The Source layout statements are plain SQL; they live in the ungated
 // `sharing_source_layout` so SQLite-only tests build the same layout.
-#[cfg(test)]
-pub(crate) use super::sharing_source_layout::adaptive_layout_statements;
 pub(crate) use super::sharing_source_layout::{adaptive_layout_statements_for, layout_statements};
 
 #[cfg(test)]

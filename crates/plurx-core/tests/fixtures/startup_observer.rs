@@ -169,14 +169,20 @@ impl MeasuredPeers {
             .with_state(manager)
     }
 
+    /// Select `config`'s store, serving this node's clock on `clock_listener`
+    /// when one is given: the caller's socket bound to `config.server.bind`.
+    ///
+    /// The observer serves a duplicate, so the caller's socket stays bound
+    /// after [`Self::stop_node`] and the same listener serves a restart; the
+    /// port is never unbound for another socket to take.
     pub async fn select(
         &self,
         config: &Config,
-        bind_clock_listener: bool,
+        clock_listener: Option<&std::net::TcpListener>,
     ) -> Result<SelectedStore, StoreError> {
         let observer = MeasuredObserver {
             owner: self,
-            bind: bind_clock_listener.then_some(config.server.bind),
+            listener: clock_listener,
         };
         Box::pin(select_daemon_store_observing(config, Some(&observer))).await
     }
@@ -184,7 +190,7 @@ impl MeasuredPeers {
 
 struct MeasuredObserver<'a> {
     owner: &'a MeasuredPeers,
-    bind: Option<std::net::SocketAddr>,
+    listener: Option<&'a std::net::TcpListener>,
 }
 
 impl StartupClockObserver for MeasuredObserver<'_> {
@@ -194,9 +200,13 @@ impl StartupClockObserver for MeasuredObserver<'_> {
         node: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
         Box::pin(async move {
-            if let Some(bind) = self.bind {
-                let listener = tokio::net::TcpListener::bind(bind)
-                    .await
+            if let Some(owned) = self.listener {
+                let listener = owned
+                    .try_clone()
+                    .and_then(|listener| {
+                        listener.set_nonblocking(true)?;
+                        tokio::net::TcpListener::from_std(listener)
+                    })
                     .map_err(|error| StoreError::Database(error.to_string()))?;
                 let route = MeasuredPeers::route(manager.clone());
                 self.owner

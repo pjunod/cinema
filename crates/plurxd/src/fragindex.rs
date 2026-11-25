@@ -123,15 +123,9 @@ impl IndexFailure {
 }
 
 fn index_process_exit_failure(status: std::process::ExitStatus, rows: usize) -> IndexFailure {
-    #[cfg(unix)]
-    let interrupted = {
-        use std::os::unix::process::ExitStatusExt;
-        // Our deadline and cancellation are settled before this path. An
-        // external kill (for example an OOM) does not diagnose the media.
-        status.signal() == Some(libc::SIGKILL)
-    };
-    #[cfg(not(unix))]
-    let interrupted = false;
+    // Our deadline and cancellation are settled before this path. An
+    // external kill (for example an OOM) does not diagnose the media.
+    let interrupted = crate::ffmpeg::killed_externally(status);
     IndexFailure::new(
         IndexFailureCode::IndexProcessFailed,
         format!("index pipe exited with {status}"),
@@ -600,6 +594,18 @@ fn tail_packet_end(
         .map(|(minimum, maximum)| (minimum, maximum, count)))
 }
 
+/// A metadata probe that produced no document. Its deadline and an external
+/// kill are interruptions; anything else is the probe refusing this source.
+fn metadata_probe_failure(error: crate::ffmpeg::HeldMetadataProbeError) -> IndexFailure {
+    use crate::ffmpeg::HeldMetadataProbeError;
+    let (code, transient) = match &error {
+        HeldMetadataProbeError::Timeout(_) => (IndexFailureCode::IndexProbeTimeout, true),
+        HeldMetadataProbeError::Interrupted(_) => (IndexFailureCode::IndexProcessFailed, true),
+        HeldMetadataProbeError::Failed(_) => (IndexFailureCode::IndexProcessFailed, false),
+    };
+    IndexFailure::new(code, error.reason().to_owned(), 0).transient(transient)
+}
+
 fn packet_probe_failure(
     error: crate::ffmpeg::HeldPacketProbeError,
     stream_index: u32,
@@ -613,6 +619,9 @@ fn packet_probe_failure(
         crate::ffmpeg::HeldPacketProbeError::Source(_) => (IndexFailureCode::IndexSourceIo, true),
         crate::ffmpeg::HeldPacketProbeError::Process(_) => {
             (IndexFailureCode::IndexProcessFailed, false)
+        }
+        crate::ffmpeg::HeldPacketProbeError::Interrupted(_) => {
+            (IndexFailureCode::IndexProcessFailed, true)
         }
     };
     let mut failure = IndexFailure::new(code, error.reason(), 0).transient(transient);
@@ -2252,19 +2261,7 @@ async fn probe_completion_expectation_inner(
                 | std::io::ErrorKind::WouldBlock
         )));
     }
-    let raw = result.map_err(|reason| {
-        let timeout = reason.contains("timed out after");
-        IndexFailure::new(
-            if timeout {
-                IndexFailureCode::IndexProbeTimeout
-            } else {
-                IndexFailureCode::IndexProcessFailed
-            },
-            reason,
-            0,
-        )
-        .transient(timeout)
-    })?;
+    let raw = result.map_err(metadata_probe_failure)?;
     // The ride-along's ordinals come from this document — the probe of the
     // very descriptor the pass reads — and never from scan-time facts.
     let subtitle_tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);

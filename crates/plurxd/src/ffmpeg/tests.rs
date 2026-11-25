@@ -3022,3 +3022,51 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
         "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
     );
 }
+
+/// A metadata probe killed from outside (the host OOM killer, on lab5 on
+/// 2026-11-25) reports an interruption, not a refusal of the source: the
+/// runner's own deadline and cancellation never reach an exit status.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
+    async fn run(script: &str) -> Result<super::BoundedOutput, super::HeldMetadataProbeError> {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        super::metadata_probe_output(
+            command,
+            std::time::Duration::from_secs(10),
+            1024,
+            "index metadata probe",
+            None,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .await
+    }
+    assert_eq!(
+        run("kill -9 $$").await.err(),
+        Some(super::HeldMetadataProbeError::Interrupted(
+            "index metadata probe exited signal: 9 (SIGKILL)".into()
+        ))
+    );
+    assert!(matches!(
+        run("exit 1").await,
+        Err(super::HeldMetadataProbeError::Failed(_))
+    ));
+    assert!(run("exit 0").await.is_ok());
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command.args(["-c", "exec sleep 30"]);
+    let timed_out = super::metadata_probe_output(
+        command,
+        std::time::Duration::from_millis(100),
+        1024,
+        "index metadata probe",
+        None,
+        crate::process_control::ChildWork::background("test"),
+    )
+    .await
+    .err();
+    assert!(
+        matches!(timed_out, Some(super::HeldMetadataProbeError::Timeout(_))),
+        "{timed_out:?}"
+    );
+}

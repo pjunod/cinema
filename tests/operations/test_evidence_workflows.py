@@ -228,18 +228,27 @@ class EvidenceWorkflowCase(unittest.TestCase):
         fast = self.read(".github/workflows/main-fast-lane.yml")
         self.assertIn(
             "types: [opened, synchronize, reopened, ready_for_review, "
-            "converted_to_draft]",
+            "converted_to_draft, labeled]",
             fast,
         )
         self.assertIn("github.event.pull_request.draft == false", fast)
-        # The lane is not opt-in. It was `draft == false` AND a `fast-lane`
-        # label, and a PR could be marked ready, reviewed and merged without
-        # anyone applying it - which is how three lanes merged in one day with
-        # this workflow never having run, the third of them carrying a fix for
-        # what the first had shipped to the fleet. Draft is the only gate now,
-        # so an unlabelled PR cannot be a gateless one.
-        self.assertNotIn("labels.*.name", fast)
+        # The cheap gate is not opt-in. It was `draft == false` AND a
+        # `fast-lane` label, and a PR could be marked ready, reviewed and
+        # merged without anyone applying it - which is how three lanes merged
+        # in one day with this workflow never having run, the third of them
+        # carrying a fix for what the first had shipped to the fleet. Draft is
+        # the only gate on the cheap jobs, so an unlabelled PR is never an
+        # unchecked one. The one label the lane reads is `lane`, the request
+        # for the full run (docs/ci/REQUESTED-LANE.md), and `scripts/land`
+        # refuses a head whose promotion gate that request never made green.
         self.assertNotIn("'fast-lane'", fast)
+        self.assertEqual(fast.count("labels.*.name"), 1)
+        self.assertIn("contains(github.event.pull_request.labels.*.name, 'lane')", fast)
+        paperwork = fast[fast.index("\n  paperwork:\n"):fast.index("\n  scope:\n")]
+        self.assertIn("contains(github.event.pull_request.labels.*.name, 'lane')", paperwork)
+        # Without a label event, paperwork has no label condition at all.
+        self.assertIn("(github.event.action != 'labeled' && github.event.action != 'label_updated') ||",
+                      paperwork)
         # Ready is what starts it and draft is what stops it, so neither state
         # change depends on a human remembering a label.
         self.assertIn("ready_for_review", fast)

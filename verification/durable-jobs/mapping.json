@@ -99,7 +99,7 @@
         "table": "proposal \u00a74.1 shared queue adapter",
         "scope": "item",
         "item": "impl<T: QueueSql> BackgroundJobStore for T",
-        "item_sha256": "e8458a231c27bcd174613bbaf56930985f4f59e2dfa4a020123cc17364448a63"
+        "item_sha256": "862ac63de5a415557a2852a1ebd4720f0d292610096d4c44736585c1aaed9c8b"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
@@ -331,7 +331,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585",
         "scope": "item",
         "item": "impl HiqliteAuthStore > fn migrate_schema",
-        "item_sha256": "7fc00e34885f1331433bf9d24ad56f2e9a9e0e53ddd2367bc05ef7af433323ba"
+        "item_sha256": "e9bba141654b78dd1f1aaa0b09c2ea1aa416d1aedaa0270651da3071790a33a1"
       },
       {
         "anchor": "impl QueueSql for HiqliteAuthStore {",

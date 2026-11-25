@@ -53,6 +53,10 @@ Main fast-lane jobs test the PR head, not a merge preview. The
 records Paul's 2026-10-11 decision: a base-tip advance alone does not invalidate
 that execution. The live PR must still be open, ready, from the same head/base
 repositories, targeting `main`, and at the exact checkout/event/API-run head.
+The event is a `pull_request` run of `main-fast-lane.yml` for that PR; a
+requested lane ([REQUESTED-LANE.md](REQUESTED-LANE.md)) is a label event of
+that kind (payload action `label_updated`, or `labeled`), so it binds and
+adopts like a push (`main_preflight_adoption.PR_EVENT_ACTIONS`).
 Source cleanliness, first-attempt, API-origin and receipt input/provenance guards
 remain unchanged. This does not waive `AGENTS.md` integration requirements:
 assess and integrate required current-main changes before landing, retaining

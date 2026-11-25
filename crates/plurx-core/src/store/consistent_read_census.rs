@@ -63,7 +63,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Adaptive attempt/source/settings installation and the typed planning read;
     // fragment publication (#1827) checks its trigger shape before startup.
     // The encoded-output publication record settles its catalogue: one more.
-    ("hiqlite.rs", 88),
+    // Device capabilities (Curator ADR 0031 §5) check their shape and marker: two more.
+    ("hiqlite.rs", 90),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -100,8 +101,11 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
-    // Exact adaptive attempt reads and the maintenance layout guard.
-    ("hiqlite_sessions.rs", 39),
+    // Exact adaptive attempt reads and the maintenance layout guard. The
+    // claim's entry read answers its request row and whether the playback
+    // already exists in one read, so a reopen skips a write and a re-read;
+    // `request_row` keeps its other callers.
+    ("hiqlite_sessions.rs", 40),
     ("hiqlite_sharing.rs", 1),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
@@ -580,6 +584,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),
     ("offloaded_column_present", STARTUP),
+    ("playback_device_caps_shape", STARTUP),
     ("playback_handoffs_schema_version", STARTUP),
     ("playback_input_keys_shape", STARTUP),
     ("pointer_desired_revision_column_present", STARTUP),

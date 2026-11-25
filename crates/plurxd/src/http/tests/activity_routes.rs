@@ -29,11 +29,6 @@ async fn finalize_learner(
     }
 }
 
-fn free_address() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("owned cluster port");
-    listener.local_addr().expect("owned cluster address")
-}
-
 fn member_config(root: &Path) -> Config {
     let mut config = Config::default();
     config.storage.data_dir = root.to_owned();
@@ -220,7 +215,7 @@ fn committed_learner_and_maintenance_owner_admit_signed_activity_and_stop() {
             .expect("SQLite predecessor"),
         );
         let source = observed
-            .select(&source_config, false)
+            .select(&source_config, None)
             .await
             .expect("actual selected voter");
         let signer = source.membership_manager();
@@ -250,10 +245,12 @@ fn committed_learner_and_maintenance_owner_admit_signed_activity_and_stop() {
         let token_file = learner_root.path().join("join.token");
         std::fs::write(&token_file, format!("{}\n", token.token)).expect("owned join token file");
         let mut learner_config = member_config(learner_root.path());
-        learner_config.server.bind = free_address();
+        // The startup observer serves the learner's clock on this socket.
+        let learner_http = std::net::TcpListener::bind("127.0.0.1:0").expect("learner HTTP");
+        learner_config.server.bind = learner_http.local_addr().expect("learner HTTP address");
         learner_config.cluster.join_token_file = token_file;
         let learner = observed
-            .select(&learner_config, true)
+            .select(&learner_config, Some(&learner_http))
             .await
             .expect("actual committed learner");
         let owner = learner.identity.node_id.clone();

@@ -379,6 +379,29 @@ static void scene_pooling(void) {
   assert(refit_median(odd, 3) == 2);
 }
 
+
+// libdovi's delta-coded pivots against FFmpeg's absolute ones. The nine-pivot
+// luma curve is the one from frame 0 of a real P7 FEL title that the
+// element-wise comparison refused; two-pivot curves agree either way.
+static void pivot_cross_check_accumulates_libdovi_deltas(void) {
+  const uint16_t luma_deltas[9] = {0, 128, 128, 128, 128, 128, 128, 128, 127};
+  const uint16_t luma_absolute[9] = {0, 128, 256, 384, 512, 640, 768, 896, 1023};
+  assert(refit_pivots_agree(luma_deltas, 9, luma_absolute, 9));
+  assert(!refit_pivots_agree(luma_absolute, 9, luma_absolute, 9));
+  const uint16_t chroma[2] = {0, 1023};
+  assert(refit_pivots_agree(chroma, 2, chroma, 2));
+  uint16_t moved[9];
+  memcpy(moved, luma_absolute, sizeof(moved));
+  moved[4] = 513;
+  assert(!refit_pivots_agree(luma_deltas, 9, moved, 9));
+  assert(!refit_pivots_agree(luma_deltas, 8, luma_absolute, 9));
+  assert(!refit_pivots_agree(NULL, 9, luma_absolute, 9));
+  assert(!refit_pivots_agree(chroma, 1, chroma, 1));
+  const uint16_t overflow[2] = {65535, 1};
+  const uint16_t wrapped[2] = {65535, 0};
+  assert(!refit_pivots_agree(overflow, 2, wrapped, 2));
+}
+
 int main(int argc, char **argv) {
   assert(argc <= 2);
   general_formula_reduces_to_the_frozen_composition();
@@ -389,6 +412,7 @@ int main(int argc, char **argv) {
   lattice_and_pairing();
   statistics();
   scene_pooling();
+  pivot_cross_check_accumulates_libdovi_deltas();
   puts("refit-compose-pass");
   return 0;
 }

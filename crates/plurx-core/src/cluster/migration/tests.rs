@@ -1026,7 +1026,7 @@ mod restore_endpoints {
                 let context = candidate;
                 install_default_crypto_provider();
                 let source = source_directory();
-                let config = membership_test_config(source.path());
+                let mut config = membership_test_config(source.path());
                 if matches!(context.probe, Probe::Unknown | Probe::WrongEndpoint) {
                     let occupied = std::io::Error::from_raw_os_error(libc::EADDRINUSE);
                     let address = if context.probe == Probe::WrongEndpoint {
@@ -1049,11 +1049,17 @@ mod restore_endpoints {
                     );
                     std::process::exit(COLLISION);
                 }
+                // The collider is its own socket, and the source binds the
+                // Raft address it holds: the config's owned sockets are for
+                // another address, so this start binds rather than borrows.
                 let _collider = (context.probe == Probe::AlwaysCollision
                     || (context.probe == Probe::FirstCollision && context.attempt == 1))
                     .then(|| {
-                        std::net::TcpListener::bind(config.cluster.raft_bind)
-                            .expect("controlled real source collision")
+                        let collider = std::net::TcpListener::bind("127.0.0.1:0")
+                            .expect("controlled real source collision");
+                        config.cluster.raft_bind =
+                            collider.local_addr().expect("collision address");
+                        collider
                     });
                 drop(
                     SqliteStore::open(&source.path().join(SQLITE_FILENAME))
@@ -1540,7 +1546,7 @@ async fn restored_voter_join_fixture() {
         .await
         .expect("restore real snapshot");
     let restored = observed
-        .select(&target_config, false)
+        .select(&target_config, None)
         .await
         .expect("restored voter starts");
     let restored_client = restored.local_client().expect("restored client");
@@ -1588,16 +1594,14 @@ async fn restored_voter_join_fixture() {
     let token_path = joining_dir.path().join("join.token");
     std::fs::write(&token_path, format!("{}\n", issued.token)).expect("joining token file");
     let mut joining_config = membership_test_config(joining_dir.path());
-    joining_config.server.bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("joining clock bind");
+    let joining_config_http = owned_http_origin(&mut joining_config);
     joining_config.cluster.join_token_file = token_path;
     // Without a transferable snapshot the joiner never finishes opening
     // a store whose schema it was never sent; bound that instead of
     // hanging the suite.
     let joined = tokio::time::timeout(
         Duration::from_secs(90),
-        observed.select(&joining_config, true),
+        observed.select(&joining_config, Some(&joining_config_http)),
     )
     .await
     .expect("the joiner never finished joining the restored cluster")
@@ -2882,36 +2886,30 @@ fn readdress_directory_swap_recovers_both_crash_boundaries() {
         .exists());
 }
 
+/// A loopback address for a peer this test never starts, used only as that
+/// peer's identity. Each address is distinct from every other one this
+/// returns, but the port goes back to the ephemeral pool, so a later bind
+/// anywhere on the host may be given it: never connect to it expecting a
+/// refusal.
+/// A node the test does start owns its sockets instead, through
+/// [`membership_test_config`] and [`owned_http_origin`].
 #[cfg(feature = "hiqlite-store")]
-fn free_test_port() -> u16 {
-    static USED_PORTS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<u16>>> =
+fn unserved_test_address() -> std::net::SocketAddr {
+    static ISSUED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<u16>>> =
         std::sync::OnceLock::new();
 
     loop {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test port");
-        let port = listener.local_addr().expect("test port address").port();
-        let inserted = USED_PORTS
+        let address = listener.local_addr().expect("test port address");
+        let inserted = ISSUED
             .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
             .lock()
             .expect("test port registry")
-            .insert(port);
+            .insert(address.port());
         if inserted {
-            return port;
+            return address;
         }
     }
-}
-
-#[cfg(feature = "hiqlite-store")]
-#[test]
-fn membership_test_configs_do_not_reuse_released_ephemeral_ports() {
-    let dir = tempfile::tempdir().expect("unique membership port dir");
-    let mut ports = std::collections::BTreeSet::new();
-    for _ in 0..64 {
-        let config = membership_test_config(dir.path());
-        assert!(ports.insert(config.cluster.raft_bind.port()));
-        assert!(ports.insert(config.cluster.api_bind.port()));
-    }
-    assert_eq!(ports.len(), 128);
 }
 
 /// A fixture that reads a port from a listener and drops it can lose that
@@ -2937,12 +2935,8 @@ fn fresh_activation_serves_both_generations_on_the_config_owned_listeners() {
                 .block_on(Box::pin(async {
                     install_default_crypto_provider();
                     let dir = tempfile::tempdir().expect("owned-listener data dir");
-                    let mut config = membership_test_config(dir.path());
-                    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft");
-                    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API");
-                    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
-                    config.cluster.api_bind = api.local_addr().expect("owned API address");
-                    config.cluster.listeners = crate::config::ClusterListeners::owned(raft, api);
+                    let config = membership_test_config(dir.path());
+                    assert!(config.cluster.listeners.is_owned());
                     drop(
                         SqliteStore::open(&dir.path().join(SQLITE_FILENAME))
                             .expect("source SQLite"),
@@ -2963,20 +2957,35 @@ fn fresh_activation_serves_both_generations_on_the_config_owned_listeners() {
 }
 
 #[cfg(feature = "hiqlite-store")]
+/// A loopback node whose Raft and API sockets the config owns: every voter
+/// start from it, or from a clone of it, serves on those sockets, so neither
+/// port is unbound between choosing it and serving it. A test that needs a
+/// port released or refused takes the sockets back out
+/// (`config.cluster.listeners = ClusterListeners::default()`) once its voter
+/// holds its own duplicates, or points a bind at another socket.
 fn membership_test_config(data_dir: &Path) -> Config {
     let mut config = Config::default();
     config.storage.data_dir = data_dir.to_owned();
-    config.cluster.raft_bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("Raft bind");
-    config.cluster.api_bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("cluster API bind");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = crate::config::ClusterListeners::owned(raft, api);
     // `localhost` is reachable on this machine but is not parsed as a
     // loopback SocketAddr. Tests can therefore distinguish committed
     // advertised membership from the old hard-coded 127.0.0.1 record.
     config.cluster.advertise_host = "localhost".to_owned();
     config
+}
+
+/// Bind this node's HTTP origin and name it in `config.server.bind`. Hand
+/// the socket to the startup observer, which serves the node's clock on it,
+/// rather than letting it bind the address again.
+#[cfg(feature = "hiqlite-store")]
+fn owned_http_origin(config: &mut Config) -> std::net::TcpListener {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP origin");
+    config.server.bind = listener.local_addr().expect("owned HTTP origin address");
+    listener
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2993,7 +3002,7 @@ fn k06_post_client_cancellation_retains_actual_daemon_lock_until_tls_drain() {
                 .expect("build cleanup control runtime")
                 .block_on(Box::pin(async {
                     let root = tempfile::tempdir().expect("create owned fixture root");
-                    let config = membership_test_config(root.path());
+                    let mut config = membership_test_config(root.path());
                     let identity = super::super::initialize_identity(
                         root.path(),
                         &uuid::Uuid::now_v7().to_string(),
@@ -3019,6 +3028,10 @@ fn k06_post_client_cancellation_retains_actual_daemon_lock_until_tls_drain() {
                     ))
                     .await
                     .expect("start actual staged client");
+                    // The voter serves on its own duplicates now; give up the
+                    // config's, so the rebinds below prove the drain released
+                    // the ports.
+                    config.cluster.listeners = crate::config::ClusterListeners::default();
                     let pending = pending.expect("guard transferred from actual Client receipt");
                     let membership = client
                         .local_db_raft_metrics()
@@ -3280,7 +3293,7 @@ fn actual_live_source_activation_three_running_voters_preserves_local_renewal() 
                 .expect("baseline SQLite"),
         );
         let source = observed
-            .select(&config, false)
+            .select(&config, None)
             .await
             .expect("actual first voter");
         let manager = source.membership_manager();
@@ -3304,13 +3317,11 @@ fn actual_live_source_activation_three_running_voters_preserves_local_renewal() 
             let path = directory.path().join("join.token");
             std::fs::write(&path, format!("{}\n", token.token)).expect("isolated token file");
             let mut joined_config = membership_test_config(directory.path());
-            joined_config.server.bind = format!("127.0.0.1:{}", free_test_port())
-                .parse()
-                .expect("distinct node HTTP origin");
+            let joined_config_http = owned_http_origin(&mut joined_config);
             joined_config.cluster.join_token_file = path;
             members.push(
                 observed
-                    .select(&joined_config, true)
+                    .select(&joined_config, Some(&joined_config_http))
                     .await
                     .expect("actual joined voter"),
             );
@@ -4147,16 +4158,16 @@ async fn daemon_join_observation_fixture() {
     // membership.json, must become remotely usable without losing data.
     // A real daemon restart drops the old runtime and frees these ports;
     // this in-process test uses fresh ports because Hiqlite 0.14 leaves its
-    // TLS listener task alive until the test runtime itself exits.
-    source_config.cluster.raft_bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("readdressed Raft bind");
-    source_config.cluster.api_bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("readdressed cluster API bind");
+    // TLS listener task alive until the test runtime itself exits. The config
+    // owns the fresh sockets too, so the readdressed voter serves on them.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("readdressed Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("readdressed API port");
+    source_config.cluster.raft_bind = raft.local_addr().expect("readdressed Raft bind");
+    source_config.cluster.api_bind = api.local_addr().expect("readdressed cluster API bind");
+    source_config.cluster.listeners = crate::config::ClusterListeners::owned(raft, api);
     source_config.cluster.advertise_host = "localhost".to_owned();
     let source = observed
-        .select(&source_config, false)
+        .select(&source_config, None)
         .await
         .expect("readdress existing source voter");
     assert_eq!(source.identity.cluster_id, cluster_id);
@@ -4274,9 +4285,7 @@ async fn daemon_join_observation_fixture() {
     let token_path = joining_dir.path().join("join.token");
     std::fs::write(&token_path, format!("{}\n", issued.token)).expect("joining token file");
     let mut joining_config = membership_test_config(joining_dir.path());
-    joining_config.server.bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("joining clock bind");
+    let joining_config_http = owned_http_origin(&mut joining_config);
     joining_config.cluster.join_token_file = token_path.clone();
     let staged_identity =
         crate::cluster::initialize_join_identity(joining_dir.path(), &cluster_id, issued.raft_id)
@@ -4322,7 +4331,7 @@ async fn daemon_join_observation_fixture() {
         .await
         .expect("repeat the expired identity-bound redemption");
     let joined = observed
-        .select(&joining_config, true)
+        .select(&joining_config, Some(&joining_config_http))
         .await
         .expect("resume an expired identity-bound join through daemon store selection");
     assert_eq!(joined.identity.cluster_id, cluster_id);
@@ -5280,7 +5289,7 @@ async fn learner_join_observation_fixture() {
     source_config.cluster.join_url = format!("http://{coordinator_addr}");
     drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
     let source = observed
-        .select(&source_config, false)
+        .select(&source_config, None)
         .await
         .expect("activate the source voter");
     let coordinator = source.membership_manager();
@@ -5364,12 +5373,10 @@ async fn learner_join_observation_fixture() {
     let token_path = learner_dir.path().join("join.token");
     std::fs::write(&token_path, format!("{}\n", learner_token.token)).expect("learner token file");
     let mut learner_config = membership_test_config(learner_dir.path());
-    learner_config.server.bind = format!("127.0.0.1:{}", free_test_port())
-        .parse()
-        .expect("learner clock bind");
+    let learner_config_http = owned_http_origin(&mut learner_config);
     learner_config.cluster.join_token_file = token_path.clone();
     let learner = observed
-        .select(&learner_config, true)
+        .select(&learner_config, Some(&learner_config_http))
         .await
         .expect("admit the learner");
     assert_eq!(learner.identity.raft_id, learner_token.raft_id);
@@ -5555,7 +5562,7 @@ async fn learner_join_observation_fixture() {
     // Real shutdown drains the vendor listeners; restart observes the
     // actual cluster again without promoting the durable learner role.
     let restart = observed
-        .select(&learner_config, true)
+        .select(&learner_config, Some(&learner_config_http))
         .await
         .expect("restart the durable learner with real observation");
     assert_eq!(restart.identity.raft_id, learner_token.raft_id);

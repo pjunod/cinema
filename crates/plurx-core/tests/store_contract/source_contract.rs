@@ -70,7 +70,7 @@ impl SourceContractCluster {
         self.uncertain_selection_roots.push(first_dir.clone());
         let first = self
             .observed
-            .select(&config, false)
+            .select(&config, None)
             .await
             .expect("actual first selected voter");
         self.members.get_mut().push(first);
@@ -99,14 +99,15 @@ impl SourceContractCluster {
             std::fs::write(&path, format!("{}\n", token.token)).expect("isolated invitation file");
             let mut joined_config = one_voter_config(&directory);
             joined_config.cluster.advertise_host = "localhost".into();
-            joined_config.server.bind = format!("127.0.0.1:{}", contract_free_ports(1)[0])
-                .parse()
-                .expect("distinct clock listener");
+            // The startup observer serves this node's clock on the socket.
+            let clock =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("distinct clock listener");
+            joined_config.server.bind = clock.local_addr().expect("clock listener address");
             joined_config.cluster.join_token_file = path;
             self.uncertain_selection_roots.push(directory.clone());
             let member = self
                 .observed
-                .select(&joined_config, true)
+                .select(&joined_config, Some(&clock))
                 .await
                 .expect("actual joined running voter");
             self.members.get_mut().push(member);

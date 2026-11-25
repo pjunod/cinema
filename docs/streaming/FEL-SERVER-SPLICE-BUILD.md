@@ -79,4 +79,4 @@ cannot supply the next extent.
 
 The integration branch is `effort/fel-server-splice`. Use the project's
 [development pipeline](../DEVELOPMENT_PIPELINE.md) and
-[main landing procedure](../ci/MERGE-TRAIN.md#train-off--what-you-do-today). The owner directed use of the direct landing path for this effort.
+[main landing procedure](../ci/REQUESTED-LANE.md#how-a-session-lands). The owner directed use of the direct landing path for this effort.

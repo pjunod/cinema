@@ -128,6 +128,21 @@ fi
 [ -n "$FIXTURE_DOCKER_ROOT" ] || exit 1
 case "$1 $2" in
   "info --format") printf '%s\\n' "$FIXTURE_DOCKER_ROOT"; exit 0 ;;
+  # FIXTURE_VOLUMES: one `name created-at users` per line. `dangling=true`
+  # is applied here, from `users`, so the janitor's own filter is not the
+  # only thing standing between a mounted volume and `volume rm`.
+  "volume ls")
+    printf '%s\\n' "$FIXTURE_VOLUMES" | awk 'NF == 3 && $3 == 0 { print $1 }'
+    exit 0 ;;
+  "volume inspect")
+    for name do :; done
+    printf '%s\\n' "$FIXTURE_VOLUMES" | awk -v n="$name" '$1 == n { print $1, ($2 == "EMPTY" ? "" : $2) }'
+    exit 0 ;;
+  "volume rm")
+    printf '%s\\n' "$*" >> "$FIXTURE_DOCKER_LOG"
+    # Docker's own refusal: a volume a container uses is never removed.
+    printf '%s\\n' "$FIXTURE_VOLUMES" | awk -v n="$3" '$1 == n && $3 > 0 { bad = 1 } END { exit bad }'
+    exit $? ;;
 esac
 [ "$1" = info ] && exit 0
 printf '%s\\n' "$*" >> "$FIXTURE_DOCKER_LOG"
@@ -207,6 +222,7 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_FULL_PRUNE_MARK": str(fixture / "full-prune"),
                 "FIXTURE_AVAIL_AFTER_FULL_PRUNE_KB": "",
                 "FIXTURE_JOB_AFTER_PRUNE": "",
+                "FIXTURE_VOLUMES": "",
                 "FIXTURE_FS_KB": str(78 * 1024 * 1024),
                 "FIXTURE_AVAIL_KB": str(40 * 1024 * 1024),
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
@@ -489,6 +505,63 @@ class JanitorContractCase(unittest.TestCase):
         commands = Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
         self.assertIn("container prune -f --filter until=168h", commands)
 
+    def _orphan_volume_host(self):
+        """The 2026-11-25 `gha-lab6-general-02` shape: a busy host, inside its
+        reserve, carrying a dead job's workspace volume pair beside the live
+        job's own, the named BuildKit state, and a fresh pair being set up."""
+        old = "2026-11-20T18:22:01Z"
+        fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.environment["FIXTURE_DOCKER_ROOT"] = str(self.runner_root)
+        self.environment["FIXTURE_DOCKER_PS"] = (
+            "FORGEJO-ACTIONS-TASK-41039_WORKFLOW-ci_JOB-Rust-units"
+        )
+        self.environment["FIXTURE_VOLUMES"] = "\n".join(
+            (
+                f"15c2dfdc6b28c102718c7ac623a9d65a {old} 0",
+                f"15c2dfdc6b28c102718c7ac623a9d65a-env {old} 0",
+                f"a866cb0bf14a7e5a4738d90f482b0326 {old} 1",
+                f"a866cb0bf14a7e5a4738d90f482b0326-env {old} 1",
+                f"33bf885db66455efdc5308f989a4e1e1 {fresh} 0",
+                f"buildx_buildkit_plurx-gha-lab6-general-02-forgejo-runner0_state {old} 0",
+                f"{'e' * 64} {old} 0",
+                # A CreatedAt that never arrived is not "midnight today".
+                f"{'d' * 32} EMPTY 0",
+            )
+        )
+
+    def test_orphaned_job_volumes_are_reclaimed_while_another_job_runs(self):
+        """A dead job's workspace volumes are garbage under a name no job will
+        reuse; nothing else on this host ever deletes them."""
+        self._orphan_volume_host()
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        removed = [
+            line.split()[-1]
+            for line in Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
+            if line.startswith("volume rm ")
+        ]
+        self.assertEqual(
+            sorted(removed),
+            ["15c2dfdc6b28c102718c7ac623a9d65a", "15c2dfdc6b28c102718c7ac623a9d65a-env"],
+        )
+        self.assertIn("removed 2 orphaned job volumes", result.stdout)
+        self.assertEqual(self.last_run()["orphan_volumes"], 2)
+        # The busy-host guard still holds the age-bounded prune.
+        self.assertIn("leaving Docker for the next pass", result.stdout)
+
+    def test_dry_run_names_orphaned_job_volumes_and_removes_none(self):
+        self._orphan_volume_host()
+
+        result = self.run_janitor("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "would remove orphaned job volume 15c2dfdc6b28c102718c7ac623a9d65a-env", result.stdout
+        )
+        self.assertFalse(Path(self.environment["FIXTURE_DOCKER_LOG"]).exists())
+
     def _short_docker_host(self, avail_after_full_gb):
         # The 2026-11-22 shape: runner cache healthy, Docker on the runner
         # volume, 24G free against the 25G reserve, and nothing a week old.
@@ -699,9 +772,9 @@ class JanitorContractCase(unittest.TestCase):
         `vod_web` asks for 45 G because it carries Playwright browsers and an
         ffmpeg build on top of the workspace. Nothing reclaims the gap between
         25 G and 45 G on its behalf; that lane needs a runner with the room,
-        which is placement rather than pruning. `release-check` uses the same
-        45 G bar for the audited SDK export, candidate-built media/CI image,
-        and complete browser suite.
+        which is placement rather than pruning. Nightly deep validation and
+        mutation use the same 45 G bar for the audited SDK export and the
+        shipping runtime CI images.
 
         The exception is counted, not just named. Keying on the value alone
         let a *second*, unrelated lane copy `disk-gb: "45"` and pass in
@@ -711,8 +784,8 @@ class JanitorContractCase(unittest.TestCase):
         known_larger = {
             "45": (
                 "vod_web: Playwright browsers plus an ffmpeg build; "
-                "release-check, nightly-deep, nightly-mutation: audited SDK export and shipping runtime CI images",
-                4,
+                "nightly-deep, nightly-mutation: audited SDK export and shipping runtime CI images",
+                3,
             ),
         }
 
@@ -1367,8 +1440,12 @@ class MacosJanitorContractCase(unittest.TestCase):
         self.bin.mkdir()
         self.log = fixture / "launchctl.log"
         tools = {
+            # A plist file holding JSON speaks for itself; the others are the
+            # fixture's one runner.
             "plutil": (
-                "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_PLIST_JSON\"\n"
+                "#!/bin/sh\nfor file do :; done\n"
+                'case "$(head -c 1 "$file" 2>/dev/null)" in \'{\') cat "$file"; exit 0 ;; esac\n'
+                "printf '%s\\n' \"$FIXTURE_PLIST_JSON\"\n"
             ),
             "launchctl": (
                 "#!/bin/sh\n"
@@ -1400,7 +1477,14 @@ class MacosJanitorContractCase(unittest.TestCase):
             # reads `-f` as --file-system, so on a Linux runner the real binary
             # answers a "File: ..." block that bash then evaluates
             # arithmetically. Faked so the quiet window can be tested at all.
-            "stat": "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_WORK_MTIME\"\n",
+            # A work root named by FIXTURE_BUSY_WORK, or every root once
+            # FIXTURE_BUSY_MARK exists, was touched just now: a job is running.
+            "stat": (
+                "#!/bin/sh\nfor path do :; done\n"
+                'if [ -n "${FIXTURE_BUSY_MARK:-}" ] && [ -f "$FIXTURE_BUSY_MARK" ]; then date +%s; exit 0; fi\n'
+                'case "$path" in *"${FIXTURE_BUSY_WORK:-/nonexistent/}"*) date +%s; exit 0 ;; esac\n'
+                "printf '%s\\n' \"$FIXTURE_WORK_MTIME\"\n"
+            ),
         }
         for name, body in tools.items():
             path = self.bin / name
@@ -1633,6 +1717,145 @@ class MacosJanitorContractCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.launchctl_calls(), [])
         self.assertEqual(self.last_run()["recovered"], 0)
+
+    # The 2026-11-25 gha-maca-apple-01 shape: run 9462 failed on a full disk
+    # before its "Delete the run's simulators" step, and its three devices and
+    # two navigation-test devices stayed booted beside the operator's own.
+    LEFT_BEHIND = {
+        "plurx CI iPhone 9462-1": "E7D64A32-75AA-4B14-B16E-0F73ABFD7F86",
+        "plurx CI iPad 9462-1": "7FD2A3D0-4497-4DA8-80BF-7D8CB58014EE",
+        "plurx CI Apple TV 9462-1": "CF0534D7-F340-42BE-B4BC-77AD843AD701",
+        "Plurx navigation isolated": "0C205B25-0D80-429D-8008-10940DA817B4",
+    }
+    KEPT = {
+        "iPhone 17 Pro": "11111111-2222-3333-4444-555555555555",
+        "plurx CI iPhone draft": "66666666-7777-8888-9999-000000000000",
+        # A CI name, but created moments ago: no dead job is that young.
+        "plurx CI iPad 9500-1": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+    }
+
+    def with_simulators(self):
+        fixture = Path(self._directory.name)
+        self.simctl_log = fixture / "simctl.log"
+        devices = []
+        for name, udid in {**self.LEFT_BEHIND, **self.KEPT}.items():
+            device = fixture / "Devices" / udid
+            (device / "data").mkdir(parents=True)
+            if udid != self.KEPT["plurx CI iPad 9500-1"]:
+                old = time.time() - 6 * 3600
+                os.utime(device, (old, old))
+            devices.append(
+                {"name": name, "udid": udid, "state": "Booted", "dataPath": str(device / "data")}
+            )
+        tools = {
+            # Root runs the janitor and acts as the runner's user: the fake
+            # drops the sudo options and runs the command, and records who.
+            "sudo": (
+                "#!/bin/sh\n"
+                'while [ "$#" -gt 0 ]; do case "$1" in\n'
+                '  -u) printf \'as %s\\n\' "$2" >> "$FIXTURE_SIMCTL_LOG"; shift 2 ;;\n'
+                "  -*) shift ;; *) break ;; esac; done\n"
+                'exec "$@"\n'
+            ),
+            "xcrun": (
+                "#!/bin/sh\n"
+                'case "$2" in\n'
+                '  list) printf \'%s\\n\' "$FIXTURE_SIMCTL_JSON" ;;\n'
+                # A job that arrives mid-pass: the first shutdown starts it.
+                '  shutdown) [ -z "${FIXTURE_JOB_ON_SHUTDOWN:-}" ] || : > "$FIXTURE_BUSY_MARK"\n'
+                '    printf \'%s %s\\n\' "$2" "$3" >> "$FIXTURE_SIMCTL_LOG" ;;\n'
+                '  *) printf \'%s %s\\n\' "$2" "$3" >> "$FIXTURE_SIMCTL_LOG" ;;\n'
+                "esac\n"
+            ),
+        }
+        for name, body in tools.items():
+            path = self.bin / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+        self.environment["FIXTURE_SIMCTL_LOG"] = str(self.simctl_log)
+        self.environment["FIXTURE_BUSY_MARK"] = str(fixture / "busy")
+        self.environment["FIXTURE_SIMCTL_JSON"] = json.dumps(
+            {"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-2": devices}}
+        )
+        self.environment["FIXTURE_PLIST_JSON"] = self.plist_json().replace(
+            "{", '{"UserName":"githubrunner",', 1
+        )
+
+    def simctl_calls(self):
+        if not self.simctl_log.exists():
+            return []
+        return self.simctl_log.read_text(encoding="utf-8").splitlines()
+
+    def test_an_idle_runner_users_orphaned_ci_simulators_are_deleted(self):
+        self.with_simulators()
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.simctl_calls()
+        deleted = sorted(line.split()[1] for line in calls if line.startswith("delete "))
+        self.assertEqual(deleted, sorted(self.LEFT_BEHIND.values()))
+        self.assertIn("as githubrunner", calls)
+        self.assertNotIn("as root", calls)
+        self.assertEqual(self.last_run()["orphan_simulators"], 4)
+
+    def test_a_busy_runner_users_simulators_are_kept(self):
+        self.with_simulators()
+        self.environment["FIXTURE_PGREP_STATUS"] = "0"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c for c in self.simctl_calls() if not c.startswith("as ")], [])
+        self.assertIn("leaving its CI simulators for the next pass", result.stdout)
+        self.assertEqual(self.last_run()["orphan_simulators"], 0)
+
+    def test_a_busy_daemon_the_cache_pass_skips_still_holds_its_users_simulators(self):
+        """A second daemon of the same user with no cache server of its own is
+        skipped by every cache filter, and is the one running the job."""
+        self.with_simulators()
+        other = Path(self._directory.name) / "Users/githubrunner/forgejo-runner-mobile"
+        (other / "_work").mkdir(parents=True)
+        (self.daemons / "org.forgejo.actions.runner.plurx.gha-maca-mobile-01.plist").write_text(
+            json.dumps(
+                {
+                    "Label": "org.forgejo.actions.runner.plurx.gha-maca-mobile-01",
+                    "UserName": "githubrunner",
+                    "WorkingDirectory": str(other),
+                    "ProgramArguments": ["forgejo-runner", "daemon", "-c", str(other / "missing.yml")],
+                },
+                # `plutil -convert json` writes no spaces.
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        self.environment["FIXTURE_BUSY_WORK"] = str(other)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c for c in self.simctl_calls() if not c.startswith("as ")], [])
+        self.assertIn("leaving its CI simulators for the next pass", result.stdout)
+
+    def test_a_job_that_starts_mid_pass_stops_the_deletes(self):
+        self.with_simulators()
+        self.environment["FIXTURE_JOB_ON_SHUTDOWN"] = "1"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deleted = [c for c in self.simctl_calls() if c.startswith("delete ")]
+        self.assertEqual(len(deleted), 1)
+        self.assertIn("picked up a job", result.stdout)
+
+    def test_dry_run_names_orphaned_simulators_and_deletes_none(self):
+        self.with_simulators()
+
+        result = self.run_janitor("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would delete githubrunner's orphaned CI simulator", result.stdout)
+        self.assertEqual([c for c in self.simctl_calls() if not c.startswith("as ")], [])
 
 
 if __name__ == "__main__":

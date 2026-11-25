@@ -29,29 +29,9 @@ mod causal_tests {
         StartupMembershipAdmission,
     };
     use plurx_core::cluster::migration::select_daemon_store_observing;
-    use plurx_core::config::Config;
     use std::borrow::Cow;
     use std::sync::Arc;
     use std::time::Duration;
-
-    fn config(root: &std::path::Path) -> Config {
-        let held: Vec<_> = (0..3)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
-            .collect();
-        let addresses: Vec<_> = held
-            .iter()
-            .map(|socket| socket.local_addr().expect("owned fixture invariant"))
-            .collect();
-        let mut config = Config::default();
-        config.storage.data_dir = root.into();
-        config.server.bind = addresses[0];
-        config.cluster.raft_bind = addresses[1];
-        config.cluster.api_bind = addresses[2];
-        config.cluster.advertise_host = "localhost".into();
-        config.cluster.join_url = format!("http://{}", addresses[0]);
-        config.cluster.artwork_url = config.cluster.join_url.clone();
-        config
-    }
 
     fn clock_app(
         manager: MembershipManager,
@@ -169,14 +149,15 @@ mod causal_tests {
 
     async fn real_signed_learner_fixture() {
         let source_root = crate::test_tempdir().expect("owned leader root");
-        let source_config = config(source_root.path());
+        let (source_config, source_http) = crate::owned_loopback_config(source_root.path());
         drop(
             plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
                 .expect("schema"),
         );
-        let startup = Arc::new(crate::StartupObservationHttp::new(
-            source_config.server.bind,
-        ));
+        let startup = Arc::new(
+            crate::StartupObservationHttp::from_std_listener(source_http)
+                .expect("owned HTTP socket"),
+        );
         let selected = select_daemon_store_observing(
             &source_config,
             Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
@@ -191,7 +172,7 @@ mod causal_tests {
             .expect("real token");
         let payload = decode_join_token(&token.token).expect("owned token");
         let learner_root = crate::test_tempdir().expect("owned learner root");
-        let learner_config = config(learner_root.path());
+        let (learner_config, learner_socket) = crate::owned_loopback_config(learner_root.path());
         let learner_id = uuid::Uuid::new_v4().to_string();
         let (protocol_min, protocol_max) = payload.declared_protocol_range();
         leader
@@ -224,6 +205,20 @@ mod causal_tests {
             .map(hiqlite::Node::from)
             .collect();
         nodes.push(hiqlite::Node::from(&local));
+        // The learner starts directly, not through store selection, so it
+        // borrows the config's sockets itself instead of binding their ports.
+        let learner_listeners = learner_config
+            .cluster
+            .listeners
+            .lend(
+                learner_config.cluster.raft_bind,
+                learner_config.cluster.api_bind,
+            )
+            .expect("lend the learner's sockets")
+            .map(|owned| hiqlite::NodeListeners {
+                raft: owned.raft,
+                api: owned.api,
+            });
         let learner_client = tokio::time::timeout(
             Duration::from_secs(45),
             Box::pin(hiqlite::start_node_for_clock_observation(
@@ -232,6 +227,7 @@ mod causal_tests {
                     nodes,
                     listen_addr_api: Cow::Borrowed("127.0.0.1"),
                     listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                    listeners: learner_listeners,
                     data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
                     filename_db: Cow::Borrowed("clock-causal.db"),
                     secret_raft: payload.secrets().raft.clone(),
@@ -309,9 +305,9 @@ mod causal_tests {
             learner_id.clone(),
             learner_observer.clone(),
         );
-        let learner_listener = tokio::net::TcpListener::bind(learner_config.server.bind)
-            .await
-            .expect("learner HTTP");
+        learner_socket.set_nonblocking(true).expect("learner HTTP");
+        let learner_listener =
+            tokio::net::TcpListener::from_std(learner_socket).expect("learner HTTP");
         let learner_http = {
             let stop = stop.clone();
             let app = learner_app.clone();

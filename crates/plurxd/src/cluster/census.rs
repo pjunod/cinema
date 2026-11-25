@@ -27,9 +27,12 @@
 //!
 //! What it reads: this crate's production `src/`, and the `pub` fields,
 //! aliases and functions of every other workspace and vendored crate's
-//! `src/` (each must parse). What it cannot see: a raw handle reached only
-//! through a generic or trait-object receiver whose method names are not
-//! the manager's, where nothing names, declares or returns the raw type.
+//! `src/` (each must parse). A crate this one's manifest does not name (as
+//! OpenRaft, reached only through Hiqlite) cannot have its type parameters
+//! chosen here, so its generic fields count as resolved. What it cannot see:
+//! a raw handle reached only through a generic or trait-object receiver whose
+//! method names are not the manager's, where nothing names, declares or
+//! returns the raw type.
 //!
 //! Spellings are classified by what the sources declare ([`Declarations`]): a
 //! field spelling counts unless every declaration of that name has a proven
@@ -435,6 +438,20 @@ impl Declarations {
     }
 
     fn read(&mut self, source: &str, scope: Scope) {
+        self.read_with(source, scope, false);
+    }
+
+    /// Read a dependency this crate's manifest does not name. Its type
+    /// parameters are not unresolved here: this crate cannot write its types,
+    /// so their arguments are the ones chosen by the crates it does name
+    /// (OpenRaft's `Membership<NID, N>` reaches plurxd only as Hiqlite's
+    /// `Membership<u64, Node>`). A raw type, an alias of one, `impl Trait`,
+    /// `dyn` and `_` still count.
+    fn read_unnameable(&mut self, source: &str) {
+        self.read_with(source, Scope::Dependency, true);
+    }
+
+    fn read_with(&mut self, source: &str, scope: Scope, fixed_generics: bool) {
         let Ok(file) = syn::parse_file(source) else {
             assert!(scope == Scope::Dependency, "a production file parses");
             self.unparsed += 1;
@@ -444,6 +461,7 @@ impl Declarations {
             declarations: self,
             scope,
             generics: Vec::new(),
+            fixed_generics,
             trait_impl: false,
             raw_impl: false,
         };
@@ -545,6 +563,9 @@ struct DeclarationReader<'d> {
     declarations: &'d mut Declarations,
     scope: Scope,
     generics: Vec<BTreeSet<String>>,
+    /// A crate this one cannot name: its type parameters are fixed by the
+    /// crates that expose its types, so they are not recorded as unresolved.
+    fixed_generics: bool,
     /// Inside `impl Trait for X`, whose functions are as visible as the trait.
     trait_impl: bool,
     /// Inside an `impl` of a raw type: its methods need a raw receiver, which
@@ -555,7 +576,7 @@ struct DeclarationReader<'d> {
 impl DeclarationReader<'_> {
     fn with_generics(&mut self, generics: &syn::Generics, visit: impl FnOnce(&mut Self)) {
         let mut names = self.generics.last().cloned().unwrap_or_default();
-        for param in generics.type_params() {
+        for param in generics.type_params().filter(|_| !self.fixed_generics) {
             names.insert(param.ident.to_string());
         }
         self.generics.push(names);
@@ -580,7 +601,7 @@ impl DeclarationReader<'_> {
         };
         if let (true, syn::ReturnType::Type(_, ty)) = (visible, &sig.output) {
             let mut generics = self.generics.last().cloned().unwrap_or_default();
-            for param in sig.generics.type_params() {
+            for param in sig.generics.type_params().filter(|_| !self.fixed_generics) {
                 generics.insert(param.ident.to_string());
             }
             self.declarations.pending_returns.push((
@@ -1082,12 +1103,56 @@ fn census_with(
     counter.counts
 }
 
+/// The packages this crate's manifest names as production dependencies, in
+/// `[dependencies]` and every `[target.*.dependencies]`.
+fn nameable_packages() -> BTreeSet<String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest: toml::Table = std::fs::read_to_string(&manifest)
+        .expect("read this crate's manifest")
+        .parse()
+        .expect("this crate's manifest parses");
+    let mut tables = vec![manifest.get("dependencies")];
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        tables.extend(targets.values().map(|target| target.get("dependencies")));
+    }
+    let mut names = BTreeSet::new();
+    for table in tables
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+    {
+        for (key, value) in table {
+            let package = value
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(key);
+            names.insert(package.to_owned());
+        }
+    }
+    names
+}
+
+/// The `[package] name` of the crate whose `src/` is `src`.
+fn package_name(src: &Path) -> String {
+    let manifest = src.parent().expect("a crate directory").join("Cargo.toml");
+    let manifest: toml::Table = std::fs::read_to_string(&manifest)
+        .expect("read a dependency manifest")
+        .parse()
+        .expect("a dependency manifest parses");
+    manifest["package"]["name"]
+        .as_str()
+        .expect("a package name")
+        .to_owned()
+}
+
 /// Production sources of every other workspace and vendored crate, whose
-/// `pub` fields this crate can reach.
-fn dependency_sources() -> Vec<String> {
+/// `pub` fields this crate can reach, each with whether this crate's manifest
+/// names its package (see [`Declarations::read_unnameable`]).
+fn dependency_sources() -> Vec<(String, bool)> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
         .expect("the crate directory");
+    let nameable = nameable_packages();
     let mut roots = Vec::new();
     for parent in [manifest.join(".."), manifest.join("../../vendor")] {
         for entry in std::fs::read_dir(&parent).expect("a workspace crate directory") {
@@ -1096,12 +1161,13 @@ fn dependency_sources() -> Vec<String> {
                 continue;
             };
             if path.is_dir() && !path.starts_with(&manifest) {
-                roots.push(path);
+                let named = nameable.contains(&package_name(&path));
+                roots.push((path, named));
             }
         }
     }
     let mut sources = Vec::new();
-    while let Some(directory) = roots.pop() {
+    while let Some((directory, named)) = roots.pop() {
         for entry in std::fs::read_dir(&directory).expect("a source directory") {
             let path = entry.expect("a source entry").path();
             let stem = path
@@ -1110,17 +1176,28 @@ fn dependency_sources() -> Vec<String> {
                 .unwrap_or("");
             if path.is_dir() {
                 if stem != "tests" {
-                    roots.push(path);
+                    roots.push((path, named));
                 }
             } else if path.extension().is_some_and(|ext| ext == "rs")
                 && stem != "tests"
                 && !stem.ends_with("_tests")
             {
-                sources.push(std::fs::read_to_string(&path).expect("read a dependency source"));
+                let source = std::fs::read_to_string(&path).expect("read a dependency source");
+                sources.push((source, named));
             }
         }
     }
     sources
+}
+
+fn read_dependencies(declarations: &mut Declarations) {
+    for (source, named) in dependency_sources() {
+        if named {
+            declarations.read(&source, Scope::Dependency);
+        } else {
+            declarations.read_unnameable(&source);
+        }
+    }
 }
 
 type Census = BTreeMap<(String, Class), usize>;
@@ -1153,9 +1230,7 @@ fn census() -> Census {
         };
         declarations.read(source, scope);
     }
-    for source in dependency_sources() {
-        declarations.read(&source, Scope::Dependency);
-    }
+    read_dependencies(&mut declarations);
     declarations.finish();
     let mut census = Census::new();
     for (rel, source) in &files {
@@ -1578,14 +1653,66 @@ fn inferred_bindings_projections_and_facade_children_are_counted() {
     );
 }
 
+/// A crate this one cannot name fixes its own type parameters only through
+/// the crates that expose its types, so its generic fields do not make a
+/// field name unresolved; a raw type there still does, and a named crate's
+/// generic field still does.
+#[test]
+fn an_unnameable_crate_s_generic_fields_are_resolved() {
+    let site = "fn f(r: &Response) -> usize { r.membership.len() }";
+    let generic = "pub struct Response<N> { pub membership: Membership<N> }";
+    let proven = "pub struct Row { pub membership: Status }";
+
+    let mut unnamed = Declarations::default();
+    unnamed.read(proven, Scope::Daemon);
+    unnamed.read_unnameable(generic);
+    unnamed.finish();
+    assert_eq!(
+        census_with(site, &unnamed, false).get(&Class::Membership),
+        None,
+        "an unnameable crate's generic field is fixed by the crate that exposes it"
+    );
+
+    let mut named = Declarations::default();
+    named.read(proven, Scope::Daemon);
+    named.read(generic, Scope::Dependency);
+    named.finish();
+    assert_eq!(
+        census_with(site, &named, false).get(&Class::Membership),
+        Some(&1),
+        "a named crate's generic field can be instantiated here, so it counts"
+    );
+
+    let mut raw = Declarations::default();
+    raw.read(proven, Scope::Daemon);
+    raw.read_unnameable("pub struct Holder { pub membership: MembershipManager }");
+    raw.finish();
+    assert_eq!(
+        census_with(site, &raw, false).get(&Class::Membership),
+        Some(&1),
+        "a raw type in an unnameable crate still counts"
+    );
+}
+
+/// Every vendored crate plurxd names directly is read as nameable, and
+/// OpenRaft, which it reaches only through Hiqlite, is not.
+#[test]
+fn nameable_packages_follow_this_crate_s_manifest() {
+    let names = nameable_packages();
+    assert!(names.contains("hiqlite"), "plurxd names hiqlite");
+    assert!(names.contains("plurx-core"), "plurxd names plurx-core");
+    assert!(
+        !names.contains("openraft"),
+        "plurxd reaches openraft only through hiqlite"
+    );
+}
+
 /// Every other workspace and vendored crate's source is read, so no `pub`
 /// raw field or accessor hides in a file the census skipped.
 #[test]
 fn every_dependency_source_parses() {
     let mut declarations = Declarations::default();
-    for source in dependency_sources() {
-        declarations.read(&source, Scope::Dependency);
-    }
+    read_dependencies(&mut declarations);
     assert_eq!(
         declarations.unparsed, 0,
         "a dependency source did not parse"

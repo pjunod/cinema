@@ -11,11 +11,25 @@ import tempfile
 import unittest
 from unittest import mock
 
+import private_temp
+
 ROOT = Path(__file__).resolve().parents[2]
 loader = importlib.machinery.SourceFileLoader("macos_daemon_package_test", str(ROOT / "scripts/package-macos"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 TOOL = importlib.util.module_from_spec(spec)
 loader.exec_module(TOOL)
+
+
+_restore_tempdir = None
+
+
+def setUpModule():
+    global _restore_tempdir
+    _restore_tempdir = private_temp.move_out_of_refused_roots()
+
+
+def tearDownModule():
+    _restore_tempdir()
 
 
 class MacosDaemonPackageCase(unittest.TestCase):
@@ -47,6 +61,17 @@ class MacosDaemonPackageCase(unittest.TestCase):
         self.daemon = self.root / "plurxd"
         self.daemon.write_bytes(b"original daemon")
         self.output = self.root / "candidate"
+
+    def test_assembly_refuses_every_installed_root(self):
+        for root in TOOL.INSTALLED_ROOTS:
+            with self.subTest(root), self.assertRaisesRegex(ValueError, "installed/global"):
+                TOOL.assemble(self.daemon, self.package, Path(root) / "plurx-candidate-never-created", "-")
+
+    def test_fixtures_stay_outside_the_installed_roots(self):
+        """Every other case must reach the refusal it is about, whatever TMPDIR is."""
+        self.assertFalse(any(self.output.resolve().is_relative_to(Path(p)) for p in TOOL.INSTALLED_ROOTS),
+                         self.output)
+        self.assertTrue(set(TOOL.INSTALLED_ROOTS) <= set(private_temp.REFUSED_ROOTS))
 
     def test_runtime_self_test_attribution_is_distributed_with_native_package(self):
         stage = self.root / "legal-stage"

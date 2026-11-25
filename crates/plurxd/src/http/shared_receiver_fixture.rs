@@ -40,7 +40,7 @@ pub(crate) fn real_receiver_fixture(
 fn real_receiver_fixture_at(
     address: IpAddr,
     mode: SourceFixtureMode,
-    advertised_http: std::net::SocketAddr,
+    advertised_http: tokio::net::TcpListener,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealReceiverFixture> + Send>> {
     Box::pin(build_receiver_fixture(
@@ -53,17 +53,22 @@ fn real_receiver_fixture_at(
 async fn build_receiver_fixture(
     address: IpAddr,
     mode: SourceFixtureMode,
-    advertised_http: Option<std::net::SocketAddr>,
+    advertised_http: Option<tokio::net::TcpListener>,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealReceiverFixture {
     let directory = crate::test_tempdir().expect("real B directory");
+    // The startup socket owner serves on the caller's bound HTTP socket, so
+    // the advertised origin is never unbound before it serves.
+    let advertised_address = advertised_http
+        .as_ref()
+        .map(|listener| listener.local_addr().expect("advertised HTTP address"));
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    if let Some(address) = advertised_http {
+    if let Some(address) = advertised_address {
         config.server.bind = address;
         config.cluster.artwork_url = format!("http://{address}");
     }
-    let cluster_address = advertised_http.map_or(
+    let cluster_address = advertised_address.map_or(
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         |http| http.ip(),
     );
@@ -71,7 +76,7 @@ async fn build_receiver_fixture(
     let api = std::net::TcpListener::bind((cluster_address, 0)).expect("B API port");
     config.cluster.raft_bind = raft.local_addr().expect("B Raft address");
     config.cluster.api_bind = api.local_addr().expect("B API address");
-    config.cluster.advertise_host = if advertised_http.is_some() {
+    config.cluster.advertise_host = if advertised_address.is_some() {
         cluster_address.to_string()
     } else {
         "localhost".to_owned()
@@ -79,8 +84,11 @@ async fn build_receiver_fixture(
     // Keep the bound sockets: the voter serves on them, so no other socket
     // can take either port before it starts.
     config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
-    let startup_clock =
-        advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
+    let startup_clock = advertised_http.map(|listener| {
+        Arc::new(
+            crate::StartupObservationHttp::from_listener(listener).expect("advertised HTTP socket"),
+        )
+    });
     let mut selected = if let Some(clock) = &startup_clock {
         Box::pin(select_daemon_store_observing(
             &config,
