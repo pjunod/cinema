@@ -1,10 +1,12 @@
 # Media I/O isolation: a hung media mount must not stop the daemon
 
+**Status:** built · owned by Claude · **Updated:** 2026-11-25 · **Source baseline:** `origin/main` at `a4b447370`
+
 Effort E-08DAF9B91B, related to E-E154B131A2 (Raft cluster rebuild, audit C4/R1).
 
 ## 1. What happened
 
-On 2026-11-23 at 20:22:54Z, voter-a's host (nynuc) lost carrier on its only
+On 2026-11-23 at 20:22:54Z, voter-a's host (media1) lost carrier on its only
 route to the NFSv4.1 media server (`hard,timeo=600,retrans=2`). From 20:23:06
 to 20:24:30Z, plurxd stopped running everything for 84.85 s. Raft receive
 handlers did not run while the leader kept sending. The serving monitor woke
@@ -177,6 +179,6 @@ is on time only because nothing hung fails the test.
 
 - Pre-vote, so that a stalled voter cannot depose a healthy leader (R1,
   E-E154B131A2).
-- nynuc's `enp46s0` link flapping. That is physical infrastructure (Paul).
+- media1's `enp46s0` link flapping. That is physical infrastructure (Paul).
 - The 23:19 leader stall. enp46s0 was up at the time, so it has a different
   cause.
