@@ -33,7 +33,7 @@ pub struct SpliceVideoRendition<'a> {
 }
 
 /// The HDR10 static SEI values one ordinary copy segment carries in band.
-/// A replacement for that segment must carry the same values or none.
+/// A replacement for that segment may carry only the same values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopyStaticMetadata(BTreeMap<u16, Vec<u8>>);
 
@@ -305,8 +305,9 @@ impl<'a> SpliceVideoRendition<'a> {
     /// its promotion is withheld from a Dolby Vision sample entry. The source's
     /// own mastering-display and light-level SEI then travel only in band.
     /// The ordinary copy keeps them exactly as the muxed layout serves them.
-    /// A replacement must repeat the values of the copy it replaces, so the
-    /// published rendition never changes its static metadata.
+    /// A replacement may only repeat the values of the copy it replaces, so
+    /// the published rendition never carries different static metadata.
+    /// Omitting them is still admitted, as it was before this check existed.
     fn static_sei_admitted(&self, kind: u16, data: &[u8]) -> bool {
         if static_metadata_size(kind).is_none() {
             return true;
