@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-19, plurx has 443 routes declared by the ordinary listener's
+As of 2026-11-25, plurx has 444 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 443 routes across the registered routers.
+plurx has 444 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -991,6 +991,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
+| POST | `/api/v1/items/{id}/m7/reevaluate` | admin | Forgets the item's recorded M7 outcomes so the idle title sweep evaluates them again; 409 when M7 is not configured |
 | POST | `/api/v1/items/{id}/refresh-artwork` | admin | Forces an artwork re-fetch for the item and its ancestors |
 | GET | `/api/v1/items/{id}/photo` | bearer | Original photo bytes with range support, or the thumbnail |
 | GET | `/api/v1/hubs` | bearer | Home rows: continue watching, next up, recently added |
@@ -1378,6 +1379,13 @@ overwritten by the next refresh. Its fields are doubly optional — absent means
 `POST /items/{id}/reanalyze` re-runs ffprobe over **every** file on the item,
 not only the failed ones, synchronously, and returns
 `{attempted, repaired, still_failing, gone, problems}`.
+
+`POST /items/{id}/m7/reevaluate` forgets the M7 outcome recorded for each of
+the item's Dolby Vision title generations and returns `{cleared}`, how many it
+forgot. It does not run M7: the idle title sweep reopens those titles (and any
+title with no record yet) under the running M7 identity while no other title
+work waits. A server without an M7 experiment directory answers 409 with "M7
+is not configured on this server".
 
 ### 6.7 Images
 
