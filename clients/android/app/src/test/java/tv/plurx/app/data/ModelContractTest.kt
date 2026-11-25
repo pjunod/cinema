@@ -107,6 +107,14 @@ class ModelContractTest {
         assertEquals("selected", defaults.audio.preferred_language_status)
         assertEquals(2L, defaults.subtitle.selected_index)
         assertEquals("eng", defaults.subtitle.preferred_language)
+
+        // A version's Dolby Vision line and how it plays, as the version
+        // picker and detail card show them.
+        val file = fixture.item_detail.files.single()
+        assertEquals(7, file.dv_profile)
+        assertEquals("Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base", file.dv_facts)
+        assertEquals("EL dropped · plays as 8.1", file.plays_on.single().label)
+        assertTrue(file.plays_on.single().el_dropped)
     }
 
     @Test
@@ -190,6 +198,44 @@ class ModelContractTest {
         )
         assertNull(old.files.single().playback_defaults)
         assertEquals(emptyList<SubtitleStream>(), old.files.single().subtitle_streams)
+    }
+
+    /**
+     * A version's Dolby Vision arrives as the flat `dv_*` fields `FileDto`
+     * sends, with the server's one-line wording and how it plays on each
+     * device; a file without Dolby Vision omits all of them.
+     */
+    @Test
+    fun itemDetailCarriesEachVersionsDolbyVisionAndHowItPlays() {
+        val detail = json.decodeFromString<ItemDetail>(
+            """{
+              "item": {"id": 9, "kind": "movie", "title": "Two versions"},
+              "files": [{
+                "id": 90, "filename": "uhd-fel.mkv",
+                "dv_profile": 7, "dv_level": 6, "dv_bl_compat_id": 6,
+                "dv_el_present": true, "dv_el_kind": "fel",
+                "dv_facts": "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base",
+                "plays_on": [
+                  {"id": "abc", "device": "Phone", "client": "plurx-android",
+                   "label": "EL dropped · plays as 8.1", "method": "remux",
+                   "el_dropped": true, "full_quality": false}
+                ]
+              }, {"id": 91, "filename": "1080p.mkv"}]
+            }""".trimIndent(),
+        )
+        val fel = detail.files.first()
+        assertEquals(7, fel.dv_profile)
+        assertEquals(6, fel.dv_bl_compat_id)
+        assertEquals("fel", fel.dv_el_kind)
+        assertEquals("Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base", fel.dv_facts)
+        val phone = fel.plays_on.single()
+        assertEquals("Phone", phone.device)
+        assertTrue(phone.el_dropped)
+        assertFalse(phone.full_quality)
+        val sdr = detail.files.last()
+        assertNull(sdr.dv_profile)
+        assertNull(sdr.dv_facts)
+        assertEquals(emptyList<PlaysOnDto>(), sdr.plays_on)
     }
 
     /**
@@ -366,12 +412,13 @@ class ModelContractTest {
 
         // The source profile comes off the FILE row, not the decision's
         // summary — the two carry it under different names, and the badge
-        // reads the file.
+        // reads the file. `FileDto` sends the facts flat, as `dv_*`.
         val row = json.decodeFromString<MediaFileDto>(
             """{"id": 6041, "filename": "dv.mkv", "hdr": "dolby_vision",
-                "dolby_vision": {"profile": 7, "bl_compat_id": 1}}""".trimIndent(),
+                "dv_profile": 7, "dv_bl_compat_id": 1}""".trimIndent(),
         )
-        assertEquals(7, row.dolby_vision?.profile)
+        assertEquals(7, row.dv_profile)
+        assertEquals(1, row.dv_bl_compat_id)
 
         // A session reporting a range and NO profile. This is the one that
         // matters most and the one that fails silently: the legacy copy path
@@ -388,20 +435,21 @@ class ModelContractTest {
         assertEquals("hdr10", fellBack.delivered_dynamic_range)
         assertNull(fellBack.delivered_dolby_vision_profile)
 
-        // A row scanned before the Dolby Vision columns existed sends no
-        // object at all, and a row scanned after but with nothing to say sends
-        // one full of nulls. Neither may fail to parse: a client that cannot
+        // A row scanned before the Dolby Vision columns existed sends none of
+        // the `dv_*` fields, and a proxy or older server may send them as
+        // explicit nulls. Neither may fail to parse: a client that cannot
         // decode a response over a missing optional field cannot play anything
         // at all on that server.
         val bareRow = json.decodeFromString<MediaFileDto>(
             """{"id": 1, "filename": "old.mkv", "hdr": "dolby_vision",
                 "hdr_format": "Dolby Vision"}""".trimIndent(),
         )
-        assertNull(bareRow.dolby_vision)
-        val emptyFacts = json.decodeFromString<MediaFileDto>(
-            """{"id": 2, "filename": "new.mkv", "dolby_vision": {}}""",
+        assertNull(bareRow.dv_profile)
+        assertNull(bareRow.dv_facts)
+        val nullFacts = json.decodeFromString<MediaFileDto>(
+            """{"id": 2, "filename": "new.mkv", "dv_profile": null, "dv_facts": null}""",
         )
-        assertNull(emptyFacts.dolby_vision?.profile)
+        assertNull(nullFacts.dv_profile)
         assertNull(
             json.decodeFromString<HlsStart>(
                 """{"session_id": "s3", "playlist_url": "/hls/s3/index.m3u8"}""",
