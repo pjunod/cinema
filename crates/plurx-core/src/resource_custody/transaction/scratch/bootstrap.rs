@@ -150,6 +150,77 @@ pub(in crate::resource_custody) fn restore(
     Ok(fold)
 }
 
+/// The fold this worker thread committed last for one non-transferred asset.
+/// It is reused only when its complete state equals the member envelope's
+/// recorded state (same head operation and revision), so any other writer,
+/// rolled-back transaction or transfer falls back to the verified replay.
+struct CommittedFold {
+    plan: ScratchPlanV3,
+    state: ScratchStateV3,
+    fold: BootstrapFold,
+}
+type FoldKey = (Uuid, Uuid, v2::Id);
+/// Bounds retained folds to the working set of live assets on this worker.
+const COMMITTED_FOLD_LIMIT: usize = 256;
+thread_local! {
+    static COMMITTED: std::cell::RefCell<BTreeMap<FoldKey, CommittedFold>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
+    static STAGED: std::cell::RefCell<Option<(FoldKey, CommittedFold)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start of every journal transaction: nothing staged by an earlier,
+/// uncommitted transaction can be promoted.
+pub(in crate::resource_custody::transaction) fn discard_staged_fold() {
+    STAGED.with(|staged| staged.borrow_mut().take());
+}
+
+/// Only after this transaction's COMMIT succeeded.
+pub(in crate::resource_custody::transaction) fn promote_staged_fold() {
+    if let Some((key, entry)) = STAGED.with(|staged| staged.borrow_mut().take()) {
+        COMMITTED.with(|committed| {
+            let mut committed = committed.borrow_mut();
+            if entry.state.asset.lifecycle == ScratchLifecycleV1::RetiredClosed {
+                committed.remove(&key);
+                return;
+            }
+            if committed.len() >= COMMITTED_FOLD_LIMIT && !committed.contains_key(&key) {
+                committed.clear();
+            }
+            committed.insert(key, entry);
+        });
+    }
+}
+
+/// The verified replay, or this worker's own committed fold when it is the
+/// exact recorded state. Taking the entry consumes it: a failed transaction
+/// leaves nothing to reuse and the next change replays the history.
+fn restore_for_change(
+    connection: &Connection,
+    obligation: Uuid,
+    graph: Uuid,
+    member: v2::Id,
+    plan: &ScratchPlanV3,
+    expected: Option<&ScratchStateV3>,
+) -> Result<BootstrapFold, CustodyError> {
+    let key = (obligation, graph, member);
+    let cached = COMMITTED.with(|committed| committed.borrow_mut().remove(&key));
+    if let (Some(entry), Some(expected)) = (cached, expected) {
+        let transferred = connection
+            .query_row(
+                "SELECT 1 FROM retained_asset_owners WHERE asset_id=?1",
+                [plan.asset_id.uuid().as_bytes()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !transferred && entry.plan == *plan && entry.state == *expected {
+            return Ok(entry.fold);
+        }
+    }
+    restore(connection, obligation, graph, member, plan, expected)
+}
+
 pub(in crate::resource_custody::transaction) fn change(
     tx: &Transaction<'_>,
     key: &TransitionKey,
@@ -211,7 +282,7 @@ pub(in crate::resource_custody::transaction) fn change(
         None => None,
         _ => return Err(codec::invalid()),
     };
-    let after = restore(
+    let fold = restore_for_change(
         tx,
         key.handle.obligation_id,
         key.handle.graph_id,
@@ -219,8 +290,8 @@ pub(in crate::resource_custody::transaction) fn change(
         plan,
         expected,
     )?
-    .apply(plan, v2::Id::new(key.operation_id)?, change)?
-    .state();
+    .apply(plan, v2::Id::new(key.operation_id)?, change)?;
+    let after = fold.state();
     let retained_json: Option<String> = tx
         .query_row(
             "SELECT custody_json FROM retained_asset_owners WHERE asset_id=?1",
@@ -277,6 +348,20 @@ pub(in crate::resource_custody::transaction) fn change(
             key.operation_id.as_bytes()
         ],
     )?;
+    STAGED.with(|staged| {
+        *staged.borrow_mut() = Some((
+            (
+                key.handle.obligation_id,
+                key.handle.graph_id,
+                change.scratch_member_id,
+            ),
+            CommittedFold {
+                plan: plan.clone(),
+                state: record.after.clone(),
+                fold,
+            },
+        ));
+    });
     Ok(DiskResult::AssetChangedV3(record))
 }
 

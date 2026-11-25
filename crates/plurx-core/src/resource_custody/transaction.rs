@@ -1020,6 +1020,7 @@ pub(super) fn execute(
     owner: Uuid,
 ) -> Result<OperationResult, CustodyError> {
     let execute_timer = Instant::now();
+    scratch::bootstrap::discard_staged_fold();
     storage.verify()?;
     let remaining = operation
         .deadline
@@ -1150,6 +1151,7 @@ pub(super) fn execute(
         e.certainty = CommitCertainty::Unknown;
         e
     })?;
+    scratch::bootstrap::promote_staged_fold();
     #[cfg(target_os = "linux")]
     if matches!(
         operation.command,
