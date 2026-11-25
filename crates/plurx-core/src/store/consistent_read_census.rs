@@ -594,6 +594,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("storage_domain_pending_schema_version", STARTUP),
     ("install_adaptive_attempt_schema", STARTUP),
     ("install_adaptive_source_scope", STARTUP),
+    ("install_encoded_output_publications", STARTUP),
     ("install_resource_settings_schema", STARTUP),
     (
         "adaptive_attempt_read",

@@ -2530,6 +2530,7 @@ impl HiqliteAuthStore {
         store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
         store.install_adaptive_source_scope(None).await?;
+        store.install_encoded_output_publications(None).await?;
         store.install_dv_refit_schema(None).await?;
         Ok(store)
     }
@@ -2750,6 +2751,7 @@ impl HiqliteAuthStore {
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
                     self.install_adaptive_source_scope(admission).await?;
+                    self.install_encoded_output_publications(admission).await?;
                     return self.install_dv_refit_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
@@ -5691,6 +5693,49 @@ impl HiqliteAuthStore {
         attempted?;
         Err(StoreError::Migration(
             "adaptive source authority installation did not settle".into(),
+        ))
+    }
+
+    async fn install_encoded_output_publications(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        use super::encoded_output_publications as publications;
+        admit_schema_migration(admission)?;
+        let read = || async {
+            self.client()
+                // authority: settle publication-record installation against the committed catalogue.
+                .query_consistent_map::<RemoteShapeRow, _>(
+                    "install_encoded_output_publications",
+                    publications::CATALOG_SQL,
+                    params!(),
+                )
+                .await
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|row| (row.name, row.sql))
+                        .collect::<Vec<_>>()
+                })
+        };
+        let rows = read().await?;
+        if publications::catalog_is_exact(&rows) {
+            return Ok(());
+        }
+        if !rows.is_empty() {
+            return Err(StoreError::Migration(
+                "encoded output publication catalogue is partial or incompatible".into(),
+            ));
+        }
+        let statements = publications::objects()
+            .into_iter()
+            .map(|(_, sql)| (sql, params!()));
+        let attempted = self.schema_migration_transaction(statements).await;
+        if publications::catalog_is_exact(&read().await?) {
+            return Ok(());
+        }
+        attempted?;
+        Err(StoreError::Migration(
+            "encoded output publication installation did not settle".into(),
         ))
     }
 

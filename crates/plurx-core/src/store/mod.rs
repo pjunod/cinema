@@ -263,6 +263,7 @@ mod placeholder_census;
 mod consistent_read_census;
 
 pub mod background_jobs;
+pub(crate) mod encoded_output_publications;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 mod background_job_turns;
 pub mod background_jobs_artwork;

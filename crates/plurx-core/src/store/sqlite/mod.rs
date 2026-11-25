@@ -1950,6 +1950,7 @@ impl SqliteStore {
         super::resource_settings_schema::install_sqlite(conn)?;
         super::adaptive_resource_attempts::schema::install_sqlite_checked(conn)?;
         super::adaptive_resource_attempts::source_scope::install_sqlite(conn)?;
+        super::encoded_output_publications::install_sqlite(conn)?;
         super::library_curation_schema::verify_sqlite(conn)?;
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
