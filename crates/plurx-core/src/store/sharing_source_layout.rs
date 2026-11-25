@@ -12,6 +12,40 @@ pub(crate) fn adaptive_layout_statements() -> Vec<String> {
     )
 }
 
+/// The adaptive Source layout as a store reaches it in production. Source
+/// activation follows membership and purpose-key setup, and the adaptive
+/// rebind's ready guard proves that whole Source shape: the replicated
+/// membership tables and the catalogue purpose-key table must exist. A
+/// standalone SQLite fixture has neither, so it gets presence-only membership
+/// tables (as `subtitle_managed_schema`'s Source82 contract fixture does;
+/// they are NOT cluster admission evidence) and the exact purpose-key table,
+/// then the production statements.
+#[cfg(test)]
+pub(crate) fn provisioned_adaptive_layout_statements() -> Vec<String> {
+    let mut statements = [
+        "cluster_nodes",
+        "cluster_node_capabilities",
+        "cluster_join_tokens",
+        "cluster_node_join_staging",
+        "cluster_node_removals",
+        "cluster_node_removal_attempts",
+        "cluster_sharing_membership_intents",
+        "cluster_sharing_join_intents",
+        "cluster_sharing_join_declarations",
+        "cluster_sharing_membership_generation",
+    ]
+    .map(|name| format!("CREATE TABLE IF NOT EXISTS {name}(fixture INTEGER)"))
+    .to_vec();
+    statements.push(
+        sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA
+            .trim()
+            .trim_end_matches(';')
+            .to_owned(),
+    );
+    statements.extend(adaptive_layout_statements());
+    statements
+}
+
 pub(crate) fn adaptive_layout_statements_for(
     outage: super::adaptive_resource_attempts::schema::OutageFence,
 ) -> Vec<String> {

@@ -136,7 +136,7 @@ async fn drained_source_rebind_preserves_synthetic_terminal_audit_bytes_and_oper
         let before:(String,String,String)=conn.query_row("SELECT binding_json,key_json,payload_digest FROM media_resource_requests r JOIN media_resource_attempts a USING(owner_key,request_id,request_incarnation_id) JOIN media_resource_operations o ON o.attempt_id=a.attempt_id",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let tx=conn.unchecked_transaction()?;
         tx.execute(&schema::assertion(&schema::migration_drained_guard()),[])?;
-        for sql in crate::store::sharing_source_schema::adaptive_layout_statements() {tx.execute(&sql,[])?;}
+        for sql in crate::store::sharing_source_layout::provisioned_adaptive_layout_statements() {tx.execute(&sql,[])?;}
         tx.commit()?;
         assert!(schema::sqlite_ready(conn,schema::Layout::Principal)?);
         let after:(String,String,String)=conn.query_row("SELECT binding_json,key_json,payload_digest FROM media_resource_requests r JOIN media_resource_attempts a USING(owner_key,request_id,request_incarnation_id) JOIN media_resource_operations o ON o.attempt_id=a.attempt_id",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;

@@ -796,7 +796,7 @@ mod tests {
                         // so claims' maintenance finds ready principal attempt
                         // authority.
                         let statements =
-                            super::super::sharing_source_layout::adaptive_layout_statements()
+                            super::super::sharing_source_layout::provisioned_adaptive_layout_statements()
                                 .into_iter()
                                 .map(|sql| (sql, vec![]))
                                 .collect();
@@ -1157,7 +1157,7 @@ mod tests {
                 if rebuilt {
                     store
                         .sharing_txn(
-                            super::super::sharing_source_layout::adaptive_layout_statements()
+                            super::super::sharing_source_layout::provisioned_adaptive_layout_statements()
                                 .into_iter()
                                 .map(|sql| (sql, vec![]))
                                 .collect(),

@@ -298,7 +298,7 @@ async fn sharing_terminal_cleanup_and_corrupt_ledger_retirement_preserve_owner_b
                 // The production Source rebuild with its adaptive rebind: this
                 // test runs maintenance, which refuses a principal route layout
                 // whose attempt authority was never rebound.
-                conn.execute_batch(&format!("{};", crate::store::sharing_source_layout::adaptive_layout_statements().join(";\n")))?;
+                conn.execute_batch(&format!("{};", crate::store::sharing_source_layout::provisioned_adaptive_layout_statements().join(";\n")))?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!("../../../../tests/fixtures/session-principal-sharing.sql"))?;
                 conn.execute("UPDATE media_sessions SET session_id=?1 WHERE incarnation_id=?2",params![fixture_session,foreign])?;
@@ -802,7 +802,8 @@ async fn sharing_activation_rebuilt_local_metadata_and_foreign_owner_refusal() {
                 // was never rebound.
                 conn.execute_batch(&format!(
                     "{};",
-                    crate::store::sharing_source_layout::adaptive_layout_statements().join(";\n")
+                    crate::store::sharing_source_layout::provisioned_adaptive_layout_statements()
+                        .join(";\n")
                 ))?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!(
@@ -1509,7 +1510,8 @@ async fn sharing_request_rebuilt_local_keys_replay_and_deleted_owner_refusal() {
                 // was never rebound.
                 conn.execute_batch(&format!(
                     "{};",
-                    crate::store::sharing_source_layout::adaptive_layout_statements().join(";\n")
+                    crate::store::sharing_source_layout::provisioned_adaptive_layout_statements()
+                        .join(";\n")
                 ))?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!(
