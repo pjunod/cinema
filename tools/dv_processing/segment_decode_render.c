@@ -1093,11 +1093,17 @@ int main(int argc, char **argv) {
   if (argc >= 19) {
     EXPORT_WIDTH = number(argv[16], 32, 4096);
     EXPORT_HEIGHT = number(argv[17], 32, 2160);
-    EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1");
-    need((EXPORT_YUV10 || !strcmp(argv[18], "pq-bilinear-rgb48-v1")) &&
+    // pq-ccm001-* compose the FEL as fel_compose.h does; the rest of the
+    // identity (the export) is the same as its pq-bilinear-* counterpart.
+    FEL_CCM001 = !strcmp(argv[18], "pq-ccm001-rgb48-v1") ||
+                 !strcmp(argv[18], "pq-ccm001-yuv420p10-v1");
+    EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1") ||
+                   !strcmp(argv[18], "pq-ccm001-yuv420p10-v1");
+    need((EXPORT_YUV10 || FEL_CCM001 || !strcmp(argv[18], "pq-bilinear-rgb48-v1")) &&
              EXPORT_WIDTH <= expected_w[0] && EXPORT_HEIGHT <= expected_h[0] &&
              EXPORT_WIDTH % 2 == 0 && EXPORT_HEIGHT % 2 == 0,
          "unsupported export geometry or policy");
+    need(!FEL_CCM001 || !base_only, "CCM 001 composition is for dual-layer FEL");
   }
   // The software Vulkan renderer has one bounded worker, accounted alongside
   // each layer's four decoder threads. Never inherit the machine's core count.
