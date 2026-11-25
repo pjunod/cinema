@@ -217,7 +217,9 @@ fn actual_retained_mix_change_rekeys_and_rebases_window() {
             actual.retained_binding,
             actual.retained_durable,
             next_durable,
-            resources(512, 0),
+            // A retained replacement may only return capacity (0cdb4c3c6),
+            // so the changed mix shrinks the retained charge.
+            resources(128, 0),
         )
         .expect("prepare changed retained S");
     let receipt =
