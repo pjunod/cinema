@@ -30,6 +30,28 @@ fn native_tool(variable: &str, default: &str) -> PathBuf {
     path
 }
 
+/// The original P probe task is the production facts collector, which admits
+/// only a self-contained parser image (608dd04d2) and refuses the dynamically
+/// linked distribution `ffprobe` on `PATH`. Resolve the same bound static probe
+/// production uses (`PLURX_BOUND_FFPROBE`, packaged at
+/// `/usr/local/lib/plurx/ffprobe` by `scripts/build-static-ffprobe`), and
+/// refuse an unsuitable one here rather than as a later opaque `State`.
+fn bound_ffprobe() -> PathBuf {
+    let variable = if std::env::var_os("PLURX_TEST_FFPROBE").is_some() {
+        "PLURX_TEST_FFPROBE"
+    } else {
+        "PLURX_BOUND_FFPROBE"
+    };
+    let path = native_tool(variable, "/usr/local/lib/plurx/ffprobe");
+    if let Err(error) = crate::process::fixed_probe::require_self_contained_probe_image(&path) {
+        panic!(
+            "required native planning FFprobe is not a self-contained bound probe: {} ({variable}): {error:?}",
+            path.display()
+        );
+    }
+    path
+}
+
 pub(super) async fn actual_owner(
     root: &std::path::Path,
 ) -> (
@@ -39,7 +61,7 @@ pub(super) async fn actual_owner(
     Instant,
 ) {
     let ffmpeg = native_tool("PLURX_TEST_FFMPEG", "/usr/bin/ffmpeg");
-    let ffprobe = native_tool("PLURX_TEST_FFPROBE", "/usr/bin/ffprobe");
+    let ffprobe = bound_ffprobe();
     let source = root.join("never-opened.mp4");
     // Fixture creation precedes the admitted operation. Every planning source,
     // probe root and engine/dependency root below uses its real original owner.

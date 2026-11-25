@@ -2393,6 +2393,15 @@ fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFac
     Ok(())
 }
 
+/// Test-only precheck that a configured probe meets the facts collector's
+/// self-contained image rule before a fixture admits it.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn require_self_contained_probe_image(path: &Path) -> Result<(), DecodeFactError> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    require_self_contained_linux_elf(&file)
+}
+
 #[cfg(target_os = "linux")]
 fn require_self_contained_linux_elf(file: &std::fs::File) -> Result<(), DecodeFactError> {
     use std::os::unix::fs::FileExt;
