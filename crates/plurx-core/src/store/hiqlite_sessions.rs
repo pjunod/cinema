@@ -2202,13 +2202,102 @@ async fn request_row(
         .next()
         .map(|row| row.0)
         .transpose()?;
+    local_request_principal(user_id, result)
+}
+
+fn local_request_principal(
+    user_id: i64,
+    row: Option<RequestState>,
+) -> Result<Option<RequestState>, StoreError> {
     let expected = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id };
-    if result.as_ref().is_some_and(|row| row.principal != expected) {
+    if row.as_ref().is_some_and(|row| row.principal != expected) {
         return Err(StoreError::Task(
             "mismatched media-session request principal".into(),
         ));
     }
-    Ok(result)
+    Ok(row)
+}
+
+/// What a claim reads before it picks a path: the request row, if any, and
+/// whether the playback already has a pointer or a preparation, from one
+/// consistent read. A playback that has either (a reopen) can never take the
+/// first-session guarded insert, whose `require_new_playback` predicate
+/// refuses it, so the claim goes straight to maintenance and the ordinary
+/// insert instead of paying a replicated write that matches no row. The flag
+/// only chooses a path: both inserts keep their own predicates, so a pointer
+/// that appears or vanishes after this read changes the cost, not the answer.
+struct ClaimEntry {
+    row: Option<RequestState>,
+    playback_known: bool,
+}
+
+struct ClaimEntryRow(Result<ClaimEntry, StoreError>);
+
+impl From<&mut Row<'_>> for ClaimEntryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let decode = |row: &mut Row<'_>| {
+            let playback_known = row
+                .try_get::<i64>("playback_known")
+                .map_err(database_error)?
+                != 0;
+            // A flag of its own: an owned row gives each column up once, so
+            // probing a request column would leave `decode_request` without it.
+            let recorded = row
+                .try_get::<i64>("request_recorded")
+                .map_err(database_error)?
+                != 0;
+            Ok(ClaimEntry {
+                row: if recorded {
+                    Some(decode_request(row)?)
+                } else {
+                    None
+                },
+                playback_known,
+            })
+        };
+        Self(decode(row))
+    }
+}
+
+async fn claim_entry(
+    method: &'static str,
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+    request_id: &str,
+) -> Result<ClaimEntry, StoreError> {
+    let ownership = LocalSessionSql::load(store).await?;
+    let owner = ownership.equals(1);
+    let projection = ownership.projection();
+    // The one-row probe keeps the answer a row when no request is recorded;
+    // its only column is named so no table's column resolves to it.
+    let entry = store
+        .session_client()
+        // authority: the claim's path and its replay answer rest on the committed request row.
+        .query_consistent_map::<ClaimEntryRow, _>(
+            method,
+            format!(
+                "SELECT (EXISTS (SELECT 1 FROM media_playback_pointers
+                                  WHERE {owner} AND playback_id = $2)
+                      OR EXISTS (SELECT 1 FROM media_session_preparations
+                                  WHERE {owner} AND playback_id = $2)) AS playback_known,
+                    (media_session_requests.request_id IS NOT NULL) AS request_recorded,
+                    request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
+                    claim_expires_at_ms, {projection}
+               FROM (SELECT 1 AS claim_entry_probe) AS probe
+               LEFT JOIN media_session_requests ON {owner} AND request_id = $3"
+            ),
+            params!(user_id, playback_id, request_id),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| StoreError::Database("claim entry read returned no row".to_owned()))?
+        .0?;
+    Ok(ClaimEntry {
+        row: local_request_principal(user_id, entry.row)?,
+        playback_known: entry.playback_known,
+    })
 }
 
 /// The ask a claim records in its own transaction (D3c): the selection upsert
@@ -3284,13 +3373,29 @@ impl MediaSessionStore for HiqliteAuthStore {
         });
         let fingerprint = request_fingerprint.to_ascii_lowercase();
         let method = "claim_media_session_request";
-        let already_recorded = request_row(method, self, user_id, request_id)
-            .await?
-            .is_some();
+        let entry = claim_entry(method, self, user_id, playback_id, request_id).await?;
+        let already_recorded = entry.row.is_some();
         // The guarded insert enforces both live and retained quotas and
         // commits the selection under the new claim. Unrelated retention
-        // and repair can wait for the existing maintenance loop.
-        let claim = if !already_recorded
+        // and repair can wait for the existing maintenance loop. A reopen
+        // (the playback has a pointer or preparation) cannot pass its
+        // new-playback predicate, so it skips straight to maintenance and the
+        // ordinary insert, which re-reads the row itself if it is refused.
+        let claim = if !already_recorded && entry.playback_known {
+            self.maintain_media_sessions(now_ms).await?;
+            claim_new_request(
+                self,
+                user_id,
+                request_id,
+                &fingerprint,
+                playback_id,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+                selection.as_ref(),
+            )
+            .await?
+        } else if !already_recorded
             && try_insert_request_claim(
                 self,
                 user_id,

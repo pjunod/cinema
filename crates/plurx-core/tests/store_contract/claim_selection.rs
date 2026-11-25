@@ -651,3 +651,134 @@ async fn an_earlier_but_slower_create_does_not_replace_a_newer_ask() {
     })
     .await;
 }
+
+/// A reopen (a new request for a playback that already has a pointer) picks
+/// its path from the claim's first read: the first-session guarded insert
+/// cannot pass its new-playback predicate there, so the claim goes to
+/// maintenance and the ordinary insert. Concurrent reopen claims that all
+/// chose that path from the same read still acquire exactly once; the rest
+/// join the winner, and only the winner records its ask.
+#[tokio::test]
+async fn concurrent_reopen_claims_choosing_their_path_acquire_once() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("claim-reopen-race", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let principal = PlaybackPrincipal::LocalUser { user_id: user.id };
+        let first = incarnation(500);
+        let (outcome, _) = claim(
+            store.as_ref(),
+            user.id,
+            "first",
+            FP,
+            "pb-reopen",
+            &first,
+            1_000,
+            61_000,
+            None,
+            backend,
+        )
+        .await;
+        assert!(matches!(outcome, MediaSessionRequestClaim::Acquired { .. }));
+        assert!(store
+            .assign_media_session_request_owner(&principal, "first", &first, "node-a", 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own first claim: {error}")));
+        store
+            .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: first.clone(),
+                session_id: incarnation(501),
+                principal: principal.clone(),
+                playback_id: "pb-reopen".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some("first".to_owned()),
+                request_fingerprint: FP.to_owned(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: r#"{"session":"first"}"#.to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: 1_000,
+                lease_expires_at_ms: 900_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate first session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the first activation must win"));
+
+        let digests: Vec<String> = (0..4u8)
+            .map(|n| format!("{:x}", n + 8).repeat(64))
+            .collect();
+        let forms: Vec<String> = (0..4).map(|n| format!("v1;reopen={n}")).collect();
+        let incarnations: Vec<String> = (0..4u128).map(|n| incarnation(510 + n)).collect();
+        let user_id = user.id;
+        let results = futures_util::future::join_all((0..4).map(|n| {
+            let store = Arc::clone(&store);
+            let (digest, form, inc) = (
+                digests[n].clone(),
+                forms[n].clone(),
+                incarnations[n].clone(),
+            );
+            async move {
+                claim(
+                    store.as_ref(),
+                    user_id,
+                    "reopen",
+                    FP,
+                    "pb-reopen",
+                    &inc,
+                    2_000,
+                    62_000,
+                    Some(&ask_at(&digest, &form, 2_000)),
+                    backend,
+                )
+                .await
+            }
+        }))
+        .await;
+        let winners: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, (outcome, _))| {
+                matches!(outcome, MediaSessionRequestClaim::Acquired { .. })
+            })
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "{backend}: exactly one reopen claim acquires: {results:?}"
+        );
+        let winner = &incarnations[winners[0]];
+        for (n, (outcome, recorded)) in results.iter().enumerate() {
+            if n == winners[0] {
+                assert!(recorded.is_some(), "{backend}: the winner answers its ask");
+                continue;
+            }
+            assert!(
+                matches!(
+                    outcome,
+                    MediaSessionRequestClaim::InFlight { incarnation_id, .. }
+                        if incarnation_id == winner
+                ),
+                "{backend}: a losing reopen claim joins the winner: {outcome:?}"
+            );
+            assert!(
+                recorded.is_none(),
+                "{backend}: a joined claim records no ask"
+            );
+        }
+        let row = desired(store.as_ref(), user.id, "pb-reopen")
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the winner's ask is recorded"));
+        assert_eq!(row.revision, 1, "{backend}: the ask was upserted once");
+        assert_eq!(
+            row.digest, digests[winners[0]],
+            "{backend}: it is the winner's ask"
+        );
+    })
+    .await;
+}

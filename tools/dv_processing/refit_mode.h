@@ -179,9 +179,7 @@ static bool refit_scene_refresh(const uint8_t *nalu, size_t size, const AVDOVIMe
     const DoviReshapingCurve *k = &raw->curves[c];
     const AVDOVIReshapingCurve *f = &parsed->curves[c];
     int pieces = f->num_pivots - 1;
-    same = k->pivots.len == f->num_pivots && k->pivots.data;
-    for (int i = 0; same && i < f->num_pivots; i++)
-      same = k->pivots.data[i] == f->pivots[i];
+    same = refit_pivots_agree(k->pivots.data, k->pivots.len, f->pivots, f->num_pivots);
     for (int i = 0; same && i < pieces; i++)
       same = (int)k->mapping_idc == (int)f->mapping_idc[i];
     if (same && k->mapping_idc == 0) {

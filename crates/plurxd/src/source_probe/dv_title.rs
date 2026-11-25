@@ -16,7 +16,15 @@ pub(super) enum TitleScanError {
     /// early). The scanner saw truncated input, so its result is not a
     /// verdict on the content, but rereading may fail the same way.
     SourceReadFailed(String),
-    /// The scanner, its aggregate or its prerequisites refused readable input.
+    /// The scanner read the whole selected input cleanly and refused its
+    /// content for a reason in [`CONTENT_REFUSALS`], and the source and the
+    /// scanner were still current afterwards. Rereading the same bytes with
+    /// the same scanner reaches the same refusal, so this is a verdict for
+    /// that probe revision and scanner digest, not a transient failure.
+    Refused(String),
+    /// The scanner, its aggregate or its prerequisites failed for a reason
+    /// that is not a verdict on the content: a launch error, a signal or
+    /// deadline, an allocation or I/O setup refusal, or a changed source.
     Failed(String),
 }
 
@@ -25,9 +33,72 @@ impl std::fmt::Display for TitleScanError {
         match self {
             Self::SourceInterrupted(reason)
             | Self::SourceReadFailed(reason)
+            | Self::Refused(reason)
             | Self::Failed(reason) => f.write_str(reason),
         }
     }
+}
+
+/// The `scan_title` refusals that judge the selected video's bytes: its
+/// configuration, its bitstream, its demuxed packets, and whether its
+/// coverage and endpoint can be proven complete. Each is reached only after
+/// reads that succeeded, and depends on nothing but those bytes, so the same
+/// file and scanner refuse the same way on every attempt.
+///
+/// Refusals left out are about the environment, not the content: the source
+/// capability, I/O and demux setup, allocation, usage, the RPU timeline
+/// sidecar, `source open`, `complete demux EOF` (a direct read's I/O error
+/// surfaces there) and `aggregate output`. Two more classes are left out:
+/// `corrupt demux packet` is set by libavformat on a short sample read, which
+/// a scanner-side loopback failure causes without the bridge seeing one; and
+/// `selected stream exists` and `selected HEVC video` judge the stream index
+/// the daemon chose, which neither the probe revision nor the scanner digest
+/// covers. They, and any reason a newer scanner adds, keep the charged retry.
+pub(super) const CONTENT_REFUSALS: &[&str] = &[
+    "a PPS lets slices withhold pictures from output",
+    "bounded access-unit NAL count",
+    "complete NAL length",
+    "NAL inside its access unit",
+    "first slice in a picture missing",
+    "slice names an unknown PPS",
+    "two first slices in one picture",
+    "pictures discarded at a new sequence",
+    "title begins at a random access point",
+    "observed complete display-frame timing",
+    "bounded title display-frame count",
+    "length-prefixed HEVC with a version-1 configuration",
+    "complete configuration array",
+    "complete configuration NAL length",
+    "configuration NAL inside its record",
+    "bounded picture size",
+    "complete declared frame coverage",
+    "contiguous decoded title coverage",
+    "observed declared video origin",
+    "bounded declared video end",
+    "complete selected video duration",
+    "selected video duration tag",
+    "complete selected video duration tag",
+    "independent complete selected-video endpoint unavailable",
+];
+
+/// `scan_title`'s `need()` prints this prefix, then its reason, and exits 1.
+const REFUSAL_PREFIX: &str = "DV title scan refused: ";
+
+/// The content refusal a scanner that exited 1 reported, if its last refusal
+/// line names one exactly.
+fn content_refusal(output: &plurx_core::process::bounded::Output) -> Option<&'static str> {
+    if output.status.code() != Some(1) {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr.lines().rev().find_map(|line| {
+        line.find(REFUSAL_PREFIX)
+            .map(|at| line[at + REFUSAL_PREFIX.len()..].trim())
+    })?;
+    CONTENT_REFUSALS
+        .iter()
+        .copied()
+        .find(|reason| *reason == line)
 }
 
 impl From<String> for TitleScanError {
@@ -79,6 +150,8 @@ pub(super) fn stderr_tail(stderr: &[u8]) -> String {
 /// Classify the scanner's exit before its aggregate is trusted. A failed
 /// source read outranks every scanner outcome, including an apparent
 /// success: an aggregate computed over truncated input is never published.
+/// Over clean reads, a refusal naming a [`CONTENT_REFUSALS`] reason is a
+/// verdict; every other non-zero exit, signal or launch error is not.
 pub(super) fn scanner_verdict(
     output: std::io::Result<plurx_core::process::bounded::Output>,
     read: SourceRead,
@@ -105,6 +178,9 @@ pub(super) fn scanner_verdict(
         ))),
         SourceRead::Clean => match output {
             Ok(output) if output.status.success() => Ok(output.stdout),
+            Ok(output) if content_refusal(&output).is_some() => Err(TitleScanError::Refused(
+                format!("complete-title DV scan refused ({})", describe(&Ok(output))),
+            )),
             failed => Err(TitleScanError::Failed(format!(
                 "complete-title DV scan failed ({})",
                 describe(&failed)
@@ -204,13 +280,18 @@ pub(super) async fn scan(
             .await
             .map_err(|error| format!("joining title source input: {error}"))?;
     }
-    let stdout = scanner_verdict(output, read)?;
-    if !tools.is_current().await {
-        return Err("DV scanner identity changed".into());
+    let verdict = scanner_verdict(output, read);
+    // An aggregate and a content refusal are both judgements of these bytes
+    // by this scanner: trust either only while both are still current.
+    if matches!(verdict, Ok(_) | Err(TitleScanError::Refused(_))) {
+        if !tools.is_current().await {
+            return Err("DV scanner identity changed".into());
+        }
+        if !source.unchanged() || source.reopen(file).await.is_err() {
+            return Err("source changed during title scan".into());
+        }
     }
-    if !source.unchanged() || source.reopen(file).await.is_err() {
-        return Err("source changed during title scan".into());
-    }
+    let stdout = verdict?;
     let stats: DvTitleStats =
         serde_json::from_slice(&stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
     if stats.eligibility() == TitleEligibility::InvalidAggregate || !stats.complete {

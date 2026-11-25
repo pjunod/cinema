@@ -399,6 +399,24 @@ class OperationsContractCase(unittest.TestCase):
                 with self.assertRaises(harness["Fail"]):
                     wait(fixture, len(old))
 
+    def test_ui_baseline_hostname_wrap_fixture_overflows_its_cell_on_any_face(self):
+        # The nodes-table stress fixture asserts that an unbreakable hostname
+        # wraps inside its cell. That is only a test of the CSS when the token
+        # is wider than the cell on whatever face the runner resolves for
+        # `system-ui`; a token about as wide as the meridian 1280 stacked cell
+        # wrapped on wide faces and fitted on narrow ones (CI run 9084). Pin
+        # the premise: at 4px per character, below any real face at the
+        # hostname's 14px, the token still exceeds the card's maximum width.
+        script = read("scripts/ui-baseline")
+        body = script.split("def stress_cluster_strip_containment(", 1)[1]
+        body = body.split("\ndef ", 1)[0]
+        unit = re.search(r'const unit = "([^"]+)";', body).group(1)
+        repeat = int(re.search(r"const host = unit\.repeat\((\d+)\);", body).group(1))
+        card_max = int(re.search(r'card\.style\.maxWidth = "(\d+)px";', body).group(1))
+        self.assertRegex(unit, r"^[A-Za-z0-9]+$", "the token must offer no break opportunity")
+        self.assertGreater(len(unit) * repeat * 4, card_max)
+        self.assertIn("overflow-wrap:anywhere", read("crates/plurxd/src/web/app.css").split(".clhost{", 1)[1].split("}", 1)[0])
+
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 
@@ -1443,6 +1461,53 @@ assert.equal(context.ACT_TIMER, null);
             " AS runtime-assets",
             dockerfile,
         )
+
+    def test_release_build_stage_installs_its_pinned_toolchain_before_the_source(self):
+        # The `build` stage starts from a floating-version rust image, so the
+        # first cargo that sees rust-toolchain.toml makes rustup download the
+        # pinned compiler and components from static.rust-lang.org. When that
+        # happened inside the compile RUN it recurred on every source change,
+        # and one network blip failed `package and smoke (arm64)` (run 9051).
+        # The download must live in a layer keyed only on rust-toolchain.toml,
+        # and nothing after it may fetch silently.
+        dockerfile = read("Dockerfile")
+        build = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        copy_toolchain = build.index("COPY rust-toolchain.toml ./")
+        install = build.index("RUN rustup toolchain install --profile minimal")
+        no_auto = build.index("ENV RUSTUP_AUTO_INSTALL=0")
+        copy_source = build.index("\nCOPY . .\n")
+        self.assertLess(copy_toolchain, install)
+        self.assertLess(install, no_auto)
+        self.assertLess(no_auto, copy_source)
+        # Every ARG and ENV of the stage carries per-commit values (the build
+        # SHA, ref and SOURCE_DATE_EPOCH CI passes), and BuildKit invalidates
+        # every instruction after a changed one. The toolchain layer has to
+        # come before all of them, or each commit downloads it again.
+        first_arg_or_env = min(
+            build.index(marker) for marker in ("\nARG ", "\nENV ") if marker in build
+        )
+        self.assertLess(install, first_arg_or_env)
+        self.assertLess(build.index("ENV PLURX_BUILD_SHA"), copy_source)
+        # The layer verifies the installed compiler against the channel the
+        # file names, so the version is stated once.
+        self.assertIn("rust-toolchain.toml)", build[install:no_auto])
+        self.assertRegex(
+            (ROOT / "rust-toolchain.toml").read_text(),
+            r'(?m)^channel = "\d+\.\d+\.\d+"$',
+        )
+        with tempfile.TemporaryDirectory() as scratch:
+            output = Path(scratch) / "Dockerfile.binaries"
+            subprocess.run(
+                [
+                    sys.executable, "-m", "validation.release_dockerfile",
+                    "--binary-export", "Dockerfile", str(output),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            derived = output.read_text()
+        self.assertIn("RUSTUP_AUTO_INSTALL=0", derived)
+        self.assertIn("COPY rust-toolchain.toml ./", derived)
 
     def test_base_image_pin_drift_is_reported_weekly_and_gates_nothing(self):
         # A pin nobody looks at is a stale pin. The weekly dependency audit is
