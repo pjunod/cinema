@@ -520,7 +520,7 @@ impl VodServe {
                 #[cfg(target_os = "linux")]
                 finite_closing: Mutex::new(std::collections::BTreeMap::new()),
                 #[cfg(target_os = "linux")]
-                finite_application_release: Arc::new(tokio::sync::Notify::new()),
+                finite_close_progress: Arc::new(tokio::sync::Notify::new()),
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),

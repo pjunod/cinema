@@ -3326,7 +3326,7 @@ impl Shared {
             "collected finite close stage=ticket_installed");
         // An adaptive attempt may still hold this producer's application
         // lease. Wake its reconciliation now instead of waiting for a tick.
-        self.finite_application_release.notify_one();
+        self.finite_close_progress.notify_one();
         let releasing = Instant::now();
         loop {
             let probe = (Instant::now() + Duration::from_millis(500)).min(deadline);
@@ -3414,8 +3414,13 @@ impl Shared {
         for rendition in self.renditions.lock().await.values() {
             rendition.kick();
         }
-        port.complete(work)
-            .map_err(|error| format!("completing original finite service: {error:?}"))
+        let completed = port
+            .complete(work)
+            .map_err(|error| format!("completing original finite service: {error:?}"));
+        // The adaptive attempt that owned this producer can now finish and
+        // leave the registry, refunding what it charged.
+        self.finite_close_progress.notify_one();
+        completed
     }
 
     #[cfg(target_os = "linux")]

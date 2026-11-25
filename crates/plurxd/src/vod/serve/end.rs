@@ -648,10 +648,11 @@ impl VodServe {
         true
     }
 
-    /// Signalled when a collected finite close waits for application owners.
+    /// Signalled when a collected finite close waits for application owners
+    /// and when it retires.
     #[cfg(target_os = "linux")]
-    pub(crate) fn finite_application_release_signal(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.shared.finite_application_release)
+    pub(crate) fn finite_close_progress_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.shared.finite_close_progress)
     }
 
     /// Blocked-GET admission counters for the operator surfaces.

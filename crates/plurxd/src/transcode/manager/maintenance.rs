@@ -825,7 +825,7 @@ impl TranscodeManager {
     pub async fn reap_loop(self: Arc<Self>) {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
         #[cfg(target_os = "linux")]
-        let application_release = self.vod.finite_application_release_signal();
+        let application_release = self.vod.finite_close_progress_signal();
         #[cfg(not(target_os = "linux"))]
         let application_release = Arc::new(tokio::sync::Notify::new());
         loop {
