@@ -957,7 +957,7 @@ impl CoreServicePort {
         let completed = match ticket.into_completed() {
             Ok(completed) => completed,
             Err(ticket) => {
-                *held = Some(ticket);
+                *held = Some(*ticket);
                 return Err(finite_state());
             }
         };

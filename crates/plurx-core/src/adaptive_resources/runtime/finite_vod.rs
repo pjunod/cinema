@@ -860,10 +860,11 @@ impl FiniteCloseTicket {
     }
 
     /// Destroy the actual empty ticket before publishing a compact terminal status.
-    /// Refusal returns the same original graph-bearing selection to its owner.
-    pub fn into_completed(self) -> Result<FiniteCloseCompleted, Self> {
+    /// Refusal returns the same original graph-bearing selection to its owner,
+    /// boxed so the common success path stays small.
+    pub fn into_completed(self) -> Result<FiniteCloseCompleted, Box<Self>> {
         if !self.retirement_succeeded || self.preparation.is_some() || self.app_state.is_some() {
-            return Err(self);
+            return Err(Box::new(self));
         }
         let identity = self.original_identity;
         drop(self);

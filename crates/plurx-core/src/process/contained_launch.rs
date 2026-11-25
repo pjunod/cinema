@@ -316,6 +316,18 @@ impl Custody {
     }
 }
 
+/// Close every descriptor, even after one fails, and report the first error.
+fn close_every_original<F: IntoRawFd>(files: impl IntoIterator<Item = F>) -> io::Result<()> {
+    let mut first = Ok(());
+    for file in files {
+        let closed = close_original(file);
+        if first.is_ok() {
+            first = closed;
+        }
+    }
+    first
+}
+
 fn close_original(descriptor: impl IntoRawFd) -> io::Result<()> {
     if unsafe { libc::close(descriptor.into_raw_fd()) } == 0 {
         Ok(())
@@ -507,10 +519,11 @@ impl OwnedContainedChild {
     /// outputs and controls even when acquisition or a consuming adapter's
     /// original close is unresolved. Its receipt path never calls this.
     pub(crate) fn reap_refused_native(&mut self) -> io::Result<bool> {
-        let outputs = [self.stdout.take(), self.stderr.take()]
-            .into_iter()
-            .flatten()
-            .fold(Ok(()), |result, file| result.and(close_original(file)));
+        let outputs = close_every_original(
+            [self.stdout.take(), self.stderr.take()]
+                .into_iter()
+                .flatten(),
+        );
         self.setup_close_uncertain |= outputs.is_err();
         let controls = self.close_retired_controls();
         outputs.and(controls)

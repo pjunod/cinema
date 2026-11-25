@@ -719,16 +719,17 @@ impl SetupCustody {
     fn close_files(self) -> io::Result<()> {
         match self {
             Self::Configured(domain) => domain.close_removed(),
-            Self::Created(created) => [
-                created.root.directory,
-                created.root.parent,
-                created.namespace,
-                created.parent,
-            ]
-            .into_iter()
-            .chain(created.directory)
-            .chain(created.controls.into_iter().flatten())
-            .fold(Ok(()), |result, file| result.and(close_original(file))),
+            Self::Created(created) => close_every_original(
+                [
+                    created.root.directory,
+                    created.root.parent,
+                    created.namespace,
+                    created.parent,
+                ]
+                .into_iter()
+                .chain(created.directory)
+                .chain(created.controls.into_iter().flatten()),
+            ),
         }
     }
 
@@ -1495,7 +1496,7 @@ impl NativeDomainCore {
         // Once unlink and original-object readback have both succeeded, consume
         // every original exactly once. A failed close must never be retried
         // by numeric descriptor or converted into successful closure.
-        [
+        close_every_original([
             self.root.directory,
             self.root.parent,
             self.directory.directory,
@@ -1512,9 +1513,7 @@ impl NativeDomainCore {
             pids_max,
             pids_events,
             memory_events,
-        ]
-        .into_iter()
-        .fold(Ok(()), |result, file| result.and(close_original(file)))
+        ])
     }
 }
 
@@ -1534,6 +1533,18 @@ fn lost_close(error: &io::Error) -> bool {
     error
         .get_ref()
         .is_some_and(|cause| cause.is::<NativeCloseUncertain>())
+}
+
+/// Close every descriptor, even after one fails, and report the first error.
+fn close_every_original<F: IntoRawFd>(files: impl IntoIterator<Item = F>) -> io::Result<()> {
+    let mut first = Ok(());
+    for file in files {
+        let closed = close_original(file);
+        if first.is_ok() {
+            first = closed;
+        }
+    }
+    first
 }
 
 fn close_original(file: impl IntoRawFd) -> io::Result<()> {

@@ -882,7 +882,7 @@ async fn fixed_finite_workspace_consumes_only_actual_completed_ticket() {
         .expect("original ticket");
     assert_eq!(ticket.original_identity(), original);
     let mut ticket = match ticket.into_completed() {
-        Err(original) => original,
+        Err(original) => *original,
         Ok(_) => panic!("live native/application selection cannot become terminal"),
     };
     let charge = runtime.accounting().expect("original charge").used;
@@ -938,7 +938,7 @@ async fn empty_finite_ticket_selectors_without_native_success_refuse_completion(
     let preparation = ticket.preparation.take();
     let app_state = ticket.app_state.take();
     let mut ticket = match ticket.into_completed() {
-        Err(original) => original,
+        Err(original) => *original,
         Ok(_) => panic!("missing selectors cannot mint a native completion"),
     };
     assert_eq!(ticket.original_identity(), original);
