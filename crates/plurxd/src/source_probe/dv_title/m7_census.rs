@@ -85,7 +85,7 @@ pub(super) fn arguments(ranges: &[M7WindowRange]) -> Result<Vec<String>, String>
     {
         return Err("M7 requires ordered disjoint title census windows".into());
     }
-    let mut args = vec!["--m7-window-census-v2".into(), OUTPUT.into()];
+    let mut args = vec!["--m7-window-census-v3".into(), OUTPUT.into()];
     for range in ranges {
         args.extend([range.first_pts.to_string(), range.end_pts.to_string()]);
     }
@@ -115,6 +115,9 @@ struct WireWindow {
     first_pts: i64,
     end_pts: i64,
     frames: Vec<WireFrame>,
+    /// Where the presentation after the window's last picture starts on the
+    /// sorted title clock, or the last picture's end when it ends the title.
+    successor_pts: i64,
 }
 
 #[derive(Deserialize)]
@@ -156,7 +159,7 @@ pub(super) fn read(
     let max_packet_sum = title_frames
         .checked_mul(MAX_PACKET_BYTES)
         .ok_or("M7 selected video packet extent exceeds its bound")?;
-    if document.schema != 2
+    if document.schema != 3
         || !document.complete
         || document.video_index != u32::from(video_index)
         || document.title_frames != title_frames
@@ -206,11 +209,14 @@ pub(super) fn read(
                 bl_vcl_sha256: digest(&frame.vcl)?,
             });
         }
-        if frames
-            .last()
-            .and_then(|frame| frame.pts.checked_add(frame.duration))
-            != Some(range.end_pts)
-        {
+        if !frames.last().is_some_and(|last| {
+            reaches_window_end(
+                (last.ordinal, last.pts, last.duration),
+                observed.successor_pts,
+                range.end_pts,
+                title_frames,
+            )
+        }) {
             return Err("M7 title census did not reach the exact window endpoint".into());
         }
         windows.push(Window {
@@ -230,6 +236,26 @@ pub(super) fn read(
     })
 }
 
+/// Whether a window whose last picture is `(ordinal, pts, duration)` ends
+/// exactly at `end_pts`. The window is the presentations starting in
+/// `[first_pts, end_pts)`, so the next one on the title clock (the scanner's
+/// `successor_pts`) starts at `end_pts`. A container's rounded duration need
+/// not reach it (see `m7_title_census.h`); a window that ends the title has no
+/// successor and is bounded by its last picture's own end instead.
+fn reaches_window_end(
+    (ordinal, pts, duration): (u64, i64, i64),
+    successor_pts: i64,
+    end_pts: i64,
+    title_frames: u64,
+) -> bool {
+    successor_pts == end_pts
+        && if ordinal + 1 == title_frames {
+            pts.checked_add(duration) == Some(successor_pts)
+        } else {
+            successor_pts > pts
+        }
+}
+
 fn digest(hexadecimal: &str) -> Result<[u8; 32], String> {
     let mut bytes = [0; 32];
     if !hexadecimal
@@ -244,4 +270,45 @@ fn digest(hexadecimal: &str) -> Result<[u8; 32], String> {
 
 fn string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Eclipse's 23.976 fps Matroska clock: 1 ms ticks, each picture stored as
+    /// 41 ticks while its PTS steps 41 or 42, and 48 pictures spanning exactly
+    /// 2002 ticks. A window ending one tick past its last picture's stored end
+    /// still ends exactly where the next picture starts.
+    #[test]
+    fn a_window_ends_where_its_successor_starts_not_where_a_rounded_duration_does() {
+        let (start, end) = (125, 125 + 2002);
+        let last = (47, start + 1961, 41);
+        assert!(reaches_window_end(last, end, end, 1000));
+        assert!(
+            !reaches_window_end(last, end + 1, end, 1000),
+            "late successor"
+        );
+        assert!(
+            !reaches_window_end(last, end - 1, end, 1000),
+            "early successor"
+        );
+        assert!(
+            !reaches_window_end((47, end, 41), end, end, 1000),
+            "a successor cannot start at or before the last picture"
+        );
+        // The title's last picture has no successor: its own end bounds it.
+        assert!(reaches_window_end((999, end - 41, 41), end, end, 1000));
+        assert!(!reaches_window_end((999, end - 42, 41), end, end, 1000));
+    }
+
+    #[test]
+    fn the_census_request_names_the_successor_bounded_schema() {
+        let args = arguments(&[M7WindowRange {
+            first_pts: 125,
+            end_pts: 2127,
+        }])
+        .expect("one ordered window");
+        assert_eq!(args[0], "--m7-window-census-v3");
+    }
 }

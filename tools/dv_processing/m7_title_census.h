@@ -87,10 +87,19 @@ static int m7_title_by_pts(const void *left, const void *right) {
 
 // Only after complete selected-video EOF has authenticated the sorted
 // presentation order. Persist only the requested bounded intervals.
+//
+// A window is the presentations whose PTS falls in [first_pts, end_pts). Its
+// end is proven by the presentation that follows it on the sorted title
+// clock, not by the last picture's own duration: a container may store a
+// rounded duration (Matroska keeps a 1001/24000 s frame on a 1 ms clock as
+// 41 ticks while its PTS steps 41 or 42), so pts + duration falls a tick
+// short of the next picture in most windows while the next picture starts
+// exactly at end_pts. Only a window that ends the title, which has no
+// successor, is bounded by its last picture's duration.
 static void m7_title_write_windows(FILE *file, const AVStream *stream, long index,
                                    int64_t first_pts, int64_t end_pts) {
   need(fprintf(file,
-        "{\"schema\":2,\"video_index\":%ld,\"time_base_num\":%d,\"time_base_den\":%d,"
+        "{\"schema\":3,\"video_index\":%ld,\"time_base_num\":%d,\"time_base_den\":%d,"
         "\"width\":%d,\"height\":%d,\"title_frames\":%"PRIu64
         ",\"video_packet_bytes\":%"PRIu64",\"first_pts\":%"PRId64",\"end_pts\":%"PRId64
         ",\"windows\":[",
@@ -102,9 +111,7 @@ static void m7_title_write_windows(FILE *file, const AVStream *stream, long inde
     need(window->count > 0, "complete M7 census interval");
     qsort(window->frames, window->count, sizeof(window->frames[0]), m7_title_by_pts);
     const struct m7_title_coded_frame *last = &window->frames[window->count - 1];
-    need(window->frames[0].time.pts == window->first_pts &&
-             last->time.pts + last->time.duration == window->end_pts,
-         "exact M7 census interval boundaries");
+    need(window->frames[0].time.pts == window->first_pts, "exact M7 census interval start");
     need(fprintf(file, "%s{\"first_pts\":%"PRId64",\"end_pts\":%"PRId64",\"frames\":[",
                  i ? "," : "", window->first_pts, window->end_pts) > 0, "M7 census window header");
     uint64_t previous = 0;
@@ -121,7 +128,12 @@ static void m7_title_write_windows(FILE *file, const AVStream *stream, long inde
                    j ? "," : "", ordinal, frame->time.pts, frame->time.duration,
                    frame->au, frame->rpu, frame->vcl) > 0, "M7 census frame write");
     }
-    need(fputs("]}", file) >= 0, "M7 census window completion");
+    const int64_t successor_pts = previous + 1 < stats.frames
+                                      ? times[previous + 1].pts
+                                      : last->time.pts + last->time.duration;
+    need(successor_pts == window->end_pts, "exact M7 census interval end");
+    need(fprintf(file, "],\"successor_pts\":%"PRId64"}", successor_pts) > 0,
+         "M7 census window completion");
   }
   need(fputs("],\"complete\":true}\n", file) >= 0 && fclose(file) == 0,
        "complete M7 census file");

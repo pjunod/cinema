@@ -423,10 +423,10 @@ static int configuration(const AVCodecParameters *par) {
 }
 
 int main(int argc, char **argv) {
-  bool census = argc >= 7 && strcmp(argv[3], "--m7-window-census-v2") == 0;
+  bool census = argc >= 7 && strcmp(argv[3], "--m7-window-census-v3") == 0;
   need(argc == 3 || census || (argc == 5 && strcmp(argv[3], "--rpu-timeline") == 0),
        "usage: scan_title HELD_SOURCE VIDEO_INDEX "
-       "[--rpu-timeline OUTPUT | --m7-window-census-v2 OUTPUT FIRST_PTS END_PTS ...]");
+       "[--rpu-timeline OUTPUT | --m7-window-census-v3 OUTPUT FIRST_PTS END_PTS ...]");
   if (census) m7_title_select_windows(argc - 5, argv + 5);
   char *end;
   errno = 0;
