@@ -435,7 +435,7 @@ async fn run_singleton_trial_variant(variant: TrialVariant) {
             "sine=frequency=330:sample_rate=48000:duration=600",
             "24",
         );
-        Some(scan_fixture(&client, &mut node, &base, token, &incumbent_media, None).await)
+        Some(scan_incumbent(&client, &mut node, &base, token, &incumbent_media).await)
     } else {
         None
     };
@@ -504,6 +504,59 @@ async fn run_singleton_trial_variant(variant: TrialVariant) {
     viewer.play(&trial).await;
     viewer.stop(&trial, &node).await;
     wait_original_removal(&mut node, &delegated, &output, false).await;
+}
+
+/// The shared scan helper names its library "Adaptive"; a second library
+/// needs its own name. Otherwise this is the same public scan and lookup.
+async fn scan_incumbent(
+    client: &reqwest::Client,
+    node: &mut Daemon,
+    base: &str,
+    token: &str,
+    media: &Path,
+) -> i64 {
+    let library = client
+        .post(format!("{base}/api/v1/libraries"))
+        .bearer_auth(token)
+        .json(&json!({"name":"Incumbent","kind":"movies","paths":[media.to_string_lossy()]}))
+        .send()
+        .await
+        .expect("create incumbent library");
+    assert_eq!(library.status(), StatusCode::OK);
+    let library_id = library.json::<Value>().await.expect("library JSON")["id"]
+        .as_i64()
+        .expect("library id");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        node.assert_running("waiting for the incumbent scan");
+        let page = get_json(
+            client,
+            base,
+            token,
+            &format!("/api/v1/libraries/{library_id}/items"),
+        )
+        .await;
+        if let Some(item_id) = page["items"]
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|item| item["id"].as_i64())
+        {
+            let detail = get_json(client, base, token, &format!("/api/v1/items/{item_id}")).await;
+            if let Some(file_id) = detail["files"]
+                .as_array()
+                .and_then(|files| files.first())
+                .and_then(|file| file["id"].as_i64())
+            {
+                return file_id;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "incumbent scan never published a file\n{}",
+            node.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn trial_beside_incumbent(
