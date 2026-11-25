@@ -376,14 +376,17 @@ pub(crate) async fn publish_title_with_tools_for_control(
             return Err("title scanner or source changed before control publication".into());
         }
         if !fence
-            .publish_dv_title(TitleOutput {
-                file_id: file.id,
-                probe_revision: demand.probe_revision,
-                source_size: demand.source_size,
-                source_mtime: demand.source_mtime,
-                scanner_digest: scanner,
-                stats,
-            })
+            .publish_dv_title(
+                TitleOutput {
+                    file_id: file.id,
+                    probe_revision: demand.probe_revision,
+                    source_size: demand.source_size,
+                    source_mtime: demand.source_mtime,
+                    scanner_digest: scanner,
+                    stats,
+                },
+                None,
+            )
             .await
             .map_err(|e| e.to_string())?
         {

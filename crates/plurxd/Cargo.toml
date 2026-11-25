@@ -113,6 +113,10 @@ windows-sys = { version = "0.61", features = [
 # No WASI filesystem or process implementation is linked into its runtime.
 wasmtime = { version = "=50.0.0", default-features = false, features = ["std", "runtime", "cranelift"] }
 
+# build.rs hashes the M7 sources (build_support/m7_source.rs).
+[build-dependencies]
+sha2 = { workspace = true }
+
 [dev-dependencies]
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }

@@ -1681,6 +1681,7 @@ impl JobFence {
     pub(crate) async fn publish_dv_title(
         &self,
         output: plurx_core::store::dv_title_jobs::TitleOutput,
+        m7: Option<plurx_core::store::dv_m7_outcomes::M7TitleOutcome>,
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
@@ -1692,6 +1693,7 @@ impl JobFence {
         let mut request = plurx_core::store::dv_title_jobs::PublishTitleJob {
             token,
             output,
+            m7,
             now_ms: unix_ms()?,
         };
         let result = match self.0.store.publish_dv_title_job(request.clone()).await {

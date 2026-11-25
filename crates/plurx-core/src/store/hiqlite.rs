@@ -2397,6 +2397,7 @@ impl HiqliteAuthStore {
         store.install_storage_domain_pending_schema(None).await?;
         store.install_dv_refit_schema(None).await?;
         store.install_dv_m7_attempt_schema(None).await?;
+        store.install_dv_m7_outcome_schema(None).await?;
         Ok(store)
     }
 
@@ -2613,7 +2614,8 @@ impl HiqliteAuthStore {
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
                     self.install_dv_refit_schema(admission).await?;
-                    return self.install_dv_m7_attempt_schema(admission).await;
+                    self.install_dv_m7_attempt_schema(admission).await?;
+                    return self.install_dv_m7_outcome_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -5162,6 +5164,47 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "M7 candidate attempt schema install did not settle".into(),
+        ))
+    }
+
+    async fn has_dv_m7_outcome_schema(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_m7_outcome_schema",
+                super::dv_m7_outcomes::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect::<Vec<_>>();
+        super::dv_m7_outcomes::has_schema(&shape)
+    }
+
+    /// Each title generation's M7 outcome: an additive extension whose
+    /// triggers fire on the title-job and F+ tables installed before it.
+    async fn install_dv_m7_outcome_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.has_dv_m7_outcome_schema().await? {
+            return Ok(());
+        }
+        let statements = super::dv_m7_outcomes::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.has_dv_m7_outcome_schema().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "M7 title outcome schema install did not settle".into(),
         ))
     }
 

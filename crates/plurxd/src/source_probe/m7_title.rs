@@ -41,7 +41,72 @@ impl From<&str> for EvaluationError {
     }
 }
 
+/// One step of an evaluation; `Ok` reaches the title's M7 result.
 pub(super) type EvaluationResult = Result<(), EvaluationError>;
+
+/// How an M7 evaluation that neither deferred nor was refused ended.
+/// [`EvaluationError::Unsupported`] and [`EvaluationError::Inconclusive`] are
+/// the refused endings, [`EvaluationError::Deferred`] the retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Evaluated {
+    /// M7 did not run on this attempt: a viewer's or probe-only admission,
+    /// or no experiment directory. Nothing is recorded.
+    Skipped,
+    /// Not an M7 title: no P8.1 conversion, not Profile 7, or not a
+    /// consistent FEL title. Recorded and never reopened.
+    NotApplicable,
+    /// A historical or repetition-alias result, or a measured, reused or
+    /// recovered one. Recorded and never reopened.
+    Result,
+}
+
+pub(super) type Evaluation = Result<Evaluated, EvaluationError>;
+
+/// The M7 identity a title's outcome is recorded under: the M7 sources this
+/// daemon was built from (`PLURX_M7_SOURCE_SHA256`, build.rs) and every
+/// installed artifact M7 runs. A change to either reopens the titles an
+/// older identity refused.
+pub(super) fn identity(tools: &crate::dv_tools::ToolSet) -> String {
+    identity_of(env!("PLURX_M7_SOURCE_SHA256"), &tools.m7_tools_digest())
+}
+
+fn identity_of(source_sha256: &str, tools_digest: &str) -> String {
+    let mut hash = Sha256::new();
+    for part in [
+        b"plurx-m7-identity-v1".as_slice(),
+        source_sha256.as_bytes(),
+        tools_digest.as_bytes(),
+    ] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part);
+    }
+    hex::encode(hash.finalize())
+}
+
+/// The record an evaluation's ending publishes with the title, if any.
+pub(super) fn outcome_record(
+    evaluation: &Evaluation,
+    identity: &str,
+) -> Option<plurx_core::store::dv_m7_outcomes::M7TitleOutcome> {
+    use plurx_core::store::dv_m7_outcomes::{M7OutcomeKind, M7TitleOutcome};
+    let (outcome, gate) = match evaluation {
+        Ok(Evaluated::Skipped) | Err(EvaluationError::Deferred(_)) => return None,
+        Ok(Evaluated::NotApplicable) => (M7OutcomeKind::NotApplicable, None),
+        Ok(Evaluated::Result) => (M7OutcomeKind::Result, None),
+        Err(EvaluationError::Unsupported(gate)) => (M7OutcomeKind::Unsupported, Some(gate)),
+        Err(EvaluationError::Inconclusive(gate)) => (M7OutcomeKind::Inconclusive, Some(gate)),
+    };
+    Some(M7TitleOutcome {
+        identity: identity.to_owned(),
+        fit_version: plurx_core::transcode::dv_refit::FIT_VERSION.to_owned(),
+        outcome,
+        // A gate is never empty; the store refuses one.
+        gate: gate.map(|gate| match M7TitleOutcome::bounded_gate(gate) {
+            bounded if bounded.is_empty() => "unspecified".to_owned(),
+            bounded => bounded,
+        }),
+    })
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -265,17 +330,18 @@ async fn raw_sha256(context: &TitleContext<'_>, source: &SourceFence) -> Result<
 pub(super) async fn evaluate(
     context: &TitleContext<'_>,
     stats: &plurx_core::scan::dv_title::DvTitleStats,
-) -> EvaluationResult {
-    if context.demand.playback_requested
-        || context.admission.is_probe_only()
-        || !plurx_core::playback::file_can_convert_to_p81(context.file)
-        || context.file.dolby_vision.profile != Some(7)
-    {
-        return Ok(());
+) -> Evaluation {
+    if context.demand.playback_requested || context.admission.is_probe_only() {
+        return Ok(Evaluated::Skipped);
     }
     let Some(root) = context.state.m7_experiment_dir.clone() else {
-        return Ok(());
+        return Ok(Evaluated::Skipped);
     };
+    if !plurx_core::playback::file_can_convert_to_p81(context.file)
+        || context.file.dolby_vision.profile != Some(7)
+    {
+        return Ok(Evaluated::NotApplicable);
+    }
     let title = held_title(context).await?;
     if let Some(result) = historical(root.clone(), title.content_sha256).await? {
         anchor_historical(context, &title, &result.protocol_sha256).await?;
@@ -295,7 +361,7 @@ pub(super) async fn evaluate(
             candidate_attempts = result.candidate_attempts,
             "retained historical M7 experiment"
         );
-        return Ok(());
+        return Ok(Evaluated::Result);
     }
     if let Some(alias) = repetition(root.clone(), title.content_sha256).await? {
         anchor_historical(context, &title, &alias.protocol_sha256).await?;
@@ -305,15 +371,17 @@ pub(super) async fn evaluate(
             protocol_sha256=%alias.protocol_sha256, repeat_count=alias.repeat_count,
             "physical repeat fixture shares the sealed M7 source experiment"
         );
-        return Ok(());
+        return Ok(Evaluated::Result);
     }
     use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
     if stats.el_kind != TitleConstant::Consistent(TitleElKind::Fel) {
-        return Ok(());
+        return Ok(Evaluated::NotApplicable);
     }
     // The new-title measurement is a ~110 KB future in debug builds; nested by
     // value under title work it overflowed a 2 MiB runtime worker stack.
-    Box::pin(measure_new_title(context, title, &root, stats)).await
+    Box::pin(measure_new_title(context, title, &root, stats))
+        .await
+        .map(|()| Evaluated::Result)
 }
 
 #[derive(Deserialize)]
@@ -1250,6 +1318,71 @@ mod tests {
             static_hdr_authority(&silent, 0, probe, Some(b"not json")),
             Err(EvaluationError::Deferred(_))
         ));
+    }
+
+    #[test]
+    fn the_m7_identity_is_a_deterministic_digest_of_source_and_tools() {
+        let source = "1".repeat(64);
+        let tools = "2".repeat(64);
+        let identity = identity_of(&source, &tools);
+        assert_eq!(identity.len(), 64);
+        assert!(identity
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_eq!(identity_of(&source, &tools), identity);
+        assert_ne!(identity_of(&"3".repeat(64), &tools), identity);
+        assert_ne!(identity_of(&source, &"3".repeat(64)), identity);
+        // Length prefixes: moving a byte between the parts is another identity.
+        assert_ne!(identity_of("ab", "c"), identity_of("a", "bc"));
+        let built = env!("PLURX_M7_SOURCE_SHA256");
+        assert_eq!(built.len(), 64);
+        assert!(built.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn evaluation_endings_record_their_outcome_and_retries_record_nothing() {
+        use plurx_core::store::dv_m7_outcomes::{M7OutcomeKind, MAX_GATE_BYTES};
+        let identity = "a".repeat(64);
+        let record = |evaluation: Evaluation| outcome_record(&evaluation, &identity);
+        assert_eq!(record(Ok(Evaluated::Skipped)), None);
+        assert_eq!(record(Err(EvaluationError::Deferred("busy".into()))), None);
+        for (evaluation, kind, gate) in [
+            (
+                Ok(Evaluated::NotApplicable),
+                M7OutcomeKind::NotApplicable,
+                None,
+            ),
+            (Ok(Evaluated::Result), M7OutcomeKind::Result, None),
+            (
+                Err(EvaluationError::Unsupported("no fitted scenes".into())),
+                M7OutcomeKind::Unsupported,
+                Some("no fitted scenes"),
+            ),
+            (
+                Err(EvaluationError::Inconclusive("rate".into())),
+                M7OutcomeKind::Inconclusive,
+                Some("rate"),
+            ),
+            (
+                Err(EvaluationError::Unsupported(String::new())),
+                M7OutcomeKind::Unsupported,
+                Some("unspecified"),
+            ),
+        ] {
+            let outcome = record(evaluation).unwrap();
+            assert_eq!(outcome.identity, identity);
+            assert_eq!(
+                outcome.fit_version,
+                plurx_core::transcode::dv_refit::FIT_VERSION
+            );
+            assert_eq!(outcome.outcome, kind);
+            assert_eq!(outcome.gate.as_deref(), gate);
+        }
+        let long = record(Err(EvaluationError::Unsupported("x".repeat(4096))))
+            .unwrap()
+            .gate
+            .unwrap();
+        assert_eq!(long.len(), MAX_GATE_BYTES);
     }
 
     fn exposure(model_means: [f64; 4]) -> CalibrationEvidence {

@@ -1376,6 +1376,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_job_turns::LIVE_TITLE_MIGRATION,
     // v137: a source-keyed frozen M7 protocol and single-use candidate slots.
     super::dv_m7_attempts::SCHEMA,
+    // v138: each title generation's M7 outcome, its identity and fitted table.
+    super::dv_m7_outcomes::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1957,6 +1959,7 @@ impl SqliteStore {
         super::scan_request_v2::verify_sqlite(conn)?;
         super::dv_refit_jobs::verify_sqlite(conn)?;
         super::dv_m7_attempts::verify_sqlite(conn)?;
+        super::dv_m7_outcomes::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

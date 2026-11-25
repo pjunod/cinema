@@ -3019,14 +3019,24 @@ pub trait BackgroundJobStore: Send + Sync {
     /// Settled FEL titles whose verdict another FEL identity measured.
     async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
         -> Result<Vec<i64>, StoreError>;
-    /// Reopen settled FEL titles fitted (under `fit_version`) after their
-    /// title job last succeeded, so their M7 evaluation sees the fit.
-    async fn reopen_dv_titles_refit_since(
+    /// Reopen settled Profile 7 enhancement-layer titles whose M7 outcome is
+    /// missing, or `unsupported` under another M7 `identity` or fitted table
+    /// (under `fit_version`), marking each reopen `pending` for both.
+    async fn reopen_stale_dv_m7_titles(
         &self,
+        identity: &str,
         fit_version: &str,
         limit: u32,
         now_ms: i64,
     ) -> Result<Vec<i64>, StoreError>;
+    /// The M7 outcome recorded for the file's current title generation.
+    async fn dv_m7_title_outcome(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_m7_outcomes::M7TitleOutcomeRecord>, StoreError>;
+    /// Forget the M7 outcomes of the item's files' current title
+    /// generations, so the idle sweep re-evaluates them. Returns how many.
+    async fn clear_dv_m7_title_outcomes(&self, item_id: i64) -> Result<u64, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -4252,13 +4262,23 @@ LIMIT 1
     ) -> Result<Vec<i64>, StoreError> {
         super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
     }
-    async fn reopen_dv_titles_refit_since(
+    async fn reopen_stale_dv_m7_titles(
         &self,
+        identity: &str,
         fit_version: &str,
         limit: u32,
         now_ms: i64,
     ) -> Result<Vec<i64>, StoreError> {
-        super::dv_title_jobs::reopen_refit_superseded(self, fit_version, limit, now_ms).await
+        super::dv_title_jobs::reopen_stale_m7(self, identity, fit_version, limit, now_ms).await
+    }
+    async fn dv_m7_title_outcome(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_m7_outcomes::M7TitleOutcomeRecord>, StoreError> {
+        super::dv_m7_outcomes::outcome(self, file_id).await
+    }
+    async fn clear_dv_m7_title_outcomes(&self, item_id: i64) -> Result<u64, StoreError> {
+        super::dv_m7_outcomes::clear_item(self, item_id).await
     }
     async fn dv_title_demands_through(
         &self,

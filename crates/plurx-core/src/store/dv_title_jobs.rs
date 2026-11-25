@@ -156,6 +156,12 @@ pub enum AnalysisTitleOutcome {
 pub struct PublishTitleJob {
     pub token: JobToken,
     pub output: TitleOutput,
+    /// The M7 evaluation's outcome, recorded with the aggregate in the same
+    /// command. `None` leaves the generation's record as it was: M7 did not
+    /// run (a viewer's or probe-only attempt, a native FEL head rebuild, no
+    /// experiment directory).
+    #[serde(default)]
+    pub m7: Option<super::dv_m7_outcomes::M7TitleOutcome>,
     pub now_ms: i64,
 }
 
@@ -329,6 +335,9 @@ pub(super) async fn publish<T: QueueSql>(
     input: PublishTitleJob,
 ) -> Result<JobPublishOutcome, StoreError> {
     input.token.validate()?;
+    if let Some(m7) = &input.m7 {
+        m7.validate()?;
+    }
     let out = &input.output;
     if input.now_ms < 0
         || out.file_id <= 0
@@ -851,33 +860,35 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')",
         .collect()
 }
 
-/// Reopen settled Profile 7 FEL titles whose current fitted F+ table was
-/// published after their title job last succeeded, each with a queued title
-/// job. Returns the titles reopened; one claimed or refit in between stays as
-/// it was.
+/// Reopen settled Profile 7 enhancement-layer titles whose M7 evaluation is
+/// stale for `identity` (the running M7 build and tools) and the current
+/// fitted F+ table under `fit_version`, each with a queued title job. Returns
+/// the titles reopened; one claimed or changed in between stays as it was.
 ///
-/// The title job's M7 evaluation reads the title's F+ outcome when it runs.
-/// A title settled against a refused or identity table (or before any table)
-/// ends M7 there, and a later fit under a new helper or fit identity would
-/// otherwise never be evaluated: nothing else reopens a settled title. The
-/// reopen keeps the same generation, so the title job reuses its stored
-/// aggregate instead of reading the source again. The fit and the title scan
-/// share one title lane and do not overlap, so their settlement times order
-/// them; once the reopened job succeeds the title no longer qualifies. A
-/// failed or cancelled attempt at the generation is left alone, as for a
-/// recipe request.
-pub(super) async fn reopen_refit_superseded<T: QueueSql>(
+/// A title is stale when its generation has no recorded M7 outcome, or when
+/// its outcome is `unsupported` (or the sweep's own `pending`) and was
+/// recorded under another identity or another fitted table. `result`,
+/// `not_applicable` and `inconclusive` are never reopened here; an
+/// administrator's re-evaluation forgets the record instead. The reopen keeps
+/// the generation, so the title job reuses its stored aggregate instead of
+/// reading the source again, and records `pending` under this identity and
+/// table in the same transaction: the loop-breaker, so a title reopens at most
+/// once per (identity, fitted table) whatever its job then does, including
+/// being cancelled or failing.
+pub(super) async fn reopen_stale_m7<T: QueueSql>(
     store: &T,
+    identity: &str,
     fit_version: &str,
     limit: u32,
     now_ms: i64,
 ) -> Result<Vec<i64>, StoreError> {
-    if !super::dv_refit_jobs::valid_fit_version(fit_version)
+    if !digest(identity)
+        || !super::dv_refit_jobs::valid_fit_version(fit_version)
         || limit == 0
         || limit > 128
         || now_ms < 0
     {
-        return Err(StoreError::Task("invalid F+ title reopen".into()));
+        return Err(StoreError::Task("invalid M7 title reopen".into()));
     }
     use super::background_jobs::{
         enqueue_body, BackgroundJobStore, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL,
@@ -890,22 +901,15 @@ pub(super) async fn reopen_refit_superseded<T: QueueSql>(
         source_size: i64,
         source_mtime: i64,
     }
+    let current = super::dv_m7_outcomes::CURRENT_FIT_TABLE;
     let candidates = format!(
         "FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
-WHERE d.terminal=1 AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ LEFT JOIN dv_m7_title_outcomes_v1 o ON o.revision=d.revision
+WHERE d.terminal=1 AND d.scanner_digest IS NOT NULL
+ AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
  AND json_type(f.probe_json,'$.{field}')='object'
- AND EXISTS(SELECT 1 FROM background_dv_refit_titles t
-  WHERE t.file_id=f.id AND t.superseded_at_ms IS NULL AND t.verdict='fitted'
-   AND t.fit_version=json_extract($1,'$.fit_version')
-   AND t.source_size=f.size AND t.source_mtime=f.mtime
-   AND t.created_at_ms>(SELECT max(job.updated_at_ms) FROM background_jobs job
-    WHERE job.kind='dv_title_scan' AND job.state='succeeded'
-     AND json_extract(job.payload_json,'$.file_id')=f.id
-     AND json_extract(job.payload_json,'$.probe_revision')=d.revision
-     AND json_extract(job.payload_json,'$.scanner_digest')=d.scanner_digest))
- AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
-  AND job.state IN ('cancelling','cancelled','failed')
-  AND json_extract(job.payload_json,'$.probe_revision')=d.revision)
+ AND (o.revision IS NULL OR (o.outcome IN ('unsupported','pending')
+  AND (o.identity IS NOT json_extract($1,'$.identity') OR o.fit_table IS NOT {current})))
  AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
   AND job.state IN ('queued','running','cancelling')
   AND json_extract(job.payload_json,'$.file_id')=f.id)",
@@ -918,7 +922,9 @@ WHERE d.terminal=1 AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.pro
  'source_size',f.size,'source_mtime',f.mtime) AS result_json {candidates}
 ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
             ),
-            encode(&serde_json::json!({"fit_version": fit_version, "limit": limit}))?,
+            encode(&serde_json::json!({
+                "identity": identity, "fit_version": fit_version, "limit": limit,
+            }))?,
             false,
             true,
         )
@@ -937,7 +943,6 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        let now = now_ms;
         let enqueue = EnqueueJob {
             id: uuid::Uuid::new_v4().to_string(),
             payload: JobPayload::DvTitleScan {
@@ -952,8 +957,8 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
                 title.file_id, title.revision, title.scanner_digest
             ),
             priority: 0,
-            not_before_ms: now,
-            now_ms: now,
+            not_before_ms: now_ms,
+            now_ms,
             request: JobRequest {
                 scope: "dv-title".into(),
                 request_id: request.clone(),
@@ -968,14 +973,17 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
         enqueue.validate()?;
         let body = encode(&enqueue_body(store, &enqueue).await?)?;
         let guard = encode(&serde_json::json!({
+            "identity": identity,
             "fit_version": fit_version,
             "file": title.file_id,
             "revision": title.revision,
             "job": enqueue.id,
+            "now": now_ms,
         }))?;
-        // Reopen under the same conditions as the read (a title claimed or
-        // refit since then stays settled), admit the attempt, and settle the
-        // title again if the attempt was not admitted.
+        // Reopen under the same conditions as the read (a title claimed,
+        // changed or re-evaluated since then stays settled), admit the
+        // attempt, mark the reopen as this identity's and table's, and settle
+        // the title again if the attempt was not admitted.
         store
             .queue_transaction(vec![
                 (
@@ -987,6 +995,19 @@ WHERE revision IN (SELECT d.revision {candidates}
                     guard.clone(),
                 ),
                 (ENQUEUE_SQL.to_owned(), body),
+                (
+                    format!(
+                        "INSERT INTO dv_m7_title_outcomes_v1(revision,file_id,identity,fit_table,outcome,gate,at_ms)
+SELECT d.revision,d.file_id,json_extract($1,'$.identity'),{current},'pending',NULL,json_extract($1,'$.now')
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE d.revision=json_extract($1,'$.revision') AND d.file_id=json_extract($1,'$.file') AND d.terminal=0
+ AND EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')
+ON CONFLICT(revision) DO UPDATE SET identity=excluded.identity,fit_table=excluded.fit_table,
+ outcome='pending',gate=NULL,at_ms=excluded.at_ms"
+                    ),
+                    guard.clone(),
+                ),
                 (
                     "UPDATE dv_title_jobs_demand SET terminal=1
 WHERE revision=json_extract($1,'$.revision') AND terminal=0

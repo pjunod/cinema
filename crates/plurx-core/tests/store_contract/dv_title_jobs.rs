@@ -165,6 +165,7 @@ fn publication(
             scanner_digest: scanner.into(),
             stats: stats(),
         },
+        m7: None,
         now_ms: now,
     }
 }

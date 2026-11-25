@@ -420,6 +420,33 @@ impl ToolSet {
     pub(crate) fn title_scanner_digest(&self) -> String {
         hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
     }
+    /// Every installed artifact an M7 evaluation runs: the processing
+    /// backend (renderer, libraries, parser, helper sources), the title
+    /// scanner, the muxer and the M7 encoder with its libraries, exactly the
+    /// identities M7's bindings already name. The F+ helper that fits the
+    /// table M7 reads is not here: a new table is its own reopen reason.
+    #[cfg(unix)]
+    pub(crate) fn m7_tools_digest(&self) -> String {
+        let mut parts = vec![
+            "plurx-m7-tools-v1".to_owned(),
+            self.backend_digest(),
+            self.title_scanner_digest(),
+            self.muxer
+                .as_ref()
+                .map(|(_, sha)| sha.clone())
+                .unwrap_or_default(),
+        ];
+        if let Some(encoder) = &self.m7_encoder {
+            parts.push(encoder.cli.1.clone());
+            parts.extend(encoder.libraries.iter().map(|(_, sha)| sha.clone()));
+        }
+        let mut body = Vec::new();
+        for part in parts {
+            body.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            body.extend_from_slice(part.as_bytes());
+        }
+        hash(&body)
+    }
     /// What an F+ fit's statistics depend on (decision G): the refit mode's
     /// version and the decoder ABI it runs on, not the whole backend digest,
     /// so rebuilding the bundle for an unrelated change does not decode every

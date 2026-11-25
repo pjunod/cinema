@@ -1,4 +1,8 @@
 use super::{complete_title, m7_settlement, JobSettlement, TitleDemand, TitleOutput};
+use crate::source_probe::m7_title::Evaluated;
+use plurx_core::store::dv_m7_outcomes::M7OutcomeKind;
+
+const IDENTITY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
 fn m7_transient_failure_yields_with_the_complete_title_aggregate() {
@@ -28,7 +32,7 @@ fn m7_transient_failure_yields_with_the_complete_title_aggregate() {
         (false, "m7_retry_pending", 30_000),
         (true, "title_interrupted", 5_000),
     ] {
-        let Some(JobSettlement::Yield {
+        let Err(JobSettlement::Yield {
             error_code,
             checkpoint,
             not_before_ms,
@@ -37,6 +41,7 @@ fn m7_transient_failure_yields_with_the_complete_title_aggregate() {
             Err(EvaluationError::Deferred(
                 "fixture refused busy scratch".into(),
             )),
+            IDENTITY,
             interrupted,
             42,
         )
@@ -51,25 +56,47 @@ fn m7_transient_failure_yields_with_the_complete_title_aggregate() {
         assert_eq!(restored.probe_revision, aggregate.probe_revision);
         assert_eq!(not_before_ms, 42 + delay);
     }
-    assert!(m7_settlement(&aggregate, Ok(()), false, 0).is_none());
-    assert!(m7_settlement(
-        &aggregate,
-        Err(EvaluationError::Unsupported(
+    // Every ending publishes with its record; a skipped evaluation records
+    // nothing, and an interrupted one yields whatever it concluded.
+    let kind = |evaluation| {
+        m7_settlement(&aggregate, evaluation, IDENTITY, false, 0)
+            .unwrap()
+            .map(|outcome| {
+                assert_eq!(outcome.identity, IDENTITY);
+                (outcome.outcome, outcome.gate)
+            })
+    };
+    assert_eq!(kind(Ok(Evaluated::Skipped)), None);
+    assert_eq!(
+        kind(Ok(Evaluated::NotApplicable)),
+        Some((M7OutcomeKind::NotApplicable, None))
+    );
+    assert_eq!(
+        kind(Ok(Evaluated::Result)),
+        Some((M7OutcomeKind::Result, None))
+    );
+    assert_eq!(
+        kind(Err(EvaluationError::Unsupported(
             "unsupported fixture geometry".into()
-        )),
-        false,
-        0,
-    )
-    .is_none());
-    assert!(m7_settlement(
-        &aggregate,
-        Err(EvaluationError::Inconclusive(
+        ))),
+        Some((
+            M7OutcomeKind::Unsupported,
+            Some("unsupported fixture geometry".into())
+        ))
+    );
+    assert_eq!(
+        kind(Err(EvaluationError::Inconclusive(
             "authored rate out of band".into()
-        )),
-        false,
-        0,
-    )
-    .is_none());
+        ))),
+        Some((
+            M7OutcomeKind::Inconclusive,
+            Some("authored rate out of band".into())
+        ))
+    );
+    assert!(matches!(
+        m7_settlement(&aggregate, Ok(Evaluated::Result), IDENTITY, true, 0),
+        Err(JobSettlement::Yield { .. })
+    ));
 }
 
 #[tokio::test]
@@ -117,13 +144,15 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
         let outcome = complete_title(
             &demand,
             aggregate.clone(),
+            IDENTITY,
             async { panic!("an already-settled head must not start M7 evaluation") },
             || interrupted,
-            |output| {
+            |output, m7| {
                 let published = &published;
                 let expected = &aggregate;
                 async move {
                     published.set(true);
+                    assert_eq!(m7, None, "a head rebuild keeps the recorded outcome");
                     assert_eq!(output.probe_revision, expected.probe_revision);
                     assert_eq!(output.stats, expected.stats);
                     Ok(fence_accepts)
@@ -153,13 +182,14 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
     let outcome = complete_title(
         &ordinary,
         aggregate.clone(),
+        IDENTITY,
         async {
             Err(EvaluationError::Deferred(
                 "fixture refused busy scratch".into(),
             ))
         },
         || false,
-        |_| async { panic!("deferred M7 must yield before fenced publication") },
+        |_, _| async { panic!("deferred M7 must yield before fenced publication") },
         || panic!("ordinary maintenance has not reached publication"),
     )
     .await;
@@ -177,4 +207,37 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
         serde_json::from_value(checkpoint["fel_title_aggregate"].clone()).unwrap();
     assert_eq!(restored.probe_revision, aggregate.probe_revision);
     assert_eq!(restored.stats, aggregate.stats);
+
+    // A refused evaluation is published with the aggregate, in one command.
+    let published = Cell::new(false);
+    let outcome = complete_title(
+        &ordinary,
+        aggregate.clone(),
+        IDENTITY,
+        async {
+            Err(EvaluationError::Unsupported(
+                "current F+ outcome has no fitted scenes".into(),
+            ))
+        },
+        || false,
+        |output, m7| {
+            let published = &published;
+            async move {
+                published.set(true);
+                assert_eq!(output.probe_revision, 2);
+                let m7 = m7.expect("the refusal is recorded");
+                assert_eq!(m7.outcome, M7OutcomeKind::Unsupported);
+                assert_eq!(m7.identity, IDENTITY);
+                assert_eq!(
+                    m7.gate.as_deref(),
+                    Some("current F+ outcome has no fitted scenes")
+                );
+                Ok(true)
+            }
+        },
+        || panic!("no publication failure was injected"),
+    )
+    .await;
+    assert!(published.get());
+    assert!(outcome.is_ok());
 }
