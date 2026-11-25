@@ -24,6 +24,19 @@ def bearer(request):
     return request["headers"].get("Authorization")
 
 
+class RuntimeSocket(LauncherCase):
+    def test_a_runtime_dir_too_deep_for_the_socket_is_passed_over(self):
+        deep = os.path.join(self.tmp, *(["d" * 40] * 3))
+        os.makedirs(deep, mode=0o700)
+        self.runtime = deep
+        self.close_at(12)
+        self.assertEqual(self.run_launcher(), 0, self.errors)
+        sock = next(a for a in self.mpv.argv() if a.startswith("--input-ipc-server=")).split("=", 1)[1]
+        self.assertFalse(sock.startswith(deep))
+        self.assertLessEqual(len(os.fsencode(sock)), launcher_module.SUN_PATH_MAX)
+        self.assertFalse(os.path.exists(os.path.dirname(sock)), "the private socket directory is removed")
+
+
 class CallSequence(LauncherCase):
     def test_redeem_decide_create_play_then_release_and_revoke(self):
         self.close_at(12)
