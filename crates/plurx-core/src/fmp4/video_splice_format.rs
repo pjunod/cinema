@@ -12,7 +12,7 @@ use super::{
     hevc_hdr10_sample_entry_facts, hevc_nal_type, hvcc_parameter_set_nals, locate_configuring_hvcc,
     malformed, sei_number, shrink_box, validate_hevc_sample_description_reference,
     visit_length_prefixed_hevc_nals, without_trailing_zero_bytes, Fmp4Error, Fragment,
-    HvcCLocation, Init, Sample, VideoCodec,
+    HvcCLocation, Init, Sample, Track, VideoCodec,
 };
 
 /// One fixed clear Main10 Profile 8.1 video initialization. Every new
@@ -29,6 +29,50 @@ pub struct SpliceVideoRendition<'a> {
     format: &'a SpliceVideoFormat,
     parameter_sets: [&'a [u8]; 3],
     slice_pps_id: u32,
+    copy_static: Option<&'a CopyStaticMetadata>,
+}
+
+/// The HDR10 static SEI values one ordinary copy segment carries in band.
+/// A replacement for that segment must carry the same values or none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CopyStaticMetadata(BTreeMap<u16, Vec<u8>>);
+
+impl CopyStaticMetadata {
+    /// Read every sample of `track` in `fragment`. A segment whose own copy
+    /// changes a value is refused, since no replacement could match it.
+    pub fn of(fragment: &Fragment, track: &Track) -> Result<Self, Fmp4Error> {
+        let mut values = BTreeMap::<u16, Vec<u8>>::new();
+        for (_, bytes) in fragment.samples_with_bytes(track.id) {
+            let bytes = bytes.ok_or_else(|| unsupported("copy sample lies outside its mdat"))?;
+            let mut outcome = Ok(());
+            visit_length_prefixed_hevc_nals(bytes, track.nal_length_size, |framed, kind| {
+                if outcome.is_err() || !matches!(kind, Some(39 | 40)) {
+                    return;
+                }
+                let nal = &framed[usize::from(track.nal_length_size)..];
+                let parsed = parse_sei(nal, |kind, data| {
+                    if static_metadata_size(kind).is_none() {
+                        return Ok(true);
+                    }
+                    match values.get(&kind) {
+                        Some(previous) if previous != data => {
+                            Err(unsupported("copy segment changes HDR10 static metadata"))
+                        }
+                        Some(_) => Ok(true),
+                        None => {
+                            values.insert(kind, data.to_vec());
+                            Ok(true)
+                        }
+                    }
+                });
+                if let Err(error) = parsed {
+                    outcome = Err(error);
+                }
+            })?;
+            outcome?;
+        }
+        Ok(Self(values))
+    }
 }
 
 /// Random-access requirements for the fragment's place in the rendition.
@@ -143,11 +187,21 @@ impl SpliceVideoFormat {
             format: self,
             producer,
             parameter_sets,
+            copy_static: None,
         })
     }
 }
 
-impl SpliceVideoRendition<'_> {
+impl<'a> SpliceVideoRendition<'a> {
+    /// Bind a replacement producer to the copy segment it replaces. Its
+    /// in-band HDR10 static SEI must then repeat that copy's values.
+    pub fn replacing(self, copy_static: &'a CopyStaticMetadata) -> Self {
+        Self {
+            copy_static: Some(copy_static),
+            ..self
+        }
+    }
+
     /// Author one fragment. The publisher proves source and clock continuity
     /// across fragments and identifies the producer change before publication.
     pub fn fragment(
@@ -193,6 +247,11 @@ impl SpliceVideoRendition<'_> {
         sequence: u32,
         boundary: SpliceBoundary,
     ) -> Result<Fragment, Fmp4Error> {
+        if self.copy_static.is_none() {
+            return Err(unsupported(
+                "a replacement is not bound to the copy segment it replaces",
+            ));
+        }
         let source = &self.producer.tracks[0];
         let output = &self.format.init.tracks[0];
         validate_hevc_sample_description_reference(self.producer, input)?;
@@ -242,6 +301,24 @@ impl SpliceVideoRendition<'_> {
         Ok(result)
     }
 
+    /// A Dolby Vision copy's init declares no HDR10 static metadata, because
+    /// its promotion is withheld from a Dolby Vision sample entry. The source's
+    /// own mastering-display and light-level SEI then travel only in band.
+    /// The ordinary copy keeps them exactly as the muxed layout serves them.
+    /// A replacement must repeat the values of the copy it replaces, so the
+    /// published rendition never changes its static metadata.
+    fn static_sei_admitted(&self, kind: u16, data: &[u8]) -> bool {
+        if static_metadata_size(kind).is_none() {
+            return true;
+        }
+        match self.format.static_metadata.get(&kind) {
+            Some(declared) => declared == data,
+            None => self
+                .copy_static
+                .is_none_or(|copy| copy.0.get(&kind).is_some_and(|value| value == data)),
+        }
+    }
+
     fn verify_sample(
         &self,
         bytes: &[u8],
@@ -249,14 +326,15 @@ impl SpliceVideoRendition<'_> {
         boundary: SpliceBoundary,
     ) -> Result<Option<Vec<u8>>, Fmp4Error> {
         let mut first_vcl = None;
-        let mut invalid = false;
+        // The first check this sample fails, named for the decline log.
+        let mut failure = None;
         let mut ordered_sample = Vec::new();
         let mut aud_len = 0;
         let seed = sample.is_sync();
         visit_length_prefixed_hevc_nals(bytes, 4, |framed, kind| {
             let nal = &framed[4..];
             if nal.len() < 3 || nal[0] & 0x81 != 0 || nal[1] & 0xf8 != 0 || nal[1] & 7 == 0 {
-                invalid = true;
+                failure.get_or_insert("splice sample has a NAL outside the base layer");
                 return;
             }
             match kind.expect("NAL with two header bytes") {
@@ -267,20 +345,22 @@ impl SpliceVideoRendition<'_> {
                     if irap {
                         bits.read(1);
                     }
-                    if bits.ue() != Some(self.slice_pps_id)
-                        || first != first_vcl.is_none()
+                    if bits.ue() != Some(self.slice_pps_id) {
+                        failure.get_or_insert("splice slice refers to another PPS");
+                    } else if first != first_vcl.is_none()
                         || first_vcl.is_some_and(|prior| prior != (kind, nal[1] & 7))
                     {
-                        invalid = true;
+                        failure.get_or_insert("splice sample's slices do not form one picture");
                     }
                     first_vcl.get_or_insert((kind, nal[1] & 7));
                 }
                 kind @ 32..=34 => {
                     let expected = self.parameter_sets[usize::from(kind - 32)];
-                    if without_trailing_zero_bytes(nal) != without_trailing_zero_bytes(expected)
-                        || first_vcl.is_some()
-                    {
-                        invalid = true;
+                    if without_trailing_zero_bytes(nal) != without_trailing_zero_bytes(expected) {
+                        failure.get_or_insert("splice sample repeats different parameter sets");
+                    } else if first_vcl.is_some() {
+                        failure
+                            .get_or_insert("splice sample sends a parameter set after its picture");
                     }
                     if seed {
                         return;
@@ -288,22 +368,31 @@ impl SpliceVideoRendition<'_> {
                 }
                 35 if seed => {
                     if !std::ptr::eq(framed.as_ptr(), bytes.as_ptr()) || aud_len != 0 {
-                        invalid = true;
+                        failure
+                            .get_or_insert("splice sample has a misplaced access unit delimiter");
                     }
                     aud_len = framed.len();
                     return;
                 }
-                37 => invalid = true, // EOB cannot end a continuing rendition.
+                // EOB cannot end a continuing rendition.
+                37 => {
+                    failure.get_or_insert("splice sample ends the bitstream");
+                }
                 39 | 40 => {
-                    invalid |= !parse_sei(nal, |kind, data| {
-                        Ok(static_metadata_size(kind).is_none()
-                            || self
-                                .format
-                                .static_metadata
-                                .get(&kind)
-                                .is_some_and(|value| value == data))
-                    })
-                    .is_ok_and(|same| same);
+                    let mut changed = false;
+                    let parsed = parse_sei(nal, |kind, data| {
+                        changed |= !self.static_sei_admitted(kind, data);
+                        Ok(true)
+                    });
+                    match parsed {
+                        _ if changed => {
+                            failure.get_or_insert("splice sample changes HDR10 static metadata");
+                        }
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => {
+                            failure.get_or_insert("splice sample has an unreadable SEI");
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -311,10 +400,11 @@ impl SpliceVideoRendition<'_> {
                 ordered_sample.extend_from_slice(framed);
             }
         })?;
-        if invalid || first_vcl.is_none() {
-            return Err(unsupported(
-                "splice sample changes the proved HEVC configuration",
-            ));
+        if let Some(failure) = failure {
+            return Err(unsupported(failure));
+        }
+        if first_vcl.is_none() {
+            return Err(unsupported("splice sample has no picture"));
         }
         if boundary == SpliceBoundary::ProducerChange
             && (!seed || !matches!(first_vcl, Some((19 | 20, 1))))
@@ -737,5 +827,184 @@ mod avc_sps_depth_chroma_tests {
         let mut main = bytes(KISS_KISS_SPS);
         main[1] = 77;
         assert_eq!(avc_sps_depth_chroma(&main), Some((8, 1)));
+    }
+}
+
+#[cfg(test)]
+mod hdr10_sei_tests {
+    use super::super::{
+        build_moof, parse_moof, set_dolby_vision_record, DolbyVisionRecord, FragmentReader, Plan,
+        Unit,
+    };
+    use super::*;
+
+    // The first two pictures of a Profile 7 UHD remux copied from a mid-film
+    // resume, NAL headers and metadata only. The init (udta removed) declares
+    // no HDR10 static metadata; the IRAP carries it in band.
+    const IRAP: [&str; 9] = [
+        "460110",
+        "4e0181010f80",
+        "4e010006800e6e73c54c80",
+        "4e010102080780",
+        "4e010601d080",
+        "4e01891833c286c41d4c0bb884d03e803d13404200989680000003000180",
+        "4e019004000003000080",
+        "4e010440b5003c0001040140000c803d32186d0a54801564080000284cd050018cc8000190005a58013ed00392f806871841a80043a03d246b35d436b6159f2e5d4baa0080",
+        "2801ac0577809f2b1bd2ffc256ed0dfc62960dd4e647090d",
+    ];
+    const TRAIL: [&str; 4] = [
+        "460130",
+        "4e010102001580",
+        "4e010440b5003c0001040140000c803d32186d0a54801564080000284cd050018cc8000190005a58013ed00392f806871841a80043a03d246b35d436b6159f2e5d4baa0080",
+        "0201d1051183c87ef0a8bf49296c3fc5f78365ac",
+    ];
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    fn framed(nals: &[Vec<u8>]) -> Vec<u8> {
+        nals.iter()
+            .flat_map(|nal| {
+                (nal.len() as u32)
+                    .to_be_bytes()
+                    .into_iter()
+                    .chain(nal.clone())
+            })
+            .collect()
+    }
+
+    fn copy_init() -> Init {
+        let mut reader = FragmentReader::new();
+        reader.push(include_bytes!(
+            "../../tests/fixtures/dv-runtime/hdr10-sei-copy-init.mp4"
+        ));
+        let Some(Unit::Init(mut init)) = reader.next_unit().expect("fixture init") else {
+            panic!("missing fixture init");
+        };
+        // The copy writer converts the Profile 7 record before splitting.
+        let converted = DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("8.1 record");
+        set_dolby_vision_record(&mut init, &converted).expect("convert record");
+        init
+    }
+
+    /// The IRAP with the init's own parameter sets after its AUD, as the copy
+    /// repeats them, then the picture that follows it.
+    fn copy_fragment(init: &Init, irap_vps: Option<Vec<u8>>) -> Fragment {
+        let location = locate_configuring_hvcc(&init.bytes)
+            .expect("parse")
+            .expect("hvcC");
+        let mut sets: Vec<Vec<u8>> = hvcc_parameter_set_nals(&init.bytes[location.payload])
+            .expect("parameter sets")
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect();
+        sets.sort_by_key(|nal| hevc_nal_type(nal));
+        if let Some(vps) = irap_vps {
+            sets[0] = vps;
+        }
+        let mut irap: Vec<_> = IRAP.iter().map(|nal| hex(nal)).collect();
+        irap.splice(1..1, sets);
+        let samples = [framed(&irap), framed(&TRAIL.map(hex))];
+        let track = init.video().expect("video track");
+        let plan = Plan {
+            track_id: track.id,
+            base_decode_time: 0,
+            samples: samples
+                .iter()
+                .enumerate()
+                .map(|(index, bytes)| Sample {
+                    duration: 667,
+                    size: bytes.len() as u32,
+                    size_at: None,
+                    flags: if index == 0 { 0x0200_0000 } else { 0x0101_0000 },
+                    cto: 0,
+                })
+                .collect(),
+            slices: Vec::new(),
+        };
+        let mut slots = Vec::new();
+        let mut bytes = build_moof(&[plan], 1, &mut slots);
+        let payload_start = bytes.len() + 8;
+        bytes[slots[0]..slots[0] + 4].copy_from_slice(&(payload_start as i32).to_be_bytes());
+        let tracks = parse_moof(&bytes, 8, std::slice::from_ref(track)).expect("parse moof");
+        let payload = samples.concat();
+        bytes.extend_from_slice(&super::super::mp4_box(b"mdat", &payload).expect("mdat"));
+        Fragment {
+            mdat_payload: payload_start..bytes.len(),
+            bytes,
+            tracks,
+        }
+    }
+
+    #[test]
+    fn a_dolby_vision_copy_keeps_its_in_band_hdr10_metadata_on_the_split() {
+        let init = copy_init();
+        let format = SpliceVideoFormat::new(&init, 48_000).expect("split video format");
+        assert!(format.static_metadata.is_empty(), "the copy declares none");
+        let rendition = format.admit(&init).expect("the copy is its own producer");
+        let fragment = copy_fragment(&init, None);
+        let clock = VideoSpliceClock {
+            input_presentation_anchor: 0,
+            output_presentation_anchor: 0,
+            output_decode_start: 0,
+        };
+        rendition
+            .fragment(&fragment, clock, 1, SpliceBoundary::Fragment)
+            .expect("the ordinary copy passes its own in-band HDR10 SEI");
+
+        let track = init.video().expect("video track");
+        let copy = CopyStaticMetadata::of(&fragment, track).expect("copy static metadata");
+        assert_eq!(copy.0.keys().copied().collect::<Vec<_>>(), [137, 144]);
+        let (sample, bytes) = fragment.samples_with_bytes(track.id)[0];
+        let bytes = bytes.expect("IRAP bytes");
+        let replace = |copy: &CopyStaticMetadata| {
+            let replacement = format.admit(&init).expect("producer").replacing(copy);
+            replacement
+                .verify_sample(bytes, sample, SpliceBoundary::Fragment)
+                .map(|_| ())
+        };
+        replace(&copy).expect("a replacement repeating the copy's values");
+        let unmatched =
+            |copy: &CopyStaticMetadata| replace(copy).expect_err("replacement must match the copy");
+        for refused in [CopyStaticMetadata::default(), {
+            let mut other = copy.clone();
+            other.0.insert(144, vec![0, 1, 0, 1]);
+            other
+        }] {
+            assert_eq!(
+                unmatched(&refused).to_string(),
+                unsupported("splice sample changes HDR10 static metadata").to_string()
+            );
+        }
+
+        // The decline log names the check: here, a repeated VPS that differs.
+        let location = locate_configuring_hvcc(&init.bytes)
+            .expect("parse")
+            .expect("hvcC");
+        let mut vps = hvcc_parameter_set_nals(&init.bytes[location.payload])
+            .expect("parameter sets")
+            .into_iter()
+            .find(|nal| hevc_nal_type(nal) == Some(32))
+            .expect("VPS")
+            .to_vec();
+        *vps.last_mut().expect("VPS byte") ^= 1;
+        let error = rendition
+            .fragment(
+                &copy_fragment(&init, Some(vps)),
+                clock,
+                1,
+                SpliceBoundary::Fragment,
+            )
+            .expect_err("a different VPS");
+        assert!(
+            error
+                .to_string()
+                .contains("splice sample repeats different parameter sets"),
+            "{error}"
+        );
     }
 }

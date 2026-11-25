@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-pub use super::video_splice_format::{SpliceBoundary, SpliceVideoFormat, SpliceVideoRendition};
+pub use super::video_splice_format::{
+    CopyStaticMetadata, SpliceBoundary, SpliceVideoFormat, SpliceVideoRendition,
+};
 
 use super::{
     be_u32, build_moof, children, malformed, parse_moof, peek_box, Fmp4Error, Fragment, Plan,
