@@ -1,6 +1,16 @@
 version = 1
 enforce_after = "e8a910f"
 
+# The release-signed ProfileCapture variant derived its build number without
+# --release: no floor check, and 1 on a checkout without history.
+[[fixes]]
+id = "android.profile-capture-derives-strictly"
+commits = ["461b3446a"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "val release = releaseTaskRequested ||"
+test = "tests/validation/test_build_number.py"
+test_anchor = "def test_every_release_signed_android_variant_derives_strictly"
+
 # Await every submitted debounce task before counting tuner starts.
 [[fixes]]
 id = "apple.settings-details-rows-support-tvos"

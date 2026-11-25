@@ -3,12 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import subprocess
+import tomllib
 import unittest
 
 from validation.doc_versions import check_repository, validate_documented_builds
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# The status lines quote the workspace version, which every release cut moves.
+VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
 
 
 class MobileBuildClaimCase(unittest.TestCase):
@@ -18,10 +21,10 @@ class MobileBuildClaimCase(unittest.TestCase):
     def test_a_status_line_that_quotes_a_build_number_is_rejected(self) -> None:
         """Build numbers are derived by scripts/build-number, never mirrored."""
         for path, before, after in (
-            ("clients/apple/README.md", "**v0.8.0**;", "**v0.8.0**, build `311`;"),
-            ("clients/android/README.md", "**v0.8.0**;", "**v0.8.0**, build `211`;"),
-            ("docs/clients/APPLE-CLIENT-PARITY.md", "source is v0.8.0;",
-             "source is v0.8.0, Apple build 311;"),
+            ("clients/apple/README.md", f"**v{VERSION}**;", f"**v{VERSION}**, build `311`;"),
+            ("clients/android/README.md", f"**v{VERSION}**;", f"**v{VERSION}**, build `211`;"),
+            ("docs/clients/APPLE-CLIENT-PARITY.md", f"source is v{VERSION};",
+             f"source is v{VERSION}, Apple build 311;"),
         ):
             with self.subTest(path):
                 def read(name: str) -> str:

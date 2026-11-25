@@ -1607,6 +1607,31 @@ fn k06_durable_activation_settlement_keeps_original_phase_and_refuses_next_submi
     }
 }
 
+/// A loopback singleton config whose Raft and API sockets the config owns, and
+/// the socket its HTTP origin names.
+///
+/// Reading ports from bound listeners and dropping them lets any other socket
+/// on the host take a port before the voter binds it. The voter serves on the
+/// config's sockets instead; the HTTP socket only reserves the origin, so the
+/// caller keeps it for as long as the node is published under it.
+fn owned_singleton_config(
+    data_dir: &std::path::Path,
+) -> (crate::config::Config, std::net::TcpListener) {
+    let http = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP origin");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
+    let mut config = crate::config::Config::default();
+    config.storage.data_dir = data_dir.into();
+    config.server.bind = http.local_addr().expect("owned HTTP address");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = crate::config::ClusterListeners::owned(raft, api);
+    config.cluster.advertise_host = "localhost".into();
+    config.cluster.join_url = format!("http://{}", config.server.bind);
+    config.cluster.artwork_url = config.cluster.join_url.clone();
+    (config, http)
+}
+
 #[test]
 fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture() {
     let worker = std::thread::Builder::new()
@@ -1629,7 +1654,6 @@ fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture()
 
 async fn delayed_activation_settlement_fixture(direct_phase: bool) {
     use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
-    use crate::config::Config;
 
     struct SingletonObserver;
     impl StartupClockObserver for SingletonObserver {
@@ -1687,22 +1711,7 @@ async fn delayed_activation_settlement_fixture(direct_phase: bool) {
     }
 
     let root = tempfile::tempdir().expect("owned activation directory");
-    let held: Vec<_> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned fixture port"))
-        .collect();
-    let addresses: Vec<_> = held
-        .iter()
-        .map(|listener| listener.local_addr().expect("address"))
-        .collect();
-    let mut config = Config::default();
-    config.storage.data_dir = root.path().into();
-    config.server.bind = addresses[0];
-    config.cluster.raft_bind = addresses[1];
-    config.cluster.api_bind = addresses[2];
-    config.cluster.advertise_host = "localhost".into();
-    config.cluster.join_url = format!("http://{}", addresses[0]);
-    config.cluster.artwork_url = config.cluster.join_url.clone();
-    drop(held);
+    let (config, _http_origin) = owned_singleton_config(root.path());
     drop(crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"));
     let selected = Box::pin(select_daemon_store_observing(
         &config,
@@ -1995,22 +2004,10 @@ async fn actual_precommit_activation_fixture(
                 .expect("actual precommit fixture");
         connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='cluster_node_removal_insert_guard'", [], |row| row.get(0)).expect("actual precommit fixture")
     }
-    let held: Vec<_> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("actual precommit fixture"))
-        .collect();
-    let addresses: Vec<_> = held
-        .iter()
-        .map(|listener| listener.local_addr().expect("actual precommit fixture"))
-        .collect();
-    let mut config = crate::config::Config::default();
-    config.storage.data_dir = root.into();
-    config.server.bind = addresses[0];
-    config.cluster.raft_bind = addresses[1];
-    config.cluster.api_bind = addresses[2];
-    config.cluster.advertise_host = "localhost".into();
-    config.cluster.join_url = format!("http://{}", addresses[0]);
-    config.cluster.artwork_url = config.cluster.join_url.clone();
-    drop(held);
+    let (config, _http_origin) = owned_singleton_config(root);
+    // The selection task owns the config, so its sockets close when the task
+    // ends; the rebinds below then prove the voter released its duplicates.
+    let (raft_bind, api_bind) = (config.cluster.raft_bind, config.cluster.api_bind);
     drop(
         crate::store::SqliteStore::open(&root.join("plurx.db")).expect("actual precommit fixture"),
     );
@@ -2109,8 +2106,8 @@ async fn actual_precommit_activation_fixture(
         }
     }
     lock.unlock().expect("actual precommit fixture");
-    assert!(std::net::TcpListener::bind(addresses[1]).is_ok());
-    assert!(std::net::TcpListener::bind(addresses[2]).is_ok());
+    assert!(std::net::TcpListener::bind(raft_bind).is_ok());
+    assert!(std::net::TcpListener::bind(api_bind).is_ok());
 }
 
 #[test]
@@ -2315,7 +2312,6 @@ fn k06_aged_committed_learner_clock_response_keeps_other_routes_live_only() {
 
 async fn aged_committed_learner_clock_response_fixture() {
     use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
-    use crate::config::Config;
     use std::borrow::Cow;
 
     struct SingletonObserver;
@@ -2346,26 +2342,8 @@ async fn aged_committed_learner_clock_response_fixture() {
             })
         }
     }
-    fn addresses() -> Vec<std::net::SocketAddr> {
-        let held: Vec<_> = (0..3)
-            .map(|_| {
-                std::net::TcpListener::bind("127.0.0.1:0").expect("reserve owned fixture port")
-            })
-            .collect();
-        held.iter()
-            .map(|listener| listener.local_addr().expect("owned port"))
-            .collect()
-    }
     let root = tempfile::tempdir().expect("leader root");
-    let ports = addresses();
-    let mut config = Config::default();
-    config.storage.data_dir = root.path().into();
-    config.server.bind = ports[0];
-    config.cluster.raft_bind = ports[1];
-    config.cluster.api_bind = ports[2];
-    config.cluster.advertise_host = "localhost".into();
-    config.cluster.join_url = format!("http://{}", ports[0]);
-    config.cluster.artwork_url = config.cluster.join_url.clone();
+    let (config, _http_origin) = owned_singleton_config(root.path());
     drop(crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"));
     let selected = Box::pin(select_daemon_store_observing(
         &config,
@@ -2379,7 +2357,16 @@ async fn aged_committed_learner_clock_response_fixture() {
         .await
         .expect("owned join token");
     let learner_root = tempfile::tempdir().expect("learner root");
-    let learner_ports = addresses();
+    // The learner starts directly on sockets this test already holds, so no
+    // other socket can take its ports before it serves.
+    let learner_http = std::net::TcpListener::bind("127.0.0.1:0").expect("learner HTTP origin");
+    let learner_raft = std::net::TcpListener::bind("127.0.0.1:0").expect("learner Raft port");
+    let learner_api = std::net::TcpListener::bind("127.0.0.1:0").expect("learner API port");
+    let learner_ports = [
+        learner_http.local_addr().expect("learner HTTP address"),
+        learner_raft.local_addr().expect("learner Raft address"),
+        learner_api.local_addr().expect("learner API address"),
+    ];
     let learner_id = uuid::Uuid::new_v4().to_string();
     let (protocol_min, protocol_max) = manager.active_protocol_range().await.expect("actual range");
     manager
@@ -2415,6 +2402,10 @@ async fn aged_committed_learner_clock_response_fixture() {
                 nodes: vec![Node::from(&leader.local), Node::from(&local)],
                 listen_addr_api: Cow::Borrowed("127.0.0.1"),
                 listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                listeners: Some(hiqlite::NodeListeners {
+                    raft: learner_raft,
+                    api: learner_api,
+                }),
                 data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
                 filename_db: Cow::Borrowed("clock-test.db"),
                 secret_raft: leader.secrets.raft.clone(),
