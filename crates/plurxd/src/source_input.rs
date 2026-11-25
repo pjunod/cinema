@@ -1172,7 +1172,7 @@ async fn read_source(
         None
     };
     let admitted_at = std::time::Instant::now();
-    let job = plurx_core::media_io::blocking(move || {
+    let job = tokio::task::spawn_blocking(move || {
         let activity = activity;
         let _pause_guard = pause_guard;
         #[cfg(test)]
@@ -1189,6 +1189,10 @@ async fn read_source(
         if size == 0 || read_state.close.is_cancelled() {
             return Err(std::io::Error::other("source purpose or input closed"));
         }
+        // The media slot covers the source lock, fence checks and reads only.
+        // The revalidation above waits on grants and the store; holding a
+        // slot through it would let healthy waits pin every media slot.
+        let _media = tokio::runtime::Handle::current().block_on(plurx_core::media_io::slot());
         let mut source = read_state.source.lock().expect("source input");
         let source = source
             .as_mut()

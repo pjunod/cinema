@@ -371,15 +371,18 @@ mod tests {
         let directory = tempfile::tempdir().expect("temp");
         let media = directory.path().join("clip.ts");
         let hung = HungPath::create(&sidecar_for(&media));
-        let worst = worst_heartbeat_lateness(&hung, 4, move || {
+        let verdict = worst_heartbeat_lateness(&hung, 4, move || {
             let media = media.clone();
             async move {
                 let _ = read_sidecar(&media).await;
             }
         });
+        // The reads must really be parked on the sidecar, or an on-time
+        // heartbeat says nothing.
+        assert_eq!(verdict.parked, 4, "the sidecar reads did not hang: {verdict:?}");
         assert!(
-            worst < std::time::Duration::from_millis(500),
-            "the heartbeat was {worst:?} late while a sidecar read was hung"
+            verdict.worst < std::time::Duration::from_millis(500),
+            "the heartbeat was late while sidecar reads were hung: {verdict:?}"
         );
     }
 

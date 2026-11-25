@@ -752,7 +752,7 @@ pub(super) fn record_source(
     {
         return Ok(());
     }
-    let metadata = source.metadata().map_err(|error| error.to_string())?;
+    let metadata = plurx_core::media_io::fstat(source).map_err(|error| error.to_string())?;
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

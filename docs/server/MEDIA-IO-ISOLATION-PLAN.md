@@ -82,11 +82,17 @@ blocking pool, never a worker) and adds a bound for media storage.
   so the runtime keeps running. Anywhere else (a blocking-pool thread, a
   plain thread, a current-thread test runtime) it calls `f` directly. This is
   the Tokio primitive for exactly this case. It is not bounded the way
-  `blocking` is: each parked check holds one blocking-pool thread. The
-  callers are per-request and per-session playback checks, which bounds the
-  number in practice.
+  `blocking` is: each parked check holds one thread. On a long hang, clients
+  retrying playback could in principle use up the 512-thread blocking pool.
+  The `plurx_media_io_in_place` gauge makes that visible. Moving the
+  `drift()` callers that can await onto `blocking` is the follow-up that
+  removes it.
+- **`media_io::slot()`** is for code already on the blocking pool, such as
+  the source reader. It takes the same permit around the media calls only.
+  The reader revalidates its grant (store and Raft work) before it takes the
+  slot, so healthy waits cannot pin media slots.
 - **Observability, not control:** `plurx_media_io_{in_flight,capacity,waiting,
-  completed_total}` on `/metrics`. These read atomics only, so the scrape
+  completed_total,in_place}` on `/metrics`. These read atomics only, so the scrape
   answers while the mount is hung. Nothing acts on these numbers: there is
   no watchdog, deadline or feature gate.
 
@@ -118,9 +124,11 @@ below ran on a worker before this change.
 | `metadata::local::adopt_{local,folder}_art` | `is_file` ×6 | `media_io::blocking` |
 | `source_census::replay` / `apply` (schedule tick, 60 s) | `canonicalize` plus `metadata` of every root and the source | `media_io::blocking` |
 | `SourceFence::drift`, `clone_held`, `clone_current_held`, the playback fence open | `fstat` of the held source | `media_io::fstat` |
+| `subtitle_source::Live::stamp`, `source_custody::recovery::reader::record_source` | `fstat` of a held descriptor | `media_io::fstat` |
 | `SourceInput::source_object_version` | std mutex held across `read_at`, then `fstat` | `media_io::in_place` |
 | `source_input` length checks, `source_direct`, `shared_source_direct`, `pretranscode::source`, `dv_segment` ×2, `subtitle_source` ×3, `subtitle_ride_along` ×2 | `fstat` of a held descriptor | `media_io::fstat` |
-| Source readers (`source_input` ×3, `source_custody` direct reader), developer DVR probe, playback fence open | already `spawn_blocking` | `media_io::blocking`, so they count against the bound |
+| `source_input::read_source` | already `spawn_blocking` | `media_io::slot()` around lock, fence and `read_at`, after the grant revalidation |
+| Source readers (`source_input` close and valid checks, `source_custody` direct reader), developer DVR probe, playback fence open | already `spawn_blocking` | `media_io::blocking`, so they count against the bound |
 
 Left as they are, because they already run off the workers:
 
@@ -156,7 +164,16 @@ worker is parked, nothing inside the runtime can run, timers included.
 - `media_io::tests::hung_media_opens_do_not_stall_a_heartbeat` covers the
   primitive.
 
+The fixture also reports how many operations were still parked when the
+heartbeat finished. The tests of the fix require all four, so a heartbeat that
+is on time only because nothing hung fails the test.
+
 ## 6. Not in scope
+
+- `VodServe` checks `rendition.source.unchanged()` while it holds the tokio
+  `sessions` lock (`vod/serve/create.rs`). With this change the workers keep
+  running, but a hung mount holds that lock for the length of the hang. This
+  predates this change; it is a follow-up.
 
 - Pre-vote, so that a stalled voter cannot depose a healthy leader (R1,
   E-E154B131A2).

@@ -645,7 +645,7 @@ pub(crate) enum Live<'a> {
 impl Live<'_> {
     async fn stamp(self) -> Option<SourceStamp> {
         let metadata = match self {
-            Self::Handle(handle) => handle.metadata().ok()?,
+            Self::Handle(handle) => plurx_core::media_io::fstat(handle).ok()?,
             Self::Path(path) => tokio::fs::metadata(path).await.ok()?,
             #[cfg(test)]
             Self::Stamp(stamp) => return Some(stamp),

@@ -16,8 +16,12 @@
 //!
 //! - a hung mount parks blocking-pool threads, never a worker, and only the
 //!   tasks awaiting media I/O wait;
-//! - a hung mount can hold at most [`MEDIA_IO_CONCURRENCY`] blocking threads,
-//!   leaving the rest of the pool (local `tokio::fs`, the store) running;
+//! - calls through [`blocking`] and [`slot`] hold at most
+//!   [`MEDIA_IO_CONCURRENCY`] blocking threads between them, leaving the rest
+//!   of the pool (local `tokio::fs`, the store) running. That is not a bound
+//!   on every media thread: [`in_place`] checks are counted but not bounded,
+//!   and paths that were already on the blocking pool before this module
+//!   (the scan walk, `tokio::fs` metadata) still use it directly;
 //! - a caller that is cancelled while its call is in the kernel leaves the
 //!   permit with the thread until the kernel returns, so the bound stays true.
 //!
@@ -40,6 +44,7 @@ static PERMITS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MEDIA_IO_CONCURRENCY)));
 static WAITING: AtomicU64 = AtomicU64::new(0);
 static COMPLETED: AtomicU64 = AtomicU64::new(0);
+static IN_PLACE: AtomicU64 = AtomicU64::new(0);
 
 /// Run synchronous media-storage work off the async workers. See the module
 /// documentation.
@@ -74,6 +79,33 @@ where
     }
 }
 
+/// A media slot held by code that is already on a blocking-pool thread.
+///
+/// Take it around the media calls only. Work that waits on something else,
+/// such as a grant or the store, must happen before the slot is taken, or a
+/// healthy mount's slots can all be pinned by waits that are not media I/O.
+pub struct MediaSlot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for MediaSlot {
+    fn drop(&mut self) {
+        COMPLETED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Take a [`MediaSlot`]. Await it from async code, or `block_on` it from a
+/// blocking-pool thread.
+pub async fn slot() -> MediaSlot {
+    let _waiting = Waiting::enter();
+    MediaSlot {
+        _permit: Arc::clone(&PERMITS)
+            .acquire_owned()
+            .await
+            .expect("the media I/O semaphore is never closed"),
+    }
+}
+
 /// [`blocking`] for work that itself returns `io::Result`.
 pub async fn blocking_io<T, F>(work: F) -> std::io::Result<T>
 where
@@ -94,8 +126,11 @@ where
 /// off.
 ///
 /// Prefer [`blocking`] wherever the caller can await: it is bounded. This is
-/// for the descriptor checks spread through synchronous decision code.
+/// for the descriptor checks spread through synchronous decision code. These
+/// calls are not bounded: each parked one holds a thread. They are counted
+/// in `plurx_media_io_in_place`, so a freeze driven by them is visible.
 pub fn in_place<T>(work: impl FnOnce() -> T) -> T {
+    let _counted = InPlace::enter();
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(work)
@@ -108,6 +143,21 @@ pub fn in_place<T>(work: impl FnOnce() -> T) -> T {
 /// the server whenever the attribute cache has expired.
 pub fn fstat(file: &std::fs::File) -> std::io::Result<std::fs::Metadata> {
     in_place(|| file.metadata())
+}
+
+struct InPlace;
+
+impl InPlace {
+    fn enter() -> Self {
+        IN_PLACE.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for InPlace {
+    fn drop(&mut self) {
+        IN_PLACE.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct Waiting;
@@ -150,7 +200,11 @@ pub fn prometheus() -> String {
          plurx_media_io_waiting {waiting}\n\
          # HELP plurx_media_io_completed_total Media-storage calls that returned.\n\
          # TYPE plurx_media_io_completed_total counter\n\
-         plurx_media_io_completed_total {completed}\n"
+         plurx_media_io_completed_total {completed}\n\
+         # HELP plurx_media_io_in_place Unbounded synchronous media checks in the kernel now.\n\
+         # TYPE plurx_media_io_in_place gauge\n\
+         plurx_media_io_in_place {in_place}\n",
+        in_place = IN_PLACE.load(Ordering::Relaxed),
     )
 }
 
@@ -181,29 +235,49 @@ pub mod hung_path {
             &self.path
         }
 
-        /// Unblock every reader parked in `open`, and make later opens fail.
+        /// Unblock every operation parked on the FIFO, until `finished` says
+        /// they have all returned.
         ///
-        /// Holding the FIFO open for reading and writing counts as a writer,
-        /// so every parked reader's `open` returns. Unlinking the name makes
-        /// an open that has not started yet fail with `ENOENT` instead of
-        /// parking. Closing the descriptor gives the readers end-of-file.
-        pub fn release(&self) {
+        /// Holding the FIFO open for reading and writing counts as a writer:
+        /// a parked `open` returns, and closing the descriptor gives the
+        /// readers end-of-file. One cycle is not enough. On macOS a single
+        /// writer cycle wakes only some of several parked readers, and an
+        /// operation queued behind a blocked worker only reaches `open` after
+        /// the earlier ones return. So cycles repeat until every operation
+        /// has finished. The 30 s cap only keeps a broken fixture from hanging
+        /// the test binary forever.
+        pub fn release(&self, finished: impl Fn() -> bool) {
             use std::os::unix::fs::OpenOptionsExt as _;
-            let holder = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&self.path);
-            let _ = std::fs::remove_file(&self.path);
-            std::thread::sleep(Duration::from_millis(50));
-            drop(holder);
+            let cap = std::time::Instant::now() + Duration::from_secs(30);
+            while !finished() && std::time::Instant::now() < cap {
+                let holder = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&self.path);
+                std::thread::sleep(Duration::from_millis(10));
+                drop(holder);
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
+    /// What [`worst_heartbeat_lateness`] saw.
+    #[derive(Debug)]
+    pub struct Verdict {
+        /// The heartbeat's worst late wake; `Duration::MAX` if it stopped.
+        pub worst: Duration,
+        /// Operations still parked on the hung path when the heartbeat
+        /// finished. A test of the fix needs this to equal `parallel`:
+        /// otherwise the operations never hung and the heartbeat proves
+        /// nothing.
+        pub parked: usize,
+    }
+
     /// Run `stall` on a two-worker runtime beside a 10 ms heartbeat. The
-    /// stall is `parallel` concurrent media operations on `hung`. Return
+    /// stall is `parallel` concurrent media operations on `hung`. Report
     /// the heartbeat's worst late wake while the operations are parked.
-    pub fn worst_heartbeat_lateness<F, Fut>(hung: &HungPath, parallel: usize, stall: F) -> Duration
+    pub fn worst_heartbeat_lateness<F, Fut>(hung: &HungPath, parallel: usize, stall: F) -> Verdict
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -214,9 +288,14 @@ pub mod hung_path {
             .build()
             .expect("runtime");
         let stall = std::sync::Arc::new(stall);
+        let returned = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         for _ in 0..parallel {
             let stall = std::sync::Arc::clone(&stall);
-            runtime.spawn(async move { stall().await });
+            let returned = std::sync::Arc::clone(&returned);
+            runtime.spawn(async move {
+                stall().await;
+                returned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
         }
         // The verdict is read on this thread, outside the runtime: when every
         // worker is parked, nothing inside it runs, timers included.
@@ -234,10 +313,13 @@ pub mod hung_path {
         let worst = verdict
             .recv_timeout(Duration::from_secs(2))
             .unwrap_or(Duration::MAX);
-        hung.release();
-        // Every parked open has returned; dropping the runtime joins them.
-        drop(runtime);
-        worst
+        let parked = parallel - returned.load(std::sync::atomic::Ordering::SeqCst);
+        hung.release(|| returned.load(std::sync::atomic::Ordering::SeqCst) == parallel);
+        // Every operation has returned, so shutdown joins nothing that is
+        // still parked. The timeout only keeps a broken fixture from
+        // hanging the test binary.
+        runtime.shutdown_timeout(Duration::from_secs(5));
+        Verdict { worst, parked }
     }
 }
 
@@ -253,15 +335,16 @@ mod tests {
         let hung = HungPath::create(&dir.path().join("hung"));
         let path = hung.path().to_owned();
         // Four parked opens on two workers: inline, they would hold both.
-        let worst = worst_heartbeat_lateness(&hung, 4, move || {
+        let verdict = worst_heartbeat_lateness(&hung, 4, move || {
             let path = path.clone();
             async move {
                 let _ = blocking(move || std::fs::read(&path)).await;
             }
         });
+        assert_eq!(verdict.parked, 4, "the opens did not hang: {verdict:?}");
         assert!(
-            worst < Duration::from_millis(500),
-            "heartbeat was {worst:?} late while media opens were hung"
+            verdict.worst < Duration::from_millis(500),
+            "heartbeat was late while media opens were hung: {verdict:?}"
         );
     }
 
@@ -272,13 +355,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let hung = HungPath::create(&dir.path().join("hung"));
         let path = hung.path().to_owned();
-        let worst = worst_heartbeat_lateness(&hung, 4, move || {
+        let verdict = worst_heartbeat_lateness(&hung, 4, move || {
             let path = path.clone();
             async move {
                 let _ = std::fs::read(&path);
             }
         });
-        assert!(worst >= Duration::from_millis(500), "inline open did not stall: {worst:?}");
+        assert!(
+            verdict.worst >= Duration::from_millis(500),
+            "inline open did not stall: {verdict:?}"
+        );
     }
 
     #[tokio::test]
