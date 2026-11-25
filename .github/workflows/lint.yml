@@ -1,8 +1,8 @@
 name: lint
 
+# Manual only: a release tag's code passed rustfmt and Clippy in its fast
+# lane, so tagging it does not rerun them (release-tag.yml).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 env:

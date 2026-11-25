@@ -9,7 +9,7 @@ name: release readiness
 # landing already carries: `scripts/land` only lands a head whose fast-lane
 # `Main promotion gate` is green (validation/release_evidence.py). When that
 # evidence is there, the `tag` job pushes the annotated `v` tag onto that
-# commit, which is what starts ci.yml's full sweep and the image publication.
+# commit, which is what starts release-tag.yml's image publication.
 # Nothing is retested here: the release code passed its gate once, when it
 # merged (Paul, 2026-11-25). No green gate, an untested landing, or a commit
 # scripts/land did not make tags nothing. Whatever merged on top of the
@@ -98,7 +98,7 @@ jobs:
       - name: Push the annotated tag on the release commit the gate passed
         env:
           # A tag pushed with the run's own token starts no workflow, so the
-          # tag that must start ci.yml is pushed with a repository secret
+          # tag that must start release-tag.yml is pushed with a repository secret
           # scoped to this one step.
           RELEASE_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
           TESTED_SHA: ${{ needs.release-check.outputs.sha }}
