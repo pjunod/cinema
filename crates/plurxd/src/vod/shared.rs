@@ -714,7 +714,8 @@ impl PreparedAttemptRendition {
             .finite_output()
             .expect("adaptive attempt has its output selector");
         let output = output
-            .output_digest()
+            .output_digest(deadline)
+            .await
             .map_err(|error| format!("binding finite attempt output: {error}"))?;
         Ok((hex::encode(prepared), hex::encode(output)))
     }

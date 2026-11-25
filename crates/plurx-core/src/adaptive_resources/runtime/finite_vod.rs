@@ -985,9 +985,10 @@ pub(super) fn finite_directory_path(
 impl FiniteOutput {
     /// Equality check for the original planned output in a prepared finite
     /// graph. It does not assert native acquisition or publication.
-    pub fn output_digest(&self) -> Result<[u8; 32], FiniteVodError> {
+    pub async fn output_digest(&self, deadline: Instant) -> Result<[u8; 32], FiniteVodError> {
         self.runtime
-            .finite_worker_binding_digests(&self.preparation, 0, self.member)
+            .finite_worker_binding_digests(&self.preparation, 0, self.member, deadline)
+            .await
             .map(|(_, output)| output)
             .map_err(Into::into)
     }
@@ -1462,9 +1463,13 @@ impl SoftwareVodOwner {
     }
     /// Stable same-preparation identity for the selected Store worker record.
     /// This is a negative equality check, never physical or admission proof.
-    pub fn prepared_handle_digest(&self) -> Result<[u8; 32], FiniteVodError> {
+    pub async fn prepared_handle_digest(
+        &self,
+        deadline: Instant,
+    ) -> Result<[u8; 32], FiniteVodError> {
         self.runtime
-            .finite_worker_binding_digests(&self.preparation, 0, self.scratch_member)
+            .finite_worker_binding_digests(&self.preparation, 0, self.scratch_member, deadline)
+            .await
             .map(|(prepared, _)| prepared)
             .map_err(Into::into)
     }

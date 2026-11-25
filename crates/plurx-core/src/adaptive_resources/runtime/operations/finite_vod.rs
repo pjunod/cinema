@@ -168,14 +168,19 @@ impl NodeResourceRuntime {
     /// Store-side negative equality for the exact prepared finite graph and
     /// its original planned output. These hashes are not native identity,
     /// physical proof, a reservation or publication authority.
-    pub(in crate::adaptive_resources::runtime) fn finite_worker_binding_digests(
+    pub(in crate::adaptive_resources::runtime) async fn finite_worker_binding_digests(
         &self,
         owner: &OwnedPreparation,
         index: usize,
         output_member: Uuid,
+        deadline: Instant,
     ) -> Result<([u8; 32], [u8; 32]), OperationError> {
         self.validate_preparation(owner)?;
-        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        // A running trial's producer holds this bundle while it publishes.
+        // Wait for it within the caller's deadline; busy is not a mismatch.
+        let bundle = tokio::time::timeout_at(deadline.into(), owner.state.lock())
+            .await
+            .map_err(|_| OperationError::Deadline)?;
         if !bundle.installed || !bundle.prepare.acknowledged || bundle.id != owner.id {
             return Err(OperationError::State);
         }

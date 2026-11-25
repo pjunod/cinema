@@ -268,7 +268,8 @@ impl FiniteSoftwareProducer {
             .await
             .map_err(|error| format!("opening finite attempt inputs: {error}"))?;
         owner
-            .prepared_handle_digest()
+            .prepared_handle_digest(deadline)
+            .await
             .map_err(|error| format!("binding finite attempt owner: {error}"))
     }
 
