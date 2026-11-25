@@ -236,10 +236,20 @@ fn item_end(code: &str, item: usize) -> usize {
             | "union"
             | "macro_rules!"
     );
+    // A block statement (`if …{}`, `match …{}`) ends at its closing brace,
+    // after any `else` chain: it needs no trailing `;`, so the following
+    // expression (a closure's tail `command.spawn()`) is not part of it.
+    let is_block_statement = matches!(first_word, "if" | "match" | "while" | "for" | "loop");
     let mut depth = 0usize;
     for (offset, byte) in bytes[item..].iter().enumerate() {
         let at = item + offset;
         match byte {
+            b'}' if is_block_statement
+                && depth == 1
+                && !code[at + 1..].trim_start().starts_with("else") =>
+            {
+                return at;
+            }
             b'(' | b'[' => depth += 1,
             b'{' if is_item && depth == 0 => {
                 return matching(bytes, at, b'{', b'}').unwrap_or(bytes.len() - 1);
