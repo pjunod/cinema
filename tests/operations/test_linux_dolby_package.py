@@ -10,6 +10,19 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import private_temp
+
+_restore_tempdir = None
+
+
+def setUpModule():
+    global _restore_tempdir
+    _restore_tempdir = private_temp.move_out_of_refused_roots()
+
+
+def tearDownModule():
+    _restore_tempdir()
+
 
 def recipe():
     path = Path(__file__).resolve().parents[2] / "scripts/build-linux-dolby-ffmpeg"

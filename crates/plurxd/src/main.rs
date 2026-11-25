@@ -174,6 +174,35 @@ pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir_in(root)
 }
 
+/// A loopback node config for an in-process daemon test, and the HTTP socket
+/// its `server.bind` names.
+///
+/// Reading a port from a bound listener and dropping it lets any other socket
+/// on the host take that port before the server binds it again. Here nothing
+/// is dropped: the Raft and API sockets live in `config.cluster.listeners`,
+/// which lends them to every voter start, and the HTTP socket is returned for
+/// the test to serve on, through [`StartupObservationHttp::from_std_listener`]
+/// or by converting it for `axum::serve`. The join and artwork origins name
+/// the HTTP socket.
+#[cfg(test)]
+pub(crate) fn owned_loopback_config(
+    data_dir: &std::path::Path,
+) -> (plurx_core::config::Config, std::net::TcpListener) {
+    let http = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP port");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = data_dir.into();
+    config.server.bind = http.local_addr().expect("owned HTTP address");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    config.cluster.advertise_host = "localhost".into();
+    config.cluster.join_url = format!("http://{}", config.server.bind);
+    config.cluster.artwork_url = config.cluster.join_url.clone();
+    (config, http)
+}
+
 /// Create an executable test fixture (a script standing in for FFmpeg, a
 /// tool, a probe) that this process can execute at once.
 ///
@@ -2127,6 +2156,15 @@ impl StartupObservationHttp {
         let mut owner = Self::new(listener.local_addr()?);
         owner.prebound = tokio::sync::Mutex::new(Some(listener));
         Ok(owner)
+    }
+
+    /// [`Self::from_listener`] for a socket bound outside a runtime, such as
+    /// the one [`owned_loopback_config`] returns. Call it inside the runtime
+    /// that will serve the socket.
+    #[cfg(test)]
+    fn from_std_listener(listener: std::net::TcpListener) -> std::io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        Self::from_listener(tokio::net::TcpListener::from_std(listener)?)
     }
 
     async fn stop_probe(&self) {

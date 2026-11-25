@@ -388,13 +388,16 @@ def validate_debug_symbols(daemon, symbols):
     return [{"architecture": architecture, "uuid": identity} for architecture, identity in executable_ids]
 
 
+INSTALLED_ROOTS = ("/Applications", "/Library", "/System", "/usr", "/opt")
+
+
 def assemble(daemon, package, output, signing_identity, debug_symbols=None, engine_package=None):
     tool = recipe()
     if not daemon.is_absolute() or daemon.is_symlink() or not daemon.is_file():
         raise ValueError("daemon must be an explicit regular built artifact")
     if not output.is_absolute() or output.exists():
         raise ValueError("output must be an absolute new package directory")
-    if any(output.is_relative_to(Path(p)) for p in ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+    if any(output.is_relative_to(Path(p)) for p in INSTALLED_ROOTS):
         raise ValueError("package assembly cannot write an installed/global directory")
     symbol_ids = validate_debug_symbols(daemon, debug_symbols) if debug_symbols is not None else None
     source_symbol_files = ({str(item.relative_to(debug_symbols)): {"bytes": item.stat().st_size, "sha256": tool.digest(item)}
