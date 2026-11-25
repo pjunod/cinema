@@ -72,8 +72,9 @@ applied the RPU and the per-shot display mapping on this machine (RPU is not
 claimed on a Profile 7 → 8.1 delivery, where it is a pass-through). EL means
 the native Dolby renderer composed the enhancement layer into the picture it is
 mapping now: the private mpv's `native-dovi-target-state` reports this as the
-level `enhancement-layer-composed`, which drops when the layer does even while
-mapping continues. An mpv without that field, or a non-native renderer, keeps
+level `enhancement-layer-composed`, which follows the frame on screen and drops
+when that frame maps without the layer, even while mapping continues, and on a
+failed render or a reset. An mpv without that field, or a non-native renderer, keeps
 the older inference (a dual-layer Profile 7 stream reached the private build).
 Neither plurx nor mpv says whether that layer is full or
 minimal, so FEL appears only when the server reports it (for example a

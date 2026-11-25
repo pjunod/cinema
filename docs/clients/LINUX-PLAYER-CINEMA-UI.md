@@ -28,9 +28,11 @@ delivered profile from the selected track. RPU and DYN are claimed while mpv
 renders Dolby Vision, unless the private build said the frame had no RPU (RPU
 not on a Profile 7 → 8.1 delivery). For the native Dolby renderer, EL follows
 the level `enhancement-layer-composed` in mpv's `native-dovi-target-state`
-(rog_hdr_dv `mpv-fel-system-dv` patch 0011): lit while the mapped picture has
-the enhancement layer composed in, off when a frame maps without it, and off
-after a frame-queue reset until a composed frame is mapped again. The overlay
+(rog_hdr_dv `mpv-fel-system-dv` patch 0011): lit while the frame nearest the
+presented instant was mapped with the enhancement layer composed in; off when
+that frame maps without it, after a failed or blank render, and after a
+frame-queue reset until a composed frame is presented again. mpv errs toward
+off next to a frame it read without mapping. The overlay
 reads the property itself and redraws on its notification, so the pill does
 not depend on catching the renderer's one-time success line. An mpv without
 the field, or a non-native renderer, keeps the earlier inference: a Profile 7

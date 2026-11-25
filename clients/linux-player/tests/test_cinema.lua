@@ -330,6 +330,10 @@ data=pills_case(dv,nil,{hdr='dolby_vision',dv_profile=7});assert(has(data,'EL'))
 -- A renderer other than the native one keeps the inference from the stream.
 P['native-dovi-target-state']=native_state(false)
 data=pills_case(dv,{kind='closed_form',label='closed-form CM v4.0'});assert(has(data,'EL'))
+-- An mpv whose property predates the level keeps the stream inference.
+P['native-dovi-target-state']={active=true,generation=1}
+data=pills_case(dv,native);assert(has(data,'EL'))
+data=pills_case(dv,native,{hdr='dolby_vision',dv_profile=7});assert(not has(data,'EL'))
 -- Still no EL without a Dolby Vision picture, whatever the level says.
 P['native-dovi-target-state']=native_state(true)
 data=pills_case({w=3840,h=2160,colormatrix='bt.2020-ncl',gamma='pq',profile=7},native);assert(not has(data,'EL'))
@@ -368,4 +372,4 @@ timers[1]()
 assert(overlay.data:find("● EL: plurx Player's Dolby renderer composed the enhancement layer",1,true))
 P['native-dovi-target-state']=nil
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
-print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 16 quality pill cases passed')
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 18 quality pill cases passed')
