@@ -1415,8 +1415,7 @@ mod tests {
             .match_indices(MARKER)
             .find_map(|(at, _)| {
                 let next = &source[at + MARKER.len()..];
-                (next.starts_with("mod ") || next.starts_with("pub mod "))
-                    .then_some(&source[..at])
+                (next.starts_with("mod ") || next.starts_with("pub mod ")).then_some(&source[..at])
             })
             .unwrap_or(source)
     }
