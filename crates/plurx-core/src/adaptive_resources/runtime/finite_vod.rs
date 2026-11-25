@@ -342,7 +342,20 @@ impl NodeResourceRuntime {
     ) -> Result<Option<FiniteTrialPermit>, crate::resource_policy::TrialRefusal> {
         use crate::resource_policy::{TrialBudget, TrialRefusal};
 
-        if let Some(observation) = request.placement_observation {
+        // A trial runs beside incumbents only when each of them, like this
+        // request, has enforced contained ceilings. Anything else keeps the
+        // request on ordinary admission, which serializes unknown peaks.
+        let beside_incumbents = self
+            .ledger
+            .contained_incumbents()
+            .map_err(|_| TrialRefusal::InsufficientEvidence)?;
+        if beside_incumbents && request.native_plan.is_none() {
+            return Err(TrialRefusal::InsufficientEvidence);
+        }
+        // History is keyed by the exact incumbent mix and is never recorded
+        // beside another active producer, so no measured hint can already
+        // cover a concurrent placement.
+        if let Some(observation) = request.placement_observation.filter(|_| !beside_incumbents) {
             // Placement sampled before this request charged its precise M.
             // Match that mix, preserving every other owner, including equal
             // M rows. Positive service still grants no physical capacity.
@@ -419,8 +432,8 @@ impl NodeResourceRuntime {
             startup_bound: Metric::Known(startup),
             cleanup_bound: Metric::Known(cleanup),
             // This path pays the actual cgroup ceiling and the explicitly
-            // bounded daemon workspace. The ledger's aggregate producer
-            // peak and exclusive interlock remain UnknownProducerPeak.
+            // bounded daemon workspace. The ledger turns the same enforced
+            // ceilings into known producer claims when capacity is known.
             memory_bound_known: true,
         }
         .allocate(now)?;
@@ -2374,6 +2387,15 @@ impl NodeResourceRuntime {
         let directory_for_output = Arc::clone(&directory_path);
         let guard_for_output = Arc::clone(&app_guard);
         let producer_memory_claim = request.producer.memory_claim();
+        // The matched native plan names the exact memory.max/pids.max of
+        // this producer's own domain. Entry writes and rereads them before
+        // any child enters, and an uncontained launch is impossible here.
+        #[cfg(target_os = "linux")]
+        let contained = request.native_plan.as_ref().map(|plan| {
+            crate::adaptive_resources::ContainedProducerBound::from_limits(plan.limits)
+        });
+        #[cfg(not(target_os = "linux"))]
+        let contained = None;
         let (preparation, events) = match self
             .prepare_typed_families_claiming_initialized_collected(
                 &[FamilyDemand {
@@ -2389,6 +2411,7 @@ impl NodeResourceRuntime {
                 deadline,
                 collector,
                 contained_trial,
+                contained,
                 |preparation| {
                     let output = FiniteOutput {
                         runtime: Arc::clone(self),

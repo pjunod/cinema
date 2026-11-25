@@ -53,7 +53,8 @@ impl ResourceCapacity {
     /// Unknown RAM permits only the explicit serialized-cold producer policy.
     /// Its numeric memory remains a bounded component, never a fictitious peak.
     /// Kernel task headroom independently checks the known minimum process roots;
-    /// unknown producer task peaks are serialized in the ledger.
+    /// unknown producer task peaks are serialized in the ledger, which also sums
+    /// known contained task ceilings against this headroom.
     pub(super) fn check(
         self,
         total: ResourceVector,

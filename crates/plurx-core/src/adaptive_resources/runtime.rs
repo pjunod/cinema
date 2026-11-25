@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     physical_graph, AdmissionRefusal, Entry, LedgerSnapshot, ReservationBinding, ReservationState,
-    ResourceLedger, ResourceVector, MAX_RESERVATIONS,
+    ResourceLedger, ResourceVector, TaskClaim, MAX_RESERVATIONS,
 };
 use crate::process::observation::{Metric, ProcessObserver, UnknownReason};
 use crate::resource_custody::{
@@ -593,6 +593,9 @@ fn restore_accounting(
                     family_role: None,
                     resources: record.resources,
                     memory_claim: record.memory_claim,
+                    // Contained ceilings are not persisted, so a restored
+                    // root never proves its task bound and stays serialized.
+                    task_claim: TaskClaim::from_processes(record.resources.processes),
                     state: ReservationState::UnknownHeld,
                     custody: None,
                     durable: Some(record.obligation_id),

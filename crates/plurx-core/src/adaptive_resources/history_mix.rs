@@ -23,7 +23,7 @@ impl ResourceLedger {
     /// Hash actual incumbent unsettled owners under the same ledger lock used
     /// by admission. Bind role, claim, state, trial status and every numeric
     /// resource dimension. The selected family must own exactly one active
-    /// unknown video producer with a process reservation; that selected row
+    /// unknown or contained video producer with a process reservation; that selected row
     /// is excluded because its own recipe and demand have their own key fields.
     /// Every other owner must be process-free retained S or an admitted
     /// heap-only planning M role. Its live memory remains in the mix. No other active
@@ -72,9 +72,16 @@ impl ResourceLedger {
             if entry.state == ReservationState::UnknownHeld {
                 return Err(AdmissionRefusal::InsufficientEvidence);
             }
+            // The selected producer keeps either serialized unknown claims or
+            // its contained ceilings; neither enters the incumbent rows.
             let is_selected = entry.family_role.is_some_and(|(family, role)| {
                 Some(family) == selected && role == FamilyRole::Video
-            }) && entry.memory_claim == MemoryClaim::UnknownProducerPeak;
+            }) && (entry.memory_claim == MemoryClaim::UnknownProducerPeak
+                || (entry.memory_claim
+                    == MemoryClaim::KnownBounded {
+                        active_producer: true,
+                    }
+                    && matches!(entry.task_claim, TaskClaim::KnownBounded { .. })));
             if is_selected {
                 if entry.resources.processes == 0 || entry.state == ReservationState::Reaping {
                     return Err(AdmissionRefusal::InsufficientEvidence);

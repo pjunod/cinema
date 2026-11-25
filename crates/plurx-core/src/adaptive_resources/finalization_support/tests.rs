@@ -198,3 +198,60 @@ fn support_is_additive_unknown_without_fake_producers_roots_or_trial_authority()
         baseline.used
     );
 }
+
+#[test]
+fn support_joins_several_producers_only_when_each_has_contained_ceilings() {
+    let ledger = ledger();
+    fresh(&ledger);
+    install(&ledger).expect("support");
+    let root = WorkloadDemand {
+        resources: Metric::Known(ResourceVector {
+            cpu_ns_per_second: 1,
+            peak_memory_bytes: 8,
+            handles: 1,
+            processes: 1,
+            ..ResourceVector::default()
+        }),
+        limit_epoch: 1,
+        trial: false,
+    };
+    let reserve = |contained: Option<ContainedProducerBound>| {
+        let family = ledger.new_family().expect("family");
+        let roles = [FamilyRoleDemand {
+            role: FamilyRole::Video,
+            demand: root,
+            retained: None,
+        }];
+        ledger.reserve_families_claiming_contained(
+            &[FamilyDemand {
+                identity: family,
+                roles: &roles,
+            }],
+            Some(&[MemoryClaim::UnknownProducerPeak]),
+            false,
+            contained,
+        )
+    };
+    let bound = ContainedProducerBound::from_limits(
+        crate::process::containment::NativeDomainLimits::new(4, 10).expect("fixture limits"),
+    );
+    let first = reserve(Some(bound)).expect("contained producer beside support");
+    let second = reserve(Some(bound)).expect("second contained producer beside support");
+    assert_eq!(ledger.contained_incumbents(), Ok(true));
+    // Support still serializes every producer without contained ceilings.
+    assert_eq!(
+        reserve(None).err(),
+        Some(AdmissionRefusal::InsufficientEvidence)
+    );
+    assert_eq!(
+        ledger.reserve(demand(false)).err(),
+        Some(AdmissionRefusal::InsufficientEvidence)
+    );
+    let snapshot = ledger.snapshot().expect("support and two producers");
+    assert_eq!(snapshot.held, 2);
+    assert!(matches!(
+        snapshot.managed_kernel_task_peak,
+        Metric::Unknown(_)
+    ));
+    drop((first, second));
+}

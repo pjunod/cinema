@@ -519,6 +519,7 @@ impl NodeResourceRuntime {
             deadline,
             None,
             false,
+            None,
             |_| (),
         )
         .map(|(owner, ())| owner)
@@ -584,6 +585,7 @@ impl NodeResourceRuntime {
             deadline,
             None,
             false,
+            None,
             initialize,
         )
     }
@@ -603,6 +605,7 @@ impl NodeResourceRuntime {
         deadline: Instant,
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
         contained_trial: bool,
+        contained: Option<crate::adaptive_resources::ContainedProducerBound>,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         self.prepare_plan_families(
@@ -625,6 +628,7 @@ impl NodeResourceRuntime {
             deadline,
             collector,
             contained_trial,
+            contained,
             initialize,
         )
     }
@@ -644,6 +648,7 @@ impl NodeResourceRuntime {
         deadline: Instant,
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
         contained_trial: bool,
+        contained: Option<crate::adaptive_resources::ContainedProducerBound>,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         if families.is_empty()
@@ -731,7 +736,12 @@ impl NodeResourceRuntime {
                     }
                     let owned = self
                         .ledger
-                        .reserve_families_claiming_contained(families, claims, contained_trial)
+                        .reserve_families_claiming_contained(
+                            families,
+                            claims,
+                            contained_trial,
+                            contained,
+                        )
                         .map_err(|error| {
                             OperationError::BeforeReservation(PreReservationRefusal::Admission(
                                 error,

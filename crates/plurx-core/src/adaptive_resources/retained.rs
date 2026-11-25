@@ -4,7 +4,7 @@
 use super::PhysicalRetirementReceipt;
 use super::{
     AdmissionRefusal, CleanupAuthority, Entry, MemoryClaim, ReservationBinding, ReservationState,
-    ResourceLedger, ResourceVector,
+    ResourceLedger, ResourceVector, TaskClaim,
 };
 use crate::resource_custody::CommittedRetirementReceipt;
 use uuid::Uuid;
@@ -198,6 +198,7 @@ impl ResourceLedger {
                 memory_claim: MemoryClaim::KnownBounded {
                     active_producer: false,
                 },
+                task_claim: TaskClaim::NoProducer,
                 state: ReservationState::Reaping,
                 custody: None,
                 durable: Some(swap.target_durable),

@@ -29,7 +29,7 @@ pub use finalization_support::{FinalizationSupportPhase, FinalizationSupportSnap
 mod memory_claim;
 pub(crate) use memory_claim::MemoryClaim;
 mod task_claim;
-pub(crate) use task_claim::TaskClaim;
+pub(crate) use task_claim::{ContainedProducerBound, TaskClaim};
 mod history_mix;
 pub mod owner_inventory;
 
@@ -354,6 +354,10 @@ struct Entry {
     family_role: Option<(FamilyIdentity, FamilyRole)>,
     resources: ResourceVector,
     memory_claim: MemoryClaim,
+    // Live-only: decided at reservation from the request's contained native
+    // limits. Not persisted; reconstruction re-derives it from the process
+    // count, which makes every restored root an unknown peak again.
+    task_claim: TaskClaim,
     state: ReservationState,
     custody: Option<Arc<physical_graph::GraphCustody>>,
     // Private operation identity, never a disk/wire refund capability. Present
@@ -425,8 +429,9 @@ pub struct LedgerSnapshot {
     /// of native P job completion. These bytes are already included in used.
     pub planning_metadata_held: usize,
     pub planning_metadata_reserved_bytes: Metric<u64>,
-    /// Active roots have unknown kernel-task peaks until their original
-    /// process owner proves cleanup; this is never reported as a numeric peak.
+    /// Uncontained or restored active roots have unknown kernel-task peaks
+    /// until their original process owner proves cleanup; such a peak is never
+    /// reported as a number. Contained roots contribute their enforced ceiling.
     pub unknown_task_peak_producers: usize,
     pub managed_kernel_task_peak: Metric<u64>,
     /// Complete managed peak is unknown while any producer has an unknown
@@ -453,6 +458,15 @@ pub struct LedgerSnapshot {
     pub native_overage_fenced: bool,
 }
 
+/// A producer admitted with its domain's enforced memory and task ceilings.
+fn contained_claims(memory: MemoryClaim, task: TaskClaim) -> bool {
+    memory
+        == (MemoryClaim::KnownBounded {
+            active_producer: true,
+        })
+        && matches!(task, TaskClaim::KnownBounded { .. })
+}
+
 impl State {
     fn fence_native_overage(&mut self, binding: ReservationBinding) {
         self.invalid = true;
@@ -464,47 +478,132 @@ impl State {
         }
     }
 
-    fn memory_claims_fit(&self, additional: &[MemoryClaim]) -> Result<(), AdmissionRefusal> {
-        let mut active = 0usize;
-        let mut unknown = self.support.is_some();
-        for claim in self
-            .entries
+    /// Every producer claim of this ledger, and candidate claims, as pairs.
+    fn producer_claims_with<'a>(
+        &'a self,
+        additional: &'a [(MemoryClaim, TaskClaim)],
+    ) -> impl Iterator<Item = (MemoryClaim, TaskClaim)> + 'a {
+        self.entries
             .values()
-            .map(|entry| entry.memory_claim)
+            .map(|entry| (entry.memory_claim, entry.task_claim))
             .chain(additional.iter().copied())
-        {
-            active += usize::from(claim.is_active_producer());
-            unknown |= claim == MemoryClaim::UnknownProducerPeak;
+    }
+    /// An unknown producer peak serializes against every other producer.
+    /// Ephemeral support is an unknown member too: it may join one producer,
+    /// or several producers only when every one has enforced contained
+    /// ceilings, which keeps support's own unknown component no larger than
+    /// it is beside a single producer.
+    fn memory_claims_fit(
+        &self,
+        additional: &[(MemoryClaim, TaskClaim)],
+    ) -> Result<(), AdmissionRefusal> {
+        let mut active = 0usize;
+        let mut unknown = false;
+        let mut uncontained = false;
+        for (memory, task) in self.producer_claims_with(additional) {
+            if !memory.is_active_producer() {
+                continue;
+            }
+            active += 1;
+            unknown |= memory == MemoryClaim::UnknownProducerPeak;
+            uncontained |= !contained_claims(memory, task);
         }
-        if unknown && active > 1 {
+        if active > 1 && (unknown || (self.support.is_some() && uncontained)) {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         Ok(())
     }
-    fn task_claims_fit(&self, additional: &[TaskClaim]) -> Result<(), AdmissionRefusal> {
+    /// An unknown task peak serializes against every other producer, and
+    /// ephemeral support follows the memory rule above. Known contained
+    /// producers may coexist only when the sum of their enforced task ceilings
+    /// fits the node's current task headroom. That headroom already excludes
+    /// their live tasks, so this conservatively counts those tasks twice.
+    /// Unknown headroom refuses.
+    fn task_claims_fit(
+        &self,
+        additional: &[(MemoryClaim, TaskClaim)],
+    ) -> Result<(), AdmissionRefusal> {
         let mut active = 0usize;
-        let mut unknown = self.support.is_some();
-        for claim in self
-            .entries
-            .values()
-            .map(|entry| TaskClaim::from_processes(entry.resources.processes))
-            .chain(additional.iter().copied())
-        {
-            active += usize::from(claim.is_active_producer());
-            unknown |= claim == TaskClaim::UnknownProducerPeak;
+        let mut unknown = false;
+        let mut uncontained = false;
+        let mut bounded = 0u64;
+        for (memory, task) in self.producer_claims_with(additional) {
+            if !task.is_active_producer() {
+                continue;
+            }
+            active += 1;
+            uncontained |= !contained_claims(memory, task);
+            match task {
+                TaskClaim::NoProducer => {}
+                TaskClaim::KnownBounded { tasks } => {
+                    bounded = bounded
+                        .checked_add(tasks)
+                        .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
+                }
+                TaskClaim::UnknownProducerPeak => unknown = true,
+            }
         }
-        if unknown && active > 1 {
+        if active <= 1 {
+            return Ok(());
+        }
+        if unknown || (self.support.is_some() && uncontained) {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
-        Ok(())
+        match self.cap.kernel_tasks {
+            Metric::Known(headroom) if bounded <= headroom => Ok(()),
+            Metric::Known(_) => Err(AdmissionRefusal::HardLimit(ResourceDimension::KernelTasks)),
+            Metric::Unknown(_) => Err(AdmissionRefusal::InsufficientEvidence),
+        }
+    }
+    /// Contained native ceilings replace an unknown producer peak only while
+    /// both node memory and task capacity are known; otherwise the producer
+    /// keeps the serialized unknown claims exactly as an uncontained root.
+    fn producer_claims(
+        &self,
+        demand: WorkloadDemand,
+        claim: MemoryClaim,
+        contained: Option<ContainedProducerBound>,
+    ) -> Result<(MemoryClaim, TaskClaim), AdmissionRefusal> {
+        let Metric::Known(resources) = demand.resources else {
+            // Admission refuses unknown demand separately, in its own order.
+            return Ok((claim, TaskClaim::UnknownProducerPeak));
+        };
+        let Some(bound) = contained else {
+            return Ok((claim, TaskClaim::from_processes(resources.processes)));
+        };
+        if claim != MemoryClaim::UnknownProducerPeak
+            || resources.processes != 1
+            || resources.peak_memory_bytes < bound.memory_bytes()
+        {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
+        if matches!(self.cap.memory_bytes, Metric::Known(_))
+            && matches!(self.cap.kernel_tasks, Metric::Known(_))
+        {
+            Ok((
+                MemoryClaim::KnownBounded {
+                    active_producer: true,
+                },
+                TaskClaim::KnownBounded {
+                    tasks: bound.tasks(),
+                },
+            ))
+        } else {
+            Ok((claim, TaskClaim::from_processes(resources.processes)))
+        }
     }
     fn assess(&self, demand: WorkloadDemand) -> Result<ResourceVector, AdmissionRefusal> {
-        self.assess_claim(demand, MemoryClaim::default(), false)
+        let tasks = match demand.resources {
+            Metric::Known(resources) => TaskClaim::from_processes(resources.processes),
+            Metric::Unknown(_) => TaskClaim::UnknownProducerPeak,
+        };
+        self.assess_claim(demand, MemoryClaim::default(), tasks, false)
     }
     fn assess_claim(
         &self,
         demand: WorkloadDemand,
         claim: MemoryClaim,
+        task_claim: TaskClaim,
         contained_trial: bool,
     ) -> Result<ResourceVector, AdmissionRefusal> {
         if self.invalid || self.draining {
@@ -528,9 +627,8 @@ impl State {
         if resources == ResourceVector::default() {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
-        self.memory_claims_fit(&[claim])?;
-        let task_claim = TaskClaim::from_processes(resources.processes);
-        self.task_claims_fit(&[task_claim])?;
+        self.memory_claims_fit(&[(claim, task_claim)])?;
+        self.task_claims_fit(&[(claim, task_claim)])?;
         if demand.trial && self.support.is_some() && !contained_trial {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
@@ -670,14 +768,17 @@ impl ResourceLedger {
         families: &[FamilyDemand<'_>],
         claims: Option<&[MemoryClaim]>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
-        self.reserve_families_claiming_contained(families, claims, false)
+        self.reserve_families_claiming_contained(families, claims, false, None)
     }
 
+    /// `contained` names the enforced native ceilings of the single missing
+    /// producer role. Without it every process root keeps an unknown peak.
     pub(in crate::adaptive_resources) fn reserve_families_claiming_contained(
         &self,
         families: &[FamilyDemand<'_>],
         claims: Option<&[MemoryClaim]>,
         contained_trial: bool,
+        contained: Option<ContainedProducerBound>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         if families.is_empty()
             || families.len() > MAX_OVERLAP_FAMILIES
@@ -707,7 +808,7 @@ impl ResourceLedger {
                 ));
             }
         }
-        self.reserve_roles_claiming_contained(&roles, claims, contained_trial)
+        self.reserve_roles_claiming_contained(&roles, claims, contained_trial, contained)
     }
 
     #[allow(clippy::type_complexity)]
@@ -731,7 +832,7 @@ impl ResourceLedger {
         )],
         claims: Option<&[MemoryClaim]>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
-        self.reserve_roles_claiming_contained(roles, claims, false)
+        self.reserve_roles_claiming_contained(roles, claims, false, None)
     }
 
     #[allow(clippy::type_complexity)]
@@ -744,6 +845,7 @@ impl ResourceLedger {
         )],
         claims: Option<&[MemoryClaim]>,
         contained_trial: bool,
+        contained: Option<ContainedProducerBound>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         let mut state = self
             .inner
@@ -753,13 +855,12 @@ impl ResourceLedger {
         if state.invalid {
             return Err(AdmissionRefusal::Unavailable);
         }
+        if contained.is_some() && !matches!(roles, [(Some((_, FamilyRole::Video)), _, None)]) {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
         if contained_trial
             && (!matches!(roles, [(Some((_, FamilyRole::Video)), demand, None)] if demand.trial)
-                || claims != Some(&[MemoryClaim::UnknownProducerPeak])
-                || state
-                    .entries
-                    .values()
-                    .any(|entry| entry.memory_claim.is_active_producer()))
+                || claims != Some(&[MemoryClaim::UnknownProducerPeak]))
         {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
@@ -835,9 +936,30 @@ impl ResourceLedger {
             // manifest by the durable journal before either role may enter IO.
             return Err(AdmissionRefusal::InvalidBundle);
         }
+        if contained.is_some() && missing.len() != 1 {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
+        let pairs = missing
+            .iter()
+            .zip(claims)
+            .map(|((_, demand), claim)| state.producer_claims(*demand, *claim, contained))
+            .collect::<Result<Vec<_>, _>>()?;
+        let claims: Vec<_> = pairs.iter().map(|(memory, _)| *memory).collect();
+        // A contained trial whose own peak stays unknown still requires that
+        // no other producer is active. With known contained ceilings the
+        // ordinary claim checks below decide coexistence with incumbents.
+        if contained_trial
+            && claims[0] == MemoryClaim::UnknownProducerPeak
+            && state
+                .entries
+                .values()
+                .any(|entry| entry.memory_claim.is_active_producer())
+        {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
         // All candidate producer claims and every old hold share this ledger's
         // one node-RAM domain. No caller-selected domain can evade serialization.
-        state.memory_claims_fit(claims)?;
+        state.memory_claims_fit(&pairs)?;
         let trial = missing
             .first()
             .ok_or(AdmissionRefusal::InvalidBundle)?
@@ -856,14 +978,12 @@ impl ResourceLedger {
         }
         let resources: Vec<_> = missing
             .iter()
-            .zip(claims)
-            .map(|((_, demand), claim)| state.assess_claim(*demand, *claim, contained_trial))
+            .zip(&pairs)
+            .map(|((_, demand), (claim, task_claim))| {
+                state.assess_claim(*demand, *claim, *task_claim, contained_trial)
+            })
             .collect::<Result<_, _>>()?;
-        let task_claims: Vec<_> = resources
-            .iter()
-            .map(|resources| TaskClaim::from_processes(resources.processes))
-            .collect();
-        state.task_claims_fit(&task_claims)?;
+        state.task_claims_fit(&pairs)?;
         let total = resources
             .iter()
             .try_fold(ResourceVector::default(), |sum, role| {
@@ -889,10 +1009,10 @@ impl ResourceLedger {
         let mut trial_members = BTreeSet::new();
         // All fallible validation precedes the single accounting commit; at
         // most six plain-u64 map entries, and no external code under this lock.
-        for (((id, resources), (family_role, _)), memory_claim) in (first_id..next)
+        for (((id, resources), (family_role, _)), (memory_claim, task_claim)) in (first_id..next)
             .zip(resources)
             .zip(missing)
-            .zip(claims.iter().copied())
+            .zip(pairs.iter().copied())
         {
             let binding = ReservationBinding {
                 ledger: self.id,
@@ -906,6 +1026,7 @@ impl ResourceLedger {
                     family_role,
                     resources,
                     memory_claim,
+                    task_claim,
                     state: ReservationState::Reserved,
                     custody: None,
                     durable: None,
@@ -1063,6 +1184,39 @@ impl ResourceLedger {
         Ok(())
     }
 
+    /// Advisory only, before a contained trial is attempted: `Ok(false)` when
+    /// no producer is active, `Ok(true)` when every active producer holds
+    /// known contained memory and task claims, and a refusal when any active
+    /// producer would still serialize against a new one. The reservation
+    /// itself rechecks every claim and capacity under its own lock.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "Only the Linux finite trial path asks this.")
+    )]
+    pub(crate) fn contained_incumbents(&self) -> Result<bool, AdmissionRefusal> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| AdmissionRefusal::Unavailable)?;
+        let mut active = false;
+        for entry in state.entries.values() {
+            if !entry.memory_claim.is_active_producer() && !entry.task_claim.is_active_producer() {
+                continue;
+            }
+            active = true;
+            if !contained_claims(entry.memory_claim, entry.task_claim) {
+                return Err(AdmissionRefusal::InsufficientEvidence);
+            }
+        }
+        if active
+            && (!matches!(state.cap.memory_bytes, Metric::Known(_))
+                || !matches!(state.cap.kernel_tasks, Metric::Known(_)))
+        {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        Ok(active)
+    }
+
     pub fn snapshot(&self) -> Result<LedgerSnapshot, AdmissionRefusal> {
         let state = self
             .inner
@@ -1109,19 +1263,27 @@ impl ResourceLedger {
             unknown_task_peak_producers: state
                 .entries
                 .values()
-                .filter(|entry| {
-                    TaskClaim::from_processes(entry.resources.processes)
-                        == TaskClaim::UnknownProducerPeak
-                })
+                .filter(|entry| entry.task_claim == TaskClaim::UnknownProducerPeak)
                 .count(),
+            // Sum of enforced contained ceilings; any unknown peak or support
+            // task keeps the complete managed peak unknown.
             managed_kernel_task_peak: if state.any_support()
-                || state.entries.values().any(|entry| {
-                    TaskClaim::from_processes(entry.resources.processes)
-                        == TaskClaim::UnknownProducerPeak
-                }) {
+                || state
+                    .entries
+                    .values()
+                    .any(|entry| entry.task_claim == TaskClaim::UnknownProducerPeak)
+            {
                 Metric::Unknown(UnknownReason::Unbounded)
             } else {
-                Metric::Known(0)
+                state
+                    .entries
+                    .values()
+                    .try_fold(0u64, |sum, entry| match entry.task_claim {
+                        TaskClaim::KnownBounded { tasks } => sum.checked_add(tasks),
+                        _ => Some(sum),
+                    })
+                    .map(Metric::Known)
+                    .unwrap_or(Metric::Unknown(UnknownReason::InvalidCounter))
             },
             active_bounded_producers: state
                 .entries
@@ -1283,9 +1445,9 @@ mod tests {
             trial,
         }
     }
-    /// The same charge without a process root. Every nonzero `processes`
-    /// carries an unknown kernel-task peak and the ledger admits at most one
-    /// such producer at a time (fdda9a593), so a probe of another dimension
+    /// The same charge without a process root. Every uncontained nonzero
+    /// `processes` carries an unknown kernel-task peak and the ledger admits at
+    /// most one such producer at a time (fdda9a593), so a probe of another dimension
     /// must not add a second root beside one that is already held.
     fn without_root(value: u64) -> ResourceVector {
         ResourceVector {

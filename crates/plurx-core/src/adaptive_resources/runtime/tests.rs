@@ -474,3 +474,91 @@ fn conflicting_recovered_claims_keep_every_hold_and_fence_new_work() {
         vector(4)
     );
 }
+
+fn contained_video_reservation(
+    ledger: &ResourceLedger,
+    epoch: u64,
+) -> Result<
+    Vec<(
+        crate::adaptive_resources::ResourceReservation,
+        CleanupAuthority,
+    )>,
+    AdmissionRefusal,
+> {
+    use crate::adaptive_resources::{
+        ContainedProducerBound, FamilyDemand, FamilyRole, FamilyRoleDemand, MemoryClaim,
+    };
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Video,
+        demand: WorkloadDemand {
+            resources: Metric::Known(ResourceVector {
+                processes: 1,
+                ..vector(1)
+            }),
+            limit_epoch: epoch,
+            trial: false,
+        },
+        retained: None,
+    }];
+    ledger.reserve_families_claiming_contained(
+        &[FamilyDemand {
+            identity: ledger.new_family()?,
+            roles: &roles,
+        }],
+        Some(&[MemoryClaim::UnknownProducerPeak]),
+        false,
+        Some(ContainedProducerBound::from_limits(
+            crate::process::containment::NativeDomainLimits::new(1, 1).expect("fixture limits"),
+        )),
+    )
+}
+
+/// A contained producer persists the ordinary bounded-active key. Its task
+/// ceiling is live-only, so after restart the same row restores as a known
+/// memory bound with an unknown task peak and serializes new producers,
+/// exactly as a legacy bounded-active process root always did.
+#[test]
+fn restored_bounded_active_root_has_an_unknown_task_peak_and_serializes_contained_work() {
+    let live = ResourceLedger::new(2, Metric::Known(vector(100))).expect("live ledger");
+    let mut held = contained_video_reservation(&live, 2).expect("live contained producer");
+    assert_eq!(
+        live.inner
+            .lock()
+            .unwrap()
+            .entries
+            .values()
+            .next()
+            .unwrap()
+            .memory_claim,
+        crate::adaptive_resources::MemoryClaim::default(),
+        "the persisted claim is the existing bounded_active key"
+    );
+    drop(held.pop());
+
+    // Old and new journals both contain this exact row shape.
+    let recovered = snapshot(&[Phase::Sealed], false);
+    assert_eq!(
+        recovered.obligations[0].memory_claim,
+        crate::adaptive_resources::MemoryClaim::default()
+    );
+    let (ledger, _) = restore_accounting(2, Metric::Known(vector(100)), &recovered)
+        .expect("restore the original complete hold");
+    let current = ledger.snapshot().expect("restored accounting");
+    assert_eq!(current.used, vector(2));
+    assert_eq!(current.unknown_peak_producers, 0);
+    assert_eq!(current.active_bounded_producers, 1);
+    assert_eq!(current.unknown_task_peak_producers, 1);
+    assert!(matches!(
+        current.managed_kernel_task_peak,
+        Metric::Unknown(_)
+    ));
+    assert!(matches!(
+        contained_video_reservation(&ledger, 2),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    assert_eq!(
+        ledger.contained_incumbents(),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    );
+    assert_eq!(ledger.snapshot().expect("unchanged").used, vector(2));
+}

@@ -336,3 +336,214 @@ fn older_concurrent_sample_cannot_replace_newer_lower_headroom() {
     ));
     assert_eq!(ledger.snapshot().unwrap().held, 0);
 }
+
+fn contained(memory: u64, tasks: u32) -> ContainedProducerBound {
+    ContainedProducerBound::from_limits(
+        crate::process::containment::NativeDomainLimits::new(memory, tasks)
+            .expect("finite fixture limits"),
+    )
+}
+
+fn reserve_contained(
+    ledger: &ResourceLedger,
+    demand: WorkloadDemand,
+    bound: ContainedProducerBound,
+) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+    let (identity, roles) = one_role(ledger, FamilyRole::Video, demand);
+    ledger.reserve_families_claiming_contained(
+        &[FamilyDemand {
+            identity,
+            roles: &roles,
+        }],
+        Some(&[MemoryClaim::UnknownProducerPeak]),
+        demand.trial,
+        Some(bound),
+    )
+}
+
+fn trial_demand(epoch: u64, cpu: u64, memory: u64) -> WorkloadDemand {
+    WorkloadDemand {
+        trial: true,
+        ..demand(epoch, cpu, memory)
+    }
+}
+
+#[test]
+fn contained_producers_coexist_within_known_task_headroom() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    let mut first =
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 40)).expect("first contained");
+    let mut second =
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 40)).expect("second contained");
+    let snapshot = ledger.snapshot().expect("known claims");
+    assert_eq!(snapshot.held, 2);
+    assert_eq!(snapshot.unknown_peak_producers, 0);
+    assert_eq!(snapshot.unknown_task_peak_producers, 0);
+    assert_eq!(snapshot.active_bounded_producers, 2);
+    assert_eq!(snapshot.managed_kernel_task_peak, Metric::Known(80));
+    assert_eq!(snapshot.managed_memory_peak_bytes, Metric::Known(16));
+    drop(second.pop());
+    drop(first.pop());
+    assert_eq!(ledger.snapshot().unwrap().held, 0);
+}
+
+#[test]
+fn summed_contained_task_ceilings_over_headroom_refuse_atomically() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    let mut first =
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 60)).expect("first contained");
+    assert!(matches!(
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 60)),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::KernelTasks))
+    ));
+    let snapshot = ledger.snapshot().expect("only the first remains");
+    assert_eq!(snapshot.held, 1);
+    assert_eq!(snapshot.used, vector(1, 8));
+    assert_eq!(snapshot.managed_kernel_task_peak, Metric::Known(60));
+    drop(first.pop());
+}
+
+#[test]
+fn unknown_task_peak_still_serializes_against_contained_producers_in_both_orders() {
+    let unknown_first = ledger(Metric::Known(100), Metric::Known(100));
+    let mut held = reserve_single(
+        &unknown_first,
+        FamilyRole::Video,
+        demand(1, 1, 8),
+        Some(MemoryClaim::UnknownProducerPeak),
+    )
+    .expect("uncontained unknown producer");
+    assert!(matches!(
+        reserve_contained(&unknown_first, demand(1, 1, 8), contained(4, 4)),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(held.pop());
+
+    // A default bounded-memory process root still has an unknown task peak.
+    let bounded_root_first = ledger(Metric::Known(100), Metric::Known(100));
+    let mut held = reserve_single(
+        &bounded_root_first,
+        FamilyRole::Audio,
+        demand(1, 1, 8),
+        None,
+    )
+    .expect("uncontained process root");
+    assert!(matches!(
+        reserve_contained(&bounded_root_first, demand(1, 1, 8), contained(4, 4)),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(held.pop());
+
+    let contained_first = ledger(Metric::Known(100), Metric::Known(100));
+    let mut held = reserve_contained(&contained_first, demand(1, 1, 8), contained(4, 4))
+        .expect("contained producer");
+    for claim in [None, Some(MemoryClaim::UnknownProducerPeak)] {
+        assert!(matches!(
+            reserve_single(&contained_first, FamilyRole::Audio, demand(1, 1, 8), claim),
+            Err(AdmissionRefusal::InsufficientEvidence)
+        ));
+    }
+    assert_eq!(contained_first.snapshot().unwrap().held, 1);
+    drop(held.pop());
+}
+
+#[test]
+fn contained_bound_without_known_capacity_keeps_the_serialized_unknown_claims() {
+    let ledger = ledger(
+        Metric::Known(100),
+        Metric::Unknown(UnknownReason::InsufficientEvidence),
+    );
+    let mut held = reserve_contained(&ledger, demand(1, 1, 8), contained(4, 4))
+        .expect("serialized cold producer");
+    let snapshot = ledger.snapshot().expect("unknown claims");
+    assert_eq!(snapshot.unknown_peak_producers, 1);
+    assert_eq!(snapshot.unknown_task_peak_producers, 1);
+    assert!(matches!(
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 4)),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(held.pop());
+}
+
+#[test]
+fn contained_bound_must_describe_one_paid_process_root() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    // The demand must already pay the kernel memory ceiling.
+    assert!(matches!(
+        reserve_contained(&ledger, demand(1, 1, 8), contained(9, 4)),
+        Err(AdmissionRefusal::InvalidBundle)
+    ));
+    let (identity, roles) = one_role(&ledger, FamilyRole::Video, demand(1, 1, 8));
+    assert!(matches!(
+        ledger.reserve_families_claiming_contained(
+            &[FamilyDemand {
+                identity,
+                roles: &roles,
+            }],
+            None,
+            false,
+            Some(contained(4, 4)),
+        ),
+        Err(AdmissionRefusal::InvalidBundle)
+    ));
+    assert_eq!(ledger.snapshot().unwrap().held, 0);
+}
+
+#[test]
+fn contained_trial_is_admitted_beside_a_contained_incumbent_only() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    let mut incumbent =
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 40)).expect("contained incumbent");
+    assert_eq!(ledger.contained_incumbents(), Ok(true));
+    let mut trial = reserve_contained(&ledger, trial_demand(1, 1, 8), contained(4, 40))
+        .expect("contained trial beside the incumbent");
+    let snapshot = ledger.snapshot().expect("both held");
+    assert!(snapshot.trial_held);
+    assert_eq!(snapshot.held, 2);
+    // Trial slot uniqueness is unchanged.
+    assert!(matches!(
+        reserve_contained(&ledger, trial_demand(1, 1, 8), contained(4, 10)),
+        Err(AdmissionRefusal::TrialAlreadyHeld)
+    ));
+    drop(trial.pop());
+    drop(incumbent.pop());
+
+    let ledger = self::ledger(Metric::Known(100), Metric::Known(100));
+    let mut incumbent = reserve_single(
+        &ledger,
+        FamilyRole::Audio,
+        demand(1, 1, 8),
+        Some(MemoryClaim::UnknownProducerPeak),
+    )
+    .expect("unknown incumbent");
+    assert_eq!(
+        ledger.contained_incumbents(),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    );
+    assert!(matches!(
+        reserve_contained(&ledger, trial_demand(1, 1, 8), contained(4, 4)),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    assert!(!ledger.snapshot().unwrap().trial_held);
+    drop(incumbent.pop());
+    assert_eq!(ledger.contained_incumbents(), Ok(false));
+}
+
+#[test]
+fn contained_trial_with_unknown_capacity_still_requires_no_active_producer() {
+    let ledger = ledger(
+        Metric::Known(100),
+        Metric::Unknown(UnknownReason::InsufficientEvidence),
+    );
+    let mut incumbent =
+        reserve_contained(&ledger, demand(1, 1, 8), contained(4, 4)).expect("serialized incumbent");
+    assert!(matches!(
+        reserve_contained(&ledger, trial_demand(1, 1, 8), contained(4, 4)),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(incumbent.pop());
+    let mut trial = reserve_contained(&ledger, trial_demand(1, 1, 8), contained(4, 4))
+        .expect("serialized trial alone");
+    assert!(ledger.snapshot().unwrap().trial_held);
+    drop(trial.pop());
+}

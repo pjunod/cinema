@@ -311,7 +311,34 @@ async fn activated_hiqlite_singleton_closes_native_trial_before_dvr_capture_open
     run_singleton_trial(true).await;
 }
 
+/// Same prerequisites as the original singleton trial. After the ordinary
+/// qualification closes, a different title keeps an ordinary contained
+/// producer playing while the qualified recipe's second Create admits,
+/// verifies and adopts its native trial beside that incumbent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires private noswap tmpfs, delegated cgroup v2, non-root clone3 and Landlock ABI6, and native FFmpeg/FFprobe"]
+async fn activated_hiqlite_singleton_adopts_a_native_vod_trial_beside_a_playing_incumbent() {
+    run_singleton_trial_variant(TrialVariant::BesideIncumbent).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrialVariant {
+    Alone,
+    Capture,
+    BesideIncumbent,
+}
+
 async fn run_singleton_trial(with_capture: bool) {
+    run_singleton_trial_variant(if with_capture {
+        TrialVariant::Capture
+    } else {
+        TrialVariant::Alone
+    })
+    .await;
+}
+
+async fn run_singleton_trial_variant(variant: TrialVariant) {
+    let with_capture = variant == TrialVariant::Capture;
     static DELEGATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _owned_fixture_slot = DELEGATION.lock().await;
     let ffmpeg = required_path("PLURX_FFMPEG");
@@ -396,6 +423,22 @@ async fn run_singleton_trial(with_capture: bool) {
     assert_eq!(members[0]["node_id"], roster["local_node_id"]);
     assert_eq!(members[0]["is_voter"], true);
     let file_id = scan_fixture(&client, &mut node, &base, token, &media, None).await;
+    // A different title has a different trial key, so it stays on ordinary
+    // admission. It is long enough that its producer outlives the trial.
+    let incumbent_file = if variant == TrialVariant::BesideIncumbent {
+        let incumbent_media = ram.path().join("incumbent-media");
+        std::fs::create_dir(&incumbent_media).expect("incumbent media directory");
+        write_fixture(
+            ffmpeg.to_str().expect("FFmpeg path"),
+            &incumbent_media.join("Singleton VOD Incumbent (2023).mkv"),
+            "smptebars=size=1280x720:rate=12:duration=600",
+            "sine=frequency=330:sample_rate=48000:duration=600",
+            "24",
+        );
+        Some(scan_fixture(&client, &mut node, &base, token, &incumbent_media, None).await)
+    } else {
+        None
+    };
     let viewer = Viewer {
         client: &client,
         base: &base,
@@ -435,6 +478,17 @@ async fn run_singleton_trial(with_capture: bool) {
             .await;
         return;
     }
+    if let Some(incumbent_file) = incumbent_file {
+        trial_beside_incumbent(
+            &viewer,
+            &mut node,
+            (file_id, incumbent_file),
+            &delegated,
+            &ordinary,
+        )
+        .await;
+        return;
+    }
 
     // Same exact source and byte recipe, but a new viewer attempt. A
     // surviving retained output or a normal fallback cannot emit this
@@ -450,6 +504,63 @@ async fn run_singleton_trial(with_capture: bool) {
     viewer.play(&trial).await;
     viewer.stop(&trial, &node).await;
     wait_original_removal(&mut node, &delegated, &output, false).await;
+}
+
+async fn trial_beside_incumbent(
+    viewer: &Viewer<'_>,
+    node: &mut Daemon,
+    (file_id, incumbent_file): (i64, i64),
+    delegated: &Path,
+    ordinary: &Value,
+) {
+    let incumbent = viewer
+        .start(incumbent_file, "playing-incumbent", node)
+        .await;
+    viewer.verified_progress(&incumbent, node).await;
+    viewer.play(&incumbent).await;
+    let incumbent_leaf = native_leaves(delegated)
+        .find(|leaf| populated(leaf))
+        .expect("the incumbent runs in its own original native leaf");
+    assert_eq!(native_leaf_count(delegated), 1);
+    assert!(
+        !node.diagnostics().contains(TRIAL_VERIFIED),
+        "an unqualified title must use ordinary admission"
+    );
+
+    // The incumbent is not stopped. The qualified recipe's second Create
+    // must admit its trial beside it, not wait for or replace it.
+    let trial = viewer.start(file_id, "trial-beside-incumbent", node).await;
+    assert_ne!(trial["session_id"], ordinary["session_id"]);
+    assert_ne!(trial["session_id"], incumbent["session_id"]);
+    let diagnostics = node.diagnostics();
+    assert!(
+        diagnostics.contains(TRIAL_ENTERED),
+        "second Create never entered a native trial\n{diagnostics}"
+    );
+    assert_eq!(
+        diagnostics.matches(TRIAL_VERIFIED).count(),
+        1,
+        "second Create never verified a native trial beside the incumbent\n{diagnostics}"
+    );
+    assert!(
+        populated(&incumbent_leaf),
+        "the incumbent producer must still be running beside the trial\n{diagnostics}"
+    );
+    viewer.play(&trial).await;
+    // Both viewers are still served after adoption.
+    viewer.play(&incumbent).await;
+    viewer.stop(&trial, node).await;
+    viewer.stop(&incumbent, node).await;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while native_leaf_count(delegated) != 0 {
+        node.assert_running("waiting for both original native closes");
+        assert!(
+            Instant::now() < deadline,
+            "original trial or incumbent close remains unverified at {delegated:?}\n{}",
+            node.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 struct TrialPaths {

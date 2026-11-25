@@ -370,14 +370,33 @@ Keep process-instance charge and kernel-task capacity separate. Every current
 producer with a persisted positive process count has an explicit derived unknown
 task-peak claim; process-free retained output has none. This derives from the
 existing durable vector and does not fabricate a numeric peak or rewrite frozen
-journal formats. No current adapter has an enforced total task bound. Unknown
-task producers serialize against all other active process producers in either
-insertion order, with minimum root count checked against task headroom. Existing
-physical retirement/settlement is still required before that claim disappears.
+journal formats. Unknown task producers serialize against all other active
+process producers in either insertion order, with minimum root count checked
+against task headroom. Existing physical retirement/settlement is still required
+before that claim disappears.
 
-This is the conservative cold-producer policy, like the approved unknown-memory
-path. It permits one producer without promising that the producer cannot exhaust
-the kernel limit; task peak and managed peak remain Unknown in diagnostics.
+**Amendment, 2026-11-25 — contained native producers.** A finite producer whose
+request selected the delegated native domain now has an enforced total task
+bound: the native plan names the exact `pids.max` and `memory.max` written to its
+own leaf before any child enters, and entry fails unless the kernel reports
+those values. The ledger records that ceiling as a known task claim, and the
+already-paid ceiling as a known memory claim, when node memory and kernel-task
+capacity are both known; otherwise the producer keeps the unknown claims above.
+Known contained producers may run side by side while the sum of their task
+ceilings fits the fresh kernel-task headroom (threads-max, every ancestor
+`pids.max` minus `pids.current`, and RLIMIT_NPROC). That headroom already
+excludes their live tasks, so incumbents are conservatively counted twice. The
+durable row keeps the existing `bounded_active` memory key; the task ceiling is
+not persisted, so restart reconstruction derives an unknown task peak for every
+restored root and serializes new producers exactly as before. Uncontained and
+legacy roots are unchanged. Sibling leaves still share the delegated parent's
+own ceilings, so one contained producer can starve another inside that parent;
+this bounds the node, not the producers' mutual service.
+
+For unknown claims this is the conservative cold-producer policy, like the
+approved unknown-memory path. It permits one producer without promising that the
+producer cannot exhaust the kernel limit; task peak and managed peak remain
+Unknown in diagnostics.
 A hard total-task guarantee requires an enforceable execution bound, not a
 thread-count guess, a watchdog or a fabricated zero. A future known task claim
 must carry that bound and durable evidence before it can relax serialization.

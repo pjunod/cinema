@@ -149,19 +149,55 @@ fn check_kernel_task_capacity(
         .native_factory_support
         .filter(|support| support.phase == super::super::FinalizationSupportPhase::Active)
         .ok_or_else(|| io::Error::other("original native factory is not active"))?;
+    use super::super::{MemoryClaim, TaskClaim};
+    // This root either keeps the serialized unknown claims, or was admitted
+    // with exactly this domain's enforced ceiling as its known task bound.
+    let known_root = match (original.memory_claim, original.task_claim) {
+        (MemoryClaim::UnknownProducerPeak, TaskClaim::UnknownProducerPeak) => false,
+        (
+            MemoryClaim::KnownBounded {
+                active_producer: true,
+            },
+            TaskClaim::KnownBounded { tasks },
+        ) if tasks == u64::from(limits.tasks()) => true,
+        _ => {
+            return Err(io::Error::other(
+                "native root claim does not match its enforced limits",
+            ))
+        }
+    };
+    // Existing durable unknown task claims serialize all tracked root
+    // producers, including UnknownHeld and restarted obligations. Other
+    // known contained roots may coexist; their full ceilings are added to
+    // this one. The sample checks current headroom (which already excludes
+    // their live tasks) without converting a root count into a prepaid
+    // thread count or accounting for independent external tasks.
+    let mut incumbent_tasks = Some(0u64);
+    for entry in state
+        .entries
+        .values()
+        .filter(|entry| entry.binding != binding && entry.resources.processes > 0)
+    {
+        incumbent_tasks = match (known_root, entry.task_claim) {
+            (true, TaskClaim::KnownBounded { tasks }) => {
+                incumbent_tasks.and_then(|sum| sum.checked_add(tasks))
+            }
+            _ => None,
+        };
+    }
     // The one standing reaper must fit even when the fresh observation
     // predates its activation by a fraction of the sample window.
-    let required_tasks = u64::from(limits.tasks()) + u64::from(support.profile.task_slots());
-    // Existing durable UnknownProducerPeak task claims serialize all tracked
-    // root producers, including UnknownHeld and restarted obligations. This
-    // sample checks current headroom without converting root count into a
-    // prepaid thread count or accounting for independent external tasks.
+    let required_tasks = incumbent_tasks.and_then(|incumbents| {
+        u64::from(limits.tasks())
+            .checked_add(u64::from(support.profile.task_slots()))?
+            .checked_add(incumbents)
+    });
+    let Some(required_tasks) = required_tasks else {
+        return Err(io::Error::other(
+            "native root exceeds original exclusive capacity",
+        ));
+    };
     if original.resources.processes != 1
-        || original.memory_claim != super::super::MemoryClaim::UnknownProducerPeak
-        || state
-            .entries
-            .values()
-            .any(|entry| entry.binding != binding && entry.resources.processes > 0)
         || state
             .capacity_observed_at
             .is_none_or(|at| at.elapsed() > super::super::finalization_support::FRESH_FOR)

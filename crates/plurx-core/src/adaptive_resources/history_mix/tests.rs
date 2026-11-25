@@ -238,6 +238,7 @@ fn actual_mix_refuses_another_active_role_and_unknown_held_state() {
                 memory_claim: MemoryClaim::KnownBounded {
                     active_producer: true,
                 },
+                task_claim: TaskClaim::from_processes(resources.processes),
                 state: ReservationState::Reserved,
                 custody: None,
                 durable: None,

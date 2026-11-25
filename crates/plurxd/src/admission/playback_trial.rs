@@ -67,15 +67,28 @@ impl PermitState {
             .store(current.saturating_add(1), Ordering::Release);
     }
 
+    /// Qualification measures an ordinary owner alone, so its window needs
+    /// this exact permit to be the only live software owner.
     fn idle_with(&self, exact: &SwPermit) -> bool {
+        self.trial_lane_open_with(exact)
+            && self.software_live_permits == 1
+            && self.software_live_used == exact.weight
+    }
+
+    /// A trial may also run beside other live software owners already
+    /// admitted by this pool. Core admission separately requires that every
+    /// active producer, the trial included, has enforced contained ceilings.
+    /// Protected playback, capture, hardware, background work and queued
+    /// live demand still close the lane, and only one trial exists.
+    fn trial_lane_open_with(&self, exact: &SwPermit) -> bool {
         exact.owner == PermitOwner::Live
             && exact.family_id().is_none()
             && self.protected_playback == 0
             && self.playback_trial.is_none()
             && self.live_waiting == 0
             && self.hardware_used() == 0
-            && self.software_live_permits == 1
-            && self.software_live_used == exact.weight
+            && self.software_live_permits >= 1
+            && self.software_live_used >= exact.weight
             && !self.background_active()
             && !self.has_reservation()
     }
@@ -265,7 +278,7 @@ impl SwPermit {
         let mut permits = self.permits.lock().ok()?;
         if !Arc::ptr_eq(&epoch.permits, &self.permits)
             || epoch.observed != permits.playback_epoch.load(Ordering::Acquire)
-            || !permits.idle_with(self)
+            || !permits.trial_lane_open_with(self)
             || !exclusion.is_current()
         {
             return None;
@@ -377,6 +390,43 @@ mod tests {
             .await
             .expect("next exact local epoch");
         assert!(hold.try_acquire_playback_trial_lane(snapshot).is_some());
+    }
+
+    #[tokio::test]
+    async fn trial_lane_opens_beside_live_owners_while_qualification_requires_idle() {
+        let admissions = Admissions::new();
+        let store = SqliteStore::open_in_memory().expect("local capture store");
+        let incumbent = admissions
+            .try_admit_software(2, 1, Priority::Live)
+            .expect("incumbent live producer");
+        let hold = admissions
+            .try_admit_software(2, 1, Priority::Live)
+            .expect("trial candidate within the pool");
+        assert!(
+            hold.idle_qualification_window().is_none(),
+            "qualification still measures one owner alone"
+        );
+        let proof = proven_capture_epoch(&admissions, &store)
+            .await
+            .expect("no protected playback or capture");
+        let trial = hold
+            .try_acquire_playback_trial_lane(proof)
+            .expect("lane beside an admitted live owner");
+        let proof = proven_capture_epoch(&admissions, &store).await;
+        assert!(proof.is_none(), "only one trial lane exists");
+        drop(trial);
+        let proof = proven_capture_epoch(&admissions, &store)
+            .await
+            .expect("released lane");
+        let intent = admissions
+            .begin_capture_intent_update()
+            .expect("protected capture intent");
+        assert!(
+            hold.try_acquire_playback_trial_lane(proof).is_none(),
+            "capture protection still closes the lane"
+        );
+        intent.known_finished();
+        drop(incumbent);
     }
 
     #[tokio::test]
