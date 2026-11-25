@@ -1,3 +1,13 @@
+plurx-player (0.5.4-1) stonking; urgency=medium
+
+  * Light Cinema's EL pill from mpv's enhancement-layer-composed level in
+    native-dovi-target-state, so it follows the presented frame and returns
+    after a seek; an mpv without the field keeps the earlier inference.
+  * Keep mpv's control socket within the AF_UNIX path limit when the runtime
+    or temporary directory is deep.
+
+ -- Claude Agent <noreply@anthropic.com>  Wed, 25 Nov 2026 10:38:29 -0500
+
 plurx-player (0.5.3-1) stonking; urgency=medium
 
   * Draw the web player's quality pills in Cinema: resolution, dynamic range

@@ -48,6 +48,11 @@ Packaged as 0.5.3 (the merged source was still versioned 0.5.2, which the
 installed 0.5.2-1 package does not contain); installed on the owner's Linux
 laptop for physical acceptance.
 
+The EL composition level and the AF_UNIX socket-path fix merged under 0.5.3,
+which the installed 0.5.3-1 package predates, so they are packaged as 0.5.4.
+The level needs mpv `+rogdv5.7` (patch 0011); with `+rogdv5.6` the pill keeps
+the earlier inference.
+
 ## Session control sequence repair (0.5.1)
 
 **Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source
