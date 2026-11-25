@@ -97,6 +97,7 @@ impl RuntimeRecipe {
     /// run that cannot continue (ended, idle-expired, its helper gone) is
     /// killed and the window is rendered by a fresh run or a single helper,
     /// so a run never turns into a refused episode on its own account.
+    #[allow(clippy::too_many_arguments)] // one window's request, plan context and settlement
     pub(super) async fn render_window(
         &self,
         request: crate::dv_segment::StreamingSegmentRequest,

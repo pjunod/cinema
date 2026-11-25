@@ -45,6 +45,9 @@ pub(super) const PLANNING_TO_R_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
 #[path = "adaptive_attempts/processed.rs"]
 mod processed;
 
+// One prepared product per attempt, moved once into adoption and never kept
+// in a collection, so the Finite variant's size costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum PreparedWorkerProduct {
     Finite(PreparedAttemptRendition),
     ProcessedFel(Box<processed::PreparedProcessedFel>),
@@ -862,6 +865,8 @@ pub(super) struct AdoptedAttempt {
     close: Option<AdoptedAttemptClose>,
 }
 
+// One adopted terminal per attempt, held in its single Option slot.
+#[allow(clippy::large_enum_variant)]
 enum AdoptedPhysicalTerminal {
     Finite(AdoptedFiniteTerminal),
     Processed(AdoptedProcessedTerminal),

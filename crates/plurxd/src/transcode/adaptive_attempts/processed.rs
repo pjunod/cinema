@@ -214,6 +214,7 @@ impl PreparedProcessedFel {
 }
 
 impl TranscodeManager {
+    #[allow(clippy::too_many_arguments)] // one FEL attempt's complete preparation inputs
     pub(super) async fn prepare_adaptive_fel(
         &self,
         envelope: &crate::media_sessions::RemoteStartRequest,
