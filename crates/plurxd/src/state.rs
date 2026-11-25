@@ -10721,12 +10721,10 @@ impl JobManager {
         let raw = raw.map_err(|error| match error {
             // Killed by someone else (an OOM, say): the probe has not said
             // anything about this source yet.
-            crate::ffmpeg::HeldMetadataProbeError::Interrupted(_) => {
-                AnalysisResolutionError::Retry {
-                    code: "index_process_failed",
-                    charge_attempt: true,
-                }
-            }
+            crate::ffmpeg::HeldProbeError::Interrupted(_) => AnalysisResolutionError::Retry {
+                code: "index_process_failed",
+                charge_attempt: true,
+            },
             _ => AnalysisResolutionError::Terminal("stored_probe_invalid"),
         })?;
         self.store
