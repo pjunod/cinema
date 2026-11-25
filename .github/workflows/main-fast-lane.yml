@@ -750,7 +750,10 @@ jobs:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
-          retention-days: 90
+          # About 300 MB per run. Held 90 days, they reached 29 GB on the forge's
+          # disk and kept growing; 14 is the server default every other evidence
+          # artifact uses. Native receipts adopt journeys from the last 14 days.
+          retention-days: 14
 
   android_compile:
     name: fast Android compile

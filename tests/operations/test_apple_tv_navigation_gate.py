@@ -67,6 +67,17 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 self.assertIn("if-no-files-found: error", step)
                 self.assertIn("path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}", step)
 
+    def test_tv_navigation_evidence_keeps_the_server_retention(self):
+        """About 300 MB a run: held 90 days it reached 29 GB on the forge's
+        disk on 2026-11-25 and was still growing."""
+        for path, apple in (
+            (".github/workflows/main-fast-lane.yml", "apple_compile"),
+            (".github/workflows/ci.yml", "apple"),
+        ):
+            with self.subTest(path=path):
+                step = job(path, apple).split("- name: Preserve TV navigation evidence including failures", 1)[1].split("- name:", 1)[0]
+                self.assertRegex(step, r"retention-days:\s*14\b")
+
     def test_apple_jobs_keep_derived_data_local_and_preserve_build_contracts(self):
         for path, apple, command, budget, serialized in (
             (".github/workflows/main-fast-lane.yml", "apple_compile", "apple-build", 120, False),
