@@ -1108,22 +1108,43 @@ async fn build_inner(
     }
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
     let trial = async {
-        let authority = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
+        let Some(authority) = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
             .try_with(Clone::clone)
             .ok()
-            .flatten()?;
-        let original = request.continuous_entry_deadline.as_ref()?;
-        build_slot.collector_slot()?;
+            .flatten()
+        else {
+            return Err("no local trial opportunity".to_owned());
+        };
+        let original = request
+            .continuous_entry_deadline
+            .as_ref()
+            .ok_or("no continuous entry deadline")?;
+        build_slot
+            .collector_slot()
+            .ok_or("no collected cleanup slot")?;
         let permit = runtime
             .allocate_local_finite_trial(&request, original, Instant::now())
-            .ok()??;
+            .map_err(|refusal| format!("core refused: {refusal:?}"))?
+            .ok_or("fresh service observation already covers the recipe")?;
         let capture = authority
             .capture_exclusion_before(permit.startup_by())
-            .await?;
-        let stop = compatibility.try_acquire_trial_lane(capture)?;
-        Some((permit, stop))
+            .await
+            .ok_or("capture exclusion unavailable before startup cutoff")?;
+        let stop = compatibility
+            .try_acquire_trial_lane(capture)
+            .ok_or("playback trial lane unavailable")?;
+        Ok((permit, stop))
     }
-    .await;
+    .await
+    .inspect_err(|reason| {
+        tracing::debug!(
+            target: "plurxd::vodserve",
+            rendition = %request.rendition_id,
+            reason = %reason,
+            "finite request used ordinary admission instead of a trial"
+        );
+    })
+    .ok();
     let trial_run = trial.as_ref().map(|(permit, stop)| FiniteTrialRun {
         allocation: permit.allocation(),
         startup_by: permit.startup_by(),
