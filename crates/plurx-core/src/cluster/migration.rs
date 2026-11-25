@@ -3804,25 +3804,61 @@ async fn start_voter(
         &local,
     )?;
 
+    // A caller that owns its cluster sockets for the config's lifetime (test
+    // fixtures) lends them here, so no other socket can take either port
+    // before Hiqlite serves on it, nor between voter generations on one
+    // config. They are lent only for the exact addresses Hiqlite would bind:
+    // the bind IP with this node's roster port. A start on any other address
+    // (fresh activation's loopback staging voter of a fixture bound elsewhere)
+    // binds as usual.
+    let lent = if config.cluster.listeners.is_owned() {
+        let raft_listen = std::net::SocketAddr::new(
+            raft_bind.ip(),
+            stored_peer_port("Raft", &local.raft_address)?,
+        );
+        let api_listen = std::net::SocketAddr::new(
+            api_bind.ip(),
+            stored_peer_port("cluster API", &local.api_address)?,
+        );
+        config
+            .cluster
+            .listeners
+            .lend(raft_listen, api_listen)
+            .map_err(|error| {
+                StoreError::Migration(format!("lending the owned cluster listeners: {error}"))
+            })?
+    } else {
+        None
+    };
     // The daemon lock guards one data directory, but these ports are host-wide
     // and default to fixed values, so two data directories on one host collide.
     // Without this check the node does not report a bind conflict: it reaches a
     // foreign voter's listener, retries the handshake for the full start
     // timeout, and then blames the migration. Check first and say which port.
-    for (role, address) in [("raft", raft_bind), ("cluster API", api_bind)] {
-        if let Err(error) = std::net::TcpListener::bind(address) {
-            return Err(StoreError::Migration(format!(
-                "the {role} port {address} is not available: {error}. Another plurxd on \
-                 this host is using it — cluster ports are host-wide, so a second data \
-                 directory needs its own raft_bind and api_bind"
-            )));
+    // The probe socket is dropped rather than handed over: a listening socket
+    // would queue peers' connections through the whole Raft start instead of
+    // refusing them.
+    if lent.is_none() {
+        for (role, address) in [("raft", raft_bind), ("cluster API", api_bind)] {
+            if let Err(error) = std::net::TcpListener::bind(address) {
+                return Err(StoreError::Migration(format!(
+                    "the {role} port {address} is not available: {error}. Another plurxd on \
+                     this host is using it — cluster ports are host-wide, so a second data \
+                     directory needs its own raft_bind and api_bind"
+                )));
+            }
         }
     }
+    let listeners = lent.map(|owned| hiqlite::NodeListeners {
+        raft: owned.raft,
+        api: owned.api,
+    });
     let node_config = NodeConfig {
         node_id: identity.raft_id,
         nodes,
         listen_addr_api: Cow::Owned(api_bind.ip().to_string()),
         listen_addr_raft: Cow::Owned(raft_bind.ip().to_string()),
+        listeners,
         data_dir: Cow::Owned(target.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed(HIQLITE_DATABASE_FILENAME),
         secret_raft: secrets.raft.clone(),

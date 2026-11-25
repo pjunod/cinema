@@ -1049,9 +1049,13 @@ enum TitleAcquisition {
 /// permanently fail a readable title. A storage read failure is charged like
 /// any other transient read failure (the probe and subtitle paths do the
 /// same), so a bad sector stays bounded by the attempt limit, but under its own
-/// code. A scanner refusal of readable input stays `title_scan_failed`. Every
-/// case keeps the retry backoff, so a whole-title read never restarts in a
-/// tight loop.
+/// code. A content refusal of cleanly read, unchanged input is a verdict on
+/// those bytes under this scanner: rereading them reaches the same refusal, so
+/// the job fails once as `title_scan_refused`, which settles the title's
+/// demand for that probe revision and scanner digest. A changed file (a new
+/// probe revision) or a new scanner re-opens it. Any other scanner failure
+/// stays a charged `title_scan_failed`. Every retry keeps the backoff, so a
+/// whole-title read never restarts in a tight loop.
 fn scan_failure_settlement(
     error: &TitleScanError,
     job_id: &str,
@@ -1075,6 +1079,12 @@ fn scan_failure_settlement(
             JobSettlement::Retry {
                 error_code: "title_source_read_failed".into(),
                 not_before_ms,
+            }
+        }
+        TitleScanError::Refused(_) => {
+            tracing::warn!(%error, job = job_id, "complete-title scan refused the title");
+            JobSettlement::Fail {
+                error_code: "title_scan_refused".into(),
             }
         }
         TitleScanError::Failed(_) => {
