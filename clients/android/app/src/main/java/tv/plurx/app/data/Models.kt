@@ -277,11 +277,24 @@ data class MediaFileDto(
     val hdr: String? = null,
     val hdr_format: String? = null,
     /**
-     * The Dolby Vision facts as columns, when the row has them. Absent on a
-     * row scanned before those columns existed, whose only DV evidence is the
-     * prose in [hdr_format].
+     * The Dolby Vision facts as the server's version list sends them (flat
+     * `dv_*` fields on `FileDto`). Absent on a row scanned before those
+     * columns existed, whose only DV evidence is the prose in [hdr_format].
      */
-    val dolby_vision: DolbyVisionFactsDto? = null,
+    val dv_profile: Int? = null,
+    val dv_level: Int? = null,
+    val dv_bl_compat_id: Int? = null,
+    val dv_el_present: Boolean? = null,
+    /** `fel` or `mel`, once the complete-title scan found it consistent. */
+    val dv_el_kind: String? = null,
+    /**
+     * The facts above as the one line the server words for every client
+     * ("Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base").
+     * Shown as sent; never rebuilt here.
+     */
+    val dv_facts: String? = null,
+    /** How this version plays on each of the account's signed-in devices. */
+    val plays_on: List<PlaysOnDto> = emptyList(),
     val bitrate: Long? = null,
     val audio_streams: List<AudioStream> = emptyList(),
     val subtitle_streams: List<SubtitleStream> = emptyList(),
@@ -755,21 +768,21 @@ data class Decision(
 )
 
 /**
- * The Dolby Vision facts the server derives its label from, so a client can
- * read the profile as a number instead of out of prose.
- *
- * Every field optional and defaulted: a row scanned before these columns
- * existed sends the object with nulls, or omits it entirely, and neither may
- * fail to parse — a client that cannot decode a response over a missing
- * optional field cannot play anything at all on that server.
+ * One device's line in a version's "how it plays" list: the verdict Play
+ * would reach on that device, worded by the server. [full_quality] is false
+ * for a fallback (a base layer, a tone-map) and [el_dropped] when the
+ * delivery leaves out an enhancement layer the source has; either reads as
+ * a caution.
  */
 @Serializable
-data class DolbyVisionFactsDto(
-    val profile: Int? = null,
-    val level: Int? = null,
-    val bl_compat_id: Int? = null,
-    val el_present: Boolean? = null,
-    val rpu_present: Boolean? = null,
+data class PlaysOnDto(
+    val id: String = "",
+    val device: String? = null,
+    val client: String? = null,
+    val label: String = "",
+    val method: String? = null,
+    val el_dropped: Boolean = false,
+    val full_quality: Boolean = true,
 )
 
 data class EffectiveProcessingReport(

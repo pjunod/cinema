@@ -1555,10 +1555,9 @@ pub(super) async fn replan_qualified_upgrade(
     }) {
         return Err("fresh FEL qualification planning no longer binds the incumbent copy".into());
     }
-    let target = fresh
-        .candidate_context
-        .as_ref()
-        .map(|context| context.selected_candidate.target_height);
+    // The rendition the fresh plan's processed ask describes: its candidate's,
+    // or the accepted ask of an Original or manual start.
+    let target = fresh.processed_ask_target_height();
     if fresh.file_id != recipe.request.file_id
         || fresh.playback_id != recipe.request.playback_id
         || fresh.presentation != recipe.request.presentation

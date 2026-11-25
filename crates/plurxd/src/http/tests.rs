@@ -15,6 +15,7 @@ use super::*;
 
 mod activity_routes;
 mod delegation;
+mod playback_devices;
 mod playback_handoffs;
 mod public_copy_wire;
 mod storage_domains;

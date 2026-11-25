@@ -144,7 +144,9 @@ def pull(number: int, title: str, head: str, body: str, branch: str = "claude/th
             "base": {"ref": "main"}, "head": {"ref": branch, "sha": head}}
 
 
-class LandCase(unittest.TestCase):
+class LandFixture(unittest.TestCase):
+    """One corrective pull request #7 over a throwaway repository; no tests of its own."""
+
     TITLE = "fix(thing): stop the thing"
 
     def setUp(self):
@@ -186,6 +188,8 @@ class LandCase(unittest.TestCase):
         self.assertEqual(forge.merges, [], "a refused pull request must never reach the merge API")
         return str(raised.exception)
 
+
+class LandCase(LandFixture):
     # -- refusals ----------------------------------------------------------------
 
     def test_a_draft_title_is_refused(self):
@@ -586,6 +590,192 @@ class LandCase(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertIn(expected, err.getvalue())
                 self.assertNotIn("sekrit-token", err.getvalue())
+
+
+class BatchForge(FakeForge):
+    """A forge whose member head carries ci-fleet's batch status (docs/ci/REQUESTED-LANE.md, "Batches").
+
+    The batch pull request, its fast-lane run and that run's jobs are what
+    `verify_batch` reads back; each test spoils one of them.
+    """
+
+    def __init__(self, repo: Repo, member: dict, batch_pull: dict, run: dict, jobs: list[dict],
+                 statuses: list[dict], fetched: str):
+        super().__init__(repo, member)
+        self.batch_pull = batch_pull
+        self.the_run = run
+        self.jobs = jobs
+        self.member_statuses = statuses
+        self.fetched = fetched
+        self.fetched_pulls: list[int] = []
+
+    def pull(self, number: int) -> dict:
+        if number == self.batch_pull["number"]:
+            return dict(self.batch_pull)
+        return super().pull(number)
+
+    def statuses(self, sha: str) -> list[dict]:
+        self.asked.append(sha)
+        return list(self.member_statuses)
+
+    def run(self, run_id: int) -> dict:
+        if run_id != self.the_run["id"]:
+            raise landing.ForgeError(404, "{}")
+        return dict(self.the_run)
+
+    def run_jobs(self, run_id: int) -> list[dict]:
+        return [dict(job) for job in self.jobs]
+
+    def fetch_pull(self, root: Path, number: int) -> str:
+        self.fetched_pulls.append(number)
+        return self.fetched
+
+
+class BatchCase(LandFixture):
+    """A member head whose verdict came from a batch run lands only once that run is traced."""
+
+    RUN = 4242
+    BATCH_PR = 900
+
+    def setUp(self):
+        super().setUp()
+        other = self.repo.branch("claude/other", "feat(other): another member", {"other.txt": "other\n"})
+        self.repo.git("checkout", "-q", "-b", "lane-batch/b-17", self.repo.main)
+        for member in (self.head, other):
+            self.repo.git("merge", "-q", "--no-ff", member, "-m", f"lane batch b-17: merge {member[:9]}")
+        self.batch_head = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("checkout", "-q", "main")
+        self.unrelated = self.repo.branch("claude/unrelated", "feat(x): not a member", {"x.txt": "x\n"})
+
+    def description(self, **change) -> str:
+        values = {"run": self.RUN, "pull": self.BATCH_PR, "head": self.batch_head, **change}
+        return (f"ci-fleet batch b-17: run {values['run']} of #{values['pull']} at {values['head']} green"
+                f" · with #8 · interaction")
+
+    def batch_status(self, **change) -> dict:
+        return {"id": 31, "context": landing.BATCH_CONTEXT, "status": "success",
+                "description": self.description(), "creator": {"login": landing.LANE_BOT},
+                "target_url": f"https://forge.example/owner/repo/actions/runs/{self.RUN}",
+                "updated_at": "2026-11-24T10:00:00Z", **change}
+
+    def batch_forge(self, *, status: dict | None = None, run: dict | None = None,
+                    gate_job: dict | None = None, batch_pull: dict | None = None,
+                    fetched: str | None = None, solo: str | None = None) -> BatchForge:
+        member = pull(7, self.TITLE, self.head, self.body)
+        the_run = {"id": self.RUN, "workflow_id": "main-fast-lane.yml", "event": "pull_request",
+                   "status": "success", "commit_sha": self.batch_head,
+                   "event_payload": json.dumps({"number": self.BATCH_PR, "action": "label_updated",
+                                                "pull_request": {"number": self.BATCH_PR}}),
+                   **(run or {})}
+        jobs = [{"id": 1, "run_id": self.RUN, "name": "fast policy and contract preflight", "status": "success"},
+                {"id": 2, "run_id": self.RUN, "name": "Main promotion gate", "status": "success",
+                 **(gate_job or {})}]
+        the_pull = {**pull(self.BATCH_PR, "lane batch b-17", self.batch_head, "", branch="lane-batch/b-17"),
+                    "state": "closed", **(batch_pull or {})}
+        statuses = [status or self.batch_status()]
+        if solo is not None:
+            statuses.append({"id": 40, "context": GATE, "status": solo})
+        forge = BatchForge(self.repo, member, the_pull, the_run, jobs, statuses,
+                           self.batch_head if fetched is None else fetched)
+        return forge
+
+    def ignored(self, forge: BatchForge, reason: str) -> None:
+        why = self.refused(forge)
+        self.assertIn("has reported no 'main fast lane / Main promotion gate' status", why)
+        notes = [line for line in self.said if line.startswith(f"Ignoring '{landing.BATCH_CONTEXT}'")]
+        self.assertEqual(len(notes), 1, self.said)
+        self.assertIn(reason, notes[0])
+
+    def test_a_verified_batch_pass_lands_the_member(self):
+        forge = self.batch_forge()
+        sha = self.land(forge)
+        self.assertEqual(sha, self.repo.git("rev-parse", "main"))
+        self.assertIn(f"Verified {landing.BATCH_CONTEXT}: batch b-17: run {self.RUN} of #{self.BATCH_PR} "
+                      f"at {self.batch_head}, its 'Main promotion gate' job 2", self.said)
+        self.assertEqual(forge.fetched_pulls, [self.BATCH_PR])
+
+    def test_a_batch_status_is_never_read_as_the_solo_gate(self):
+        self.assertEqual(landing.gate_state([self.batch_status()]), ("missing", ""))
+
+    def test_a_run_of_another_workflow_is_ignored(self):
+        self.ignored(self.batch_forge(run={"workflow_id": "ci.yml"}), "is 'ci.yml', not main-fast-lane.yml")
+
+    def test_a_run_that_is_not_a_pull_request_run_is_ignored(self):
+        self.ignored(self.batch_forge(run={"event": "workflow_dispatch"}), "not pull_request")
+
+    def test_a_run_whose_gate_job_failed_is_ignored(self):
+        self.ignored(self.batch_forge(gate_job={"status": "failure"}), "'Main promotion gate' job is 'failure'")
+
+    def test_a_run_that_did_not_succeed_is_ignored(self):
+        self.ignored(self.batch_forge(run={"status": "failure"}), "concluded 'failure'")
+
+    def test_a_run_of_another_head_is_ignored(self):
+        self.ignored(self.batch_forge(run={"commit_sha": self.unrelated}), f"not batch head {self.batch_head}")
+
+    def test_a_batch_pull_request_at_another_head_is_ignored(self):
+        self.ignored(self.batch_forge(batch_pull={"head": {"ref": "lane-batch/b-17", "sha": self.unrelated}}),
+                     f"#{self.BATCH_PR} head is {self.unrelated}")
+
+    def test_a_fetched_batch_head_that_differs_is_ignored(self):
+        self.ignored(self.batch_forge(fetched=self.unrelated), f"refs/pull/{self.BATCH_PR}/head is {self.unrelated}")
+
+    def test_a_member_that_is_not_in_the_batch_is_ignored(self):
+        forge = self.batch_forge()
+        forge.state = pull(7, self.TITLE, self.unrelated, self.body)
+        why = self.refused(forge, head=self.unrelated)
+        self.assertIn("has not passed", why)
+        self.assertTrue(any(f"{self.unrelated} is not an ancestor of batch head {self.batch_head}" in line
+                            for line in self.said), self.said)
+
+    def test_a_malformed_description_is_ignored(self):
+        for description in (
+            self.description().replace(" green", " red"),
+            self.description(head=self.batch_head[:12]),
+            self.description() + " · and more",
+            "ci-fleet batch b-17: run 4242 green",
+        ):
+            with self.subTest(description=description):
+                self.said.clear()
+                self.ignored(self.batch_forge(status=self.batch_status(description=description)),
+                             "is not ci-fleet's batch grammar")
+
+    def test_a_batch_pull_request_not_from_a_lane_batch_branch_is_ignored(self):
+        for branch in ("claude/b-17", "lane-batch/b-18"):
+            with self.subTest(branch=branch):
+                self.said.clear()
+                self.ignored(self.batch_forge(batch_pull={"head": {"ref": branch, "sha": self.batch_head}}),
+                             f"is from {branch!r}, not lane-batch/b-17")
+
+    def test_a_closed_batch_whose_branch_was_deleted_still_verifies(self):
+        # Forgejo then answers head.ref = refs/pull/<n>/head; head.label keeps the branch.
+        head = {"label": "lane-batch/b-17", "ref": f"refs/pull/{self.BATCH_PR}/head", "sha": self.batch_head}
+        self.land(self.batch_forge(batch_pull={"head": head}))
+        self.assertTrue(any(line.startswith(f"Verified {landing.BATCH_CONTEXT}") for line in self.said))
+
+    def test_a_deleted_branch_must_still_have_been_a_lane_batch_branch(self):
+        head = {"label": "claude/b-17", "ref": f"refs/pull/{self.BATCH_PR}/head", "sha": self.batch_head}
+        self.ignored(self.batch_forge(batch_pull={"head": head}), "is from 'claude/b-17'")
+
+    def test_a_batch_pull_request_into_another_base_is_ignored(self):
+        self.ignored(self.batch_forge(batch_pull={"base": {"ref": "release"}}), "does not target main")
+
+    def test_a_batch_status_from_another_account_is_ignored(self):
+        self.ignored(self.batch_forge(status=self.batch_status(creator={"login": "pjunod"})),
+                     "posted by pjunod, not ci-fleet-lane")
+
+    def test_an_unreadable_run_is_ignored(self):
+        self.ignored(self.batch_forge(status=self.batch_status(description=self.description(run=5))),
+                     "could not show its run or pull request")
+
+    def test_an_unverified_batch_status_does_not_hide_a_solo_pass(self):
+        forge = self.batch_forge(run={"workflow_id": "ci.yml"}, solo="success")
+        self.land(forge)
+        self.assertEqual(len(forge.merges), 1)
+        self.assertFalse(any(line.startswith("Ignoring") for line in self.said))
+
+    def test_an_unverified_batch_status_does_not_turn_a_solo_failure_into_a_pass(self):
+        why = self.refused(self.batch_forge(run={"event": "push"}, solo="failure"))
+        self.assertIn("is failure", why)
 
 
 class PushCheckCase(unittest.TestCase):

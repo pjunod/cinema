@@ -1337,7 +1337,7 @@ private fun PlayerContent(
     if (remoteTrackMenu != null) {
         val kind = remoteTrackMenu
         RemoteChoiceDialog(if (kind == RemoteTrackMenuKind.All) "Audio and subtitles" else "Choose ${kind?.wireName}", ownedTracks().filter { kind == RemoteTrackMenuKind.All && it.kind != "quality" || it.kind == kind?.wireName }.map { track ->
-            RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, track.choose)
+            RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, activate = track.choose)
         }) { remoteTrackMenu = null; poke(); focus(panelOpener) }
     }
 

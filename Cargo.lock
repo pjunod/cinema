@@ -3768,7 +3768,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plurx-cluster-check"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3794,7 +3794,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-compat-jellyfin"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3804,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-compat-plex"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "axum",
  "http-body-util",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3868,7 +3868,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-desktop-control"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "clap",
  "flate2",
@@ -3887,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-notification-broker"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3917,7 +3917,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-pgs"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "hex",
  "libpgs",
@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-support"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3958,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-tray"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-channel",
  "gtk4",
@@ -3971,11 +3971,11 @@ dependencies = [
 
 [[package]]
 name = "plurx-worker-control"
-version = "0.9.0"
+version = "0.9.1"
 
 [[package]]
 name = "plurxd"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",

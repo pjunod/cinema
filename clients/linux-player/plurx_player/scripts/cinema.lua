@@ -6,9 +6,16 @@ local opts = {accent = '6EA8FE', hide_ms = 4000}
 require('mp.options').read_options(opts, 'cinema')
 local overlay = mp.create_osd_overlay('ass-events')
 local S = {shown = true, touched = 0, buttons = {}, focus = nil, menu = nil,
-           row = 1, preview = nil, dragging = false, hover = nil, mouse_bound = false}
+           row = 1, preview = nil, dragging = false, hover = nil, mouse_bound = false,
+           native = {}}
 local W, H = 1280, 720
 local render, activity, mouse, click, key, play_pause
+-- Every handler asks for a frame; one frame is drawn when the event queue
+-- has drained. mpv's Lua loop runs timers only once wait_event returns none
+-- and idle handlers just after them, so a render costing a whole video frame
+-- can never keep the hide timer from running however often properties change.
+local dirty = false
+local function invalidate() dirty = true end
 local function number(v) return type(v) == 'number' and v == v and math.abs(v) < math.huge end
 local function clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 local function prop(name, fallback) local v = mp.get_property_native(name); if v == nil then return fallback end; return v end
@@ -178,7 +185,11 @@ local function snapshot()
     view.source=table_of(view.facts.source)
     view.renderer=type(view.facts.renderer)=='table' and view.facts.renderer or nil
     view.enhancement=type(view.facts.enhancement)=='table' and view.facts.enhancement or nil
-    view.native=table_of(prop('native-dovi-target-state'))
+    -- Delivered by its observer, never read here: mpv answers a read of this
+    -- property on its video-output thread, which can take a whole frame.
+    -- Renders follow every frame, so reading it would keep this script's event
+    -- queue from ever draining, and mpv runs the hide timer only once it has.
+    view.native=S.native
     return view
 end
 -- detail/helpers.js resLabel, on the frame mpv decodes rather than the file.
@@ -564,6 +575,10 @@ local function bind_mouse(wanted)
     else
         mp.remove_key_binding('cinema-click'); mp.remove_key_binding('cinema-double')
     end
+    -- Renders run from an idle handler, after mpv's own idle flush of key
+    -- bindings: flush now, or a click right after the pointer stops would
+    -- still reach the binding of the frame before.
+    mp.flush_keybindings()
 end
 render = function()
     local w, h = mp.get_osd_size()
@@ -709,7 +724,7 @@ render = function()
     local mx,my = coords(); bind_mouse(S.dragging or hit(mx,my) ~= nil)
 end
 activity = function()
-    S.shown=true; S.touched=mp.get_time(); render()
+    S.shown=true; S.touched=mp.get_time(); invalidate()
 end
 local function preview_pointer()
     local x = coords()
@@ -720,9 +735,9 @@ mouse = function()
     if S.dragging then preview_pointer() end
     S.hover=nil
     activity()
+    -- Hit-test what is on screen: the frame drawn after the last drain.
     local b = hit(x,y)
     if b then S.hover=b.id end
-    render()
 end
 click = function(event)
     local x,y = coords(); local b = hit(x,y)
@@ -790,9 +805,10 @@ for _, pair in ipairs({{'TAB','tab'},{'Shift+TAB','backtab'},{'ENTER','enter'},{
 end
 mp.add_forced_key_binding('WHEEL_UP','cinema-wheel-up',function() if S.menu then key('up') else mp.commandv('add','volume',5); activity() end end)
 mp.add_forced_key_binding('WHEEL_DOWN','cinema-wheel-down',function() if S.menu then key('down') else mp.commandv('add','volume',-5); activity() end end)
-for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params','native-dovi-target-state'}) do
-    mp.observe_property(name,'native',function() render() end)
+for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params'}) do
+    mp.observe_property(name,'native',invalidate)
 end
+mp.observe_property('native-dovi-target-state','native',function(_,value) S.native=table_of(value); invalidate() end)
 mp.observe_property('user-data/cinema','native',function()
     local retryable=cinema().retryable == true
     -- A stale popup must not cover the recovery action, especially in a
@@ -807,11 +823,14 @@ mp.register_event('file-loaded',function() S.preview=nil; S.dragging=false; S.me
 mp.add_periodic_timer(0.2,function()
     -- No diagnostic polling while the panel is closed. Read fresh properties
     -- while open even when playback is paused or notifications are throttled.
-    if S.menu=='info' then render() end
+    if S.menu=='info' then invalidate() end
     if S.shown and not prop('pause',false) and not S.menu and not S.preview and not S.dragging
             and not busy() and mp.get_time()-S.touched >= opts.hide_ms/1000 then
-        S.shown=false; S.focus=nil; render()
+        S.shown=false; S.focus=nil; invalidate()
     end
 end)
 mp.register_event('shutdown',function() overlay:remove() end)
+mp.register_idle(function()
+    if dirty then dirty=false; render() end
+end)
 activity()

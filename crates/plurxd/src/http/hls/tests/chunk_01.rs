@@ -347,7 +347,10 @@
             .split_once("    if owner_node_id == state.node_id {")
             .expect("the activation that follows dispatch")
             .0;
-        assert!(degraded.contains("(degraded_processing, processing_note)"), "the worker result carries its degrade reason and processing note");
+        assert!(
+            degraded.contains("local_serving_generation, degraded_processing)) = started"),
+            "the worker result carries its degrade reason"
+        );
         assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
         for restored in [
             "plan_notes.push(processing_declined_note(&reason));",
@@ -1076,6 +1079,7 @@
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2287,6 +2291,7 @@
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2573,6 +2578,7 @@
                     continuous_media: None,
                     quality_catalog: None,
                     candidate_context: None,
+                    accepted_processed_ask: None,
                     vod_only: false,
                     passive_vod: false,
                     finite_bitrate_limit_bps: None,

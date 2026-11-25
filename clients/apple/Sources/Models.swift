@@ -496,6 +496,13 @@ struct MediaFile: Codable, Identifiable {
     /// always been on `FileDto`; the detail screen now shows them.
     var hdr: String? = nil
     var hdrFormat: String? = nil
+    /// The version's Dolby Vision facts as the one line the server words for
+    /// every client ("Profile 7 · FEL · full enhancement layer · level 6 ·
+    /// HDR10 base"). Shown as sent; never rebuilt here. Absent without DV.
+    var dvFacts: String? = nil
+    /// How this version plays on each of the account's signed-in devices,
+    /// the verdict Play would reach there. Absent until a device reports.
+    var playsOn: [PlaysOn]? = nil
     var bitrate: Int? = nil
     var audioStreams: [AudioTrack]? = nil
     var subtitleStreams: [SubtitleStream]? = nil
@@ -517,6 +524,22 @@ struct MediaFile: Codable, Identifiable {
         container?.lowercased() == "epub"
             || filename?.lowercased().hasSuffix(".epub") == true
     }
+}
+
+/// One device's line in a version's "how it plays" list, judged and worded
+/// by the server. A fallback (a base layer, a tone-map) or a dropped
+/// enhancement layer reads as a caution.
+struct PlaysOn: Codable, Equatable, Identifiable {
+    let id: String
+    var device: String? = nil
+    var client: String? = nil
+    var label: String = ""
+    var method: String? = nil
+    var elDropped: Bool? = nil
+    var fullQuality: Bool? = nil
+
+    var deviceName: String { device ?? client ?? "Device" }
+    var isCaution: Bool { fullQuality == false || elDropped == true }
 }
 
 enum ReaderAction: String, Codable, Equatable {

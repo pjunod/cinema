@@ -1,0 +1,17 @@
+# The Android and Apple version pickers listed filenames only; Android also
+# decoded a nested dolby_vision object the server never sends.
+[[fixes]]
+id = "android.dv-version-picker-rows"
+commits = ["45a0f65e503bb006c0dd66dae74c109ed5449512"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val dv_facts: String? = null"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ModelContractTest.kt"
+test_anchor = "fun itemDetailCarriesEachVersionsDolbyVisionAndHowItPlays()"
+
+[[fixes]]
+id = "apple.dv-version-picker-rows"
+commits = ["405fec31b91f22ed9633614873e04833237098e0", "8f6cec9995083fbcb43a1df9244daab08e35adad"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "var dvFacts: String? = nil"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testSharedNativeAPIFixtureDecodesWithoutConsumerDrift()"

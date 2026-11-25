@@ -1934,10 +1934,20 @@ fn directory_placement(item: Item, directory: String, candidates: &[Item]) -> Pl
     })
 }
 
-fn usable_source_directory(library: &Library, directory: Option<&Path>) -> Option<String> {
-    let directory = directory?.canonicalize().ok()?;
-    let roots = library
-        .paths
+/// Resolving the directory and the roots stats every path component on the
+/// media mount, so it runs on the media-I/O pool.
+async fn usable_source_directory(library: &Library, directory: Option<&Path>) -> Option<String> {
+    let directory = directory?.to_owned();
+    let roots = library.paths.clone();
+    crate::media_io::blocking(move || usable_source_directory_under(&roots, &directory))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn usable_source_directory_under(roots: &[PathBuf], directory: &Path) -> Option<String> {
+    let directory = directory.canonicalize().ok()?;
+    let roots = roots
         .iter()
         .map(|configured| {
             (
@@ -2050,7 +2060,7 @@ async fn place_item(
                 }
             }
             if let Some(directory) =
-                usable_source_directory(library, parsed.source_directory.as_deref())
+                usable_source_directory(library, parsed.source_directory.as_deref()).await
             {
                 let candidates = store
                     .find_movies_by_directory(library.id, &directory)
@@ -2216,6 +2226,7 @@ async fn find_or_create_show(
     parsed: &parse::ParsedEpisode,
 ) -> Result<(Item, Option<DuplicateDirectory>), StoreError> {
     let directory = usable_source_directory(library, parsed.source_directory.as_deref())
+        .await
         .map(|directory| crate::store::show_directory_identity(&directory))
         .filter(|directory| {
             !library

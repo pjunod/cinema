@@ -12,6 +12,20 @@ bump may break compatibility and a **patch** bump never does.
 `Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
 from the landing commits into the dated section below. -->
 
+## [0.9.1] — 2026-11-25
+<!-- changelog-through: c19e68681671c5ced73a9881c30714c06cc0373d -->
+
+### Changed
+- Reopening a playback at a new position costs one replicated write and one claim read fewer.
+
+### Fixed
+- Resuming a Dolby Vision FEL title whose file embeds cover art no longer loses the native enhancement splice.
+- Dolby Vision Profile 7 FEL titles whose luma reshaping curve has more than two pivots are no longer refused by the F+ curve fit.
+- A Dolby Vision title the scanner refuses on its content (for example an untagged Matroska track) now fails once instead of being read in full five times.
+- A Dolby Vision FEL session whose native enhancement splice could not be used now still reaches FEL through the prepared switch instead of staying on the plain conversion.
+- A cluster voter that stalls (for example while its media storage is unreachable) no longer forces a healthy leader to step down when it resumes; voters now pre-vote before starting an election.
+- plurx Player on Linux starts when TMPDIR is a deep directory and XDG_RUNTIME_DIR is unset, instead of failing because mpv's control socket path was too long.
+
 ## [0.9.0] — 2026-11-24
 <!-- changelog-through: 681167543c42d197ff732d1dc0a79c544e61c672 -->
 
@@ -4496,8 +4510,9 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.0
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.1
+[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...e3eec613f9de4b2f1a9c705ce058bc14d55a16fc
 [0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...000300ccfcd98b7b3a2221d7031420cd99748bfd
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0

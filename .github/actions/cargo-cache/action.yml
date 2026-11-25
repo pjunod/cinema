@@ -162,7 +162,9 @@ runs:
         # user, and both see the same RUNNER_TOOL_CACHE. Sharing one root let
         # root-owned lane directories refuse every later host job on the same
         # runner (`touch .last-used: Permission denied`). Key the root by the
-        # executing uid so each executor owns, writes and prunes only its own.
+        # executing uid so each executor owns, writes and prunes only its own;
+        # scripts/ci-cache-prune still counts every -uid<N> root of this runner
+        # against the one budget, so two executors cannot double it.
         runner_name="${runner_name}-uid$(id -u)"
         toolchain=$(rustc -Vv | sed -n 's/^release: //p')
         [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {

@@ -7,9 +7,11 @@ use super::{user_from_row, SqliteStore, USER_COLS};
 use crate::auth::TokenIdlePolicy;
 use crate::domain::User;
 use crate::error::StoreError;
+use crate::store::playback_device_caps as device_caps;
 use crate::store::{
     bounded_device_label, keys, CacheAdminMutationClaim, DeleteTokenByPrefixOutcome,
-    TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
+    PlaybackDeviceCaps, TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES,
+    TOKEN_SUMMARY_MAX,
 };
 
 pub(super) fn require_standalone_claim(
@@ -97,6 +99,72 @@ impl Drop for TokenActivityReservation<'_> {
         if reservations.get(&self.token_hash) == Some(&self.reserved_at) {
             reservations.remove(&self.token_hash);
         }
+    }
+}
+
+impl SqliteStore {
+    /// Device capability records over live tokens; the idle-expiry policy is
+    /// read in the same statement and applied as authentication applies it.
+    async fn list_device_caps(
+        &self,
+        sql: String,
+        user_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .with_read(move |conn| {
+                let mut statement = conn.prepare(&sql)?;
+                let map = |row: &rusqlite::Row<'_>| {
+                    Ok(device_caps::ListedDeviceCaps {
+                        record: PlaybackDeviceCaps {
+                            token_prefix: row.get(0)?,
+                            device: row.get(1)?,
+                            user_id: row.get(2)?,
+                            username: row.get(3)?,
+                            last_seen_at: row.get(4)?,
+                            caps: row.get(5)?,
+                            updated_at: row.get(6)?,
+                        },
+                        expiry_enabled: row.get(7)?,
+                        idle_days: row.get(8)?,
+                        expiry_since: row.get(9)?,
+                    })
+                };
+                let policy = [
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                ];
+                let label = MAX_DEVICE_LABEL_BYTES as i64;
+                let rows = match user_id {
+                    Some(user_id) => statement
+                        .query_map(
+                            params![
+                                label,
+                                policy[0],
+                                policy[1],
+                                policy[2],
+                                user_id,
+                                limit as i64
+                            ],
+                            map,
+                        )?
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => statement
+                        .query_map(
+                            params![label, policy[0], policy[1], policy[2], limit as i64],
+                            map,
+                        )?
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                Ok(rows)
+            })
+            .await?;
+        // The wall clock authentication judges by (`unixepoch()` there).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs() as i64);
+        Ok(device_caps::live(rows, now))
     }
 }
 
@@ -538,6 +606,48 @@ impl UserStore for SqliteStore {
         .await
     }
 
+    async fn put_device_caps(
+        &self,
+        token_hash: &str,
+        caps: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let read_hash = token_hash.to_owned();
+        let current = self
+            .with_read(move |conn| {
+                Ok(conn
+                    .query_row(device_caps::CURRENT, params![read_hash], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .optional()?)
+            })
+            .await?;
+        if current.as_deref() == Some(caps) {
+            return Ok(false);
+        }
+        let token_hash = token_hash.to_owned();
+        let caps = caps.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(device_caps::UPSERT, params![caps, now, token_hash])? > 0)
+        })
+        .await
+    }
+
+    async fn device_caps_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let sql = device_caps::list_for_user_sql();
+        self.list_device_caps(sql, Some(user_id), TOKEN_SUMMARY_MAX)
+            .await
+    }
+
+    async fn device_caps_for_all_users(&self) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let sql = device_caps::list_all_sql();
+        self.list_device_caps(sql, None, device_caps::DEVICE_CAPS_LIST_MAX)
+            .await
+    }
+
     async fn delete_token_by_prefix_for_user(
         &self,
         user_id: i64,
@@ -592,6 +702,20 @@ impl SqliteStore {
                 "UPDATE tokens SET last_seen_at = ?2 WHERE token_hash = ?1",
                 params![token_hash, last_seen_at],
             )? > 0)
+        })
+        .await
+    }
+
+    /// Test fixture: every stored device capability record, live token or
+    /// not, so a test can prove a removal path left nothing behind rather
+    /// than only that the listing's join hides it.
+    pub async fn fixture_device_caps_rows(&self) -> Result<i64, StoreError> {
+        self.with_conn(|conn| {
+            Ok(
+                conn.query_row("SELECT count(*) FROM playback_device_caps_r1", [], |row| {
+                    row.get(0)
+                })?,
+            )
         })
         .await
     }

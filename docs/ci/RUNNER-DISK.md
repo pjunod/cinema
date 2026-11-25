@@ -11,11 +11,10 @@ Read this before adding a cache to any workflow, and before believing a
 
 ## Current runner roles and reserved labels
 
-The roster reconciliation records the existing Forgejo
-registrations. Neutral names in `validation/runner-fleet.toml` describe logical
-placements; the fleet collector maps live host names through its private alias
-configuration. Keep the existing registration IDs and UUIDs when reconciling
-names.
+The roster records the existing Forgejo registrations. Neutral names in
+`validation/runner-fleet.toml` describe logical placements; the fleet collector
+maps live host names through its private alias configuration. Keep registration
+IDs and UUIDs when reconciling names.
 
 On `maca`, `gha-maca-linux-arm-01` serves `release-arm64`. CI packaging uses
 `gha-maca-linux-arm-02` with `ci-arm64`, one slot, four vCPUs, 8 GiB RAM,
@@ -28,11 +27,10 @@ Keep `async-proof-owned` on the existing `gha-lab5-general-03` slot.
 The owning `codex/async-store-refinement` branch records its target-only
 provisioning in commit `f14b400bc` (2026-10-29): one dedicated-label carrier,
 preserved registration identity and a private durable proof-storage binding.
-That branch owns the dispatch identity, resource admission and proof
-qualification rules. The main-branch roster records the observed label; it
-imports no proof workflow, activates no proof session and grants no proof
-credit. Removing the label because main has no requesting workflow would break
-its existing branch consumer.
+That branch owns its dispatch identity, resource admission and proof
+qualification rules. Main's roster only records the observed label: no proof
+workflow, session or credit. Removing it because main has no requesting
+workflow would break that branch's consumer.
 
 `unit-memory-12g`, `ci-coverage`, `primary` and `backup` also retain their
 documented compatibility, diagnostic or operational roles. A current workflow
@@ -260,8 +258,10 @@ Measured on the fleet on 2026-09-07, when the whole thing was full:
 |---|---|---|---|
 | Runner cache server | `<runner>/cache` (`bolt.db` + blobs) | 41 G on `gha-lab6-general-01`, ~167 G fleet-wide | the janitor timer, and nothing else |
 | Runner work root | `<runner>/_work` (checkouts) | ~58 M on `gha-lab4-general-01`, 2026-09-08 | nothing, and it does not need to be |
-| Cargo caches | `$RUNNER_TOOL_CACHE/plurx-ci/cargo/...` | 30 G budget per runner | `scripts/ci-cache-prune`, before and after every job |
+| Cargo caches | `$RUNNER_TOOL_CACHE/plurx-ci/cargo/...` | 30 G budget per runner, shared by its `-uid<N>` executor roots | `scripts/ci-cache-prune`, before and after every job |
 | Docker + BuildKit | `/var/lib/docker` | 101 G images · 58 G build cache on media1 | `scripts/ci-buildkit-prune` (50 G) and the janitor |
+
+A dead job's leftovers: [RUNNER-JOB-LEFTOVERS.md](RUNNER-JOB-LEFTOVERS.md).
 
 ### The cache server evicts nothing. Ever.
 
@@ -642,10 +642,8 @@ moves.
 `disk-gb` is a per-lane input and the janitor has one number for the host, so
 a lane asking for more than the janitor reserves keeps a band of its own.
 **`vod_web` asks for 45 G** for Playwright browsers and an ffmpeg build.
-**Release readiness's `release-check` also asks for 45 G** for its audited
-SDK package export, candidate-built shipping media/CI image, and full browser
-suite. Nightly deep validation and mutation also reserve 45 G for that
-same package export and shipping runtime build. All four lanes need this
+Nightly deep validation and mutation also reserve 45 G for their audited
+SDK package export and shipping runtime build. All three lanes need this
 room on top of the workspace; nothing reclaims the
 25–45 G gap on their behalf. Raising `REQUIRED_GB` to 45 would put it over
 half a 78 GB guest, so that demand would be reported and ignored. Placement

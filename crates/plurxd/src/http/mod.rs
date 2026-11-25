@@ -11,6 +11,7 @@ pub(crate) mod annotations;
 mod auth;
 pub(crate) mod background_jobs;
 pub(crate) mod curation;
+pub(crate) mod playback_devices;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
@@ -395,6 +396,8 @@ fn http_route_group(path: &str) -> usize {
         // attributed here rather than opening a group of their own.
         | "/api/v1/me/devices"
         | "/api/v1/me/devices/{prefix}"
+        // The same sign-ins, with the capabilities each last reported.
+        | "/api/v1/playback/devices"
         | "/api/v1/users/{id}/devices"
         | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"
@@ -1960,6 +1963,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/logout", post(auth::logout))
         .route("/me/devices", get(users::list_my_devices))
+        .route("/playback/devices", get(playback_devices::list))
         .route("/me/devices/{prefix}", delete(users::revoke_my_device))
         .route("/users/{id}/devices", get(users::list_user_devices))
         .route(

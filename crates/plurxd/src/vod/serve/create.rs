@@ -2111,7 +2111,6 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
-                processing_note: None,
                 session_id: session_id.into(),
                 // A split copy's entry point is its family master: the
                 // video-only index alone would play without any soundtrack.
@@ -3438,6 +3437,7 @@ mod principal_demand_tests {
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             control_sequence: None,
             file_id,
             playback_id: "shared-demand".to_owned(),

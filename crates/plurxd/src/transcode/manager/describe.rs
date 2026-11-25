@@ -101,7 +101,6 @@ impl TranscodeManager {
                     .map(|_| 8),
                 processed_fel: encoding.and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
-                processing_note: None,
                 retained_output: facts.response_owner.retained_output_facts(),
                 audio_delivery: facts.audio_delivery,
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
@@ -136,7 +135,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -1321,32 +1319,49 @@ impl TranscodeManager {
 
     /// The settings item detail needs, read once through
     /// [`plurx_core::store::CatalogueReader::display_settings`].
-    pub(crate) const DETAIL_DISPLAY_SETTING_KEYS: [&'static str; 4] = [
+    pub(crate) const DETAIL_DISPLAY_SETTING_KEYS: [&'static str; 6] = [
         keys::AUDIO_LANG,
         keys::SUB_LANG,
         keys::SUB_MODE,
         keys::DV_CONVERT,
+        keys::HWACCEL,
+        keys::DV_HDR_PROCESSING,
     ];
 
-    /// Item detail's track-language defaults and Dolby Vision conversion
-    /// choice from that one read, degrading exactly as [`Self::lang_prefs`]
-    /// and [`Self::dv_convert_enabled`] do when it fails.
+    /// Item detail's track-language defaults, Dolby Vision conversion choice
+    /// and the rest of what Play's verdict reads from settings (the encoder
+    /// preference behind the HDR10 ceiling, the Developer HDR switch), from
+    /// that one read, degrading exactly as [`Self::lang_prefs`],
+    /// [`Self::dv_convert_enabled`] and [`Self::hdr10_ceiling`] do when it
+    /// fails.
     pub(crate) fn detail_display_from(
         &self,
         settings: Result<std::collections::BTreeMap<String, String>, plurx_core::error::StoreError>,
-    ) -> (plurx_core::tracks::LangPrefs, bool) {
+    ) -> DetailDisplay {
         match settings {
-            Ok(settings) => (
-                Self::lang_prefs_from(&settings),
-                plurx_core::store::stored_switch(
+            Ok(settings) => DetailDisplay {
+                prefs: Self::lang_prefs_from(&settings),
+                dv_convert: plurx_core::store::stored_switch(
                     settings.get(keys::DV_CONVERT).map(String::as_str),
                     true,
                 ),
-            ),
-            Err(_) => (
-                plurx_core::tracks::LangPrefs::default(),
-                self.dv_convertible,
-            ),
+                hdr10_max_height: self.hdr10_ceiling_with_preference(
+                    settings
+                        .get(keys::HWACCEL)
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                ),
+                dv_hdr_processing: plurx_core::store::stored_switch(
+                    settings.get(keys::DV_HDR_PROCESSING).map(String::as_str),
+                    false,
+                ),
+            },
+            Err(_) => DetailDisplay {
+                prefs: plurx_core::tracks::LangPrefs::default(),
+                dv_convert: self.dv_convertible,
+                hdr10_max_height: self.hdr10_ceiling_with_preference(""),
+                dv_hdr_processing: false,
+            },
         }
     }
 
@@ -1471,4 +1486,14 @@ impl TranscodeManager {
         self.reap_superseded_until(deadline, supersession_user, playback_id)
             .await
     }
+}
+
+/// The settings item detail reads once, as [`TranscodeManager::detail_display_from`]
+/// resolves them.
+pub(crate) struct DetailDisplay {
+    pub prefs: plurx_core::tracks::LangPrefs,
+    pub dv_convert: bool,
+    /// [`TranscodeManager::hdr10_ceiling`] for the stored encoder preference.
+    pub hdr10_max_height: i64,
+    pub dv_hdr_processing: bool,
 }
