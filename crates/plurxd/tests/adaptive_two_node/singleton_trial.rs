@@ -423,22 +423,6 @@ async fn run_singleton_trial_variant(variant: TrialVariant) {
     assert_eq!(members[0]["node_id"], roster["local_node_id"]);
     assert_eq!(members[0]["is_voter"], true);
     let file_id = scan_fixture(&client, &mut node, &base, token, &media, None).await;
-    // A different title has a different trial key, so it stays on ordinary
-    // admission. It is long enough that its producer outlives the trial.
-    let incumbent_file = if variant == TrialVariant::BesideIncumbent {
-        let incumbent_media = ram.path().join("incumbent-media");
-        std::fs::create_dir(&incumbent_media).expect("incumbent media directory");
-        write_fixture(
-            ffmpeg.to_str().expect("FFmpeg path"),
-            &incumbent_media.join("Singleton VOD Incumbent (2023).mkv"),
-            "smptebars=size=1280x720:rate=12:duration=600",
-            "sine=frequency=330:sample_rate=48000:duration=600",
-            "24",
-        );
-        Some(scan_incumbent(&client, &mut node, &base, token, &incumbent_media).await)
-    } else {
-        None
-    };
     let viewer = Viewer {
         client: &client,
         base: &base,
@@ -478,7 +462,22 @@ async fn run_singleton_trial_variant(variant: TrialVariant) {
             .await;
         return;
     }
-    if let Some(incumbent_file) = incumbent_file {
+    if variant == TrialVariant::BesideIncumbent {
+        // Prepared only after qualification closed, so its scan and probes
+        // cannot disturb the measured ordinary owner. A different title has
+        // a different trial key and stays on ordinary admission. It is long
+        // enough that its producer outlives the trial.
+        let incumbent_media = ram.path().join("incumbent-media");
+        std::fs::create_dir(&incumbent_media).expect("incumbent media directory");
+        write_fixture(
+            ffmpeg.to_str().expect("FFmpeg path"),
+            &incumbent_media.join("Singleton VOD Incumbent (2023).mkv"),
+            "smptebars=size=1280x720:rate=12:duration=600",
+            "sine=frequency=330:sample_rate=48000:duration=600",
+            "24",
+        );
+        let incumbent_file =
+            scan_incumbent(&client, &mut node, &base, token, &incumbent_media).await;
         trial_beside_incumbent(
             &viewer,
             &mut node,
