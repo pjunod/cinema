@@ -39,6 +39,8 @@ const ALLOCATION_UNIT_BYTES: u64 = 4096;
 const PER_OBJECT_RESERVE_BYTES: u64 = 16 * 1024;
 const CHILD_DIRECTORY_RESERVE_BYTES: u64 = 64 * 1024;
 const PARENT_ENTRY_RESERVE_BYTES: u64 = 64 * 1024;
+/// Fragment, index and playlist bytes allowed per output object beyond its media.
+const CONTAINER_OBJECT_BYTES: u64 = 256 * 1024;
 const STATIC_MANIFEST_FILE_BYTES: u64 = 4 * MIB;
 
 /// Expand the already compiled finite output plan for one additional
@@ -198,16 +200,19 @@ pub(super) fn compile(
     let resident_logical_bytes = u64::from(resident_file_objects)
         .checked_mul(FILE_BYTES as u64)
         .ok_or_else(|| "finite software logical output bound overflows".to_owned())?;
-    let aligned_logical_bytes = align_up(resident_logical_bytes, ALLOCATION_UNIT_BYTES)?;
-    let reserved_storage_bytes = aligned_logical_bytes
-        .checked_add(
-            u64::from(resident_file_objects)
-                .checked_mul(PER_OBJECT_RESERVE_BYTES)
-                .ok_or_else(|| "finite software storage reserve overflows".to_owned())?,
-        )
-        .and_then(|bytes| bytes.checked_add(CHILD_DIRECTORY_RESERVE_BYTES))
-        .and_then(|bytes| bytes.checked_add(PARENT_ENTRY_RESERVE_BYTES))
-        .ok_or_else(|| "finite software storage reserve overflows".to_owned())?;
+    let audio_kbps = if encoding.shared_audio.is_some() || encoding.plan.options().input_has_audio {
+        encoding.options.audio_bitrate_kbps
+    } else {
+        0
+    };
+    let reserved_storage_bytes = software_output_reservation(
+        encoding.options.video_bitrate_kbps,
+        audio_kbps,
+        plan.duration_ticks(),
+        plan.timescale,
+        resident_file_objects,
+        resident_logical_bytes,
+    )?;
     let response_memory_bytes = FiniteResponseBuffer::required_partition_bytes(FILE_BYTES, 2)
         .ok_or_else(|| "finite response-buffer partition overflows".to_owned())?;
     let output = FiniteOutputLimits {
@@ -392,6 +397,55 @@ pub(super) fn compile(
 }
 
 #[cfg(target_os = "linux")]
+/// Output storage one finite software rendition may write.
+///
+/// Every software encode runs with `-maxrate` at [`vbv_maxrate_kbps`] and a
+/// VBV buffer of twice the target, so over the whole stream its video cannot
+/// exceed the cap times the duration plus one buffer. Audio is charged at twice
+/// its rate, each object gets a fixed container and alignment allowance, and
+/// the media bound is doubled for rate-control overshoot. Custody refuses any
+/// publish past this reservation, so an overshoot fails the producer rather
+/// than using storage it never reserved. One whole file must still fit, and
+/// an unbounded (zero) video rate keeps the per-file worst case.
+///
+/// [`vbv_maxrate_kbps`]: plurx_core::transcode::vbv_maxrate_kbps
+fn software_output_reservation(
+    video_kbps: u32,
+    audio_kbps: u32,
+    duration_ticks: u64,
+    timescale: u32,
+    objects: u32,
+    worst_case_logical_bytes: u64,
+) -> Result<u64, String> {
+    let overflow = || "finite software storage reserve overflows".to_owned();
+    let fixed = u64::from(objects)
+        .checked_mul(PER_OBJECT_RESERVE_BYTES)
+        .and_then(|bytes| bytes.checked_add(CHILD_DIRECTORY_RESERVE_BYTES))
+        .and_then(|bytes| bytes.checked_add(PARENT_ENTRY_RESERVE_BYTES))
+        .ok_or_else(overflow)?;
+    let worst_case = align_up(worst_case_logical_bytes, ALLOCATION_UNIT_BYTES)?
+        .checked_add(fixed)
+        .ok_or_else(overflow)?;
+    if video_kbps == 0 || timescale == 0 {
+        return Ok(worst_case);
+    }
+    let rate_bps = u128::from(plurx_core::transcode::vbv_maxrate_bps(video_kbps))
+        + u128::from(audio_kbps) * 2_000;
+    let buffer_bits = u128::from(video_kbps) * 2_000;
+    let media_bits =
+        (rate_bps * u128::from(duration_ticks)).div_ceil(u128::from(timescale)) + buffer_bits;
+    let media_bytes = media_bits.div_ceil(8) * 2;
+    let per_object = u128::from(CONTAINER_OBJECT_BYTES + ALLOCATION_UNIT_BYTES);
+    let bounded = media_bytes + u128::from(objects) * per_object + u128::from(fixed);
+    let one_file =
+        u128::from(align_up(FILE_BYTES as u64, ALLOCATION_UNIT_BYTES)?) + u128::from(fixed);
+    let reserved = align_up(
+        u64::try_from(bounded.max(one_file)).map_err(|_| overflow())?,
+        ALLOCATION_UNIT_BYTES,
+    )?;
+    Ok(reserved.min(worst_case))
+}
+
 fn align_up(value: u64, unit: u64) -> Result<u64, String> {
     if unit == 0 {
         return Err("finite software allocation unit is zero".into());
@@ -434,6 +488,63 @@ fn encoder_threads(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn software_output_reservation_follows_the_vbv_cap_not_the_copy_worst_case() {
+        const TIMESCALE: u32 = 90_000;
+        let worst = 49 * FILE_BYTES as u64;
+        let fixed = 49 * PER_OBJECT_RESERVE_BYTES
+            + CHILD_DIRECTORY_RESERVE_BYTES
+            + PARENT_ENTRY_RESERVE_BYTES;
+        let reserved = software_output_reservation(
+            3_000,
+            128,
+            90 * u64::from(TIMESCALE),
+            TIMESCALE,
+            49,
+            worst,
+        )
+        .unwrap();
+        // 90 s at a 4.5 Mbit/s cap plus a 6 Mbit buffer and 256 kbit/s audio.
+        let media = (4_500_000 * 90 + 6_000_000 + 256_000 * 90) / 8;
+        assert!(reserved >= 2 * media + 49 * CONTAINER_OBJECT_BYTES + fixed);
+        assert!(
+            reserved < worst / 10,
+            "{reserved} still near the copy worst case {worst}"
+        );
+        assert_eq!(reserved % ALLOCATION_UNIT_BYTES, 0);
+    }
+
+    #[test]
+    fn software_output_reservation_keeps_one_whole_file_and_never_exceeds_the_worst_case() {
+        const TIMESCALE: u32 = 90_000;
+        let fixed = 4 * PER_OBJECT_RESERVE_BYTES
+            + CHILD_DIRECTORY_RESERVE_BYTES
+            + PARENT_ENTRY_RESERVE_BYTES;
+        let worst = 4 * FILE_BYTES as u64;
+        let tiny = software_output_reservation(500, 64, u64::from(TIMESCALE), TIMESCALE, 4, worst)
+            .unwrap();
+        assert!(tiny >= FILE_BYTES as u64 + fixed);
+        // An unbounded (zero) rate or a degenerate clock keeps the per-file case.
+        assert_eq!(
+            software_output_reservation(0, 64, u64::from(TIMESCALE), TIMESCALE, 4, worst).unwrap(),
+            worst + fixed
+        );
+        assert_eq!(
+            software_output_reservation(500, 64, 1, 0, 4, worst).unwrap(),
+            worst + fixed
+        );
+        let huge = software_output_reservation(
+            200_000,
+            640,
+            10 * 3_600 * u64::from(TIMESCALE),
+            TIMESCALE,
+            4,
+            worst,
+        )
+        .unwrap();
+        assert_eq!(huge, worst + fixed);
+    }
 
     #[test]
     fn explicit_pool_and_frozen_recipe_bound_encoder_creation_without_rewriting_cpu_service() {
