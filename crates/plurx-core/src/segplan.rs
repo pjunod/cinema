@@ -234,10 +234,11 @@ impl FragmentIndexOutcome {
     /// refusal is checked too.
     /// Revision 3 also reopens process failures caused by an external kill.
     /// Older workers recorded those interruptions as terminal media failures.
-    /// Revision 4 reopens the probe kills revision 3 still recorded that way:
-    /// their only trace is the probe's own words, `exited signal: 9`, since a
-    /// probe failure carries no exit category. Budget failures are not
-    /// reopened again: revision 2's budget is the one they still run under.
+    /// Revision 4 reopens the probe kills revision 3 still recorded that way.
+    /// Their only trace is the probe's own words, since a probe failure
+    /// carries no exit category, and they may carry a retry deadline kept from
+    /// an earlier transient failure. Budget failures are not reopened again:
+    /// revision 2's budget is the one they still run under.
     ///
     /// The retry deadline alone never makes a row terminal. A retryable row
     /// past it is due: the window closes when an attempt after the deadline
@@ -246,20 +247,24 @@ impl FragmentIndexOutcome {
     /// window promised instead of declaring the title unindexable unread.
     pub fn state(&self, now_ms: i64) -> IndexOutcomeState {
         use crate::content_analysis::IndexFailureCode;
-        const KILLED: &str = "signal: 9 (SIGKILL)";
-        let recorded_killed = self
-            .diagnostic
-            .as_ref()
-            .is_some_and(|diagnostic| diagnostic.exit_category.as_deref() == Some(KILLED))
-            || self.reason.contains(KILLED);
+        // The words the metadata and packet probes record for a SIGKILL
+        // status (`ffmpeg::metadata_probe_output`, `HeldPacketProbeError`).
+        let probe_killed = self.reason == "index metadata probe exited signal: 9 (SIGKILL)"
+            || self
+                .reason
+                .starts_with("packet probe exited signal: 9 (SIGKILL):");
+        let terminal_process_failure = self.typed_code
+            == Some(IndexFailureCode::IndexProcessFailed)
+            && self.typed_retryable == Some(false);
         if matches!(self.refusal, IndexRefusal::Truncated { .. })
             && ((self.policy_revision < 3
-                && self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded))
-                || (self.policy_revision < crate::content_analysis::INDEX_FAILURE_POLICY_REVISION
-                    && self.typed_code == Some(IndexFailureCode::IndexProcessFailed)
-                    && self.typed_retryable == Some(false)
-                    && self.retry_deadline_ms == 0
-                    && recorded_killed))
+                && (self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded)
+                    || (terminal_process_failure
+                        && self.retry_deadline_ms == 0
+                        && self.diagnostic.as_ref().is_some_and(|diagnostic| {
+                            diagnostic.exit_category.as_deref() == Some("signal: 9 (SIGKILL)")
+                        }))))
+                || (self.policy_revision < 4 && terminal_process_failure && probe_killed))
         {
             return IndexOutcomeState::Due;
         }
@@ -1650,10 +1655,21 @@ mod tests {
             killed.policy_revision = INDEX_FAILURE_POLICY_REVISION;
             assert_eq!(killed.state(1_000), IndexOutcomeState::Terminal, "{reason}");
         }
+        // A timeout earlier in the window left its deadline on the row; the
+        // kill recorded after it kept that deadline.
+        let mut after_timeout = outcome(Some(false), i64::MAX, 500);
+        after_timeout.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        after_timeout.policy_revision = 3;
+        after_timeout.reason = "index metadata probe exited signal: 9 (SIGKILL)".to_owned();
+        assert_eq!(after_timeout.state(1_000), IndexOutcomeState::Due);
+
         let mut refused = outcome(Some(false), i64::MAX, 0);
         refused.typed_code = Some(IndexFailureCode::IndexProcessFailed);
         refused.policy_revision = 3;
         refused.reason = "index metadata probe exited exit status: 1".to_owned();
+        assert_eq!(refused.state(1_000), IndexOutcomeState::Terminal);
+        // A probe's stderr quoting a kill is not the probe being killed.
+        refused.reason = "packet probe exited exit status: 1: signal: 9 (SIGKILL)".to_owned();
         assert_eq!(refused.state(1_000), IndexOutcomeState::Terminal);
     }
 
@@ -1661,7 +1677,8 @@ mod tests {
     fn an_old_external_kill_is_due_once_without_reopening_content_failures() {
         let mut old = outcome(Some(false), i64::MAX, 0);
         old.typed_code = Some(IndexFailureCode::IndexProcessFailed);
-        old.policy_revision = INDEX_FAILURE_POLICY_REVISION - 1;
+        // Recorded before revision 3 made a pipe kill transient.
+        old.policy_revision = 2;
         old.diagnostic = Some(crate::content_analysis::IndexDiagnostic {
             exit_category: Some("signal: 9 (SIGKILL)".into()),
             ..Default::default()

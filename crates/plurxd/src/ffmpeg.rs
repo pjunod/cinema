@@ -885,12 +885,14 @@ pub(crate) struct HeldPacketProbeRequest {
 }
 
 /// Whether a probe child that exited with `status` was killed by a SIGKILL
-/// this process did not send — the kernel's OOM killer, say.
+/// its runner did not send — the kernel's OOM killer, or an operator's stop
+/// from Activity (`http::system::stop_process`).
 ///
 /// Every held-source probe runner here settles its own deadline and
 /// cancellation as an error before it has an exit status, so a SIGKILL
-/// status is someone else's. It says nothing about the media: the same read
-/// may succeed once the host has memory again.
+/// status is never the runner's own. Either way it says nothing about the
+/// media: the same read may succeed later, and its retries stay bounded by
+/// the index retry window and attempt limit, as the index pipe's do.
 pub(crate) fn killed_externally(status: std::process::ExitStatus) -> bool {
     #[cfg(unix)]
     {

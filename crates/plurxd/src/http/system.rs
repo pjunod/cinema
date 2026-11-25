@@ -6006,7 +6006,8 @@ pub async fn activity_detail(
 /// through the pidfd taken at spawn, so a number that has since been reused
 /// by an unrelated process cannot be hit. The child's owner sees an ordinary
 /// exit: a playback producer's session reports it as it reports a crashed
-/// encoder, a background probe records a failed probe.
+/// encoder; an index pass or probe records an interrupted attempt and
+/// retries it within its retry window (`ffmpeg::killed_externally`).
 pub async fn stop_process(
     _admin: AdminUser,
     axum::extract::Path(pid): axum::extract::Path<u32>,
