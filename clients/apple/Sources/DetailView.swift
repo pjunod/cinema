@@ -239,6 +239,33 @@ private struct IOSWebMediaGlyph: View {
 }
 #endif
 
+/// How the version plays on each of the account's devices, as the server
+/// judged it. A fallback or a dropped enhancement layer carries the warning
+/// mark, so it is seen rather than hidden.
+struct PlaysOnList: View {
+    let file: MediaFile
+
+    var body: some View {
+        if let rows = file.playsOn, !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Plays on").font(.caption).foregroundStyle(Palette.muted)
+                ForEach(rows) { row in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(row.deviceName).font(.callout)
+                        Spacer(minLength: 12)
+                        if row.isCaution {
+                            Label(row.label, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(Palette.muted)
+                        } else {
+                            Text(row.label).font(.callout)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: EpisodeMediaInfoMetrics.maximumWidth, alignment: .leading)
+        }
+    }
+}
+
 struct EpisodeMediaInfoRow: Equatable, Identifiable {
     let label: String
     let value: String
@@ -1007,7 +1034,7 @@ struct DetailView: View {
         let source = RemoteOwnedChoiceSource(token: UUID(), epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature)
         remoteChoiceSource = source
         remoteChoices = choices.map { choice in
-            RemoteChoice(id: choice.id, label: choice.label, selected: choice.selected) {
+            RemoteChoice(id: choice.id, label: choice.label, selected: choice.selected, detail: choice.detail) {
                 guard remoteNavigation.activeScope == "item:\(itemId):preplay",
                       source.accepts(token: remoteChoiceSource?.token, epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature) else { return }
                 choice.choose()
@@ -1048,7 +1075,7 @@ struct DetailView: View {
     }
     private func openPreplayVersions(_ detail: ItemDetail, opener: String = "detail:version") {
         showPreplayChoices(title: "Version", opener: opener, choices: (detail.files ?? []).map { file in
-            RemoteChoice(id: String(file.id), label: file.filename ?? "Version \(file.id)", selected: selectedMediaFileID == file.id) { selectedMediaFileID = file.id }
+            RemoteChoice(id: String(file.id), label: file.filename ?? "Version \(file.id)", selected: selectedMediaFileID == file.id, detail: file.dvFacts) { selectedMediaFileID = file.id }
         })
     }
 
@@ -1233,12 +1260,19 @@ struct DetailView: View {
                         Text("Media").font(.headline)
                         if files.count > 1 {
                             Picker("Version", selection: Binding(get: { file.id }, set: { selectedMediaFileID = $0 })) {
-                                ForEach(files) { version in Text(version.filename ?? "Version \(version.id)").tag(version.id) }
+                                ForEach(files) { version in
+                                    VStack(alignment: .leading) {
+                                        Text(version.filename ?? "Version \(version.id)")
+                                        if let facts = version.dvFacts { Text(facts) }
+                                    }
+                                    .tag(version.id)
+                                }
                             }
                         }
                         ForEach(Self.episodeMediaInfoRows(file).filter { $0.label != "Audio" && $0.label != "File" }) { row in
                             VStack(alignment: .leading, spacing: 4) { Text(row.label).font(.caption).foregroundStyle(Palette.muted); Text(row.value).font(.callout) }
                         }
+                        PlaysOnList(file: file)
                         CalmTrackList(file: file, selection: trackSelectionBinding(for: file), isSubtitle: false).id("audio-\(file.id)")
                         CalmTrackList(file: file, selection: trackSelectionBinding(for: file), isSubtitle: true).id("subtitles-\(file.id)")
                         TrackChoiceCostNotice(file: file, selection: trackSelection(for: file))
@@ -2342,6 +2376,9 @@ struct DetailView: View {
         }
         if !video.isEmpty {
             rows.append(EpisodeMediaInfoRow(label: "Video", value: video.joined(separator: " · ")))
+        }
+        if let facts = nonempty(file.dvFacts) {
+            rows.append(EpisodeMediaInfoRow(label: "Dolby Vision", value: facts))
         }
 
         let audio = (file.audioStreams ?? []).compactMap(audioDescription(_:))

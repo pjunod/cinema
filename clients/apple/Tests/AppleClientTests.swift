@@ -976,6 +976,21 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(fixture.page.items?.first?.rollup?.leaves, 20)
         XCTAssertEqual(fixture.decision.delivery?.mode, "remux")
         XCTAssertEqual(fixture.decision.deliveredDynamicRange, "dolby_vision")
+
+        // A version's Dolby Vision line and how it plays, as the version
+        // picker and the Media section show them.
+        let file = try XCTUnwrap(fixture.itemDetail.files?.first)
+        XCTAssertEqual(file.dvFacts, "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base")
+        XCTAssertEqual(
+            DetailView.episodeMediaInfoRows(file).first { $0.label == "Dolby Vision" }?.value,
+            "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base"
+        )
+        let device = try XCTUnwrap(file.playsOn?.first)
+        XCTAssertEqual(device.deviceName, "Living room")
+        XCTAssertEqual(device.label, "EL dropped · plays as 8.1")
+        XCTAssertTrue(device.isCaution)
+        XCTAssertFalse(PlaysOn(id: "full", label: "Full FEL", elDropped: false, fullQuality: true).isCaution)
+        XCTAssertNil(DetailView.episodeMediaInfoRows(MediaFile(id: 1)).first { $0.label == "Dolby Vision" })
     }
 
     func testReadingStateDecodesItsRevisionAndRendererNeutralLocator() throws {
