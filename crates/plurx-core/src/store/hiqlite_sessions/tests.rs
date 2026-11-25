@@ -319,7 +319,7 @@ fn preparation_abort_is_ledger_gated_in_every_statement() {
 fn activation_losing_pointer_read_race_is_a_read_only_replay() {
     let wrapper = method_source("activate_media_session");
     assert!(wrapper.contains(
-        "activate_with_authority(\"activate_media_session\", self, activation, None, None).await"
+        "activate_with_authority(\"activate_media_session\", self, activation, None, None, None).await"
     ));
     let source = SOURCE
         .split_once("async fn activate_with_authority(")
