@@ -839,15 +839,9 @@ impl TranscodeManager {
         else {
             return Ok(None);
         };
-        let deadline = crate::media_pool::create_stage_deadline(Duration::from_secs(2));
-        let snapshot = tokio::time::timeout_at(
-            deadline,
-            self.store
-                .playback_planning_snapshot(request.file_id, &super::QUALITY_PLANNING_KEYS),
-        )
-        .await
-        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
-        .map_err(|error| catalog_input_error(error.to_string()))?;
+        let snapshot = self
+            .revalidated_planning_snapshot(request.file_id, None)
+            .await?;
         Ok(snapshot.filter(|snapshot| {
             snapshot.file.id == query.file_id
                 && snapshot.file.size == query.source_size
@@ -876,23 +870,36 @@ impl TranscodeManager {
             }
             return Ok(Some((*plan.snapshot).clone()));
         }
-        let deadline = deadline
-            .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
-        let snapshot = tokio::time::timeout_at(
-            deadline,
-            self.store
-                .playback_planning_snapshot(request.file_id, &super::QUALITY_PLANNING_KEYS),
-        )
-        .await
-        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
-        .map_err(|error| catalog_input_error(error.to_string()))?
-        .ok_or_else(|| catalog_input_error("candidate source missing"))?;
+        let snapshot = self
+            .revalidated_planning_snapshot(request.file_id, deadline)
+            .await?
+            .ok_or_else(|| catalog_input_error("candidate source missing"))?;
         if *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot) {
             return Err(catalog_input_error(
                 "candidate source or settings changed before admission",
             ));
         }
         Ok(Some(snapshot))
+    }
+
+    /// The current planning snapshot for `file_id`, read under the bounded
+    /// create-stage deadline (2 s unless the caller holds one). Both planning
+    /// authorities revalidate against this one read.
+    async fn revalidated_planning_snapshot(
+        &self,
+        file_id: i64,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        let deadline = deadline
+            .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
+        tokio::time::timeout_at(
+            deadline,
+            self.store
+                .playback_planning_snapshot(file_id, &super::QUALITY_PLANNING_KEYS),
+        )
+        .await
+        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
+        .map_err(|error| catalog_input_error(error.to_string()))
     }
 
     #[allow(clippy::too_many_arguments)]
