@@ -4203,9 +4203,12 @@ impl MediaStore for HiqliteAuthStore {
         after_id: i64,
         limit: i64,
     ) -> Result<Vec<MediaFile>, StoreError> {
+        // A local replica read (`query_map`): this only picks candidates. The
+        // graft that follows is fenced on size and mtime and fills the field
+        // only while it is absent, so a lagging page costs nothing.
         files(
             self.client()
-                .query_consistent_map::<FileRow, _>(
+                .query_map::<FileRow, _>(
                     "files_missing_dv_levels",
                     format!(
                         "SELECT {FILE_COLS} FROM files \
