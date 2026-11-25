@@ -567,13 +567,17 @@ fn scratch_v3_projection_tamper_and_missing_event_are_not_recovery_evidence() {
         )
         .unwrap();
     snapshot(&f.storage.connection, &f.storage.witness).unwrap();
-    f.storage
-        .connection
-        .execute(
-            "DELETE FROM operations WHERE operation_id=?1",
-            [command.id.as_bytes()],
-        )
-        .unwrap();
+    // The asset membership index references the event row, so a missing
+    // event removes its index entry too.
+    for table in ["asset_operation_membership", "operations"] {
+        f.storage
+            .connection
+            .execute(
+                &format!("DELETE FROM {table} WHERE operation_id=?1"),
+                [command.id.as_bytes()],
+            )
+            .unwrap();
+    }
     assert!(snapshot(&f.storage.connection, &f.storage.witness).is_err());
 }
 #[test]

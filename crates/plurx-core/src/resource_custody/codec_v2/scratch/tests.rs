@@ -88,7 +88,12 @@ fn directory(plan: &ScratchPlanV2) -> ScratchFold {
             observation: AssetObservationV1::Directory {
                 observed: DirectoryObservedV1 {
                     directory_id: observed_id,
-                    native_object: scratch.directory_object.clone(),
+                    // `fixture()` mints fresh ids on every call, so the
+                    // observed child must carry the plan's own domain.
+                    native_object: NativeObject {
+                        filesystem_domain: plan.filesystem_domain.clone(),
+                        ..scratch.directory_object.clone()
+                    },
                     acquisition_io_id: io,
                     held_copy_ids: vec![copy],
                 },
@@ -219,11 +224,7 @@ fn scratch_v2_logical_length_is_not_allocated_bytes_and_unknown_does_not_shrink(
     );
     let fold = fold.apply(&plan, io, &arm).unwrap();
     let observed_id = id();
-    let manifest = fixture();
-    let MemberPlan::ScratchAssetsV1 { scratch, .. } = &manifest.members[2] else {
-        unreachable!()
-    };
-    let mut native = scratch.directory_object.clone();
+    let mut native = fold.state.directory.as_ref().unwrap().native_object.clone();
     native.file_type = FileType::Regular;
     let observation = FileObservedV1 {
         file_id: observed_id,
