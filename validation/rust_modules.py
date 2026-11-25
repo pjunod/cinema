@@ -85,7 +85,16 @@ def module_source(path: str | pathlib.Path) -> str:
             expanded = bodies[0]
         else:
             header = bodies[0].split("\n", 1)[0] + "\n"
-            inner = [body[len(header) : -len("}\n")] for body in bodies]
+            # Children that are exactly one `header ... }` block share the
+            # first one's header. A child that also declares items outside it
+            # (a type and its Drop before the impl) is kept whole: cutting the
+            # header's length off its first line would split a literal.
+            inner = [
+                body[len(header) : -len("}\n")]
+                if body.startswith(header) and body.endswith("}\n")
+                else body
+                for body in bodies
+            ]
             expanded = header + "\n".join(inner) + "}\n"
         pieces += [text[last : block.start()], expanded]
         last = block.end()
