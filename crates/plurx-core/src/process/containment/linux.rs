@@ -1317,7 +1317,12 @@ impl NativeDomainCore {
         let pids_max = event_counter(&pids, "max")?;
         let memory_max = event_counter(&memory, "max")?;
         let oom_kills = event_counter(&memory, "oom_kill")?;
-        Ok(pids_max != 0 || memory_max != 0 || oom_kills != 0)
+        let pressured = pids_max != 0 || memory_max != 0 || oom_kills != 0;
+        if pressured {
+            tracing::debug!(target: "plurx_core::adaptive_resources", pids_max, memory_max,
+                oom_kills, "finite trial native domain reported limit events");
+        }
+        Ok(pressured)
     }
 
     /// Original-domain controller observation, never a resource upper bound.

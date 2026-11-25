@@ -1340,28 +1340,51 @@ impl SoftwareVodOwner {
     /// longer sufficient for this still charged trial owner.
     #[cfg(target_os = "linux")]
     pub async fn trial_hard_pressure(&self, deadline: Instant) -> bool {
+        let pressured = |reason: &'static str| {
+            tracing::debug!(target: "plurx_core::adaptive_resources", reason,
+                "finite trial observed hard pressure");
+            true
+        };
         if self
             .runtime
             .refresh_admission_capacity(deadline)
             .await
             .is_err()
         {
-            return true;
+            return pressured("admission capacity refresh failed");
         }
-        if self
-            .runtime
-            .finite_trial_native_pressure(&self.preparation)
-            .unwrap_or(true)
+        match self.runtime.finite_trial_native_pressure(&self.preparation) {
+            Ok(false) => {}
+            Ok(true) => return pressured("native pressure"),
+            Err(error) => {
+                tracing::debug!(target: "plurx_core::adaptive_resources", ?error,
+                    "finite trial native pressure unreadable");
+                return pressured("native pressure unreadable");
+            }
+        }
+        let Ok(snapshot) = self.runtime.ledger.snapshot() else {
+            return pressured("ledger snapshot unavailable");
+        };
+        if snapshot.native_overage_fenced {
+            return pressured("native overage fenced");
+        }
+        if !matches!(snapshot.capacity.memory_bytes, Metric::Known(capacity)
+            if capacity >= snapshot.used.peak_memory_bytes)
         {
-            return true;
+            tracing::debug!(target: "plurx_core::adaptive_resources",
+                capacity = ?snapshot.capacity.memory_bytes,
+                used = snapshot.used.peak_memory_bytes, "finite trial memory over capacity");
+            return pressured("memory over capacity");
         }
-        self.runtime.ledger.snapshot().map_or(true, |snapshot| {
-            snapshot.native_overage_fenced
-                || !matches!(snapshot.capacity.memory_bytes, Metric::Known(capacity)
-                    if capacity >= snapshot.used.peak_memory_bytes)
-                || !matches!(snapshot.capacity.cpu_ns_per_second, Metric::Known(capacity)
-                    if capacity >= snapshot.used.cpu_ns_per_second)
-        })
+        if !matches!(snapshot.capacity.cpu_ns_per_second, Metric::Known(capacity)
+            if capacity >= snapshot.used.cpu_ns_per_second)
+        {
+            tracing::debug!(target: "plurx_core::adaptive_resources",
+                capacity = ?snapshot.capacity.cpu_ns_per_second,
+                used = snapshot.used.cpu_ns_per_second, "finite trial cpu over capacity");
+            return pressured("cpu over capacity");
+        }
+        false
     }
 
     /// Observe the original durable producer service event. This updates only
