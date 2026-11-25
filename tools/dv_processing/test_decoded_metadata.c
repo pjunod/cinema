@@ -154,6 +154,19 @@ static void malformed_metadata_refuses(void) {
   REFUSE(m->curves[1].mmr_coef[0][0][0] = INT64_MIN);
   REFUSE(m->num_x_partitions = 2);
   REFUSE(m->nlq[0].vdr_in_max = 16384);
+  // pq-ccm001-* clamps at vdr_in_max, so a limit that binds is admitted
+  // there; the field bounds still hold for it.
+  p7_mapping_fixture(data);
+  m->nlq[0].vdr_in_max = 16384;
+  assert(dv_map_metadata(data, size, 7, DV_FEL_CLAMPED, &out) &&
+         out.dovi.nlq_active);
+  m->nlq[0].vdr_in_max = UINT64_C(2) << 23;
+  assert(!dv_map_metadata(data, size, 7, DV_FEL_CLAMPED, &out));
+  p7_mapping_fixture(data);
+  m->nlq[0].nlq_offset = 1024;
+  assert(!dv_map_metadata(data, size, 7, DV_FEL_CLAMPED, &out));
+  p7_mapping_fixture(data);
+  assert(!dv_map_metadata(data, size, 7, 3, &out));
   REFUSE(m->nlq[0].linear_deadzone_slope = UINT64_MAX);
   REFUSE(m->nlq_method_idc = AV_DOVI_NLQ_NONE);
   REFUSE(h->disable_residual_flag = 1);

@@ -146,6 +146,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/dv_trace.h"),
         ),
         (
+            "fel_compose.h",
+            include_bytes!("../../../tools/dv_processing/fel_compose.h"),
+        ),
+        (
             "fel_renderer.h",
             include_bytes!("../../../tools/dv_processing/fel_renderer.h"),
         ),

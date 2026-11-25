@@ -254,6 +254,11 @@ reason = "PR #822 landed with a class-qualified Python Regression-Test field, te
 # The API supplied the PR title verbatim rather than Forgejo's canonical merge
 # subject. This pins its real immutable two-parent landing, without excusing any
 # trailer: history still resolves every Regression-Test against this exact tree.
+
+[[errata]]
+commit = "ca3753828c58f54ed691a7c340227efc50eee63b"
+reason = "PR #1921 (FEL reference composition milestone 5.3) was merged into effort/fel-reference-composition through the raw merge API with the default title-only message, so landing ca3753828 carries none of the Regression-Test lines in the pull request description. The description names tests/operations/test_fel_reference_composer.py::test_hand_computed_vectors for corrective commit 523486ef (fix(dv): refuse FEL coefficients outside clause 5.3.3's ranges in the reference) and tests/operations/test_fel_compose_stage.py::test_shader_matches_reference_code_for_code. Both resolve in ca3753828's own tree. Effort development gate run 9458 passed on the merged head 64e6cb5c; gate run 9563 for PR #1943 exposed the omission at history-check. This landing-specific erratum records the missing message fields without rewriting history, moving the boundary or exempting later landings, which carry their lines in the merge message."
+
 [[landings]]
 commit = "5630baf52634fc7610254238f0ca35d77425577d"
 tree = "83af8af5c2d07f2a3eb59b9fe8da245338166877"

@@ -13,6 +13,7 @@ INPUTS = (
     'dv_dm.h',
     'dv_metadata.h',
     'dv_trace.h',
+    'fel_compose.h',
     'fel_renderer.h',
     'hevc-rasl-frame-thread.patch',
     'movie_source_io.h',

@@ -215,11 +215,21 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                 nlq->linear_deadzone_slope[component] < (1ULL << 23) &&
                 nlq->linear_deadzone_threshold[component] < (1ULL << 23),
             "bounded fractional NLQ parameters");
-    require_content(nlq_clip_is_nonbinding(nlq->nlq_offset[component],
-                                   nlq->linear_deadzone_slope[component],
-                                   nlq->linear_deadzone_threshold[component],
-                                   nlq->vdr_in_max_int[component],
-                                   nlq->vdr_in_max[component]),
+    // pq-ccm001-* clamps the residual at vdr_in_max as clause 5.4.3.2
+    // specifies; pq-bilinear-* has no clamp, so a limit that could bind
+    // would change its picture.
+    require_content(nlq_clip_is_bounded(nlq->nlq_offset[component],
+                                        nlq->linear_deadzone_slope[component],
+                                        nlq->linear_deadzone_threshold[component],
+                                        nlq->vdr_in_max_int[component],
+                                        nlq->vdr_in_max[component]),
+            "unsupported vdr_in_max range");
+    require_content(FEL_CCM001 ||
+                        nlq_clip_is_nonbinding(nlq->nlq_offset[component],
+                                               nlq->linear_deadzone_slope[component],
+                                               nlq->linear_deadzone_threshold[component],
+                                               nlq->vdr_in_max_int[component],
+                                               nlq->vdr_in_max[component]),
             "unsupported bounded vdr_in_max residual clipping");
     if (!frame) {
       double slope = nlq->linear_deadzone_slope[component];
@@ -235,7 +245,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
   }
   require(!FEL_CCM001 || frame, "CCM 001 composition needs decoder-attached metadata");
   if (frame) {
-    require_content(dv_map_decoded_metadata(frame, 7, true, &decoded),
+    require_content(dv_map_decoded_metadata(frame, 7, FEL_CCM001 ? DV_FEL_CLAMPED : DV_FEL_UNCLAMPED, &decoded),
             "bounded decoder-derived FEL metadata mapping");
     *out = decoded.dovi;
     if (FEL_CCM001) {

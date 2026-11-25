@@ -195,11 +195,16 @@ before dequantization: NLQ offset is in EL codes, slope is S/2^23 and threshold
 T/2^23, the residual is sign(rr)·((|rr|−½)·slope+threshold) bounded by
 `vdr_in_max`, and the exact neutral code contributes zero. This is the native
 player's reconstruction, release for release and parameter for parameter;
-[the sampling record](DM-PRECISION-STATUS.md#reconstruction-sampling--one-master-for-the-server-and-the-player) has the pixel proof. The existing
+[the sampling record](DM-PRECISION-STATUS.md#reconstruction-sampling--one-master-for-the-server-and-the-player) has the pixel proof. This
+composition has no clamp, so under `pq-bilinear-*` the
 [`vdr_in_max` admission](../../tools/dv_processing/nlq_clipping.h) must still
 prove clipping cannot bind for any ten-bit EL code, including its rounding
 reserve. The measured 512/2048/0/1048576 parameter family satisfies that same
-contract; no source-specific override is introduced.
+contract; no source-specific override is introduced. The `pq-ccm001-*`
+identities compose with [`fel_compose.h`](../../tools/dv_processing/fel_compose.h),
+which clamps at `vdr_in_max` as ETSI GS CCM 001 clause 5.4.3.2 specifies, so
+they admit any limit inside the field bounds (`nlq_clip_is_bounded`); see
+[the composition plan](FEL-REFERENCE-COMPOSITION-PLAN.md), milestone 5.4.
 
 Direct synthetic texture controls without decoder frames retain their original
 manual identity projection. The [metadata-only fixture](../../tools/dv_processing/controls/p7_mapping_fixture.h)
