@@ -73,12 +73,10 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_PAPERWORK_CONTINUATION: preliminary
           # The description and title are read from the event payload file
           # (validation/pr_event.py), never the environment: a long
           # description made the runner unable to start this step at all.
-          PR_BODY_FROM_EVENT: "1"
           GITHUB_TOKEN: ${{ github.token }}
           # Persistent publisher credentials must never enter a PR-controlled
           # workflow. This job checks and fetches only; publication is external.
@@ -363,6 +361,18 @@ jobs:
         env:
           PLURX_HISTORY_MERGE_TARGET: origin/${{ github.event.pull_request.base.ref }}
         run: make history-check
+      # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
+      # request's `Regression-Test:` lines, judged in the tree the merge will
+      # produce. The body and title are payload data on the `pull_request`
+      # event, read from the event file (validation/pr_event.py): no API call,
+      # no credential, nothing interpolated into the script, and no size
+      # limit from the environment. This checkout is the branch
+      # head, not a merge candidate (the step prints both to keep that
+      # visible), so the module builds the candidate with `git merge-tree`.
+      # Advisory while validation/merge-errata.toml sets no boundary (phase
+      # A); the change that sets the boundary removes `continue-on-error` in
+      # the same diff, and tests/validation/test_regression_field.py refuses
+      # one without the other.
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
