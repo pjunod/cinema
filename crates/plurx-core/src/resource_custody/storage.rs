@@ -136,16 +136,20 @@ fn publish(
 }
 
 #[cfg(unix)]
+/// WAL with synchronous=EXTRA (FULL in WAL mode): every COMMIT is durable once
+/// the WAL is fsynced, and SQLite syncs the directory when it creates the WAL.
+/// A rollback journal instead cost several fsyncs plus a directory sync per
+/// commit, which made each serial custody transition 45-70 ms on disk.
 fn configure(connection: &Connection) -> Result<(), CustodyError> {
     connection.busy_timeout(std::time::Duration::ZERO)?;
-    connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=EXTRA; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     #[cfg(target_os = "macos")]
     connection.execute_batch("PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;")?;
     let mode: String = connection.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
     let sync_level: i64 = connection.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
     let fk: i64 = connection.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
     let trusted: i64 = connection.query_row("PRAGMA trusted_schema", [], |r| r.get(0))?;
-    if mode != "delete" || sync_level != 3 || fk != 1 || trusted != 0 {
+    if mode != "wal" || sync_level != 3 || fk != 1 || trusted != 0 {
         return Err(CustodyError::new(
             ErrorKind::UnsupportedStorage,
             "custody SQLite durability unavailable",
@@ -286,10 +290,14 @@ impl Storage {
             .map(|entry| entry.map(|e| e.file_name()))
             .collect::<Result<Vec<_>, _>>()?;
         for name in &names {
+            // A legitimate WAL (and its shared-memory index) or a hot rollback
+            // journal from an earlier mode is recovered by SQLite, never removed.
             if ![
                 "obligations.sqlite3",
                 "installation.json",
                 "obligations.sqlite3-journal",
+                "obligations.sqlite3-wal",
+                "obligations.sqlite3-shm",
             ]
             .iter()
             .any(|expected| name == *expected)
@@ -465,9 +473,6 @@ impl Storage {
             ] {
                 let path = self.guard.path.join(sidecar);
                 if std::fs::symlink_metadata(&path).is_ok() {
-                    if sidecar != "obligations.sqlite3-journal" {
-                        return Err(codec::invalid());
-                    }
                     secure_file(&path, false)?;
                 }
             }
