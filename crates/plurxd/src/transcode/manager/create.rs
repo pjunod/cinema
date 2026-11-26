@@ -4149,7 +4149,7 @@ impl TranscodeManager {
             None
         };
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
                 "the source changed during encoded recipe preparation; rescan it before playback",
@@ -4164,7 +4164,7 @@ impl TranscodeManager {
         } else {
             None
         };
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
                 "the source changed while attesting the encoded engine; rescan it before playback",
@@ -4774,7 +4774,7 @@ impl TranscodeManager {
                         Some(&engine.digest),
                         raster,
                     );
-                    if !source.unchanged() {
+                    if !source.unchanged().await {
                         return Err(vod_refusal_error(
                             "candidate_recipe_changed",
                             "copy source changed during equality validation",

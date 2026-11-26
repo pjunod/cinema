@@ -287,7 +287,7 @@ pub(super) async fn scan(
         if !tools.is_current().await {
             return Err("DV scanner identity changed".into());
         }
-        if !source.unchanged() || source.reopen(file).await.is_err() {
+        if !source.unchanged().await || source.reopen(file).await.is_err() {
             return Err("source changed during title scan".into());
         }
     }

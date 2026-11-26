@@ -1,5 +1,6 @@
 use super::shared::AttachmentPurpose;
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 /// One request's resolved native recipe, before any rendition is attached.
 struct PreparedVodRecipe {
@@ -172,7 +173,8 @@ impl VodServe {
         if !rendition
             .source
             .as_ref()
-            .is_some_and(|source| source.unchanged() && source.object_version() == source_version)
+            .held_unchanged_as(source_version)
+            .await
         {
             return Err(PreparationError::Stop("source_changed"));
         }
@@ -1469,7 +1471,7 @@ impl VodServe {
                     || child
                         .source
                         .as_ref()
-                        .is_some_and(|source| !source.unchanged())
+                        .is_some_and(|source| !source.unchanged_in_place())
             }) {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_source_rescan_required",
@@ -2079,7 +2081,7 @@ impl SourceCopyReadiness {
         &self,
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
     ) -> bool {
-        self.assignment.same_identity(assignment) && self._source.unchanged()
+        self.assignment.same_identity(assignment) && self._source.unchanged_in_place()
     }
 }
 
@@ -2186,12 +2188,7 @@ impl ReservedSourceVodRendition {
             if let Some(cause) = self.rendition.failure_cause() {
                 return Err(cause);
             }
-            if self
-                .rendition
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
-            {
+            if self.rendition.source.as_ref().missing_or_changed().await {
                 return Err("Source physical identity changed before readiness".into());
             }
             if let Some(verdict) = demand.expired_verdict().await {

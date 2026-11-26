@@ -1,6 +1,6 @@
 # Media I/O isolation: a hung media mount must not stop the daemon
 
-**Status:** built · owned by Claude · **Updated:** 2026-11-25 · **Source baseline:** `origin/main` at `a4b447370`
+**Status:** built; awaitable fence checks bounded (A-0A22BF6A) · owned by Claude · **Updated:** 2026-11-26 · **Source baseline:** `origin/main` at `97e528d00`
 
 Effort E-08DAF9B91B, related to E-E154B131A2 (Raft cluster rebuild, audit C4/R1).
 
@@ -86,9 +86,19 @@ blocking pool, never a worker) and adds a bound for media storage.
   the Tokio primitive for exactly this case. It is not bounded the way
   `blocking` is: each parked check holds one thread. On a long hang, clients
   retrying playback could in principle use up the 512-thread blocking pool.
-  The `plurx_media_io_in_place` gauge makes that visible. Moving the
-  `drift()` callers that can await onto `blocking` is the follow-up that
-  removes it.
+  The `plurx_media_io_in_place` gauge makes that visible.
+- **Fence checks are bounded where the caller can await.**
+  `SourceFence::unchanged()` and `drift()` are `async` and run the `fstat` on
+  a duplicated descriptor through `blocking` (`dup` stays in the local kernel
+  and never reaches the server). The `HeldSource` helpers cover the
+  `Option<&SourceFence>` call shapes (`held_unchanged`, `missing_or_changed`,
+  `held_and_changed`, `held_unchanged_as`, `held_drift`). 93 call sites
+  await the bounded check. The 35 that remain use `unchanged_in_place()` /
+  `drift_in_place()`, which take the `in_place` path above. They are
+  synchronous decision code, `filter`/`is_some_and` closures over
+  lock-guarded state, or code already on the blocking pool under a media
+  slot. Making the check `async` by default made the compiler list every
+  caller, and each in-place site is a sync context it confirmed.
 - **`media_io::slot()`** is for code already on the blocking pool, such as
   the source reader. It takes the same permit around the media calls only.
   The reader revalidates its grant (store and Raft work) before it takes the
@@ -102,10 +112,10 @@ Not chosen:
 
 - **A separate runtime for Raft.** It would protect Raft and leave HTTP,
   playback and the serving monitor stalling. It treats the symptom.
-- **Converting every fence check to `async`.** About 150 sites, many inside
-  `filter`/`is_some_and` closures and synchronous state machines. That is a
-  large, risky rewrite for the same effect `block_in_place` gives at the
-  single choke point (`SourceFence::drift`).
+- **Converting every fence check to `async`.** The sites inside synchronous
+  state machines and closures over lock guards would need those to become
+  `async` or to drop their locks across the check, which changes what the
+  check protects. They stay in place; the awaitable ones are bounded (above).
 - **Timeouts around media calls.** A timed-out `stat` on a hard mount is still
   in the kernel. A timeout bounds only the caller's wait, which the async path
   already gives.
@@ -165,6 +175,10 @@ worker is parked, nothing inside the runtime can run, timers included.
   can fail.
 - `media_io::tests::hung_media_opens_do_not_stall_a_heartbeat` covers the
   primitive.
+- `fragment_index_cluster::tests::an_awaited_source_check_queues_on_the_media_bound`
+  holds every media slot, as a hung mount leaves them, and requires an awaited
+  `unchanged()` to wait for a slot while `unchanged_in_place()` still
+  completes. Before A-0A22BF6A both completed.
 
 The fixture also reports how many operations were still parked when the
 heartbeat finished. The tests of the fix require all four, so a heartbeat that

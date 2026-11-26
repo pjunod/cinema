@@ -2,6 +2,7 @@
 //! A recipe directory is mutable; an issued artifact is never that directory.
 use super::output_measurement::CompleteOutputObservation;
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 const MAX_ARTIFACTS: usize = 64;
 const RETAINED_GC_BATCH: usize = 32;
@@ -64,7 +65,7 @@ impl VodServe {
         source: &crate::fragment_index_cluster::SourceFence,
     ) -> Option<MeasuredCandidateCostProof> {
         let context = request.candidate_context.as_ref()?;
-        if !source.unchanged()
+        if !source.unchanged_in_place()
             || !candidate.identity_matches()
             || !candidate.decoder_compatible
             || candidate.id != context.candidate_id
@@ -531,7 +532,7 @@ impl RetainedVodArtifact {
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged_in_place())
                 && init
                     .as_ref()
                     .is_some_and(|init| init.served_init == self.observation.served_init)
@@ -1152,7 +1153,7 @@ impl RetainedArtifactRegistry {
                     && artifact.observation.preimage.playlist.as_slice()
                         == rendition.playlist.as_slice()))
             && rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == artifact.source_version
+                source.unchanged_in_place() && source.object_version() == artifact.source_version
             }))
         .then_some(artifact)
     }
@@ -1359,7 +1360,7 @@ impl RetainedArtifactRegistry {
                         logical_matches = artifact.logical == *incoming_logical,
                         playlist_matches = artifact.observation.preimage.playlist == rendition.playlist,
                         source_present = rendition.source.is_some(),
-                        source_unchanged = rendition.source.as_ref().is_some_and(|s| s.unchanged()),
+                        source_unchanged = rendition.source.as_ref().is_some_and(|source| source.unchanged_in_place()),
                         source_version_matches = rendition.source.as_ref().is_some_and(|s| s.object_version() == artifact.source_version),
                         candidate_fields = %binding,
                         logical_fields = ?logical,
@@ -1385,9 +1386,7 @@ impl RetainedArtifactRegistry {
                     && artifact.validated.load(Acquire)
                     && artifact.logical == *incoming_logical
                     && artifact.observation.preimage.playlist == rendition.playlist
-                    && rendition.source.as_ref().is_some_and(|source| {
-                        source.unchanged() && source.object_version() == artifact.source_version
-                    }))
+                    && rendition.source.as_ref().is_some_and(|source| source.unchanged_in_place() && source.object_version() == artifact.source_version))
                 .then(|| artifact.facts())
             })
         }?;
@@ -1443,7 +1442,8 @@ impl RetainedArtifactRegistry {
             || !rendition
                 .source
                 .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+                .held_unchanged_as(&artifact.source_version)
+                .await
         {
             return None;
         }
@@ -1476,7 +1476,8 @@ impl RetainedArtifactRegistry {
             || !rendition
                 .source
                 .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+                .held_unchanged_as(&artifact.source_version)
+                .await
         {
             return None;
         }
@@ -1860,7 +1861,7 @@ impl RetainedArtifactRegistry {
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged());
+                    .is_some_and(|source| source.unchanged_in_place());
             let init_matches = source_current
                 && init
                     .as_ref()

@@ -11277,7 +11277,7 @@ impl JobManager {
                             })
                         }
                     };
-                    if !source.unchanged()
+                    if !source.unchanged().await
                         || crate::fragment_index_cluster::inspect_source(&file)
                             .await
                             .map_err(|_| unavailable())?

@@ -87,7 +87,7 @@ impl SourceGrowingBacking {
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
             && self.owners.contains_live_assignment(&self.assignment)
-            && self.source.unchanged()
+            && self.source.unchanged_in_place()
     }
     /// Viewer activity: the first publication, an authenticated resource
     /// fetch, or a control exchange the fence accepted. A refused exchange is
@@ -434,10 +434,7 @@ impl SourceViewerActor {
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != backing.session_id
             || route.publication_ready_at_ms != 0
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
             return Err(ended);
         }
