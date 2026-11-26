@@ -354,7 +354,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                         )
                     else:
                         self.assertIn(name, {"cluster_wal", "deep-validation", "mutation",
-                                             "publish_main", "worker_control_proof"})
+                                             "publish_main"})
                     if (path, name) in self.SIZED_JOBS:
                         self.assertNotIn("CARGO_BUILD_JOBS:", header)
                         self.assertIn("      - name: Size Cargo parallelism from the container's limits\n"
