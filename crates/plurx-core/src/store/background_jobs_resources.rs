@@ -2597,7 +2597,10 @@ mod source_tests {
                             // The exact generic key exercises the bounded node-local fallback.
                             r#"["source_io"]"#
                         };
-                        db.execute("INSERT INTO source_leases VALUES(?1,'analysis',?2,1,?3,'{}',?4,'active',NULL,1000,1000,200000)",rusqlite::params![format!("analysis:{id}:1"),id,node,keys]).expect("live holder");
+                        // Viewer preparation outranks analysis and jobs, so a read
+                        // attestation is refused only by readers it still counts.
+                        let kind = if attestation { "offline" } else { "analysis" };
+                        db.execute("INSERT INTO source_leases VALUES(?1,?2,?3,1,?4,'{}',?5,'active',NULL,1000,1000,200000)",rusqlite::params![format!("{kind}:{id}:1"),kind,id,node,keys]).expect("live holder");
                         db.execute("INSERT INTO background_job_waiters(request_scope,request_id,state,job_id,deadline_ms) VALUES('playback-analysis',?1,'pending',?1,200000)", [&id]).expect("live interest, no maintenance occupancy");
                     }
                 }
@@ -2615,6 +2618,10 @@ mod source_tests {
                         claim_generation: 1,
                     }
                 };
+                let independent = || {
+                    store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind IN ('offline','lease')",[],|row|row.get::<_,i64>(0)).expect("independent readers")
+                };
+                let before = independent();
                 assert!(
                     register_background_custody(&store, owner, 2_000)
                         .await
@@ -2622,7 +2629,7 @@ mod source_tests {
                         .is_none(),
                     "domain_full={domain_full}, attestation={attestation}"
                 );
-                assert_eq!(store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind IN ('offline','lease')",[],|row|row.get::<_,i64>(0)).expect("no over-admission"),0);
+                assert_eq!(independent(), before, "no over-admission");
             }
         }
     }

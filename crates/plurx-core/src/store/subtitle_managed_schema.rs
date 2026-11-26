@@ -1237,7 +1237,13 @@ mod tests {
     #[test]
     fn file_root_v7_lets_a_reader_on_one_disk_claim_while_another_disk_is_busy() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
-        SqliteStore::apply_migrations_for_test(&conn, 137).expect("deployed v7 resources");
+        // The source-lease expand (v139) carries v7's per-file root narrowing
+        // into its root-keyed view, so claim against that current shape.
+        SqliteStore::apply_migrations_for_test(
+            &conn,
+            super::super::source_leases::EXPANDED_VERSION as i64,
+        )
+        .expect("expanded v7 resources");
         two_root_library(&conn);
         for (id, file) in [("busy-b", 2), ("next-a", 1), ("next-b", 5)] {
             queued(
