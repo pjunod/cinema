@@ -262,21 +262,12 @@ impl FittedPublication {
         input.seal_read_ceiling(MAX_PIPE_BYTES as u64)?;
         let mut file = context.file.clone();
         file.path = input.url().into();
-        file.audio_streams.clear();
         let entry = self
             .plan
             .entry(start)
             .ok_or("M7 fitted start entry is absent")?;
         let start_seconds = entry.start_ticks as f64 / f64::from(self.plan.timescale);
-        let mut args = transcode::copy_pipe_args_with_audio_delivery(
-            &file,
-            start_seconds,
-            None,
-            false,
-            plurx_core::transcode::Pacing::unpaced(),
-            self.video,
-            None,
-        );
+        let mut args = fitted_copy_args(&file, start_seconds, self.video);
         let executable =
             crate::ffmpeg::EncodedExecutable::capture_program(&context.state.system.ffmpeg).await?;
         let program = executable.path.clone();
@@ -697,6 +688,22 @@ fn copy_failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
 /// like every other declared M7 and F+ child. Without one it inherits the
 /// daemon's working directory, which the source-access verifier refuses
 /// (`cwd_outside_daemon_roots`), and debug builds panic on that refusal.
+/// The fitted rendition is picture-only: its plan carries no audio track and
+/// its comparison reads only video. Source audio is never mapped, so a
+/// soundtrack MP4 cannot carry (TrueHD) cannot fail the copy.
+fn fitted_copy_args(
+    file: &plurx_core::domain::MediaFile,
+    start_seconds: f64,
+    video: CopyVideoOptions,
+) -> Vec<String> {
+    transcode::copy_video_only_pipe_args(
+        file,
+        start_seconds,
+        plurx_core::transcode::Pacing::unpaced(),
+        video,
+    )
+}
+
 fn materialization_command<I, S>(
     program: &Path,
     args: I,
@@ -745,6 +752,71 @@ mod tests {
         let long = copy_failure(status, "é".repeat(2 * MAX_COPY_FAILURE_BYTES).as_bytes());
         assert!(long.len() <= 64 + MAX_COPY_FAILURE_BYTES, "{}", long.len());
         assert!(long.ends_with('é'));
+    }
+
+    /// Eclipse's fitted copy mapped its TrueHD soundtrack into the
+    /// picture-only MP4 and FFmpeg refused the header (exit 88).
+    #[test]
+    fn the_fitted_copy_maps_only_the_selected_picture() {
+        let mut file = context_free_file();
+        file.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 0,
+            codec: "truehd".into(),
+            channels: Some(8),
+            default: true,
+            ..Default::default()
+        }];
+        let args = fitted_copy_args(&file, 12.5, CopyVideoOptions::new(false, true));
+        let maps: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-map")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(maps, ["0:v:0"], "{args:?}");
+        assert!(args.iter().any(|arg| arg == "-an"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "-c:a"), "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+        assert!(crate::vodserve::m7_copy_landing_clock(
+            &args,
+            "/bundle/ffmpeg".into(),
+            "/owned/runtime".into(),
+            24_000,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .is_some());
+    }
+
+    fn context_free_file() -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
+            id: 1,
+            item_id: 1,
+            path: "http://127.0.0.1:1/source".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(60_000),
+            container: Some("matroska".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: Some(1_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
     }
 
     /// Eclipse's first fitted materialization panicked the M7 task with
