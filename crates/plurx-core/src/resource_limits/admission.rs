@@ -134,6 +134,14 @@ fn linux_task_headroom(view: Option<&super::LinuxView>) -> Metric<u64> {
         Ok(value) => value,
         Err(reason) => return Metric::Unknown(reason),
     };
+    if view.native.boundary == super::RootBoundary::Visible {
+        available = match visible_root_task_headroom(&view.root, available, |path| {
+            view.native.read_controller(path)
+        }) {
+            Ok(value) => value,
+            Err(reason) => return Metric::Unknown(reason),
+        };
+    }
 
     // Namespace UID 0 is not proof of the initial-user NPROC exemption.
     // A private PID namespace also cannot census all tasks of a real UID.
@@ -184,6 +192,37 @@ fn hierarchy_task_headroom(
         current = current.parent().ok_or(UnknownReason::IncompleteTree)?;
     }
     Ok(available)
+}
+
+/// A visible root that is itself a non-root cgroup (it has cgroup.type)
+/// carries its own pids.max when it lists the pids controller; a true root
+/// has none.
+#[cfg(target_os = "linux")]
+fn visible_root_task_headroom(
+    root: &Path,
+    available: u64,
+    mut read: impl FnMut(&Path) -> Option<String>,
+) -> Result<u64, UnknownReason> {
+    if read(&root.join("cgroup.type")).is_none() {
+        return Ok(available);
+    }
+    let controllers = read(&root.join("cgroup.controllers")).ok_or(UnknownReason::Inaccessible)?;
+    if !controllers.split_whitespace().any(|name| name == "pids") {
+        return Ok(available);
+    }
+    let limit = read(&root.join("pids.max")).ok_or(UnknownReason::Inaccessible)?;
+    let used = read(&root.join("pids.current")).ok_or(UnknownReason::Inaccessible)?;
+    let used = parse_decimal(&used).ok_or(UnknownReason::InvalidCounter)?;
+    Ok(
+        match parse_limit(&limit).ok_or(UnknownReason::InvalidCounter)? {
+            Some(limit) => available.min(
+                limit
+                    .checked_sub(used)
+                    .ok_or(UnknownReason::InvalidCounter)?,
+            ),
+            None => available,
+        },
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -312,6 +351,34 @@ mod hierarchy_tests {
                 .into()
             )),
             Err(UnknownReason::InvalidCounter)
+        );
+    }
+
+    /// A cgroup namespace root is a non-root cgroup: its own pids.max bounds
+    /// the tasks under it. A true root (no cgroup.type) has no such file.
+    #[test]
+    fn visible_namespace_root_applies_its_own_task_limit() {
+        let root = tempfile::tempdir().expect("visible cgroup root");
+        let read = |path: &Path| std::fs::read_to_string(path).ok();
+        assert_eq!(
+            visible_root_task_headroom(root.path(), 1000, read),
+            Ok(1000),
+            "a true root carries no task limit of its own"
+        );
+        for (name, value) in [
+            ("cgroup.type", "domain\n"),
+            ("cgroup.controllers", "cpu memory pids\n"),
+            ("pids.max", "64\n"),
+            ("pids.current", "9\n"),
+        ] {
+            std::fs::write(root.path().join(name), value).expect("cgroup interface");
+        }
+        assert_eq!(visible_root_task_headroom(root.path(), 1000, read), Ok(55));
+        std::fs::remove_file(root.path().join("pids.current")).expect("drop counter");
+        assert_eq!(
+            visible_root_task_headroom(root.path(), 1000, read),
+            Err(UnknownReason::Inaccessible),
+            "a listed controller without its counter stays unknown"
         );
     }
 

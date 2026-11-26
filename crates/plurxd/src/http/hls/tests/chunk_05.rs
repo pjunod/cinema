@@ -1289,6 +1289,20 @@ async fn vod_stream_finalizer_commits_only_exact_live_response_bodies() {
     tokio::fs::create_dir(&error_path)
         .await
         .expect("unreadable VOD object");
+    // The open object must be at least as long as its one advertised byte to
+    // reach the body's read. An empty directory's size is filesystem-defined
+    // (btrfs reports 0); one entry makes it nonzero everywhere.
+    tokio::fs::write(error_path.join("entry"), b"x")
+        .await
+        .expect("unreadable VOD object entry");
+    assert!(
+        tokio::fs::metadata(&error_path)
+            .await
+            .expect("unreadable VOD object metadata")
+            .len()
+            >= 1,
+        "the unreadable object covers its advertised byte"
+    );
     let error_touch = fixture
         .state
         .transcode
@@ -1622,6 +1636,56 @@ async fn an_abandoned_segment_body_is_recorded_as_response_dropped() {
         frontier_before,
         "a dropped response cannot advance the consumed frontier"
     );
+}
+
+/// A rolling segment body outlives the few seconds its headers had to be
+/// published in. Storage reads behind a slow client run against the body's
+/// own lifetime, so the segment is delivered whole however long the client
+/// takes, within that lifetime.
+#[tokio::test]
+async fn a_slow_client_receives_a_whole_rolling_segment_after_its_publication_window() {
+    use futures_util::StreamExt;
+
+    let dir = crate::test_tempdir().expect("segment directory");
+    let fixture = HlsDeliveryFixture::publish(dir.path(), "slow-client").await;
+    fixture.make_segment_window_servable().await;
+    // Several storage reads, more than the pump can buffer ahead of a client
+    // that has stopped polling.
+    let body = vec![5_u8; 4 * crate::media_sessions::MEDIA_BODY_READ_BUFFER];
+    tokio::fs::write(dir.path().join("seg00002.m4s"), &body)
+        .await
+        .expect("segment bytes");
+
+    let response = segment(
+        State(fixture.state.clone()),
+        AxPath(("slow-client".to_owned(), "seg00002.m4s".to_owned())),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("segment response");
+    let mut stream = response.into_body().into_data_stream();
+    let mut received = stream
+        .next()
+        .await
+        .expect("a first chunk")
+        .expect("a readable first chunk")
+        .len();
+    assert!(received < body.len(), "the client has taken only a prefix");
+
+    // The client pauses past the publication window, well inside the body
+    // lifetime.
+    tokio::time::pause();
+    tokio::time::advance(
+        super::RESPONSE_PUBLICATION_LIFECYCLE_BUDGET + Duration::from_secs(1),
+    )
+    .await;
+    tokio::time::resume();
+
+    while let Some(chunk) = stream.next().await {
+        received += chunk.expect("a slow client still reads the segment").len();
+    }
+    assert_eq!(received, body.len(), "the whole segment reaches the client");
+    assert_eq!(fixture.delivered_bytes(), body.len() as i64);
 }
 
 #[tokio::test]

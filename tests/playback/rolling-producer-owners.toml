@@ -1124,10 +1124,14 @@ pattern = "RESPONSE_PUBLICATION_LIFECYCLE_BUDGET"
 # 5 -> 6: `an_mpegts_session_keeps_its_static_codec_string` is a unit test that
 # calls `exact_hls_context_at` with that same budget as its deadline, so the
 # sixth site is the test reading the constant, not a new owner or producer.
+# 6 -> 7: `a_slow_client_receives_a_whole_rolling_segment_after_its_publication_window`
+# advances the clock past this budget to prove a rolling body's storage reads
+# run for the body lifetime instead; a test reading the constant, no owner.
 [module_symbols.occurrences]
 "crates/plurxd/src/http/hls.rs" = 1
 "crates/plurxd/src/http/hls/context.rs" = 1
 "crates/plurxd/src/http/hls/response.rs" = 3
+"crates/plurxd/src/http/hls/tests/chunk_05.rs" = 1
 "crates/plurxd/src/http/hls/tests/chunk_06.rs" = 1
 
 [[module_symbols]]
@@ -9187,12 +9191,16 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # it neither signals an OS child nor creates another process/reap owner.
 # DV window runs (#1862): +1 is the declaration `async fn kill(self)` of the
 # WindowRun owner above; it signals the existing helper stage owner only.
+# Zombie-closed probe group: +1 is the test-only libc::waitpid in
+# fixed_probe/tests.rs, reaping the one adopted zombie descendant the
+# regression inspects after the probe settled. No production reap owner.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 5
 "crates/plurx-core/src/process/bounded/pause.rs" = 1
 "crates/plurx-core/src/process/contained_launch.rs" = 4
 "crates/plurx-core/src/process/fixed_planning_engine.rs" = 2
 "crates/plurx-core/src/process/fixed_probe.rs" = 4
+"crates/plurx-core/src/process/fixed_probe/tests.rs" = 1
 "crates/plurx-core/src/process/mod.rs" = 5
 "crates/plurx-core/src/process/priority.rs" = 4
 "crates/plurx-core/src/scan/probe.rs" = 1

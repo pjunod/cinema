@@ -1550,6 +1550,8 @@ impl FixedProbeImageClosed {
 #[cfg(target_os = "linux")]
 enum ProbeSessionClosed {
     KilledOriginalGroupAndObservedAbsent,
+    /// Killed, and every remaining member is an unreaped zombie.
+    KilledOriginalGroupAndObservedDead,
     OriginalGroupAlreadyAbsent,
 }
 #[cfg(not(target_os = "linux"))]
@@ -1588,6 +1590,7 @@ impl FixedProbeRootClosed {
             && matches!(
                 self.session_closed,
                 ProbeSessionClosed::KilledOriginalGroupAndObservedAbsent
+                    | ProbeSessionClosed::KilledOriginalGroupAndObservedDead
                     | ProbeSessionClosed::OriginalGroupAlreadyAbsent
             )
             && match self.stdout_projection {
@@ -4517,6 +4520,16 @@ async fn observe_probe_group_absent(
             if error.raw_os_error() != Some(libc::EPERM) {
                 return Err(error);
             }
+        }
+        // Killed descendants orphaned by the leader's exit stay in the group
+        // as zombies until their new parent reaps them, which a container's
+        // PID 1 may never do. A group whose every remaining thread is dead
+        // runs nothing and holds no descriptor: it is closed.
+        if crate::process::bounded::source_group_quiescent(group, false)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(ProbeSessionClosed::KilledOriginalGroupAndObservedDead);
         }
         if std::time::Instant::now() >= deadline {
             return Err(std::io::Error::new(

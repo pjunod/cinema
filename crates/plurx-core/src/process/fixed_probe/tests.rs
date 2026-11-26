@@ -2833,6 +2833,84 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
     );
 }
 
+/// A container's PID 1 may never reap the orphans it adopts. The probe's
+/// killed background descendant then stays in its group as a zombie, and the
+/// probe must still settle normally, not run out its deadline waiting for a
+/// group that runs nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn normal_completion_settles_when_killed_descendants_stay_unreaped_zombies() {
+    // SAFETY: prctl with integer arguments; this test process adopts the
+    // probe's orphans exactly as a non-reaping container PID 1 does, and
+    // reaps only the one it checks below.
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+    let root = test_tempdir().expect("tempdir");
+    let media = root.path().join("media.bin");
+    std::fs::write(&media, b"source").expect("media");
+    let source = Arc::new(std::fs::File::open(media).expect("open source"));
+    let probe = root.path().join("ffprobe-test");
+    executable(
+        &probe,
+        r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version zombie-descendant'; exit 0; fi
+sleep 30 &
+printf '%s\n' "$!" > "$PLURX_TEST_PROBE_PATH.descendant-pid"
+printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","disposition":{"attached_pic":0}}]}'
+"###,
+    );
+    let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+        .await
+        .expect("identity");
+    let budget = Duration::from_secs(3);
+    let started = std::time::Instant::now();
+    let facts = DecodeFactCache::new()
+        .get_or_probe(
+            &identity,
+            DecodeFactSource::isolated(source),
+            None,
+            ProbeStreamSelection::Absolute(4),
+            budget,
+            None,
+        )
+        .await;
+    assert!(
+        facts.is_ok(),
+        "a group left only with unreaped zombies settles normally: {facts:?}"
+    );
+    assert!(
+        started.elapsed() < budget,
+        "the probe settled before its deadline, not at it"
+    );
+    let descendant: libc::pid_t = std::fs::read_to_string(probe.with_extension("descendant-pid"))
+        .expect("descendant pid")
+        .trim()
+        .parse()
+        .expect("numeric descendant pid");
+    let stat = std::fs::read_to_string(format!("/proc/{descendant}/stat"))
+        .expect("the killed descendant is still in the process table");
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .expect("stat comm")
+        .1
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        fields[0], "Z",
+        "the descendant was killed, not left running"
+    );
+    assert_eq!(
+        fields[1].parse::<u32>().expect("ppid"),
+        std::process::id(),
+        "the descendant is this non-reaping adopter's zombie"
+    );
+    let mut status = 0;
+    // SAFETY: waitpid on this process's own adopted zombie child.
+    assert_eq!(
+        unsafe { libc::waitpid(descendant, &mut status, 0) },
+        descendant
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn source_lease_wait_is_charged_to_the_probe_deadline() {
