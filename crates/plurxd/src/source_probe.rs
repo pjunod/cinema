@@ -802,7 +802,8 @@ async fn execute(
 /// collector. Cooperative completion joins the original child and pipes.
 /// Abrupt Drop retains the original admission in their actual cleanup tasks
 /// and persistently fences readiness as Unknown; it proves no native absence.
-#[cfg(any(not(target_os = "linux"), test))]
+/// This is the runner for admitted work with no job row (and so no source
+/// fence); `run_source_admitted_probe` adds the fence for job-owned scans.
 async fn run_admitted_probe<F, T, E>(
     transcode: &crate::transcode::TranscodeManager,
     admission: &Arc<crate::transcode::FragmentAdmission>,

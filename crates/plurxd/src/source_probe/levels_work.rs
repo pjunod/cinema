@@ -108,9 +108,21 @@ impl LevelsTask {
         let Some(probe_pipeline) = plurx_core::scan::probe::pipeline_digest().await else {
             return Ok(None);
         };
+        // The read is the title scan's kind of work (one software stream
+        // copy, no GPU), so it takes the title scan's admission. Without it
+        // the cursor stays put and the source is offered again next tick.
+        let Some(admission) = state.transcode.admit_dv_title(false).await else {
+            return Ok(None);
+        };
         *after = file.id;
         let cancel = CancellationToken::new();
-        let work = Box::pin(run(state.clone(), file, cancel.clone(), backoff.clone()));
+        let work = Box::pin(run(
+            state.clone(),
+            file,
+            Arc::new(admission),
+            cancel.clone(),
+            backoff.clone(),
+        ));
         Ok(Some(Self {
             work,
             cancel,
@@ -144,11 +156,24 @@ impl LevelsTask {
 async fn run(
     state: AppState,
     file: MediaFile,
+    admission: Arc<crate::transcode::FragmentAdmission>,
     cancel: CancellationToken,
     backoff: Backoff,
 ) -> bool {
-    let read =
-        plurx_core::process::bounded::cancellable(cancel.clone(), read_levels(&state, &file)).await;
+    // The admitted runner keeps the admission as the child's original-work
+    // owner and cancels the read when the admission is wanted elsewhere.
+    // Stopping the lane cancels it too, so `cancel` is also its shutdown.
+    let read = super::run_admitted_probe(
+        &state.transcode,
+        &admission,
+        &cancel,
+        &cancel,
+        None,
+        read_levels(&state, &file),
+    )
+    .await;
+    // The child is reaped; the lane's slot goes back before the graft.
+    drop(admission);
     if cancel.is_cancelled() {
         // A yielded or stopped read says nothing about the title.
         return true;
@@ -368,6 +393,139 @@ async fn read_levels(_: &AppState, _: &MediaFile) -> Result<DvLevelsRecord, Titl
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The levels read is processing work like its title-scan sibling: the
+    /// lane holds the title scan's admission from start until the read is
+    /// reaped, a source is not taken while no admission is free, and the
+    /// slot comes back once the read settles.
+    #[tokio::test]
+    async fn the_levels_read_is_admitted_and_releases_its_admission() {
+        use plurx_core::domain::{
+            DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
+        };
+        use plurx_core::store::{SqliteStore, Store};
+        use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+        let dir = crate::test_tempdir().expect("scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "1")
+            .await
+            .expect("budget");
+        let mut state = AppState::new(
+            "test".into(),
+            Arc::clone(&store),
+            crate::state::Dirs {
+                artwork: dir.path().join("artwork"),
+                transcode: dir.path().join("transcode"),
+                cache: dir.path().join("cache"),
+                subs: dir.path().join("subs"),
+                runtime_cache: dir.path().join("runtime"),
+                renditions: dir.path().join("renditions"),
+            },
+            "levels-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(16)),
+        );
+        state.transcode = Arc::new(crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().join("transcode"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "levels".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![dir.path().into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "levels".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let path = dir.path().join("levels.mkv");
+        tokio::fs::write(&path, b"not a stream")
+            .await
+            .expect("source");
+        let metadata = tokio::fs::metadata(&path).await.expect("metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix mtime")
+            .as_secs() as i64;
+        store
+            .upsert_file(
+                item,
+                path.to_str().expect("path"),
+                metadata.len() as i64,
+                mtime,
+                &ProbeResult {
+                    video_codec: Some("hevc".into()),
+                    hdr: Some("dolby_vision".into()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(8),
+                        level: Some(6),
+                        bl_compat_id: Some(1),
+                        rpu_present: Some(true),
+                        el_present: Some(false),
+                    },
+                    raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("DV source");
+        let backoff = Backoff::default();
+
+        // Another owner holds the one software slot: no read starts and the
+        // source stays next in line.
+        let other = state
+            .transcode
+            .admit_dv_title(false)
+            .await
+            .expect("the competing title admission");
+        let mut after = 0;
+        assert!(LevelsTask::start(&state, &mut after, &backoff)
+            .await
+            .expect("start")
+            .is_none());
+        assert_eq!(after, 0, "an unadmitted read does not pass its source");
+        drop(other);
+        assert_eq!(state.transcode.test_software_threads_in_use(), 0);
+
+        let task = LevelsTask::start(&state, &mut after, &backoff)
+            .await
+            .expect("start")
+            .expect("an admitted levels read");
+        assert_eq!(
+            state.transcode.test_software_threads_in_use(),
+            1,
+            "the read holds the title scan's one software thread"
+        );
+        assert!(
+            state.transcode.admit_fragment().await.is_none(),
+            "the read owns the lane while it runs"
+        );
+        assert!(task.work.await, "the lane's work settles");
+        assert_eq!(state.transcode.test_software_threads_in_use(), 0);
+        assert!(
+            state.transcode.admit_fragment().await.is_some(),
+            "ordinary admission after the read is reaped and released"
+        );
+    }
 
     /// The pass's own command line, run by the real FFmpeg over a Profile 8
     /// fixture, folds to the levels its RPUs carry.
