@@ -61,6 +61,20 @@ impl SourceOpenedControl {
 trait ControlHooks: std::any::Any + Send + Sync {
     fn observed(&self) -> crate::seam_hooks::HookFuture<'_>;
     fn accepting(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// The settlement SQL retry cadence, when a hook sets one.
+    fn settlement_retry_delay(&self) -> Option<Duration>;
+    /// A Store result to use in place of the settlement write, when a hook
+    /// supplies one. The physical settlement and assignment stay actual.
+    fn settlement_result_override(
+        &self,
+        physical: Option<&SourcePhysicalSettlement>,
+        assignment: &SourceDispatchAssignment,
+    ) -> Option<
+        Result<
+            plurx_core::sharing_source_sessions::SourceReleaseOutcome,
+            plurx_core::error::StoreError,
+        >,
+    >;
     #[cfg(test)]
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -71,6 +85,21 @@ impl ControlHooks for NoControlHooks {
     }
     fn accepting(&self) -> crate::seam_hooks::HookFuture<'_> {
         Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn settlement_retry_delay(&self) -> Option<Duration> {
+        None
+    }
+    fn settlement_result_override(
+        &self,
+        _: Option<&SourcePhysicalSettlement>,
+        _: &SourceDispatchAssignment,
+    ) -> Option<
+        Result<
+            plurx_core::sharing_source_sessions::SourceReleaseOutcome,
+            plurx_core::error::StoreError,
+        >,
+    > {
+        None
     }
     #[cfg(test)]
     fn as_any(&self) -> &dyn std::any::Any {
@@ -105,8 +134,69 @@ impl ControlHooks for PausingControlHooks {
     fn accepting(&self) -> crate::seam_hooks::HookFuture<'_> {
         self.accepting.hold()
     }
+    /// Advance the existing retry loop promptly; its real attempt bound and
+    /// deadline checks remain unchanged. This never manufactures a timeout.
+    fn settlement_retry_delay(&self) -> Option<Duration> {
+        (self
+            .settlement_sql_fault
+            .load(std::sync::atomic::Ordering::Acquire)
+            != 0)
+            .then_some(Duration::ZERO)
+    }
+    fn settlement_result_override(
+        &self,
+        physical: Option<&SourcePhysicalSettlement>,
+        assignment: &SourceDispatchAssignment,
+    ) -> Option<
+        Result<
+            plurx_core::sharing_source_sessions::SourceReleaseOutcome,
+            plurx_core::error::StoreError,
+        >,
+    > {
+        use std::sync::atomic::Ordering;
+        let selected = self.settlement_sql_fault.load(Ordering::Acquire);
+        if selected == 0 {
+            return None;
+        }
+        let physical = physical.expect("original Source physical settlement");
+        assert!(
+            physical.matches(assignment),
+            "SQL injection follows actual matching native/preparation closure"
+        );
+        self.settlement_sql_attempts.fetch_add(1, Ordering::AcqRel);
+        if matches!(physical, SourcePhysicalSettlement::Registered(_, _)) {
+            self.settlement_registered_proofs
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        Some(match selected {
+            1 => Err(plurx_core::error::StoreError::Database(
+                "fixture Source SQL failure after original physical settlement".into(),
+            )),
+            2 => Ok(plurx_core::sharing_source_sessions::SourceReleaseOutcome::Refused),
+            _ => unreachable!("test-only SQL fault selector"),
+        })
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+impl SourceControlHookOwner {
+    pub(super) fn settlement_retry_delay(&self) -> Option<Duration> {
+        self.slot.get().settlement_retry_delay()
+    }
+    pub(super) fn settlement_result_override(
+        &self,
+        physical: Option<&SourcePhysicalSettlement>,
+        assignment: &SourceDispatchAssignment,
+    ) -> Option<
+        Result<
+            plurx_core::sharing_source_sessions::SourceReleaseOutcome,
+            plurx_core::error::StoreError,
+        >,
+    > {
+        self.slot
+            .get()
+            .settlement_result_override(physical, assignment)
     }
 }
 #[cfg(test)]
@@ -156,61 +246,6 @@ impl SourceControlHookOwner {
             0,
             "one SQL fault selection per actual owner"
         );
-    }
-
-    pub(super) fn fixture_settlement_sql(
-        &self,
-        physical: &SourcePhysicalSettlement,
-        assignment: &SourceDispatchAssignment,
-    ) -> Option<
-        Result<
-            plurx_core::sharing_source_sessions::SourceReleaseOutcome,
-            plurx_core::error::StoreError,
-        >,
-    > {
-        use std::sync::atomic::Ordering;
-        let hooks = self
-            .slot
-            .get()
-            .as_any()
-            .downcast_ref::<PausingControlHooks>()?;
-        let selected = hooks.settlement_sql_fault.load(Ordering::Acquire);
-        if selected == 0 {
-            return None;
-        }
-        assert!(
-            physical.matches(assignment),
-            "SQL injection follows actual matching native/preparation closure"
-        );
-        hooks.settlement_sql_attempts.fetch_add(1, Ordering::AcqRel);
-        if matches!(physical, SourcePhysicalSettlement::Registered(_, _)) {
-            hooks
-                .settlement_registered_proofs
-                .fetch_add(1, Ordering::AcqRel);
-        }
-        Some(match selected {
-            1 => Err(plurx_core::error::StoreError::Database(
-                "fixture Source SQL failure after original physical settlement".into(),
-            )),
-            2 => Ok(plurx_core::sharing_source_sessions::SourceReleaseOutcome::Refused),
-            _ => unreachable!("test-only SQL fault selector"),
-        })
-    }
-
-    /// Advance the existing retry loop promptly; its real attempt bound and
-    /// deadline checks remain unchanged. This never manufactures a timeout.
-    pub(super) fn fixture_settlement_retry_delay(&self) -> Option<Duration> {
-        self.slot
-            .get()
-            .as_any()
-            .downcast_ref::<PausingControlHooks>()
-            .filter(|hooks| {
-                hooks
-                    .settlement_sql_fault
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    != 0
-            })
-            .map(|_| Duration::ZERO)
     }
 
     #[cfg(target_os = "linux")]

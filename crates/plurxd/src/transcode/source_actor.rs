@@ -3116,13 +3116,10 @@ impl TranscodeManager {
             owner.changed.notify_waiters();
             // A Store fault retains the actual owner and sealed physical
             // settlement evidence. Retry SQL without inventing a new producer.
-            #[cfg(test)]
             let retry_delay = owner
                 .control_hooks
-                .fixture_settlement_retry_delay()
+                .settlement_retry_delay()
                 .unwrap_or(SOURCE_SETTLEMENT_RETRY);
-            #[cfg(not(test))]
-            let retry_delay = SOURCE_SETTLEMENT_RETRY;
             tokio::select! {
                 () = shutdown.cancelled() => break result,
                 () = tokio::time::sleep(retry_delay) => {}
@@ -3338,15 +3335,9 @@ impl TranscodeManager {
         // The negative test seam substitutes only the Store result BEFORE its
         // write. Native/preparation closure and the body barrier above remain
         // actual, and no committed release is rewritten as a failure.
-        #[cfg(test)]
-        let release_override = owner.control_hooks.fixture_settlement_sql(
-            physical
-                .as_ref()
-                .expect("original Source physical settlement"),
-            &owner.assignment,
-        );
-        #[cfg(not(test))]
-        let release_override = None::<Result<SourceReleaseOutcome, plurx_core::error::StoreError>>;
+        let release_override = owner
+            .control_hooks
+            .settlement_result_override(physical.as_ref(), &owner.assignment);
         let released = if let Some(result) = release_override {
             result
         } else if let Some(terminal) = terminal {
