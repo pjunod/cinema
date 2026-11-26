@@ -9167,12 +9167,16 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # it neither signals an OS child nor creates another process/reap owner.
 # DV window runs (#1862): +1 is the declaration `async fn kill(self)` of the
 # WindowRun owner above; it signals the existing helper stage owner only.
+# Zombie-closed probe group: +1 is the test-only libc::waitpid in
+# fixed_probe/tests.rs, reaping the one adopted zombie descendant the
+# regression inspects after the probe settled. No production reap owner.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 5
 "crates/plurx-core/src/process/bounded/pause.rs" = 1
 "crates/plurx-core/src/process/contained_launch.rs" = 4
 "crates/plurx-core/src/process/fixed_planning_engine.rs" = 2
 "crates/plurx-core/src/process/fixed_probe.rs" = 4
+"crates/plurx-core/src/process/fixed_probe/tests.rs" = 1
 "crates/plurx-core/src/process/mod.rs" = 5
 "crates/plurx-core/src/process/priority.rs" = 4
 "crates/plurx-core/src/scan/probe.rs" = 1

@@ -769,6 +769,14 @@ async fn observe_original_group_absent(pid: libc::pid_t, deadline: Instant) -> i
                 return Err(error);
             }
         }
+        // Orphaned members a container's PID 1 never reaps stay in the group
+        // as zombies; a group whose every remaining thread is dead is closed.
+        if crate::process::bounded::source_group_quiescent(pid, false)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
         if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
