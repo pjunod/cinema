@@ -26,7 +26,7 @@ fn core_authored_mp4_head() -> (Init, Fragment) {
     )
 }
 
-fn non_dolby_file() -> MediaFile {
+pub(crate) fn non_dolby_file() -> MediaFile {
     MediaFile {
         downloaded_subtitles: Vec::new(),
         id: 1,

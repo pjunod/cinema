@@ -345,6 +345,14 @@ pub(crate) enum SourceWorkerError {
     CopyInitContractChanged,
     CopyClockUnknown,
     CopySyncUnverified,
+    /// The copy's output outgrew the in-memory hold that pairs its whole
+    /// canonical and AV fragments: a source whose keyframe spans are too
+    /// large to copy here.
+    CopyInputLimit,
+    /// The copy's child wrote one output pipe far ahead of the other: a
+    /// fault of its output protocol, the same on every repeat.
+    CopyOutputSkew,
+    HevcConfigurationUnsupported,
     Capacity,
     Conflict,
     Deadline,
@@ -424,6 +432,18 @@ mod live_refusal_tests {
     use super::*;
     use SourceWorkerError as E;
 
+    /// A copy refused because its output outgrew the mux's pairing hold is
+    /// its own failure, not a start that was merely unavailable.
+    #[test]
+    fn a_copy_input_limit_is_its_own_failure() {
+        assert_eq!(E::copy_failure("copy_range_input_limit"), E::CopyInputLimit);
+        assert_eq!(E::copy_failure("copy_observation_skew"), E::CopyOutputSkew);
+        assert_eq!(
+            E::copy_failure("hevc_configuration_unsupported"),
+            E::HevcConfigurationUnsupported
+        );
+    }
+
     /// Every renewal tick (VOD, growing and direct) decides by this after
     /// re-proving its source: an object proven renews; one that could not be
     /// read just now skips the renewal while the confirmed lease holds and
@@ -482,6 +502,9 @@ impl SourceWorkerError {
         match code {
             "copy_target_exceeded" => Self::CopyTargetExceeded,
             "copy_sync_unverified" => Self::CopySyncUnverified,
+            "copy_range_input_limit" => Self::CopyInputLimit,
+            "copy_observation_skew" => Self::CopyOutputSkew,
+            "hevc_configuration_unsupported" => Self::HevcConfigurationUnsupported,
             "copy_init_contract_changed" | "copy_head_init_changed" => {
                 Self::CopyInitContractChanged
             }

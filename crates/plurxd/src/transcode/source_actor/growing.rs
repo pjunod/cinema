@@ -528,6 +528,41 @@ impl TranscodeManager {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        // The copy's memory is admitted first, before it takes a copy slot or
+        // reads its head: a start waiting for memory holds nothing another
+        // copy needs and discards no work. A node whose copies hold their
+        // budget answers busy, which the receiver retries.
+        // The one recipe of this range. An Analysis gap fill of the same
+        // source repeats it, so its rows are comparable with these.
+        let recipe = crate::copy_analysis::CopyRecipe {
+            video,
+            audio_index: prepared.request().audio_index,
+            transcode_audio: aac,
+            audio_delivery: prepared.request().audio_delivery.clone(),
+        };
+        *stage = "growing.copy_memory";
+        let charge = crate::copyrange::admission_charge(
+            prepared.file().size,
+            prepared.file().duration_ms,
+            recipe.tracks(prepared.file()).audio_bits_per_second,
+        );
+        let memory = std::sync::Arc::new(
+            self.admissions
+                .copy_memory()
+                .acquire(
+                    charge,
+                    crate::admission::CopyPriority::Live,
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await
+                .map_err(|refusal| match refusal {
+                    crate::admission::CopyMemoryRefusal::Busy => SourceWorkerError::Capacity,
+                    // More than this node can hold even alone.
+                    crate::admission::CopyMemoryRefusal::OverCeiling => {
+                        SourceWorkerError::CopyInputLimit
+                    }
+                })?,
+        );
         *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
         *stage = "growing.rendition_owner";
@@ -685,14 +720,6 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        // The one recipe of this range. An Analysis gap fill of the same
-        // source repeats it, so its rows are comparable with these.
-        let recipe = crate::copy_analysis::CopyRecipe {
-            video,
-            audio_index: prepared.request().audio_index,
-            transcode_audio: aac,
-            audio_delivery: prepared.request().audio_delivery.clone(),
-        };
         *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
@@ -701,6 +728,7 @@ impl TranscodeManager {
             recipe.tracks(&file),
             video.retains_hevc_parameter_sets(),
             file.video_codec.as_deref() == Some("hevc"),
+            memory,
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.copy_args";
