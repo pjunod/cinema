@@ -6309,8 +6309,20 @@ async fn the_etag_changes_across_an_evict_and_regenerate() {
         .await
         .expect("open")
         .expect("materialized");
+    let (first_len, first_etag) = (first.len, first.etag.clone());
+    // Publication never replaces a live object (b43167290): the regenerate
+    // follows a real eviction, after the reader that held it is gone.
+    drop(first);
     {
         let mut manifest = rendition.manifest.lock().await;
+        assert!(
+            rendition
+                .dir
+                .evict(&mut manifest, 0)
+                .await
+                .expect("evict"),
+            "an unadmitted rendition's segment evicts"
+        );
         rendition
             .dir
             .materialize(&mut manifest, 0, b"other bytes!", 2_000)
@@ -6322,9 +6334,9 @@ async fn the_etag_changes_across_an_evict_and_regenerate() {
         .await
         .expect("open")
         .expect("materialized");
-    assert_eq!(first.len, second.len, "the collision the instant breaks");
+    assert_eq!(first_len, second.len, "the collision the instant breaks");
     assert_ne!(
-        first.etag, second.etag,
+        first_etag, second.etag,
         "same key, index and length must still not collide across a \
              regeneration"
     );
