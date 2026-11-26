@@ -661,7 +661,9 @@ fn perform_update(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV
     }
     j.start_permit_expires = None;
     j.transition(Phase::Committed)?;
-    store.save(j)
+    store.save(j)?;
+    native::retire_after_commit(&installed, store, j);
+    Ok(())
 }
 /// The worker owns systemd reload after its exact signed package cohort commits.
 /// Keep the executor injectable for file-only regression fixtures; production
@@ -816,7 +818,9 @@ pub fn recover(i: &InstallationV1, id: &str) -> Result<()> {
             j.transition(Phase::Committed)?;
             j.start_permit_expires = None;
             j.detail = None;
-            store.save(&j)
+            store.save(&j)?;
+            native::retire_after_commit(i, &store, &mut j);
+            Ok(())
         }
         Phase::Installing if i.method == InstallMethod::MacosNative && j.rollback == update::Rollback::BinaryCompatible => {
             let _install_lock = crate::launch_lock::acquire(i, true)?;
