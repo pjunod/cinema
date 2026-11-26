@@ -1528,12 +1528,10 @@ async fn measure_http_request(
             http_route_group(path.as_str())
         });
     // Classified from the template plus fixed-vocabulary path values only;
-    // see `hls_request_metrics::classify`. GET only: axum answers HEAD on the
-    // same routes, and a probe that moves no object must not count as a fetch.
-    let hls_object = (request.method() == Method::GET)
-        .then(|| request.extensions().get::<MatchedPath>())
-        .flatten()
-        .and_then(|path| hls_request_metrics::classify(path.as_str(), request.uri().path()));
+    // see `hls_request_metrics::classify`, which also counts GETs only.
+    let hls_object = request.extensions().get::<MatchedPath>().and_then(|path| {
+        hls_request_metrics::classify(request.method(), path.as_str(), request.uri().path())
+    });
     let method = http_method_index(request.method());
     let head_request = request.method() == Method::HEAD;
     let target = safe_trace_target(request.uri());

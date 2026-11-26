@@ -1533,7 +1533,8 @@ fn every_registered_hls_object_route_has_a_request_class() {
             .replace("{object}", "00001.m4s");
         let matched = format!("/api/v1{route}");
         assert!(
-            hls_request_metrics::classify(&matched, &format!("/api/v1{path}")).is_some(),
+            hls_request_metrics::classify(&Method::GET, &matched, &format!("/api/v1{path}"))
+                .is_some(),
             "registered HLS object route has no request class: {matched}"
         );
         checked += 1;

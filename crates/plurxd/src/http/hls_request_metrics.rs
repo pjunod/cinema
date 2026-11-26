@@ -94,9 +94,14 @@ fn child_role(path: &str, components_after_role: usize) -> Option<&'static str> 
     }
 }
 
-/// Classify one request by its matched route template and request path.
-/// `None` for every route that is not an HLS object.
-pub(super) fn classify(template: &str, path: &str) -> Option<usize> {
+/// Classify one request by its method, matched route template and request
+/// path. `None` for every route that is not an HLS object, and for anything
+/// but GET: axum answers HEAD on the same routes, and a probe that moves no
+/// object is not a fetch.
+pub(super) fn classify(method: &axum::http::Method, template: &str, path: &str) -> Option<usize> {
+    if method != axum::http::Method::GET {
+        return None;
+    }
     let template = template.strip_prefix("/api/v1").unwrap_or(template);
     let (surface, resource, role) = match template {
         "/hls/{session}/master.m3u8" => ("session", "master", "none"),
@@ -200,7 +205,7 @@ mod tests {
     use super::*;
 
     fn label(template: &str, path: &str) -> Option<(&'static str, &'static str, &'static str)> {
-        classify(template, path).map(|index| HLS_OBJECTS[index])
+        classify(&axum::http::Method::GET, template, path).map(|index| HLS_OBJECTS[index])
     }
 
     #[test]
@@ -314,6 +319,16 @@ mod tests {
         assert!(text.contains(
             "plurx_hls_requests_total{surface=\"session\",resource=\"segment\",role=\"muxed\",status=\"200\"} 0\n"
         ));
+    }
+
+    #[test]
+    fn hls_request_classification_counts_get_only() {
+        let template = "/api/v1/hls/{session}/{segment}";
+        let path = "/api/v1/hls/s1/seg00007.m4s";
+        assert!(classify(&axum::http::Method::GET, template, path).is_some());
+        for method in [axum::http::Method::HEAD, axum::http::Method::OPTIONS] {
+            assert_eq!(classify(&method, template, path), None, "{method}");
+        }
     }
 
     #[test]
