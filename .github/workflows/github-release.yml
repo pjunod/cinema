@@ -404,7 +404,13 @@ jobs:
           run_in() {
             local image=$1 script=$2
             echo "::group::$image"
+            # plurxd refuses to serve on Linux without the actual host's
+            # identity bound read-only (source_custody/recovery.rs). The
+            # packaged unit supplies it with BindReadOnlyPaths; this smoke
+            # starts plurxd without systemd, so it binds the same two files.
             docker run --rm --volume "$PWD/dist:/dist:ro" \
+              --mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly \
+              --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly \
               --env EXPECT_VERSION --env DEB --env RPM \
               "$image" bash -euo pipefail -c "$package_manager"$'\n'"$script"
             echo "::endgroup::"

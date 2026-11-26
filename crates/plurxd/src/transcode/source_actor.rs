@@ -8,6 +8,20 @@ pub(crate) use growing::{
     SourceGrowingBacking, SourceGrowingPreparation, GROWING_LEASE_TIMEOUT_MS,
 };
 
+/// A selected-caption window's own answer: still preparing (`Deadline`) or
+/// over its concurrent-work bound (`Capacity`) passes; anything else is this
+/// track's final answer for this request. Frozen and growing sources share it.
+fn subtitle_refusal(error: SourceWorkerError) -> LiveRefusal {
+    if matches!(
+        error,
+        SourceWorkerError::Deadline | SourceWorkerError::Capacity
+    ) {
+        LiveRefusal::transient(error)
+    } else {
+        LiveRefusal::terminal(error)
+    }
+}
+
 #[derive(Clone)]
 enum SourceBacking {
     ImmutableVod,
@@ -1190,8 +1204,13 @@ impl SourceViewerActor {
             None => None,
         };
         // A frozen VOD's segment wait has no progress signal here; its
-        // deadline ends the request as it always has.
-        let vod_segment = segment && self.0.direct.is_none() && self.growing_backing().is_none();
+        // deadline ends the request as it always has. Only Unix has growing
+        // backings, so every other platform's Source is frozen.
+        #[cfg(unix)]
+        let frozen = self.growing_backing().is_none();
+        #[cfg(not(unix))]
+        let frozen = true;
+        let vod_segment = segment && self.0.direct.is_none() && frozen;
         let actor = self.clone();
         let resource = resource.clone();
         let job = tokio::spawn(Box::pin(async move {
@@ -1411,7 +1430,7 @@ impl SourceViewerActor {
                             let cached = tracks
                                 .cached(index, revision, &custody)
                                 .await
-                                .map_err(growing::subtitle_refusal)?;
+                                .map_err(subtitle_refusal)?;
                             let absent = cached.is_none();
                             let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
@@ -1436,7 +1455,7 @@ impl SourceViewerActor {
                                     deadline,
                                 )
                                 .await
-                                .map_err(growing::subtitle_refusal)?
+                                .map_err(subtitle_refusal)?
                                 .ok_or(pending)?;
                             if bytes.len() > 2 * 1024 * 1024 {
                                 return Err(unsupported);
