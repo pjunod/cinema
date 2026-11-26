@@ -49,7 +49,7 @@ pub const PLAYBACK_INPUT_EXTRA_KEYS: [&str; 6] = [
 /// A copy of the `plurxd` planning list (`QUALITY_PLANNING_KEYS`), so the
 /// store-contract test can write every key. A `plurxd` test pins it equal to
 /// that list; D3b widens both together.
-pub const PLAYBACK_PLANNING_KEYS: [&str; 32] = [
+pub const PLAYBACK_PLANNING_KEYS: [&str; 34] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
@@ -67,6 +67,10 @@ pub const PLAYBACK_PLANNING_KEYS: [&str; 32] = [
     keys::HLS_BURST_SECS,
     keys::SW_POOL_THREADS,
     keys::MAX_HW_SESSIONS,
+    // The operator's limit intent for the two numeric limits above: the
+    // capacity authority a plan freezes reads them together.
+    keys::SW_POOL_THREADS_PROVENANCE,
+    keys::MAX_HW_SESSIONS_PROVENANCE,
     keys::HLS_AHEAD_MAX_SECS,
     keys::HLS_AHEAD_MAX_BYTES,
     keys::HLS_SCRATCH_MAX_BYTES,

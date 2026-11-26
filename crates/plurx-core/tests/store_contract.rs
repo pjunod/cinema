@@ -22334,11 +22334,54 @@ async fn every_planning_key_write_moves_the_playback_input_generation() {
         bound.sort_unstable();
         bound.dedup();
         for key in bound {
+            // Limit provenance has one writer, the typed capacity update; a
+            // generic write of it is refused by design.
+            let store_ref = &store;
+            let typed = |choice| async move {
+                let store = store_ref;
+                let revision = store
+                    .resource_capacity_snapshot()
+                    .await
+                    .expect("capacity snapshot")
+                    .expect("capacity schema")
+                    .revision;
+                let mut update = plurx_core::resource_settings::CapacityUpdate {
+                    expected_revision: revision,
+                    hardware_sessions: None,
+                    software_pool_threads: None,
+                };
+                if key == plurx_core::store::keys::MAX_HW_SESSIONS_PROVENANCE {
+                    update.hardware_sessions = Some(choice);
+                } else {
+                    update.software_pool_threads = Some(choice);
+                }
+                assert!(store
+                    .put_resource_capacity(&update)
+                    .await
+                    .expect("typed capacity write"));
+                store
+                    .get_setting(key)
+                    .await
+                    .expect("provenance read")
+                    .expect("the typed write records provenance")
+            };
+            let provenance = key.ends_with(".provenance");
             let before = generation().await;
-            store.put_setting(key, "one").await.expect("insert");
+            let first = if provenance {
+                Some(typed(plurx_core::resource_settings::LimitChoice::Automatic).await)
+            } else {
+                store.put_setting(key, "one").await.expect("insert");
+                None
+            };
             let inserted = generation().await;
             assert!(inserted > before, "{backend}: insert {key}");
-            store.put_setting(key, "two").await.expect("update");
+            if provenance {
+                let second =
+                    typed(plurx_core::resource_settings::LimitChoice::Explicit { value: 3 }).await;
+                assert_ne!(first, Some(second), "{backend}: update {key}");
+            } else {
+                store.put_setting(key, "two").await.expect("update");
+            }
             let updated = generation().await;
             assert!(updated > inserted, "{backend}: update {key}");
             raw.delete_setting(key).await;

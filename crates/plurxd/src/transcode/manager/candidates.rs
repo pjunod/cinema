@@ -4834,7 +4834,9 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 32);
+        // 32 settings plus the two limit-provenance keys the frozen
+        // capacity authority reads (8ddae0e39).
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 34);
         assert!(QUALITY_PLANNING_KEYS.contains(&keys::DV_DISPLAY_TARGET));
         assert!(
             QUALITY_PLANNING_KEYS.len() <= plurx_core::store::PLANNING_SNAPSHOT_KEYS_MAX,
