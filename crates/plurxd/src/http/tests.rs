@@ -2395,6 +2395,8 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     );
     assert_exact_store_inventory(
         include_str!("dvr.rs"),
+        // 43f648b3d: rule and recording commits run under the capture-intent
+        // protection through `run_dvr_write`, on a moved Store handle.
         &[
             "collect_overview:store.settings_snapshot",
             "collect_overview:store.dvr_overview_rows",
@@ -2405,6 +2407,8 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
             "configs:store.settings_snapshot",
             "status:store.list_dvr_recordings_in",
             "list_recordings:store.list_dvr_recordings",
+            "capture_commit_protection:store.has_local_dvr_commit_authority",
+            "create_recording:store.clone",
             "create_recording:store.insert_dvr_airing_with_event",
             "create_recording:store.get_dvr_recording_for_airing",
             "get_recording:store.get_dvr_recording",
@@ -2422,14 +2426,16 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
             "delete_recording:store.transition_dvr_recording_with_event",
             "delete_recording:store.get_dvr_recording",
             "restore_recording:store.get_dvr_recording",
-            "restore_recording:store.transition_dvr_recording_with_event",
+            "restore_recording:store.clone",
+            "restore_recording:store.as_ref",
             "restore_recording:store.get_dvr_recording",
             "schedule:store.list_dvr_schedule_window",
             "list_rules:store.list_dvr_rules",
             "create_rule:store.list_dvr_rules",
-            "create_rule:store.put_dvr_rule",
             "update_rule:store.get_dvr_rule",
-            "update_rule:store.put_dvr_rule",
+            "save_rule:store.has_local_dvr_commit_authority",
+            "save_rule:store.clone",
+            "save_rule:store.put_dvr_rule",
             "delete_rule:store.get_dvr_rule",
             "delete_rule:store.delete_dvr_rule",
             "reorder_rules:store.reorder_dvr_rules",
