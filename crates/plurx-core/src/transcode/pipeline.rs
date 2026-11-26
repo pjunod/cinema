@@ -525,9 +525,13 @@ impl Pipeline {
     ///
     /// For QSV the parent must be VA-API rather than QSV itself: Vulkan derives
     /// from VA-API, DRM or CUDA but not from QSV, while QSV derives from
-    /// VA-API. `derive_device=qsv` on the Vulkan filter device then walks
-    /// Vulkan's ancestors to the VA-API parent. The named QSV device stays on
-    /// the same parent so a QSV hardware decode shares its VA display.
+    /// VA-API. `derive_device=qsv` on the Vulkan filter device walks Vulkan's
+    /// ancestors and creates a fresh QSV session on the VA-API parent (the
+    /// named `hw` is a sibling of Vulkan, not an ancestor, so it is not the
+    /// one reused); both sit on the same VA display. The named QSV device is
+    /// what a QSV hardware decode picks up. Only [`Pipeline::Libplacebo`]
+    /// pairs with QSV ([`Pipeline::pairs_with`]); the VA-API-mapped variant
+    /// ends in VA-API surfaces a QSV upload cannot take.
     pub fn device_args(self, encoder: Encoder) -> Vec<String> {
         if matches!(self, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi) {
             let vaapi = super::encoder::vaapi_device();
@@ -542,7 +546,7 @@ impl Pipeline {
                         "vk".into(),
                     ];
                 }
-                Encoder::Qsv => {
+                Encoder::Qsv if self == Pipeline::Libplacebo => {
                     return vec![
                         "-init_hw_device".into(),
                         format!("vaapi=va:{vaapi}"),
@@ -572,7 +576,7 @@ impl Pipeline {
             (Pipeline::Libplacebo | Pipeline::LibplaceboVaapi, Encoder::Vaapi) => {
                 Some("format=nv12,hwupload=derive_device=vaapi")
             }
-            (Pipeline::Libplacebo | Pipeline::LibplaceboVaapi, Encoder::Qsv) => {
+            (Pipeline::Libplacebo, Encoder::Qsv) => {
                 Some("hwupload=derive_device=qsv:extra_hw_frames=64,format=qsv")
             }
             _ => encoder.filter_suffix_for(self.output_grade()),
@@ -1298,9 +1302,13 @@ mod tests {
                 Encoder::Nvenc,
                 Encoder::VideoToolbox,
             ] {
-                if matches!(pipeline, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
-                    && matches!(encoder, Encoder::Vaapi | Encoder::Qsv)
-                {
+                if matches!(
+                    (pipeline, encoder),
+                    (
+                        Pipeline::Libplacebo | Pipeline::LibplaceboVaapi,
+                        Encoder::Vaapi
+                    ) | (Pipeline::Libplacebo, Encoder::Qsv)
+                ) {
                     continue;
                 }
                 let mut expected = encoder.init_args();
@@ -1322,11 +1330,14 @@ mod tests {
         let pipeline = Pipeline::Libplacebo;
         assert!(pipeline.pairs_with(Encoder::Qsv));
         let args = pipeline.device_args(Encoder::Qsv);
+        // The render node is environment-dependent (another test sets
+        // PLURX_VAAPI_DEVICE in parallel); pin the structure, not the path.
+        assert!(args[1].starts_with("vaapi=va:"), "{args:?}");
         assert_eq!(
             args,
             vec![
                 "-init_hw_device".to_owned(),
-                format!("vaapi=va:{}", super::super::encoder::vaapi_device()),
+                args[1].clone(),
                 "-init_hw_device".to_owned(),
                 "qsv=hw@va".to_owned(),
                 "-init_hw_device".to_owned(),
