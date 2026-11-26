@@ -890,6 +890,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "abort_foreground_source_activation",
     "mark_foreground_source_settled",
     "reap_settled_source_custody",
+    // store_contract/background_jobs.rs `expired_lease_sweep_requeues_with_takeover_bookkeeping`.
+    "requeue_expired_running_jobs",
     "settled_foreground_source_custody",
     "activate_background_source_custody",
     "abort_background_source_activation",

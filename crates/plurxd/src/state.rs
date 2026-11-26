@@ -7289,6 +7289,12 @@ impl JobManager {
         if let Err(error) = self.store.reap_settled_source_custody(clock_ms()).await {
             tracing::warn!(%error, "replaying settled source custody");
         }
+        // After the reap, so a job whose lapsed custody it just released is
+        // requeued on this tick. A dead worker's job otherwise stays `running`
+        // until a claimer happens to reach it in candidate order.
+        if let Err(error) = self.store.requeue_expired_running_jobs(clock_ms()).await {
+            tracing::warn!(%error, "requeueing expired-lease background jobs");
+        }
         crate::source_custody::source_pressure_changed().notify_waiters();
     }
 

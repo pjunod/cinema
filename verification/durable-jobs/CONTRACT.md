@@ -998,6 +998,7 @@ in README and the model; finite safety exhaustion is never liveness evidence.
 |---|---|
 | `InitFresh`, `InitRecovery`, `Next`, `ModelView`, `Symm` | Constructed reachable-shape seeds and explicit finite exploration machinery; not production operations |
 | `Cancel`, `Remove`, `LoseResource`, `Takeover`, `Outage`, `Restart` | Queue cancellation; membership removal; reservation loss; environment takeover abstraction of expired `CLAIM_SQL` plus triggers; unreachable authority; crash/reboot transport abstraction |
+| `ExpireSweep` | `background_jobs.rs::requeue_expired_running_jobs` (`EXPIRED_LEASE_ATTEMPTS_SQL`, `EXPIRED_LEASE_REQUEUE_SQL` and the settlement trigger): an expired running row returns to `queued` unowned with fence and revision advanced, its attempts finished and its reservations released; attempt budget, retry window and charged-custody guards are not modelled (they only narrow it) |
 | `PauseSource`, `ResumeSource` | `background_jobs_resources.rs::pause_background` / `resume_background` plus foreground SQL triggers; exact stable owner and one source reservation; physical stop/join and extra admission veto external |
 | `SendRenew`, `ApplyRenew`, `DeliverRenew` | Caller queue heartbeat; atomic `RENEW_SQL`/renew trigger; worker adoption of returned exact token |
 | `DomainChange`, `AcquireDomain` | Exact domain renewal/release and expired-lease acquisition in both coordination backends |
@@ -1034,6 +1035,9 @@ old facade result is not new-boot authority.
 successor attempt. It can invalidate old authority more broadly than the
 source claim path; it is not an exact claim-eligibility implementation or a
 recovery action. The normal dispatch/CAS path retains those predicates.
+
+`ExpireSweep` is the same revocation with no successor: it never installs a
+token, so it can only make old authority inexact earlier than a claim would.
 
 Recovery Init has time0, a running old-boot claim expiring at2 and not-before2
 or3. Fair time reaches the applicable barriers; a delay2 claim may occur at2,

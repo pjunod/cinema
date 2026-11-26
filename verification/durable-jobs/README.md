@@ -282,7 +282,7 @@ local/request token revision and expiry to stable identity plus an `Exact`
 flag and a well-typed flag. Current tokens are fully determined by the
 retained job row. Every observed revision was current or older when received;
 job revisions never decrease, identities never recycle, and deleted jobs
-never re-admit in this model. The revision writers `Cancel`, `Takeover`,
+never re-admit in this model. The revision writers `Cancel`, `Takeover`, `ExpireSweep`,
 `ApplyRenew`, `ApplyClaim` and `RefusalSettle` each increment the retained
 revision; all other positive safety actions preserve it. `RecoveryApply`
 also increments it in the separate recovery relation. The defect-only
