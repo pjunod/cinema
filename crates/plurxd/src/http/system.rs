@@ -6932,6 +6932,9 @@ pub(crate) async fn metrics(
          plurx_notify_received_total {notifications}\n"
     ));
     scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
+    // Reads atomics only. A hung media mount shows here as in-flight calls
+    // pinned while this scrape still answers.
+    scans.push_str(&plurx_core::media_io::prometheus());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\
