@@ -901,6 +901,15 @@ impl NativeSplitInventory {
         now < *deadline
     }
 
+    /// A warm start's prepared FEL head is still being staged.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepared_head_pending(&self) -> bool {
+        matches!(
+            *self.prepared_head.lock().expect("prepared FEL head"),
+            PreparedNativeFelHead::Pending,
+        )
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn decline_prepared_head(&self) {
         *self.prepared_head.lock().expect("prepared FEL head") = PreparedNativeFelHead::Declined;
@@ -1187,8 +1196,12 @@ struct SessionDir {
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
     split_author: Option<NativeSplitAuthor>,
     split_staged_bytes: u64,
-    /// Bytes of the ordinary copy landed so far (init, media, playlists).
+    /// Bytes of the ordinary copy's init and media this writer has landed.
+    /// Playlists are rewritten in place and failed writes land nothing, so
+    /// neither counts; both err toward a larger reserve.
     ordinary_bytes: std::sync::atomic::AtomicU64,
+    /// The largest ordinary media object landed so far.
+    largest_ordinary: std::sync::atomic::AtomicU64,
     /// A split the master declined has had its staged objects removed.
     split_discarded: bool,
     /// The `#EXTINF`/URI pairs, without the immutable header.
@@ -1261,6 +1274,7 @@ impl SessionDir {
             split_author: None,
             split_staged_bytes: 0,
             ordinary_bytes: std::sync::atomic::AtomicU64::new(0),
+            largest_ordinary: std::sync::atomic::AtomicU64::new(0),
             split_discarded: false,
             entries: String::new(),
             published_secs: 0.0,
@@ -1339,6 +1353,8 @@ impl SessionDir {
             if !name.starts_with("split-") && name != "index.m3u8" {
                 self.ordinary_bytes
                     .fetch_add(landed_bytes as u64, std::sync::atomic::Ordering::Relaxed);
+                self.largest_ordinary
+                    .fetch_max(landed_bytes as u64, std::sync::atomic::Ordering::Relaxed);
             }
             Ok::<_, std::io::Error>(digest.map(|digest| crate::rolling_output::CommittedObject {
                 bytes: bytes.len() as u64,
@@ -1366,13 +1382,34 @@ impl SessionDir {
 
     /// What the ordinary copy's startup grant still has to carry. An optional
     /// split write must leave this much of the allocation's grant unused.
+    ///
+    /// - The ordinary copy's unspent startup grant.
+    /// - Until its first playlist is out, at least its next write: an ordinary
+    ///   write is authorized at twice its size until its rename settles, and
+    ///   the next segment is assumed as large as the largest so far. A refused
+    ///   ordinary write before the gate opens fails the whole start.
+    /// - While a warm start's prepared FEL head is still being staged, that
+    ///   head's own share, which the start reserved beside both copies.
     fn ordinary_reserve(&self) -> u64 {
-        self.split_inventory.as_ref().map_or(0, |inventory| {
-            inventory.ordinary_startup.saturating_sub(
-                self.ordinary_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
-        })
+        let Some(inventory) = self.split_inventory.as_ref() else {
+            return 0;
+        };
+        let landed = self
+            .ordinary_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut reserve = inventory.ordinary_startup.saturating_sub(landed);
+        if !self.started {
+            let next = self
+                .largest_ordinary
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_mul(2);
+            reserve = reserve.max(next);
+        }
+        #[cfg(target_os = "linux")]
+        if inventory.prepared_head_pending() {
+            reserve = reserve.saturating_add(inventory.ordinary_startup);
+        }
+        reserve
     }
 
     /// Wait until the budget authorizes this write, the session goes away, or
@@ -1610,6 +1647,12 @@ impl SessionDir {
         }
         self.split_discarded = true;
         self.split_author = None;
+        if let Some(inventory) = self.split_inventory.as_ref() {
+            // Retention charges `bytes()` as live: forget the staged media so
+            // the ledger stops counting what is about to be deleted. Rendered
+            // FEL belongs to its processing and stays.
+            inventory.segments.lock().expect("split inventory").clear();
+        }
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
             return;
         };
@@ -1763,6 +1806,7 @@ impl SessionDir {
         if self.entries.is_empty() {
             return Ok(());
         }
+        self.discard_declined_split().await;
         // End of stream opens the gate no matter how few segments exist: a
         // film shorter than the cushion still has to play, and a complete
         // playlist with its ENDLIST is a *better* first read than a live one
@@ -4589,6 +4633,56 @@ mod split_reserve_tests {
         assert!(!root.path().join("split-audio-seg00000.m4s").exists());
         assert!(!root.path().join("split-video-seg00000.m4s").exists());
         assert!(session.split_author.is_none());
+        assert_eq!(
+            inventory.bytes(),
+            0,
+            "retention no longer charges the deleted media as live"
+        );
+    }
+
+    /// Before the first playlist, the ordinary copy's next write is
+    /// authorized at twice its size, and a refusal then fails the start. The
+    /// split leaves room for that write even when the startup estimate has
+    /// already been spent.
+    #[tokio::test]
+    async fn before_the_first_playlist_the_split_leaves_room_for_the_next_ordinary_write() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // A 10-byte estimate the 1_000-byte first segment already overran.
+        let inventory = Arc::new(NativeSplitInventory::with_budget(10, 1_000_000));
+        let (mut session, _permit) = writer(root.path().to_path_buf(), 4_000, 4_000, &inventory);
+        session.gate_secs = 3600;
+        // 1_000 landed of a 4_000 grant leaves 3_000. The split pair, written
+        // at twice its 1_000 bytes, does not fit beside the 2_000 the next
+        // ordinary write needs, and the budget cannot grow.
+        assert!(!segment(&mut session, 0, 1_000).await);
+        assert_eq!(inventory.decline_reason(), Some("optional_write_blocked"));
+        session
+            .publish_file("seg00001.m4s", &[0u8; 1_000])
+            .await
+            .expect("the next ordinary write still fits");
+    }
+
+    /// A warm start reserved a share for its prepared FEL head beside both
+    /// copies. While that head is being staged the split leaves it alone.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_warm_split_leaves_the_prepared_fel_share_while_it_is_staged() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for pending in [true, false] {
+            let inventory = NativeSplitInventory::with_budget(4_000, 1_000_000);
+            let inventory = Arc::new(if pending {
+                inventory.compare_prepared_head()
+            } else {
+                inventory
+            });
+            // Three startups reserved, as `prepared_native_fel_sizing` does,
+            // and no room to grow.
+            let (mut session, _permit) =
+                writer(root.path().to_path_buf(), 12_000, 12_000, &inventory);
+            session.started = true;
+            let staged = segment(&mut session, 0, 4_000).await;
+            assert_eq!(staged, !pending, "pending head {pending}");
+        }
     }
 }
 
