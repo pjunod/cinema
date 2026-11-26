@@ -558,9 +558,7 @@ async fn measure_new_title(
             let recipe = FrozenRecipe::new(source.cadence, source.static_hdr, rate)
                 .map_err(|error| EvaluationError::Unsupported(error.to_string()))?;
             let windows = source.windows.iter().map(|range| {
-                verified.window(
-                    &title.source, context.tools, source.layout, range.first_pts, range.end_pts,
-                )
+                verified.window(&title.source, context.tools, source.layout, range.first_pts)
                 .filter(|frames| frames.len() == FRAMES)
                 .map(<[FrameEvidence]>::to_vec)
                 .ok_or("M7 window does not contain the frozen 48-frame exposure")

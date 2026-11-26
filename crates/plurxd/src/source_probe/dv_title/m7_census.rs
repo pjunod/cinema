@@ -50,13 +50,18 @@ impl VerifiedSourceCensus {
         )
     }
 
+    /// The authenticated pictures of the window whose first presentation is
+    /// `first_pts`. A window's range ends where its successor starts, which a
+    /// consumer holding only the pictures cannot rebuild: on a rounded clock the
+    /// last picture's stored end falls short of it. The start alone names the
+    /// window because `read` admitted only the requested, ordered, disjoint
+    /// ranges, each beginning with a picture at its `first_pts`.
     pub(in crate::source_probe) fn window(
         &self,
         source: &SourceFence,
         tools: &ToolSet,
         layout: CaptureLayout,
         first_pts: i64,
-        end_pts: i64,
     ) -> Option<&[FrameEvidence]> {
         if source.object_version() != self.source_version
             || tools.title_scanner_digest() != self.scanner
@@ -67,11 +72,15 @@ impl VerifiedSourceCensus {
         {
             return None;
         }
-        self.windows
-            .iter()
-            .find(|window| window.range.first_pts == first_pts && window.range.end_pts == end_pts)
-            .map(|window| window.frames.as_slice())
+        window_starting(&self.windows, first_pts)
     }
+}
+
+fn window_starting(windows: &[Window], first_pts: i64) -> Option<&[FrameEvidence]> {
+    windows
+        .iter()
+        .find(|window| window.range.first_pts == first_pts)
+        .map(|window| window.frames.as_slice())
 }
 
 pub(super) fn arguments(ranges: &[M7WindowRange]) -> Result<Vec<String>, String> {
@@ -300,6 +309,48 @@ mod tests {
         // The title's last picture has no successor: its own end bounds it.
         assert!(reaches_window_end((999, end - 41, 41), end, end, 1000));
         assert!(!reaches_window_end((999, end - 42, 41), end, end, 1000));
+    }
+
+    /// Eclipse's comparison holds only the 48 pictures, so the end it can
+    /// derive is the last picture's rounded stored end, one tick short of the
+    /// successor-bounded range. Its window must still be found by its start.
+    #[test]
+    fn a_window_is_found_from_its_pictures_when_its_last_duration_is_rounded() {
+        let time_base = Rational::new(1, 1000).expect("Matroska clock");
+        let picture = |ordinal: u64, pts: i64| FrameEvidence {
+            ordinal,
+            pts,
+            duration: 41,
+            time_base,
+            access_unit_sha256: [ordinal as u8; 32],
+            rpu_sha256: [1; 32],
+            bl_vcl_sha256: [2; 32],
+        };
+        let windows = [
+            Window {
+                range: M7WindowRange {
+                    first_pts: 125,
+                    end_pts: 2127,
+                },
+                frames: vec![picture(3, 125), picture(4, 2085)],
+            },
+            Window {
+                range: M7WindowRange {
+                    first_pts: 4000,
+                    end_pts: 6002,
+                },
+                frames: vec![picture(96, 4000)],
+            },
+        ];
+        let found = window_starting(&windows, 125).expect("first window");
+        let last = found.last().expect("pictures");
+        assert_eq!(last.pts + last.duration, 2126, "derived end is short");
+        assert_eq!(found, windows[0].frames.as_slice());
+        assert_eq!(
+            window_starting(&windows, 4000),
+            Some(windows[1].frames.as_slice())
+        );
+        assert_eq!(window_starting(&windows, 126), None, "mid-window start");
     }
 
     #[test]

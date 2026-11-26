@@ -667,7 +667,6 @@ async fn verify_source_census(
             context.tools,
             request.layout,
             request.first_pts,
-            request.end_pts,
         ) != Some(plan.frames)
         {
             return Err(Error::Authority(
