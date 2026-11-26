@@ -735,6 +735,17 @@ async fn install_vod_http_session(
     publication.owner
 }
 
+/// Shrink an object a response has already opened. Reads through that open
+/// descriptor then reach storage EOF before the length it promised.
+fn truncate_open_object(path: &std::path::Path, len: u64) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open VOD object for truncation")
+        .set_len(len)
+        .expect("truncate VOD object under its response");
+}
+
 async fn vod_ready(path: &std::path::Path, advertised_len: u64) -> crate::vodserve::SegmentReady {
     vod_ready_metered(
         path,
@@ -900,7 +911,10 @@ async fn a_short_vod_body_logs_its_sanitized_failure_and_accepted_prefix() {
     let session_id = "vod-private-session-never-log-verbatim";
     let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
     let path = dir.path().join("short.m4s");
-    tokio::fs::write(&path, vec![7_u8; 8192])
+    // The object is whole when the response opens it; a range past the
+    // file's end is refused before any byte is promised. It then shrinks
+    // under the open response, so the body reaches storage EOF short.
+    tokio::fs::write(&path, vec![7_u8; 16384])
         .await
         .expect("VOD object");
     let delivery = std::sync::Arc::new(crate::meter::Meter::new());
@@ -914,6 +928,7 @@ async fn a_short_vod_body_logs_its_sanitized_failure_and_accepted_prefix() {
     )
     .await
     .expect("VOD response");
+    truncate_open_object(&path, 8192);
     assert!(axum::body::to_bytes(response.into_body(), 16385)
         .await
         .is_err());
@@ -1220,7 +1235,7 @@ async fn vod_stream_finalizer_commits_only_exact_live_response_bodies() {
     let short_id = "vod-short";
     let short_owner = install_vod_http_session(&fixture, dir.path(), short_id).await;
     let short_path = dir.path().join("short.m4s");
-    tokio::fs::write(&short_path, vec![4_u8; 1_024])
+    tokio::fs::write(&short_path, vec![4_u8; 2_048])
         .await
         .expect("short VOD object");
     let short_touch = fixture
@@ -1239,6 +1254,8 @@ async fn vod_stream_finalizer_commits_only_exact_live_response_bodies() {
     )
     .await
     .expect("short VOD response");
+    // Whole when opened, then shorter than promised under the open body.
+    truncate_open_object(&short_path, 1_024);
     let mut short = short.into_body().into_data_stream();
     assert_eq!(
         short

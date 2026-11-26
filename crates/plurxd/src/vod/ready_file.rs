@@ -311,10 +311,34 @@ async fn next_range_chunk(
             if remaining == 0 {
                 return Ok(None);
             }
+            // A local object shorter than the promised range still delivers
+            // the prefix storage could read; the next poll, finding nothing
+            // more, ends the body with the short-read error.
             let count = remaining.min(chunk_capacity) as usize;
             let mut bytes = vec![0; count];
-            timeout(deadline, file.read_exact(&mut bytes)).await??;
-            remaining -= count as u64;
+            // A read error after part of the chunk arrived still delivers
+            // that part; the absolute deadline and the file resurface the
+            // error on the next poll.
+            let mut filled = 0;
+            while filled < count {
+                let read = match timeout(deadline, file.read(&mut bytes[filled..])).await {
+                    Ok(Ok(read)) => read,
+                    Ok(Err(error)) | Err(error) if filled == 0 => return Err(error),
+                    Ok(Err(_)) | Err(_) => break,
+                };
+                if read == 0 {
+                    break;
+                }
+                filled += read;
+            }
+            if filled == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "short local range",
+                ));
+            }
+            bytes.truncate(filled);
+            remaining -= filled as u64;
             Ok(Some((
                 Bytes::from(bytes),
                 RangeSource::Local {
