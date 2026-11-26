@@ -2999,7 +2999,7 @@ mod prepublication_wait_tests {
             .split_once("pub(crate) async fn segment_for_publication_before(")
             .expect("wait function")
             .1
-            .split_once("let opened = if let Some(opened) = authenticated_cached_file.take()")
+            .split_once("let opened = if core_copy_output.is_some() {")
             .expect("the wait before any object is opened")
             .0;
         // The two branches that wait before this attempt has a served
