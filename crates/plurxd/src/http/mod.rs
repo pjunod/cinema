@@ -33,6 +33,7 @@ pub(crate) mod playback_handoffs;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod activity_starts;
 pub(crate) mod hls;
+mod hls_request_metrics;
 mod https_admin;
 pub(crate) mod images;
 pub(crate) mod index_coverage;
@@ -1274,6 +1275,8 @@ impl HttpRequestMetrics {
 
 static HTTP_REQUEST_METRICS: LazyLock<HttpRequestMetrics> =
     LazyLock::new(HttpRequestMetrics::default);
+static HLS_REQUEST_METRICS: hls_request_metrics::HlsRequestMetrics =
+    hls_request_metrics::HlsRequestMetrics::new();
 
 /// At most one 5xx access line per route group per second, carrying how many
 /// it swallowed since the last one.
@@ -1369,6 +1372,9 @@ struct MeasuredBody {
     /// Data bytes this body has yielded to the connection so far.
     delivered: u64,
     recorded: bool,
+    /// The HLS object class this response serves, when it serves one; its
+    /// delivered bytes are also credited there.
+    hls_object: Option<usize>,
 }
 
 impl MeasuredBody {
@@ -1386,7 +1392,13 @@ impl MeasuredBody {
             declared,
             delivered: 0,
             recorded: false,
+            hls_object: None,
         }
+    }
+
+    fn with_hls_object(mut self, hls_object: Option<usize>) -> Self {
+        self.hls_object = hls_object;
+        self
     }
 
     /// Whether everything this body promised has been handed over: it is at
@@ -1405,6 +1417,9 @@ impl MeasuredBody {
         self.recorded = true;
         self.metrics
             .record_body(self.group, self.started_at.elapsed(), complete);
+        if let Some(object) = self.hls_object {
+            HLS_REQUEST_METRICS.record_bytes(object, self.delivered);
+        }
     }
 }
 
@@ -1512,6 +1527,12 @@ async fn measure_http_request(
         .map_or(HTTP_ROUTE_GROUPS.len() - 1, |path| {
             http_route_group(path.as_str())
         });
+    // Classified from the template plus fixed-vocabulary path values only;
+    // see `hls_request_metrics::classify`.
+    let hls_object = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|path| hls_request_metrics::classify(path.as_str(), request.uri().path()));
     let method = http_method_index(request.method());
     let head_request = request.method() == Method::HEAD;
     let target = safe_trace_target(request.uri());
@@ -1525,6 +1546,9 @@ async fn measure_http_request(
     let response = next.run(request).await;
     let status = response.status();
     metrics.record_request(group, method, http_status_class_index(status));
+    if let Some(object) = hls_object {
+        HLS_REQUEST_METRICS.record_request(object, status);
+    }
     if status.is_server_error() {
         // Only 5xx, and at most one line per route group per second.
         // `logbuf::LogBuffer` is a bounded ring and it is the only log the
@@ -1547,11 +1571,15 @@ async fn measure_http_request(
         }
     }
     let declared = declared_body_length(head_request, status, &response);
-    response.map(|body| axum::body::Body::new(MeasuredBody::new(metrics, group, body, declared)))
+    response.map(|body| {
+        axum::body::Body::new(
+            MeasuredBody::new(metrics, group, body, declared).with_hls_object(hls_object),
+        )
+    })
 }
 
 pub(crate) fn prometheus_http_request_metrics() -> String {
-    HTTP_REQUEST_METRICS.render()
+    HTTP_REQUEST_METRICS.render() + &HLS_REQUEST_METRICS.render()
 }
 
 // ---------------------------------------------------------------------------

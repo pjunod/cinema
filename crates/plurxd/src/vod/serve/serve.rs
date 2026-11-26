@@ -1052,6 +1052,10 @@ impl VodServe {
             .open_materialized_select(rendition, index, &delivery, custody)
             .await?
         {
+            self.shared
+                .pool
+                .metrics_handle()
+                .count_segment_answer(crate::waitpool::VodSegmentAnswer::Stored);
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure_cause() {
@@ -1134,6 +1138,12 @@ impl VodServe {
             .open_materialized_select(rendition, index, &delivery, custody)
             .await?
         {
+            // Published between the first look and registration: a producer
+            // made it for this demand, not a stored hit.
+            self.shared
+                .pool
+                .metrics_handle()
+                .count_segment_answer(crate::waitpool::VodSegmentAnswer::Produced);
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure_cause() {
@@ -1168,7 +1178,13 @@ impl VodServe {
                     .open_materialized_select(rendition, index, &delivery, custody)
                     .await?
                 {
-                    Some(ready) => Ok(ready),
+                    Some(ready) => {
+                        self.shared
+                            .pool
+                            .metrics_handle()
+                            .count_segment_answer(crate::waitpool::VodSegmentAnswer::Produced);
+                        Ok(ready)
+                    }
                     // An eviction already committed before registration, or an
                     // external unlink, can still remove the file. Publication
                     // during this admitted wait is protected by its narrow pin.
