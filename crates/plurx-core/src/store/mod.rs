@@ -16,6 +16,7 @@
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
 pub mod analysis_coordination;
+mod analysis_source_scope;
 mod copy_index_v3;
 pub mod playback_device_caps;
 pub use playback_device_caps::PlaybackDeviceCaps;
