@@ -110,9 +110,9 @@ static void m7_pack_original_bl(const AVFrame *bl, uint8_t *out) {
 
 static void m7_sample_v1_frame(const struct m7_sample_v1 *sample, const AVFrame *bl,
                                const AVFrame *el, const AVDOVIMetadata *data,
-                               const struct refit_mapping *mapping, int64_t ordinal, const uint8_t *nalu, size_t nalu_size) {
-  refit_content(!el || refit_topleft_mapping(data),
-                "M7 FEL requires identity mapping and calibrated linear NLQ");
+                               const struct refit_exact *mapping, int64_t ordinal, const uint8_t *nalu, size_t nalu_size) {
+  // The caller admits a FEL frame's mapping through refit_exact_from_dovi.
+  need(!el || mapping, "M7 FEL frame has an admitted exact mapping");
   refit_content(refit_topleft_color(av_dovi_get_color(data)),
                 "M7 requires the calibrated full-range PQ DM matrices and offsets");
   refit_content(bl->color_primaries == AVCOL_PRI_BT2020 && bl->color_trc == AVCOL_TRC_SMPTE2084 &&

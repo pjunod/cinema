@@ -28,7 +28,7 @@ pub(super) use production::{prepare_authored, reclaim_candidate_media, PrepareEr
 type Hash = [u8; 32];
 
 const RECIPE_REVISION: u32 = 1;
-const INPUT_FORMAT: &str = "plurx-composed-model-b-topleft-v1";
+const INPUT_FORMAT: &str = "plurx-composed-model-b-topleft-v2";
 const MODE: &str = "lumazfsp";
 const GRID: usize = 16;
 const QG_SIZE: u32 = 32;

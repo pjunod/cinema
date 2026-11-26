@@ -5,7 +5,11 @@
 //! software-decoded ten-bit planar 4:2:0 pictures, with half-resolution EL,
 //! BT.2020 NCL/PQ video-range TopLeft declarations and the frozen M7 tap
 //! positions. The F+ arm uses the same coded base picture as the source.
-//! The reference is the software model of the FEL signal at that site.
+//! The reference is the software model of the FEL signal at that site: the
+//! source RPU's own mapping and LINEAR_DZ residual, composed exactly by
+//! [`composer::SourceComposition`] (Model B v2). v1 admitted only identity
+//! mapping with offset 512, slope 2048 and no threshold; on those RPUs v2 is
+//! the same arithmetic, sample for sample.
 //!
 //! Model transforms follow the diagnostic four_model_audit.py; the F+ bridge
 //! and reference mask follow served_refit_eval.py and m7_pair_compare.py.
@@ -15,15 +19,16 @@ use dolby_vision::rpu::{
     rpu_data_mapping::DoviMappingMethod, vdr_dm_data::VdrDmData,
 };
 
+use self::composer::{Composed, SourceComposition};
 use super::{
     dv_fel_qualification::{delta_e_itp, pq_eotf, rgb48_to_ictcp},
-    dv_processing::DvParsedMetadata,
     dv_refit::{ComposerCurves, ServableCurves},
     dv_refit_serve::written_curves,
 };
 
 pub mod aggregation;
 pub mod capture;
+pub mod composer;
 
 /// Version of the managed Rust RGB16 and Delta E ITP sample contract.
 pub const SCORING_REVISION: u32 = 1;
@@ -83,7 +88,7 @@ impl ModelSampleScore {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ScoreError {
-    #[error("M7 requires a fresh Profile 7 FEL RPU with calibrated color, identity mapping and linear NLQ")]
+    #[error("M7 requires a fresh Profile 7 FEL RPU with calibrated color and an exactly composed mapping with nonbinding linear-deadzone NLQ")]
     UnsupportedSourceRpu,
     #[error("M7 requires actual whole and seek Profile 8.1 mappings that match the pinned production curves and source color")]
     UnboundServedCurves,
@@ -157,37 +162,24 @@ impl DmCoefficients {
         })
     }
 
-    fn source(raw: &[u8]) -> Option<Self> {
+    /// The calibrated colour of a fresh P7 FEL RPU and its exact mapping.
+    fn source(raw: &[u8]) -> Option<(Self, SourceComposition)> {
+        if raw.len() > MAX_RPU_BYTES || !raw.starts_with(&RPU_NAL_HEADER) {
+            return None;
+        }
         // libdovi's parser panics on unsupported polynomial interpolation.
-        let source = std::panic::catch_unwind(|| DvParsedMetadata::from_raw_rpu(raw))
+        let rpu = std::panic::catch_unwind(|| DoviRpu::parse_unspec62_nalu(raw))
             .ok()?
             .ok()?;
-        let color = Self {
-            matrix_q13: source.nonlinear_matrix,
-            offsets_q28: source.nonlinear_offsets,
-            lms_q14: source.linear_matrix,
-        };
-        (source.depths == [10, 10, 12]
-            && source.coefficient_data_type == 0
-            && !source.bl_full_range
-            && source.luma_integer == [0, 1]
-            && source.luma_fraction == [0; 2]
-            && source.chroma_integer == [[0, 1]; 2]
-            && source.chroma_fraction == [[0; 2]; 2]
-            && source.nlq_offset == [512; 3]
-            && source.nlq_slope_integer == [0; 3]
-            && source.nlq_slope == [2048; 3]
-            && source.nlq_threshold_integer == [0; 3]
-            && source.nlq_threshold == [0; 3]
-            && source.nlq_max_integer == [0; 3]
-            && source.nlq_max_fraction == [1_048_576; 3]
-            && color == Self::CALIBRATED)
-            .then_some(color)
+        let composition = SourceComposition::from_rpu(&rpu)?;
+        let color = Self::from_dm(rpu.vdr_dm_data.as_ref()?)?;
+        (color == Self::CALIBRATED).then_some((color, composition))
     }
 }
 
 /// Score a frame with its published F+ curves and authored candidate color.
 pub struct FrameScorer {
+    source: SourceComposition,
     served_curves: ComposerCurves,
     color: ColorTransform,
 }
@@ -242,7 +234,8 @@ impl FrameScorer {
         served_seek: &[u8],
         pinned: &ServableCurves,
     ) -> Result<(Self, DmCoefficients), ScoreError> {
-        let color = DmCoefficients::source(source).ok_or(ScoreError::UnsupportedSourceRpu)?;
+        let (color, composition) =
+            DmCoefficients::source(source).ok_or(ScoreError::UnsupportedSourceRpu)?;
         let served_curves = fitted_curves(served_whole, color)
             .filter(|curves| curves == pinned.curves())
             .ok_or(ScoreError::UnboundServedCurves)?;
@@ -257,6 +250,7 @@ impl FrameScorer {
         }
         Ok((
             Self {
+                source: composition,
                 served_curves,
                 color: ColorTransform::new(color),
             },
@@ -289,7 +283,7 @@ impl FrameScorer {
         source_el: [u16; 3],
     ) -> (ModelInput, ModelInput) {
         (
-            ModelInput::from_residual(source_bl, source_el.map(|code| code as i16 - 512)),
+            ModelInput::from_composition(self.source.compose(source_bl, source_el)),
             ModelInput::from_served(source_bl, self.served_curves.reshape(source_bl)),
         )
     }
@@ -434,40 +428,62 @@ fn fitted_curves(raw: &[u8], color: DmCoefficients) -> Option<ComposerCurves> {
         .then_some(curves)
 }
 
+/// One arm's input to the four models: the 12-bit composition for Models
+/// B, C and D, and Model A's continuous signal before the offset, which is
+/// the mapped value in ten-bit code units read as code / 1023 plus the
+/// unrounded residual.
 #[derive(Clone, Copy)]
 struct ModelInput {
-    base: [u16; 3],
-    centered: [i16; 3],
     composed: [u16; 3],
+    continuous: [f64; 3],
 }
 
 impl ModelInput {
-    fn from_residual(base: [u16; 3], centered: [i16; 3]) -> Self {
-        let composed = std::array::from_fn(|i| {
-            let d = centered[i];
-            // floor((BL / 1024 + residual) * 4096 + 0.5), exactly.
-            (4 * base[i] as i16 + d + (d < 0) as i16).clamp(0, 4095) as u16
-        });
+    /// The source arm, from its exact composition.
+    fn from_composition(composed: Composed) -> Self {
         Self {
-            base,
-            centered,
-            composed,
+            composed: composed.codes,
+            continuous: std::array::from_fn(|i| {
+                composed.mapped_codes[i] / 1023.0 + composed.residual[i]
+            }),
+        }
+    }
+
+    /// Identity mapping with the frozen offset-512, slope-2048 residual,
+    /// as `centered` = EL - 512: the authored candidate arm (zero residual).
+    fn from_residual(base: [u16; 3], centered: [i16; 3]) -> Self {
+        Self {
+            composed: std::array::from_fn(|i| {
+                let d = centered[i];
+                // floor((BL / 1024 + residual) * 4096 + 0.5), exactly.
+                (4 * base[i] as i16 + d + (d < 0) as i16).clamp(0, 4095) as u16
+            }),
+            continuous: std::array::from_fn(|i| {
+                f64::from(base[i]) / 1023.0 + continuous_residual(centered[i])
+            }),
         }
     }
 
     fn from_served(base: [u16; 3], composed: [u16; 3]) -> Self {
-        let centered = std::array::from_fn(|i| {
-            let delta = composed[i] as i16 - 4 * base[i] as i16;
-            // The signed half-code NLQ formula gives negative deltas a
-            // different rounding boundary from positive deltas.
-            delta - (delta < 0) as i16
-        });
+        let centered = served_centered(base, composed);
         Self {
-            base,
-            centered,
             composed,
+            continuous: std::array::from_fn(|i| {
+                f64::from(base[i]) / 1023.0 + continuous_residual(centered[i])
+            }),
         }
     }
+}
+
+/// The F+ arm's residual as Model A reads it: the composition's offset from
+/// the base code, on the frozen identity-NLQ lattice.
+fn served_centered(base: [u16; 3], composed: [u16; 3]) -> [i16; 3] {
+    std::array::from_fn(|i| {
+        let delta = composed[i] as i16 - 4 * base[i] as i16;
+        // The signed half-code NLQ formula gives negative deltas a
+        // different rounding boundary from positive deltas.
+        delta - (delta < 0) as i16
+    })
 }
 
 struct ColorTransform {
@@ -504,10 +520,7 @@ impl ColorTransform {
             return Ok(self.integer_rgb(input.composed));
         }
         let signal = if model == Model::A {
-            std::array::from_fn(|i| {
-                f64::from(input.base[i]) / 1023.0 + continuous_residual(input.centered[i])
-                    - self.offsets_10[i]
-            })
+            std::array::from_fn(|i| input.continuous[i] - self.offsets_10[i])
         } else {
             std::array::from_fn(|i| f64::from(input.composed[i]) / 4095.0 - self.offsets_12[i])
         };

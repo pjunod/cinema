@@ -7,6 +7,34 @@ use super::*;
 use crate::transcode::dv_refit::{apply_to_rpu, servable, RefitCurves};
 use dolby_vision::rpu::ConversionMode;
 
+/// The runtime fixture's fresh P7 FEL RPU with identity mapping and the
+/// frozen offset-512, slope-2048 LINEAR_DZ residual.
+fn identity_source_rpu() -> DoviRpu {
+    let mut source = DoviRpu::parse_unspec62_nalu(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/frame-000.nal"
+    ))
+    .unwrap();
+    let mapping = source.rpu_data_mapping.as_mut().unwrap();
+    mapping.set_empty_p81_mapping();
+    let nlq = mapping.nlq.as_mut().unwrap();
+    nlq.nlq_offset = [512; 3];
+    nlq.vdr_in_max_int = [0; 3];
+    nlq.vdr_in_max = [1_048_576; 3];
+    nlq.linear_deadzone_slope_int = [0; 3];
+    nlq.linear_deadzone_slope = [2048; 3];
+    nlq.linear_deadzone_threshold_int = [0; 3];
+    nlq.linear_deadzone_threshold = [0; 3];
+    source.vdr_dm_data.as_mut().unwrap().set_p81_coeffs();
+    source.modified = true;
+    source
+}
+
+fn identity_source() -> SourceComposition {
+    let composition = SourceComposition::from_rpu(&identity_source_rpu()).unwrap();
+    assert!(composition.is_identity());
+    composition
+}
+
 #[test]
 fn signed_composition_and_quantization_boundaries() {
     assert_eq!(signed_q13_floor(-8193), -2);
@@ -26,9 +54,9 @@ fn signed_composition_and_quantization_boundaries() {
         [0, 4095, 4095]
     );
     let fitted = ModelInput::from_served([256; 3], [1023, 1024, 1025]);
-    assert_eq!(fitted.centered, [-2, 0, 1]);
+    assert_eq!(served_centered([256; 3], fitted.composed), [-2, 0, 1]);
     assert_eq!(
-        ModelInput::from_residual(fitted.base, fitted.centered).composed,
+        ModelInput::from_residual([256; 3], [-2, 0, 1]).composed,
         fitted.composed
     );
     assert_eq!(quantize_rgb([-0.25, 0.5, 1.25]), Some([0, 32768, 65535]));
@@ -96,6 +124,7 @@ fn matched_models_score_one_reference_and_use_its_band_for_both_arms() {
     assert_eq!(served_curves.reshape([256, 500, 540])[0], 0);
     assert_eq!(served_curves.reshape([384, 500, 540])[0], 4095);
     let scorer = FrameScorer {
+        source: identity_source(),
         served_curves,
         color: ColorTransform::new(DmCoefficients::CALIBRATED),
     };
@@ -138,22 +167,7 @@ fn matched_models_score_one_reference_and_use_its_band_for_both_arms() {
 
 #[test]
 fn frame_requires_both_served_mappings_and_the_authored_candidate_color() {
-    let mut source = DoviRpu::parse_unspec62_nalu(include_bytes!(
-        "../../../tests/fixtures/dv-runtime/frame-000.nal"
-    ))
-    .unwrap();
-    let mapping = source.rpu_data_mapping.as_mut().unwrap();
-    mapping.set_empty_p81_mapping();
-    let nlq = mapping.nlq.as_mut().unwrap();
-    nlq.nlq_offset = [512; 3];
-    nlq.vdr_in_max_int = [0; 3];
-    nlq.vdr_in_max = [1_048_576; 3];
-    nlq.linear_deadzone_slope_int = [0; 3];
-    nlq.linear_deadzone_slope = [2048; 3];
-    nlq.linear_deadzone_threshold_int = [0; 3];
-    nlq.linear_deadzone_threshold = [0; 3];
-    source.vdr_dm_data.as_mut().unwrap().set_p81_coeffs();
-    source.modified = true;
+    let mut source = identity_source_rpu();
     let source_nal = source.write_hevc_unspec62_nalu().unwrap();
 
     source.convert_with_mode(ConversionMode::To81).unwrap();

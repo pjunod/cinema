@@ -262,7 +262,7 @@ static void refit_sample(const AVFrame *bl, const AVFrame *el, int x, int y,
 }
 
 static void refit_topleft_pixels(const AVFrame *bl, const AVFrame *el,
-                                 const struct refit_mapping *mapping,
+                                 const struct refit_exact *mapping,
                                  const AVDOVIColorMetadata *color,
                                  uint8_t *pixels_out) {
   size_t pixels = (size_t)bl->width * bl->height;
@@ -272,7 +272,7 @@ static void refit_topleft_pixels(const AVFrame *bl, const AVFrame *el,
     for (int x = 0; x < bl->width; x++) {
       uint16_t base[3], enhancement[3], composed[3], rgb[3];
       refit_sample(bl, el, x, y, base, enhancement);
-      refit_compose(mapping, base, enhancement, composed);
+      refit_exact_compose(mapping, base, enhancement, composed);
       refit_topleft_rgb(color, composed, rgb);
       int64_t luma;
       uint16_t code = refit_topleft_luma(rgb, &luma);
@@ -291,11 +291,10 @@ static struct m7_sample_v1 refit_m7_sample;
 
 static void refit_topleft_frame(const AVFrame *bl, const AVFrame *el,
                               const AVDOVIMetadata *data,
-                              const struct refit_mapping *mapping, int64_t ordinal,
+                              const struct refit_exact *mapping, int64_t ordinal,
                               const uint8_t *nalu, size_t nalu_size) {
   const AVDOVIColorMetadata *color = av_dovi_get_color(data);
-  refit_content(refit_topleft_mapping(data), "TopLeft v1 requires identity mapping and calibrated linear NLQ");
-  refit_content(refit_topleft_color(color), "TopLeft v1 requires the calibrated Q13/Q28 full-range color matrix");
+  refit_content(refit_topleft_color(color), "TopLeft v2 requires the calibrated Q13/Q28 full-range color matrix");
   size_t pixels = (size_t)bl->width * bl->height;
   size_t bytes = 3 * pixels;
   if (!refit_records) {
@@ -352,6 +351,14 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
   const char *refused = refit_mapping_from_dovi(data, &mapping);
   refit_content(refused == NULL, refused ? refused : "");
   bool refresh = refit_scene_refresh(nalu, raw->size + 2, data);
+  // M7 and the TopLeft export compose Model B exactly; the F+ statistics
+  // below keep refit_compose's binary64 renderer model.
+  struct refit_exact exact;
+  memset(&exact, 0, sizeof(exact));
+  if (refit_m7 || refit_topleft) {
+    const char *inexact = refit_exact_from_dovi(data, &exact);
+    refit_content(inexact == NULL, inexact ? inexact : "");
+  }
 
   int w = bl->width, h = bl->height, ew = el->width, eh = el->height;
   // The frozen pairing covers a half-resolution EL only.
@@ -361,13 +368,13 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
        "software-decoded planar ten-bit layers");
   if (refit_m7) {
-    m7_sample_v1_frame(&refit_m7_sample, bl, el, data, &mapping, ordinal, nalu, raw->size + 2);
+    m7_sample_v1_frame(&refit_m7_sample, bl, el, data, &exact, ordinal, nalu, raw->size + 2);
     refit_end_pts = bl->pts + bl->duration;
     refit_composed++;
     return;
   }
   if (refit_topleft) {
-    refit_topleft_frame(bl, el, data, &mapping, ordinal, nalu, raw->size + 2);
+    refit_topleft_frame(bl, el, data, &exact, ordinal, nalu, raw->size + 2);
     refit_composed++;
     return;
   }

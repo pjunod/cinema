@@ -19,7 +19,10 @@ use sha2::{Digest as _, Sha256};
 use std::io::{self, Write};
 
 pub const PROBE_KEY: &str = "plurx_dv_m7_v1";
-pub const MODEL_VERSION: &str = "plurx-m7-four-model-v1";
+/// v2 composes the source arm exactly for every mapping the helper's
+/// refit_exact.h admits (any pivots, polynomial and MMR pieces, nonbinding
+/// LINEAR_DZ). v1 admitted identity mapping only; its receipts never bind v2.
+pub const MODEL_VERSION: &str = "plurx-m7-four-model-v2";
 pub const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 pub const MAX_RECENT_RECEIPTS: usize = 8;
 pub(crate) const SCHEMA: u32 = 1;

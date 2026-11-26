@@ -88,8 +88,10 @@ governs evaluation and full-title promotion.
 
 ## CPU TopLeft encode input
 
-The `plurx-composed-model-b-topleft-v1` export applies the current FEL
-composition at every luma site, then packs Model B's PQ RGB16 through
+The `plurx-composed-model-b-topleft-v2` export (v1 before Model B v2; the
+Michael trial's frozen exports are v1) applies the exact FEL composition of
+[Model B v2](../../../../docs/streaming/M7-MODEL-B-GENERAL-COMPOSITION.md)
+at every luma site, then packs Model B's PQ RGB16 through
 the BT.2020 NCL limited-range equations. The integer divisions round to
 nearest with ties upward for Y, Cb and Cr. The RGB16 computation retains
 Model B's signed floor shift. Chroma uses the even/even luma coordinates
@@ -98,7 +100,9 @@ Y, Cb, Cr with ten significant bits per sample. The JSONL sidecar carries
 PQ, BT.2020, NCL, video range, TopLeft and original source clock metadata.
 
 This version requires the calibrated Michael source's stream declarations,
-identity mapping, linear NLQ, exact YCC and LMS matrices and EOTF marker.
+exact YCC and LMS matrices and EOTF marker, and a mapping that Model B v2
+composes exactly (v1 required identity mapping and linear NLQ). For an
+identity source, v2 writes the same bytes as v1.
 The codec declarations and source RPUs jointly bound the color
 interpretation. Any incompatible source is refused. The author and encoder
 must carry the output metadata explicitly. A raw export has no container

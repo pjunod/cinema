@@ -1431,17 +1431,17 @@ mod tests {
         ));
     }
 
-    /// Eclipse's FEL uses MMR chroma reshaping, which the frozen model does
-    /// not compose. The sample helper refuses it during calibration, before
+    /// A FEL mapping outside the exact Model B composition (here a binding
+    /// vdr_in_max) is refused by the sample helper during calibration, before
     /// any comparison; that refusal must settle the title, not requeue copies.
     #[test]
     fn a_sample_helper_content_refusal_settles_and_other_comparison_errors_defer() {
         let refused = m7_comparison::Error::Content(
-            "Segment refused: M7 FEL requires identity mapping and calibrated linear NLQ".into(),
+            "Segment refused: M7 exact composition requires nonbinding linear-deadzone NLQ".into(),
         );
         assert!(matches!(
             comparison_error(refused),
-            EvaluationError::Unsupported(message) if message.contains("identity mapping")
+            EvaluationError::Unsupported(message) if message.contains("exact composition")
         ));
         for error in [
             m7_comparison::Error::Busy("scratch".into()),
