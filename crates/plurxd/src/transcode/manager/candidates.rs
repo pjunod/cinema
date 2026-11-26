@@ -2155,6 +2155,7 @@ impl TranscodeManager {
             catalog_query: None,
             display_target: None,
             display_target_note: None,
+            dv_row_facts: None,
             ordinary_request: None,
             retained_output: None,
             canonical_caps: None,

@@ -833,7 +833,7 @@ fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
         file.dolby_vision.profile = Some(8);
         file.dolby_vision.rpu_present = Some(true);
         serde_json::to_value(DecisionResponse {
-            enhancement: direct_enhancement(&file, &decision, &delivery),
+            enhancement: direct_enhancement(&file, &decision, &delivery, None),
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -924,7 +924,7 @@ fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     file.dolby_vision.el_present = Some(false);
     let decision = planned(playback::PlaybackMethod::DirectPlay);
     let (_, delivery) = delivery_plan(file.id, &decision, None, false);
-    let enhancement = direct_enhancement(&file, &decision, &delivery)
+    let enhancement = direct_enhancement(&file, &decision, &delivery, None)
         .expect("preserved original Dolby Vision exposes dynamic metadata");
     assert_eq!(enhancement.active, vec![EnhancementBadge::Dyn]);
     assert!(!enhancement.requires_effective_processing);
@@ -941,27 +941,27 @@ fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     for rpu_present in [None, Some(false)] {
         let mut unknown_metadata = file.clone();
         unknown_metadata.dolby_vision.rpu_present = rpu_present;
-        assert!(direct_enhancement(&unknown_metadata, &decision, &delivery).is_none());
+        assert!(direct_enhancement(&unknown_metadata, &decision, &delivery, None).is_none());
     }
     let mut unknown_profile = file.clone();
     unknown_profile.dolby_vision.profile = None;
-    assert!(direct_enhancement(&unknown_profile, &decision, &delivery).is_none());
+    assert!(direct_enhancement(&unknown_profile, &decision, &delivery, None).is_none());
     let mut ordinary_hdr = file.clone();
     ordinary_hdr.hdr = Some("hdr10".into());
-    assert!(direct_enhancement(&ordinary_hdr, &decision, &delivery).is_none());
+    assert!(direct_enhancement(&ordinary_hdr, &decision, &delivery, None).is_none());
 
     let mut fallback = decision.clone();
     fallback.delivered_dynamic_range = "hdr10";
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
     fallback = decision.clone();
     fallback.preserve_dolby_vision = false;
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
     fallback = decision.clone();
     fallback.delivered_dolby_vision_profile = Some(5);
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
     fallback = decision.clone();
     fallback.convert_dolby_vision = true;
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
 
     for method in [
         playback::PlaybackMethod::Remux,
@@ -969,8 +969,8 @@ fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     ] {
         let session_decision = planned(method);
         let (_, session_delivery) = delivery_plan(file.id, &session_decision, None, true);
-        assert!(direct_enhancement(&file, &session_decision, &session_delivery).is_none());
-        assert!(direct_enhancement(&file, &decision, &session_delivery).is_none());
+        assert!(direct_enhancement(&file, &session_decision, &session_delivery, None).is_none());
+        assert!(direct_enhancement(&file, &decision, &session_delivery, None).is_none());
     }
 }
 

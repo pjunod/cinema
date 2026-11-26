@@ -147,7 +147,10 @@ function playbackEnhancementFromWire(raw){
   // text; only the pills are limited to the badges `known` lists.
   const details=raw.details.filter(d=>d&&typeof d.badge==='string'&&typeof d.text==='string'
     &&d.text.length>0&&d.text.length<=240).map(d=>({badge:d.badge,active:d.active===true,text:d.text}));
-  return {active,details,requires_effective_processing:raw.requires_effective_processing===true};
+  // The Dolby Vision metadata row of an unprocessed delivery rides along
+  // unread; playerDvRows checks it when it is shown.
+  const dv_metadata=raw.dv_metadata&&typeof raw.dv_metadata==='object'?raw.dv_metadata:null;
+  return {active,details,requires_effective_processing:raw.requires_effective_processing===true,dv_metadata};
 }
 // A late optional-upgrade refusal belongs only to the session generation
 // that attempted it; it changes explanation text, never enhancement badges.
@@ -229,6 +232,35 @@ function playerEnhancementRow(p){
   const p81=playerEffectiveProcessing(p)?.profile81_reconstructed===true;
   return {value:p81?'Profile 8.1 FEL':enhancement.active.length?enhancement.active.join(' · '):'None active',
     note:enhancement.details.length?enhancement.details.map(d=>d.text).join('\n'):null};
+}
+// The Playback info `Dolby Vision metadata` and `Display target` rows. The
+// server writes every sub-row's text (docs/API.md); this pairs it with the
+// contract's sub-row labels and refuses what it cannot show, deriving nothing.
+// A processed delivery's rows belong to its current, generation-matching
+// report and clear with it; any other delivery's come with the enhancement.
+function dvRowText(text){
+  return typeof text==='string'&&text.trim().length>0&&text.length<=512
+    &&!/[\u0000-\u001f\u007f-\u009f]/.test(text)?text:null;
+}
+function dvSubRows(id,texts){
+  const field=typeof PLAYBACK_INFO_FIELDS!=='undefined'?PLAYBACK_INFO_FIELDS.find(f=>f.id===id):null;
+  const labels=field?.sub_rows;
+  if(!Array.isArray(labels)||labels.length!==texts.length||!texts.every(dvRowText)) return null;
+  return labels.map((label,i)=>`${label}: ${texts[i]}`).join('\n');
+}
+function playerDvRows(p){
+  const enhancement=p?.enhancement;
+  if(!enhancement) return {metadata:null,target:null};
+  const report=enhancement.requires_effective_processing?playerEffectiveProcessing(p):null;
+  const metadata=enhancement.requires_effective_processing?report?.dv_metadata:enhancement.dv_metadata;
+  const target=report?.display_target;
+  const row=(value,note)=>value&&note?{value,note}:null;
+  return {
+    metadata:metadata&&typeof metadata==='object'?row(dvRowText(metadata.applied?.text),
+      dvSubRows('dv_metadata',[metadata.in_file?.text,metadata.applied?.text,metadata.left_for_display?.text])):null,
+    target:target&&typeof target==='object'?row(dvRowText(target.mapped_for_text),
+      dvSubRows('display_target',[target.reported_peak_text,target.mapped_for_text,target.title_peak_text])):null
+  };
 }
 function enhancementPills(enhancement){
   if(!enhancement||!enhancement.active.length) return '';

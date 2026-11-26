@@ -122,18 +122,7 @@ pub(crate) struct ProcessingSkip {
 
 impl ProcessingSkip {
     pub(crate) fn owner_header(&self) -> Option<String> {
-        let json = serde_json::to_string(self).ok()?;
-        let mut ascii = String::new();
-        for ch in json.chars() {
-            if ch.is_ascii() {
-                ascii.push(ch);
-            } else {
-                for unit in ch.encode_utf16(&mut [0; 2]) {
-                    ascii.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-        (ascii.len() <= 4096).then_some(ascii)
+        ascii_header_json(self)
     }
 
     pub(crate) fn from_owner_wire(bytes: &[u8], generation: &str) -> Option<Self> {
@@ -1364,3 +1353,21 @@ fn trial_proved_production(
 #[cfg(test)]
 #[path = "processed_upgrade_tests.rs"]
 pub(in crate::http) mod tests;
+
+/// JSON for a bounded private owner header: header values are visible ASCII,
+/// so every other character travels as a JSON `\u` escape, which the
+/// receiving `serde_json` parse restores. `None` past 4096 bytes.
+pub(crate) fn ascii_header_json(value: &impl serde::Serialize) -> Option<String> {
+    let json = serde_json::to_string(value).ok()?;
+    let mut ascii = String::with_capacity(json.len());
+    for ch in json.chars() {
+        if ch.is_ascii() {
+            ascii.push(ch);
+        } else {
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                ascii.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    (ascii.len() <= 4096).then_some(ascii)
+}

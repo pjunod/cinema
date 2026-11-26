@@ -3043,8 +3043,9 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             )
         })
         .unwrap_or((None, None));
+    let title_levels = super::create::session_title_levels(state, Some(source)).await;
     let mut enhancement = grade.and_then(|grade| {
-        super::create::session_enhancement(
+        super::create::session_enhancement_with_levels(
             Some(source),
             &staged_request.kind,
             grade,
@@ -3053,6 +3054,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             None,
             None,
             None,
+            title_levels.as_ref(),
         )
     });
     // Ordinary prepared selections can attach a processed output without

@@ -101,7 +101,9 @@ BUILD_SPECS = {
     # registry package located through cargo metadata; no native recipe changes.
     # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
     # the web-unit-check recipe (a Node web test); no native recipe changes.
-    'Makefile': '562fe36a23271d6bbf6654768af01d3fbf226bcaea9e9de1b8857f05e3f946b9',
+    # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
+    # no native recipe changes.
+    'Makefile': 'c4ad23b20355dfea405ddc07ceab1328932dd5a348a7787296dcf53a150bfd7d',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,

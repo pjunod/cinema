@@ -177,6 +177,51 @@ internal fun enhancementSummary(enhancement: tv.plurx.app.data.PlaybackEnhanceme
 internal fun enhancementLines(enhancement: tv.plurx.app.data.PlaybackEnhancement?): List<String>? =
     enhancement?.details?.map { it.text }?.takeIf { it.isNotEmpty() }
 
+/** One Playback info row of server-written text: [value] and its sub-row [note] lines. */
+internal data class DvInfoRow(val value: String, val note: String)
+
+internal data class DvInfoRows(val metadata: DvInfoRow? = null, val target: DvInfoRow? = null)
+
+/** Sub-row labels, in order; PlaybackInfoContractTest verifies them against the shared contract. */
+internal val DvMetadataSubRowLabels = listOf("In the file", "Applied by Cinema", "Left for the display")
+internal val DisplayTargetSubRowLabels = listOf("Reported peak", "Mapped for", "Title peak")
+
+/** Non-blank, at most 512 characters, no control characters. */
+internal fun dvRowText(text: String?): String? = text?.takeIf { value ->
+    value.isNotBlank() && value.length <= 512 &&
+        value.none { it.code <= 0x1F || it.code in 0x7F..0x9F }
+}
+
+private fun dvInfoRow(labels: List<String>, texts: List<String?>, value: String?): DvInfoRow? {
+    if (texts.any { dvRowText(it) == null }) return null
+    return DvInfoRow(value ?: return null, labels.zip(texts).joinToString("\n") { (label, text) -> "$label: $text" })
+}
+
+/**
+ * The Dolby Vision metadata and display target rows. A processed delivery's come
+ * only from its current, generation-matching report; any other delivery's
+ * metadata rides the enhancement and it has no display target.
+ */
+internal fun dvInfoRows(
+    enhancement: tv.plurx.app.data.PlaybackEnhancement?,
+    report: tv.plurx.app.data.EffectiveProcessingReport?,
+    activeGeneration: String?,
+    delivered: String?,
+): DvInfoRows {
+    enhancement ?: return DvInfoRows()
+    val current = report?.takeIf { it.matches(activeGeneration, delivered) }
+    val metadata = if (enhancement.requiresEffectiveProcessing) current?.dvMetadata else enhancement.dvMetadata
+    val target = current?.displayTarget.takeIf { enhancement.requiresEffectiveProcessing }
+    return DvInfoRows(
+        metadata = metadata?.let {
+            dvInfoRow(DvMetadataSubRowLabels, listOf(it.inFile, it.applied, it.leftForDisplay), dvRowText(it.applied))
+        },
+        target = target?.let {
+            dvInfoRow(DisplayTargetSubRowLabels, listOf(it.reportedPeak, it.mappedFor, it.titlePeak), dvRowText(it.mappedFor))
+        },
+    )
+}
+
 private fun enhancementSpokenName(badge: tv.plurx.app.data.EnhancementBadge): String = when (badge) {
     tv.plurx.app.data.EnhancementBadge.FEL -> "Dolby Vision full enhancement layer active"
     tv.plurx.app.data.EnhancementBadge.RPU -> "Dolby Vision RPU reshaping active"
