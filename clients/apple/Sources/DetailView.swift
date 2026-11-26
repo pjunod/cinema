@@ -266,6 +266,52 @@ struct PlaysOnList: View {
     }
 }
 
+/// The versions of a title as rows on the page rather than a menu: an iOS
+/// menu shows only a row's first line and cuts long release names, so each
+/// version's Dolby Vision line from the server would never be seen there.
+struct VersionChoiceList: View {
+    struct Row: Identifiable, Equatable {
+        let id: Int
+        let title: String
+        let detail: String?
+        let selected: Bool
+    }
+
+    let files: [MediaFile]
+    let selectedID: Int
+    let choose: (Int) -> Void
+
+    static func rows(_ files: [MediaFile], selectedID: Int) -> [Row] {
+        files.map { Row(id: $0.id, title: $0.filename ?? "Version \($0.id)", detail: $0.dvFacts, selected: $0.id == selectedID) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Version").font(.caption).foregroundStyle(Palette.muted)
+            ForEach(Self.rows(files, selectedID: selectedID)) { row in
+                Button { choose(row.id) } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: row.selected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(row.selected ? Palette.accent : Palette.muted)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.title).font(.callout).fixedSize(horizontal: false, vertical: true)
+                            if let detail = row.detail {
+                                Text(detail).font(.caption).foregroundStyle(Palette.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(row.selected ? .isSelected : [])
+            }
+        }
+    }
+}
+
 #if os(tvOS)
 /// The selected version's Dolby Vision line and how it plays on each device,
 /// in the quiet style of the cost notice above it: the tvOS hero has no media
@@ -1289,15 +1335,7 @@ struct DetailView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Media").font(.headline)
                         if files.count > 1 {
-                            Picker("Version", selection: Binding(get: { file.id }, set: { selectedMediaFileID = $0 })) {
-                                ForEach(files) { version in
-                                    VStack(alignment: .leading) {
-                                        Text(version.filename ?? "Version \(version.id)")
-                                        if let facts = version.dvFacts { Text(facts) }
-                                    }
-                                    .tag(version.id)
-                                }
-                            }
+                            VersionChoiceList(files: files, selectedID: file.id) { selectedMediaFileID = $0 }
                         }
                         ForEach(Self.episodeMediaInfoRows(file).filter { $0.label != "Audio" && $0.label != "File" }) { row in
                             VStack(alignment: .leading, spacing: 4) { Text(row.label).font(.caption).foregroundStyle(Palette.muted); Text(row.value).font(.callout) }
