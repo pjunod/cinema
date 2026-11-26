@@ -2,11 +2,16 @@ use super::*;
 use plurx_core::adaptive_resources::{ResourceLedger, ResourceVector, WorkloadDemand};
 use plurx_core::process::observation::Metric;
 
+/// A custodied root is charged its three retained pipe ends (stdin, stdout,
+/// stderr) before launch, as every physical root reservation is.
+const ROOT_HANDLES: u64 = 3;
+
 fn ledger() -> ResourceLedger {
     ResourceLedger::new(
         1,
         Metric::Known(ResourceVector {
             processes: 2,
+            handles: ROOT_HANDLES,
             ..Default::default()
         }),
     )
@@ -30,6 +35,7 @@ where
         .reserve(WorkloadDemand {
             resources: Metric::Known(ResourceVector {
                 processes: 1,
+                handles: ROOT_HANDLES,
                 ..Default::default()
             }),
             limit_epoch: 1,
