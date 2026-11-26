@@ -186,6 +186,11 @@ pub(super) fn rolling_scratch_envelope(
 }
 
 impl RollingScratchSizing {
+    /// The most one session's scratch may be granted under `limits`.
+    pub(super) fn session_ceiling(limits: AheadLimits) -> i64 {
+        Self::ceiling(limits)
+    }
+
     fn ceiling(limits: AheadLimits) -> i64 {
         let session_ceiling = if limits.max_bytes > 0 {
             limits.max_bytes
