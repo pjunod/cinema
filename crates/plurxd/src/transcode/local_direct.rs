@@ -178,6 +178,55 @@ impl TranscodeManager {
             .expect("one original sealed local direct worker")
     }
 
+    /// The one direct-source request a local direct play makes: one body of
+    /// 64 bounded 64 KiB chunks, charged at the exact minimum footprint of the
+    /// retained path, the formatted media id and this module's owners, at the
+    /// capacity epoch the caller just refreshed.
+    pub(crate) fn local_direct_request(
+        binding: DirectSourceBinding,
+        file: &MediaFile,
+        epoch: u64,
+    ) -> Option<DirectSourceRequest> {
+        const CHUNK: usize = 64 * 1024;
+        const CHUNKS: usize = 64;
+        let media_file_id = file.id.to_string();
+        let path_len = file.path.to_str()?.len();
+        let application_owner_bytes = Self::local_direct_application_bytes()?;
+        let memory = DirectSourceRequest::minimum_memory_bytes(
+            path_len,
+            // Retain and charge the same formatted String allocation.
+            media_file_id.capacity(),
+            1,
+            CHUNK,
+            CHUNKS,
+            application_owner_bytes,
+        )?;
+        Some(DirectSourceRequest {
+            binding,
+            path: file.path.clone(),
+            media_file_id,
+            scanner_size: file.size,
+            scanner_mtime: file.mtime,
+            demand: WorkloadDemand {
+                resources: Metric::Known(ResourceVector {
+                    cpu_ns_per_second: 0,
+                    peak_memory_bytes: memory,
+                    handles: 1,
+                    processes: 0,
+                    hardware_slots: 0,
+                    tuner_slots: 0,
+                    scratch_bytes: 0,
+                }),
+                limit_epoch: epoch,
+                trial: false,
+            },
+            max_bodies: 1,
+            chunk_bytes: CHUNK,
+            outstanding_chunks: CHUNKS,
+            application_owner_bytes,
+        })
+    }
+
     /// Register original worker and memory lease before native entry. Failure
     /// after preparation remains in this manager for same-operation cleanup.
     pub(crate) async fn open_local_direct(
@@ -187,8 +236,6 @@ impl TranscodeManager {
         file: &MediaFile,
         deadline: Instant,
     ) -> Result<LocalDirectOpen, LocalDirectFailure> {
-        const CHUNK: usize = 64 * 1024;
-        const CHUNKS: usize = 64;
         if file.id <= 0 || Instant::now() >= deadline {
             return Err(LocalDirectFailure::Unavailable);
         }
@@ -197,32 +244,7 @@ impl TranscodeManager {
             .refresh_admission_capacity(deadline)
             .await
             .map_err(|_| ())?;
-        let media_file_id = file.id.to_string();
-        let path_len = file.path.to_str().ok_or(())?.len();
-        let application_owner_bytes = Self::local_direct_application_bytes().ok_or(())?;
-        let memory = DirectSourceRequest::minimum_memory_bytes(
-            path_len,
-            // Retain and charge the same formatted String allocation.
-            media_file_id.capacity(),
-            1,
-            CHUNK,
-            CHUNKS,
-            application_owner_bytes,
-        )
-        .ok_or(())?;
-        let demand = WorkloadDemand {
-            resources: Metric::Known(ResourceVector {
-                cpu_ns_per_second: 0,
-                peak_memory_bytes: memory,
-                handles: 1,
-                processes: 0,
-                hardware_slots: 0,
-                tuner_slots: 0,
-                scratch_bytes: 0,
-            }),
-            limit_epoch: epoch,
-            trial: false,
-        };
+        let request = Self::local_direct_request(binding, file, epoch).ok_or(())?;
         let mut protection = self
             .admissions()
             .acquire_protected_playback_lane(deadline)
@@ -230,26 +252,12 @@ impl TranscodeManager {
             .map_err(|_| LocalDirectFailure::Unavailable)?;
         // Claim an inline slot and keep its mutex through synchronous core
         // prepare and original task registration. No await separates them.
-        let observe_service = matches!(&binding, DirectSourceBinding::Local { .. });
+        let observe_service = matches!(&request.binding, DirectSourceBinding::Local { .. });
         let (owner, entry) = {
             let mut entries = self.local_direct_owners.entries.lock().map_err(|_| ())?;
             let slot = entries.iter_mut().find(|slot| slot.is_none()).ok_or(())?;
             let (owner, lease) = runtime
-                .prepare_direct_source(
-                    DirectSourceRequest {
-                        binding,
-                        path: file.path.clone(),
-                        media_file_id,
-                        scanner_size: file.size,
-                        scanner_mtime: file.mtime,
-                        demand,
-                        max_bodies: 1,
-                        chunk_bytes: CHUNK,
-                        outstanding_chunks: CHUNKS,
-                        application_owner_bytes,
-                    },
-                    deadline,
-                )
+                .prepare_direct_source(request, deadline)
                 .map_err(|_| ())?;
             let owner = Arc::new(owner);
             let service_generation = if observe_service {
@@ -459,3 +467,7 @@ impl TranscodeManager {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "local_direct/tests.rs"]
+mod tests;
