@@ -390,10 +390,9 @@ impl ArtifactManifest {
         incoming_logical: &Option<LogicalOutput>,
     ) -> bool {
         incoming_logical.as_ref() == Some(&self.logical)
-            && rendition
-                .source
-                .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == self.origin.source_version)
+            && rendition.source.as_ref().is_some_and(|s| {
+                s.unchanged_in_place() && s.object_version() == self.origin.source_version
+            })
             && rendition.playlist.as_slice() == self.origin.playlist.as_slice()
     }
     #[cfg(test)]

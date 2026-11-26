@@ -16,6 +16,13 @@
 > dependency audit remains. These rules supersede the older automatic
 > qualification and post-merge instructions below pending their rewrite.
 
+> **Requested-lane amendment, 2026-11-24:** marking ready now starts only the
+> cheap gate (paperwork, scope, fast Rust fmt/Clippy, web syntax and types,
+> Android compile), and so does every later push. The heavy jobs and the
+> `Main promotion gate` run once per head when a session adds the `lane`
+> label (`ci-fleet lane request`); `scripts/land` then requires that gate.
+> The merge train is retired. [docs/ci/REQUESTED-LANE.md](ci/REQUESTED-LANE.md).
+
 > **Test-lane amendment, 2026-10-07, superseding 2026-09-20:** The ready
 > main-bound fast Rust job compiles every target and runs workspace and
 > vendored Hiqlite Clippy on the pinned FFmpeg 6 runner surface. The full

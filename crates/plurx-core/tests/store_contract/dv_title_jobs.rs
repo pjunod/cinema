@@ -1670,6 +1670,18 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             matches!(contend, ClaimOutcome::Contended),
             "{backend}: {contend:?}"
         );
+        // The expired-lease sweep honours the same charged reader.
+        store
+            .requeue_expired_running_jobs(expiry)
+            .await
+            .expect("sweep while the reader is charged");
+        let waiting = store
+            .background_job(&old.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(waiting.state, JobState::Running, "{backend}");
+        assert_eq!(waiting.revision, old.revision, "{backend}");
         assert!(store
             .resolve_background_source_custody(custody.clone())
             .await
@@ -2639,6 +2651,186 @@ async fn title_manual_cancellation_suppresses_same_viewer_renewal_until_new_inte
                 .active_job_id
                 .as_deref(),
             Some(id.as_str())
+        );
+    })
+    .await;
+}
+
+/// A per-file reader reserves only the library root holding its file, so one
+/// disk's maintenance reader does not hold back work on another disk of the
+/// same library. A file under no root still reserves every root.
+#[tokio::test]
+async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    use plurx_core::store::NewAnalysisRequest;
+
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let mut domains = Vec::new();
+        let mut libraries = Vec::new();
+        for (name, roots) in [("Two disks", ["/scope-a", "/scope-b"])] {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: name.into(),
+                    kind: LibraryKind::Movies,
+                    paths: roots.iter().map(Into::into).collect(),
+                    anime: false,
+                })
+                .await
+                .expect("two-root library");
+            for root in roots {
+                domains.push(StorageDomainMapping {
+                    library_id: library.id,
+                    root_path: root.into(),
+                    domain_id: format!("disk-{}", &root[7..]),
+                });
+            }
+            libraries.push(library.id);
+        }
+        assert!(super::set_storage_domains(store.as_ref(), domains, 1_000)
+            .await
+            .expect("install domains"));
+        let mut files = std::collections::HashMap::new();
+        for (library, path) in [
+            (libraries[0], "/scope-a/a.mkv"),
+            (libraries[0], "/scope-b/b.mkv"),
+            (libraries[0], "/scope-b/c.mkv"),
+            (libraries[0], "/scope-x/z.mkv"),
+            (libraries[0], "/scope-a/e.mkv"),
+        ] {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: path.into(),
+                    year: Some(2024),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let file = store
+                .upsert_file(item, path, 10_000, 1, &probe())
+                .await
+                .expect("file");
+            files.insert(path, file);
+        }
+        let held = |holders: &[plurx_core::store::background_jobs::SourceIoHolder], work: &str| {
+            let mut keys = holders
+                .iter()
+                .filter(|holder| holder.work_id == work)
+                .map(|holder| holder.resource_key.clone())
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        };
+
+        // Analysis hashes only its own file, on disk-a of the same library.
+        let analysis = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: format!("scope-analysis-{backend}"),
+                file_id: files["/scope-a/e.mkv"],
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: "b".repeat(64),
+                video_identity: String::new(),
+                requested_generation: "scope-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "scope-node".to_owned(),
+                not_before_ms: 1_000,
+                created_at_ms: 1_000,
+            })
+            .await
+            .expect("enqueue analysis");
+        let claimed = store
+            .claim_analysis_request("scope-node", 1_001, 31_001)
+            .await
+            .expect("claim analysis")
+            .expect("analysis claims its disk");
+        assert_eq!(claimed.request_id, analysis.request_id, "{backend}");
+        let holders = store.source_io_holders(1_001).await.expect("holders");
+        assert_eq!(
+            held(&holders, &analysis.request_id),
+            ["source_io:disk-a"],
+            "{backend}: analysis reserves only the disk holding its file"
+        );
+
+        let admission = |job_id: String, now: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                let job = store
+                    .background_job(&job_id)
+                    .await
+                    .expect("read")
+                    .expect("job");
+                store
+                    .explain_job_claim(ClaimJob {
+                        job_id,
+                        expected_revision: job.revision,
+                        node_id: "title-node".into(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        claim_id: uuid::Uuid::new_v4().to_string(),
+                        kind: JobKind::DvTitleScan,
+                        payload_version: 1,
+                        now_ms: now,
+                        dispatched_at_ms: now,
+                    })
+                    .await
+                    .expect("read admission")
+                    .expect("known title")
+                    .block
+            }
+        };
+        let queued = |path: &'static str, now: i64| {
+            let store = Arc::clone(&store);
+            let scanner = scanner.clone();
+            let file = files[path];
+            async move {
+                let demand = bound(&store, file, &scanner).await;
+                let EnqueueOutcome::Accepted { job_id, .. } =
+                    enqueue(&store, &demand, &scanner, now).await
+                else {
+                    panic!("new title demand must enqueue: {path}");
+                };
+                job_id
+            }
+        };
+
+        // The production starvation: with disk-a's analysis running, a title
+        // scan on disk-b of the same library still claims (v6 refused it).
+        let (_, busy) = active(&store, files["/scope-b/b.mkv"], &scanner, 1_002).await;
+        let holders = store.source_io_holders(1_002).await.expect("holders");
+        assert_eq!(
+            held(&holders, &busy.id),
+            ["source_io:disk-b"],
+            "{backend}: a title scan reserves only the disk holding its file"
+        );
+        // A file under no root still needs every root, so disk-b blocks it.
+        let nowhere = queued("/scope-x/z.mkv", 1_003).await;
+        assert_eq!(
+            admission(nowhere, 1_003).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: a file under no root keeps every root"
+        );
+        // Disk-a's analysis is its one maintenance reader, so a title scan
+        // there waits.
+        let analysis_disk = queued("/scope-a/a.mkv", 1_004).await;
+        assert_eq!(
+            admission(analysis_disk, 1_004).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: disk-a keeps one maintenance reader"
+        );
+        // A second reader on disk-b is still refused.
+        let same_disk = queued("/scope-b/c.mkv", 1_005).await;
+        assert_eq!(
+            admission(same_disk, 1_005).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: disk-b keeps one maintenance reader"
         );
     })
     .await;

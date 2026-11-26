@@ -3536,8 +3536,6 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "openraft"
 version = "0.9.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a97014fb78acb77be3a40ac2da305f6dd3a6b243f3a908ace87d29b3972eaafd"
 dependencies = [
  "anyerror",
  "byte-unit",
@@ -3770,7 +3768,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plurx-cluster-check"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3796,7 +3794,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-compat-jellyfin"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3806,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-compat-plex"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "axum",
  "http-body-util",
@@ -3817,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-core"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3870,7 +3868,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-desktop-control"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "clap",
  "flate2",
@@ -3889,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-notification-broker"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3919,7 +3917,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-pgs"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "hex",
  "libpgs",
@@ -3932,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-support"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3960,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "plurx-tray"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "async-channel",
  "gtk4",
@@ -3973,11 +3971,11 @@ dependencies = [
 
 [[package]]
 name = "plurx-worker-control"
-version = "0.9.0"
+version = "0.9.2"
 
 [[package]]
 name = "plurxd"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",

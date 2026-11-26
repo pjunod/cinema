@@ -132,6 +132,8 @@ mod jellyfin_play;
 mod library_schedule;
 #[path = "store_contract/offload.rs"]
 mod offload;
+#[path = "store_contract/playback_device_caps.rs"]
+mod playback_device_caps;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -447,6 +449,9 @@ const USER_METHODS: &[&str] = &[
     "authenticate_token",
     "authenticate_token_for",
     "authenticate_token_proof_for",
+    "put_device_caps",
+    "device_caps_for_user",
+    "device_caps_for_all_users",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -599,6 +604,8 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_hevc_parameter_sets",
     "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
+    "merge_file_probe_dv_levels",
+    "files_missing_dv_levels",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -883,6 +890,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "abort_foreground_source_activation",
     "mark_foreground_source_settled",
     "reap_settled_source_custody",
+    // store_contract/background_jobs.rs `expired_lease_sweep_requeues_with_takeover_bookkeeping`.
+    "requeue_expired_running_jobs",
     "settled_foreground_source_custody",
     "activate_background_source_custody",
     "abort_background_source_activation",
@@ -13107,7 +13116,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,6)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,7)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -13312,11 +13321,11 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
                 .await
                 .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
         );
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(6),
-            "{round}: exact managed v6 view, marker and guards"
+            queue_fixture::managed_fixture_shape(7),
+            "{round}: exact managed v7 view, marker and guards"
         );
         assert_eq!(
             replicated_fixture_shape(&client, custody_shape).await,
@@ -13412,7 +13421,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         custody_before
     );
     require_replicated_fixture_marker(&client, "background_custody_retention_schema", 1).await;
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13723,7 +13732,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 6).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 7).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13760,7 +13769,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=6) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=7) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13792,7 +13801,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 6, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 7, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13871,7 +13880,7 @@ async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)
         .collect::<Vec<_>>();
     rewind_empty_managed_subtitle_extension(client).await;
     let mut rows = client
-        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name IN ('analysis_required_resources','analysis_source_scope_schema') OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
     let statements = rows
         .iter_mut()
@@ -14401,7 +14410,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 6",
+             WHERE singleton = 1 AND version = 7",
             1,
         ),
         (
@@ -14428,11 +14437,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(6),
-            "{round}: exact current managed v6 view, marker and guards",
+            queue_fixture::managed_fixture_shape(7),
+            "{round}: exact current managed v7 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -22014,7 +22023,24 @@ fn contract_inventory_matches_every_store_method() {
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 638, "review the Store method count");
+    // 638 -> 641 for per-device playback capabilities (PR #1907): `UserStore`'s
+    // `put_device_caps`, `device_caps_for_user` and `device_caps_for_all_users`
+    // keep each sign-in's capability document in the additive
+    // `playback_device_caps_r1` extension, removed with its token. Named in
+    // USER_METHODS and exercised on both backends by
+    // playback_device_caps::a_device_capability_record_lives_and_dies_with_its_sign_in.
+    // 641 -> 643: `merge_file_probe_dv_levels` grafts the Dolby Vision levels
+    // record onto the measured probe revision and `files_missing_dv_levels`
+    // pages the DV sources still lacking it. Both are named in `MEDIA_METHODS`
+    // and covered on both backends by
+    // store_contract/dv_title_probe_provenance.rs (dv_levels_*).
+    // No new trait or supertrait of `Store`.
+    // 643 -> 644: `BackgroundJobStore`'s `requeue_expired_running_jobs`
+    // returns expired-lease running jobs to the queue with the takeover's
+    // bookkeeping. Named in BACKGROUND_JOB_METHODS and exercised on both
+    // backends by background_jobs::expired_lease_sweep_requeues_with_takeover_bookkeeping.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 644, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -35636,6 +35662,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: other.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35655,6 +35682,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35681,6 +35709,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: Some(&only),
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35696,6 +35725,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35721,6 +35751,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &only_unwatched,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35742,6 +35773,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &first,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35763,6 +35795,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35777,6 +35810,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35953,6 +35987,80 @@ async fn curation_contract_runs_through_dyn_store() {
             before,
             "{backend}: seasons and episodes are not taggable"
         );
+
+        let home = store
+            .create_library(&NewLibrary {
+                name: "Curation Videos".into(),
+                kind: LibraryKind::Home,
+                paths: vec![PathBuf::from("/curation/videos")],
+                anime: false,
+            })
+            .await
+            .expect("video library");
+        let home_item = |kind, parent_id, title: &str| NewItem {
+            library_id: home.id,
+            kind,
+            parent_id,
+            title: title.into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        };
+        let folder = store
+            .insert_item(&home_item(ItemKind::Folder, None, "Trips"))
+            .await
+            .expect("folder");
+        let video = store
+            .insert_item(&home_item(ItemKind::Video, Some(folder), "Beach day"))
+            .await
+            .expect("nested video");
+        store
+            .set_tag_members(
+                household.id,
+                &[video],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                255,
+            )
+            .await
+            .expect("tag nested video");
+        let video_rule = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            libraries: vec![home.id],
+            ..Default::default()
+        };
+        let mut query = RuleQuery {
+            viewer: owner.id,
+            spec: &video_rule,
+            only_items: None,
+            top_level_only: false,
+            day: 0,
+            presence: plurx_core::domain::ItemPresence::OnDisk,
+        };
+        let result = store.rule_items(&query, 0, 20).await.expect("Home row");
+        assert_eq!(
+            (result.item_ids, result.total),
+            (vec![video], 1),
+            "{backend}"
+        );
+        query.top_level_only = true;
+        let result = store
+            .rule_items(&query, 0, 20)
+            .await
+            .expect("root library grid");
+        assert_eq!((result.item_ids, result.total), (vec![], 0), "{backend}");
+        store
+            .set_tag_members(
+                household.id,
+                &[],
+                &[video],
+                owner.id,
+                TagSource::Manual,
+                256,
+            )
+            .await
+            .expect("remove nested-video tag before the merge count assertions");
 
         // Ids are never reused: a stored layout or a client holding row:N or
         // tag N must not silently point at something new.

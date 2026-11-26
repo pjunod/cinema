@@ -76,6 +76,13 @@ def run_commands(workflow, job="preflight"):
     return commands
 
 
+# The PR events main-fast-lane.yml runs on, as Forgejo spells the payload
+# action. A requested lane (docs/ci/REQUESTED-LANE.md) is a label event:
+# Forgejo sends `label_updated`; `labeled` is the GitHub spelling.
+PR_EVENT_ACTIONS = ("opened", "synchronize", "synchronized", "reopened", "ready_for_review",
+                    "converted_to_draft", "labeled", "label_updated")
+
+
 def bind_event(run, scope, ready=True):
     require(run.get("event") == "pull_request" and isinstance(run.get("event_payload"), str),
             "Prior run lacks authenticated PR event payload")
@@ -88,7 +95,7 @@ def bind_event(run, scope, ready=True):
             and pull["base"]["ref"] == "main"
             and pull["state"] == "open" and pull["head"]["sha"] == run["commit_sha"]
             and run["workflow_id"] == "main-fast-lane.yml"
-            and event["action"] in ("opened", "synchronize", "synchronized", "reopened", "ready_for_review", "converted_to_draft"),
+            and event["action"] in PR_EVENT_ACTIONS,
             "Prior event/source/PR/base/readiness binding mismatch")
     if ready:
         require(pull["draft"] is False and event["action"] != "converted_to_draft",

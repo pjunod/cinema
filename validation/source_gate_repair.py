@@ -77,7 +77,13 @@ WORKFLOW = 'ci.yml'
 # changes -- it drops the merge-target fetch and the stored-counter comparison
 # and runs `python3 -m validation.mobile_versions` on the checked-out tree.
 # preflight, check and every other job are byte-identical.
-WORKFLOW_SHA256 = 'ec49904464984e8316820cf9e3c97bb0dd29e4dce310bd368a09ec07430c7db2'
+# Re-reviewed for #1934 (release tags publish from their gate): the `push:
+# tags` trigger and the tag-only `publish` job are removed, the badge drops its
+# `publish` need and result, and header/concurrency comments change.
+# preflight, check and every other job are byte-identical.
+# Re-reviewed for the TV navigation evidence retention: only that upload
+# step's `retention-days` (90 -> 14) and its comment change.
+WORKFLOW_SHA256 = 'd672f908f7a7ebd55570cd617c0c3f21ac619c83b2eba639c5430c13226b2af5'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

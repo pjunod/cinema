@@ -7318,6 +7318,16 @@ impl JobManager {
         if !self.may_run_cluster_jobs().await {
             return;
         }
+        // A dead worker's job otherwise stays `running` until a claimer
+        // happens to reach it in candidate order. The sweep revokes leases on
+        // this node's clock, so it runs only where the rest of queue upkeep
+        // does (committed voters, behind `may_run_cluster_jobs`), not on
+        // every node the way the custody reap must. It runs after that reap,
+        // which `schedule_tick` performs first on the same tick, so a job
+        // whose lapsed custody was just released is requeued now.
+        if let Err(error) = self.store.requeue_expired_running_jobs(clock_ms()).await {
+            tracing::warn!(%error, "requeueing expired-lease background jobs");
+        }
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");
         }
@@ -10719,7 +10729,15 @@ impl JobManager {
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        let raw = raw.map_err(|error| match error {
+            // Killed by someone else (an OOM, say): the probe has not said
+            // anything about this source yet.
+            crate::ffmpeg::HeldProbeError::Interrupted(_) => AnalysisResolutionError::Retry {
+                code: "index_process_failed",
+                charge_attempt: true,
+            },
+            _ => AnalysisResolutionError::Terminal("stored_probe_invalid"),
+        })?;
         self.store
             .record_fragment_index_source(&attested.observation)
             .await
@@ -11270,7 +11288,7 @@ impl JobManager {
                             })
                         }
                     };
-                    if !source.unchanged()
+                    if !source.unchanged().await
                         || crate::fragment_index_cluster::inspect_source(&file)
                             .await
                             .map_err(|_| unavailable())?

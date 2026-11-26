@@ -1743,7 +1743,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -2428,8 +2427,9 @@ impl TranscodeManager {
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
             native_split: native_split.then(|| {
-                let split = crate::copyseg::NativeSplitInventory::with_startup_budget(
-                    split_startup_budget as u64,
+                let split = crate::copyseg::NativeSplitInventory::with_budget(
+                    u64::try_from(ordinary_sizing.grant_bytes(limits)).unwrap_or(0),
+                    u64::try_from(RollingScratchSizing::session_ceiling(limits)).unwrap_or(0),
                 );
                 #[cfg(target_os = "linux")]
                 let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
@@ -2761,7 +2761,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

@@ -35,8 +35,43 @@ test -n "$runner_name" && test -z "$extra" \
   || die "refusing unsafe toolchain cache: $toolchain"
 runner_root=$(dirname -- "$cache_root")
 
+# One runner, one budget. `.github/actions/cargo-cache` keys the runner root by
+# the executing uid (`<runner>-uid0` for a job container, `<runner>-uid1000`
+# for a host executor) so each executor owns its own files. Budgeting each of
+# those roots separately gave one runner disk a full budget per uid:
+# `gha-lab1-plurx-heavy-01` held 27 GiB under each of its two roots, 54 GiB
+# against a 30 GiB budget, and the release gate's disk precheck failed on it.
+# The siblings' usage now counts against this budget too. This pruner still
+# deletes only inside its own root -- the other executor's files are not its
+# to delete, and as the runner user it could not delete root's anyway -- so
+# the other executor converges on the same shared budget at its own next job.
+sibling_roots=()
+if [[ "$runner_name" =~ ^(.+)-uid[0-9]+$ ]]; then
+  shared_runner=${BASH_REMATCH[1]}
+  for sibling in "$prefix$shared_runner"-uid*; do
+    [ -d "$sibling" ] && [ ! -L "$sibling" ] || continue
+    [[ "$(basename -- "$sibling")" =~ ^"$shared_runner"-uid[0-9]+$ ]] || continue
+    [ "$sibling" != "$runner_root" ] || continue
+    sibling_roots[${#sibling_roots[@]}]=$sibling
+  done
+fi
+
 read_usage() {
   du -sk "$runner_root" | awk '{ print $1 }'
+}
+
+# Another executor's files may not all be readable from this uid; what `du`
+# can read is what is counted, and an unreadable corner is not a failure.
+read_sibling_usage() {
+  local sibling total=0 used
+  for sibling in ${sibling_roots[@]+"${sibling_roots[@]}"}; do
+    used=$({ du -sk "$sibling" 2>/dev/null \
+      || echo "ci-cache-prune: part of $sibling is unreadable from uid $(id -u); counting what is readable" >&2; } \
+      | awk 'NR == 1 { print $1 }')
+    [[ "$used" =~ ^[0-9]+$ ]] || used=0
+    total=$((total + used))
+  done
+  echo "$total"
 }
 
 read_disk() {
@@ -45,6 +80,7 @@ read_disk() {
 
 read -r filesystem_kb available_kb < <(read_disk)
 usage_kb=$(read_usage)
+sibling_kb=$(read_sibling_usage)
 budget_kb=$((budget_gb * 1024 * 1024))
 # The floor is a share of the filesystem, never a fixed size.
 #
@@ -90,7 +126,7 @@ if [ "$floor_kb" -gt "$ceiling_floor_kb" ]; then
 fi
 
 healthy() {
-  [ "$usage_kb" -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]
+  [ $((usage_kb + sibling_kb)) -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]
 }
 
 refresh() {
@@ -206,17 +242,28 @@ if ! healthy; then
 fi
 
 refresh
+sibling_kb=$(read_sibling_usage)
 after_kb=$usage_kb
 {
   echo "### Cargo cache"
   echo
   echo "- root: \`$runner_root\`"
   echo "- active toolchain: \`$toolchain\`"
-  echo "- budget: ${budget_gb} GiB"
+  echo "- budget: ${budget_gb} GiB, shared with ${#sibling_roots[@]} other executor root(s)"
   echo "- filesystem floor: $((floor_kb / 1024 / 1024)) GiB"
   echo "- before: $((before_kb / 1024)) MiB"
   echo "- after: $((after_kb / 1024)) MiB"
+  echo "- other executors: $((sibling_kb / 1024)) MiB"
   echo "- prune decision: \`$reason\`"
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-healthy || die "cache remains over budget or filesystem remains below reserve"
+# Fatal: the reserve a build needs, or this root alone over the budget. Over
+# the shared budget only because of another executor's root is not this job's
+# to fix -- it has already given up everything it may delete -- so it is
+# reported and the other executor's next prune brings the total back.
+if [ "$available_kb" -lt "$floor_kb" ] || [ "$usage_kb" -gt "$budget_kb" ]; then
+  die "cache remains over budget or filesystem remains below reserve"
+fi
+if [ $((usage_kb + sibling_kb)) -gt "$budget_kb" ]; then
+  echo "::warning::Cargo cache for this runner is $(((usage_kb + sibling_kb) / 1024)) MiB against a ${budget_gb} GiB budget; $((sibling_kb / 1024)) MiB is under other executors' roots, which prune themselves at their next job"
+fi

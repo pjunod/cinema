@@ -2201,6 +2201,57 @@ struct PlayerView: View {
         return (value, shown.detailLines)
     }
 
+    /// A server-written row text is shown only when it is a non-blank string of
+    /// at most 512 characters with no control characters.
+    static func dvRowText(_ text: String?) -> String? {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              text.utf16.count <= 512,
+              !text.unicodeScalars.contains(where: { $0.value <= 0x1F || (0x7F...0x9F).contains($0.value) })
+        else { return nil }
+        return text
+    }
+
+    /// One Dolby Vision provenance row: the value text and the labelled
+    /// sub-rows joined by newlines. Any text that fails drops the whole row.
+    static func dvRow(
+        _ id: String, value: String?, texts: [String?]
+    ) -> (value: String, note: String)? {
+        guard let labels = applePlaybackInfoFields.first(where: { $0.id == id })?.subRows,
+              labels.count == texts.count,
+              let shown = dvRowText(value) else { return nil }
+        let parts = texts.compactMap(dvRowText)
+        guard parts.count == texts.count else { return nil }
+        return (shown, zip(labels, parts).map { "\($0): \($1)" }.joined(separator: "\n"))
+    }
+
+    /// The `dv_metadata` and `display_target` rows. A delivery that
+    /// `requiresEffectiveProcessing` takes both only from the current,
+    /// generation-matching report (so they clear with it); any other delivery
+    /// takes `dv_metadata` from the enhancement and has no display target.
+    static func dvProvenanceRows(
+        _ enhancement: PlaybackEnhancement?,
+        effectiveProcessing: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?
+    ) -> (metadata: (value: String, note: String)?, target: (value: String, note: String)?) {
+        guard let enhancement else { return (nil, nil) }
+        var metadata: DolbyVisionMetadataRows?
+        var target: DisplayTargetRows?
+        if enhancement.requiresEffectiveProcessing {
+            guard let report = effectiveProcessing,
+                  report.matches(generation: activeGeneration, delivered: delivered)
+            else { return (nil, nil) }
+            metadata = report.dvMetadata
+            target = report.displayTarget
+        } else {
+            metadata = enhancement.dvMetadata
+        }
+        return (
+            metadata.flatMap { dvRow("dv_metadata", value: $0.applied?.text, texts: $0.texts) },
+            target.flatMap { dvRow("display_target", value: $0.mappedForText, texts: $0.texts) }
+        )
+    }
+
     /// The three states of MEDIA-BADGES-PLAN §2.3, as a pure function of
     /// (source grade, delivered grade, display capability):
     ///
@@ -3450,6 +3501,8 @@ struct ApplePlaybackInfoField: Identifiable {
     let modes: Set<PlaybackStatsMode>
     let placement: PlaybackLedgerPlacement
     let always: Bool
+    /// The contract's `sub_rows` labels, in order; empty for a plain row.
+    let subRows: [String]
 
     init(
         _ id: String,
@@ -3457,8 +3510,10 @@ struct ApplePlaybackInfoField: Identifiable {
         _ section: String,
         _ modes: [PlaybackStatsMode],
         placement: PlaybackLedgerPlacement = .grid,
-        always: Bool = false
+        always: Bool = false,
+        subRows: [String] = []
     ) {
+        self.subRows = subRows
         self.id = id
         self.label = label
         self.section = section
@@ -3496,6 +3551,10 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("device_audio", "Device audio output", "NOW DECODING", [.standard, .details, .debug], always: true),
     .init("dynamic_range", "Dynamic range", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("enhancement", "Enhancement", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
+    .init("dv_metadata", "Dolby Vision metadata", "NOW DECODING", [.details, .debug], placement: .notes,
+          subRows: ["In the file", "Applied by Cinema", "Left for the display"]),
+    .init("display_target", "Display target", "NOW DECODING", [.details, .debug], placement: .notes,
+          subRows: ["Reported peak", "Mapped for", "Title peak"]),
     .init("dv_refit", "F+ curves", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("decode_audio", "Stream audio track", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("player_state", "Player state", "NOW DECODING", [.mini, .standard, .details, .debug]),
@@ -3702,6 +3761,14 @@ struct PlaybackStatsView: View {
                 delivered: controller.deliveredRange
             ) else { return nil }
             return ContractFieldValue(value: summary.value, lines: summary.lines)
+        case "dv_metadata", "display_target":
+            let rows = PlayerView.dvProvenanceRows(
+                controller.playbackEnhancement,
+                effectiveProcessing: controller.effectiveProcessing,
+                activeGeneration: controller.effectiveProcessingGeneration,
+                delivered: controller.deliveredRange)
+            guard let row = id == "dv_metadata" ? rows.metadata : rows.target else { return nil }
+            return ContractFieldValue(value: row.value, note: row.note)
         case "dv_refit":
             guard let status, status.id == controller.currentSessionId else { return nil }
             return status.dolbyVisionRefit?.label.map { ContractFieldValue(value: $0) }

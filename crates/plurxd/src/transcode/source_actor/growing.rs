@@ -87,7 +87,7 @@ impl SourceGrowingBacking {
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
             && self.owners.contains_live_assignment(&self.assignment)
-            && self.source.unchanged()
+            && self.source.unchanged_in_place()
     }
     /// Viewer activity: the first publication, an authenticated resource
     /// fetch, or a control exchange the fence accepted. A refused exchange is
@@ -434,10 +434,7 @@ impl SourceViewerActor {
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != backing.session_id
             || route.publication_ready_at_ms != 0
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
             return Err(ended);
         }
@@ -476,20 +473,6 @@ impl SourceViewerActor {
         let stuck = super::LiveRefusal::terminal(SourceWorkerError::Unavailable);
         self.retire_on_terminal(Some(&stuck));
         stuck
-    }
-}
-
-/// A selected-caption window's own answer: still preparing (`Deadline`) or
-/// over its concurrent-work bound (`Capacity`) passes; anything else is this
-/// track's final answer for this request.
-pub(super) fn subtitle_refusal(error: SourceWorkerError) -> super::LiveRefusal {
-    if matches!(
-        error,
-        SourceWorkerError::Deadline | SourceWorkerError::Capacity
-    ) {
-        super::LiveRefusal::transient(error)
-    } else {
-        super::LiveRefusal::terminal(error)
     }
 }
 
@@ -956,7 +939,6 @@ impl TranscodeManager {
                 processed_dv_profile: None,
                 processed_fel: None,
                 degraded_processing: None,
-                processing_note: None,
                 retained_output: None,
                 audio_delivery: prepared.request().audio_delivery.clone(),
                 session_id: session_id.clone(),

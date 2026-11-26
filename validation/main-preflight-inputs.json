@@ -12,6 +12,17 @@
       "reason": "Audited temporary Git roots and explicit temporary catalogs."
     },
     {
+      "id_prefix": "validation:test_release_evidence.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/release_evidence.py",
+        "validation/landing.py",
+        "validation/history.py",
+        "validation/runner.py"
+      ],
+      "reason": "Temporary Git roots and a fake forge; no network or repository state."
+    },
+    {
       "id_prefix": "validation:test_mobile_versions.",
       "inputs": [
         "validation/__init__.py",
@@ -3073,9 +3084,12 @@
     {
       "id_prefix": "operations:test_vendor_audit_lock.",
       "inputs": [
-        "scripts/vendor-audit-lock"
+        "scripts/vendor-audit-lock",
+        "vendor/gemm-common/registry-provenance.lock",
+        "vendor/ksni/registry-provenance.lock",
+        "vendor/openraft/registry-provenance.lock"
       ],
-      "reason": "Loaded vendor-lock implementation operating on temporary synthetic manifests/locks."
+      "reason": "Loaded vendor-lock implementation operating on temporary synthetic manifests/locks, plus the committed registry provenance locks it merges."
     },
     {
       "id_prefix": "operations:test_vod_bframes_timeline_design.",
@@ -4367,6 +4381,34 @@
       "reason": "Module-level loader reads only scripts/release-cut, whose module body imports no repository helper. setUp reads release-readiness workflow; asserted script names are text only."
     },
     {
+      "id_prefix": "operations:test_release_cut.WeeklyTagWorkflowCase.test_it_reruns_no_test_suite",
+      "inputs": [
+        ".github/workflows/release-readiness.yml",
+        "scripts/release-cut"
+      ],
+      "reason": "Module-level loader reads only scripts/release-cut, whose module body imports no repository helper. setUp reads release-readiness workflow; asserted script names are text only."
+    },
+    {
+      "id_prefix": "operations:test_release_cut.ReleaseTagPublicationCase.test_a_tag_publishes_only_after_its_commit_s_existing_gate",
+      "inputs": [
+        ".github/workflows/release-tag.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/lint.yml",
+        "scripts/release-cut"
+      ],
+      "reason": "Module-level loader reads only scripts/release-cut, whose module body imports no repository helper. Reads the listed workflows as text."
+    },
+    {
+      "id_prefix": "operations:test_release_cut.ReleaseTagPublicationCase.test_a_tag_starts_no_test_sweep",
+      "inputs": [
+        ".github/workflows/release-tag.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/lint.yml",
+        "scripts/release-cut"
+      ],
+      "reason": "Module-level loader reads only scripts/release-cut, whose module body imports no repository helper. Reads the listed workflows as text."
+    },
+    {
       "id_prefix": "validation:test_history.CorrectiveBoundaryCase.test_an_anchored_commit_that_is_not_corrective_needs_no_landing_line",
       "inputs": [
         "validation/__init__.py",
@@ -4455,6 +4497,8 @@
         "vendor/dolby_vision/PLURX-PATCH.md",
         "vendor/hiqlite-wal/PLURX-PATCH.md",
         "vendor/hiqlite/PLURX-PATCH.md",
+        "vendor/openraft/LICENSE-APACHE",
+        "vendor/openraft/PLURX-PATCH.md",
         "vendor/rust_decimal/PLURX-PATCH.md",
         "vendor/s3-simple/PLURX-PATCH.md"
       ],

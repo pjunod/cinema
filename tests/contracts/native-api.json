@@ -52,6 +52,17 @@
         "bit_depth": 10,
         "hdr": "dolby_vision",
         "hdr_format": "Dolby Vision · Profile 7 (HDR10-compatible)",
+        "dv_profile": 7,
+        "dv_level": 6,
+        "dv_bl_compat_id": 6,
+        "dv_el_present": true,
+        "dv_el_kind": "fel",
+        "dv_facts": "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base",
+        "plays_on": [
+          {"id": "contract", "device": "Living room", "client": "plurx-apple",
+           "label": "EL dropped · plays as 8.1", "method": "remux",
+           "el_dropped": true, "full_quality": false}
+        ],
         "bitrate": 24000000,
         "audio_streams": [
           {

@@ -6,7 +6,17 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import tv.plurx.app.data.DisplayTargetTexts
+import tv.plurx.app.data.DvMetadataTexts
+import tv.plurx.app.data.EffectiveProcessingReport
+import tv.plurx.app.data.EnhancementBadge
+import tv.plurx.app.data.PlaybackEnhancement
 import tv.plurx.app.data.PlaybackSessionStatus
+import tv.plurx.app.ui.components.DisplayTargetSubRowLabels
+import tv.plurx.app.ui.components.DvInfoRow
+import tv.plurx.app.ui.components.DvInfoRows
+import tv.plurx.app.ui.components.DvMetadataSubRowLabels
+import tv.plurx.app.ui.components.dvInfoRows
 
 class PlaybackInfoContractTest {
     private val fixture = checkNotNull(
@@ -36,6 +46,10 @@ class PlaybackInfoContractTest {
         dynamicRange = "HDR10",
         enhancementSummary = "FEL · DYN",
         enhancement = listOf("The full enhancement layer is in the picture.", "Dynamic metadata reaches the display."),
+        dvRows = DvInfoRows(
+            metadata = DvInfoRow("L1 and L2", "In the file: L1, L2\nApplied by Cinema: L1, L2\nLeft for the display: none"),
+            target = DvInfoRow("1000 nits", "Reported peak: 1000 nits\nMapped for: 1000 nits\nTitle peak: 4000 nits"),
+        ),
         subtitles = "English · native",
         decoder = "c2.android.hevc.decoder",
         stalls = "2 (1 supply · 1 decode)",
@@ -203,5 +217,75 @@ class PlaybackInfoContractTest {
                 ),
             ),
         )
+    }
+
+    private fun contractSubRows(id: String) = fixture.getValue("fields").jsonArray.map { it.jsonObject }
+        .single { it.getValue("id").jsonPrimitive.content == id }
+        .getValue("sub_rows").jsonArray.map { it.jsonPrimitive.content }
+
+    @Test
+    fun theDolbyVisionRowsTakeTheirLabelsAndSubRowOrderFromTheContract() {
+        assertEquals(contractSubRows("dv_metadata"), DvMetadataSubRowLabels)
+        assertEquals(contractSubRows("display_target"), DisplayTargetSubRowLabels)
+        val rows = playbackInfoRows(details, emptyList())
+        assertEquals("Dolby Vision metadata", rows.single { it.id == "dv_metadata" }.label)
+        assertEquals("Display target", rows.single { it.id == "display_target" }.label)
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val processed = PlaybackEnhancement(listOf(EnhancementBadge.DYN), emptyList(), requiresEffectiveProcessing = true)
+        val report = EffectiveProcessingReport(generation, true, false, listOf("PolynomialReshape"),
+            dvMetadata = DvMetadataTexts("a", "b", "c"), displayTarget = DisplayTargetTexts("d", "e", "f"))
+        val built = dvInfoRows(processed, report, generation, "hdr10")
+        assertEquals(DvInfoRow("b", contractSubRows("dv_metadata").zip(listOf("a", "b", "c")).joinToString("\n") { "${it.first}: ${it.second}" }), built.metadata)
+        assertEquals(DvInfoRow("e", contractSubRows("display_target").zip(listOf("d", "e", "f")).joinToString("\n") { "${it.first}: ${it.second}" }), built.target)
+    }
+
+    @Test
+    fun aProcessedDeliveryShowsTheRowsOnlyFromItsCurrentReport() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val processed = PlaybackEnhancement(listOf(EnhancementBadge.DYN), emptyList(), requiresEffectiveProcessing = true,
+            dvMetadata = DvMetadataTexts("x", "y", "z"))
+        val report = EffectiveProcessingReport(generation, true, false, listOf("PolynomialReshape"),
+            dvMetadata = DvMetadataTexts("a", "b", "c"), displayTarget = DisplayTargetTexts("d", "e", "f"))
+        assertEquals(DvInfoRows(), dvInfoRows(processed, null, generation, "hdr10"))
+        assertEquals(DvInfoRows(), dvInfoRows(processed, report, "22222222-2222-4222-8222-222222222222", "hdr10"))
+        assertEquals(DvInfoRows(), dvInfoRows(processed, report, generation, "sdr"))
+        assertEquals("b", dvInfoRows(processed, report, generation, "hdr10").metadata?.value)
+    }
+
+    @Test
+    fun anUnprocessedDeliveryTakesMetadataFromTheEnhancementAndHasNoDisplayTarget() {
+        val plain = PlaybackEnhancement(listOf(EnhancementBadge.DYN), emptyList(),
+            dvMetadata = DvMetadataTexts("a", "b", "c"))
+        val report = EffectiveProcessingReport("11111111-1111-4111-8111-111111111111", true, false, listOf("PolynomialReshape"),
+            displayTarget = DisplayTargetTexts("d", "e", "f"))
+        val rows = dvInfoRows(plain, report, report.generation, "hdr10")
+        assertEquals("b", rows.metadata?.value)
+        assertEquals(null, rows.target)
+        assertEquals(DvInfoRows(), dvInfoRows(null, null, null, null))
+    }
+
+    @Test
+    fun anOutOfShapeTextDropsItsRow() {
+        fun metadata(vararg texts: String?) = dvInfoRows(
+            PlaybackEnhancement(listOf(EnhancementBadge.DYN), emptyList(), dvMetadata = DvMetadataTexts(texts[0], texts[1], texts[2])),
+            null, null, null,
+        ).metadata
+        assertEquals("b", metadata("a", "b", "c")?.value)
+        assertEquals(null, metadata("a", "b", null))
+        assertEquals(null, metadata("a", "  ", "c"))
+        assertEquals(null, metadata("a", "b\u0085", "c"))
+        assertEquals(null, metadata("a\u007f", "b", "c"))
+        assertEquals(null, metadata("a", "b", "x".repeat(513)))
+        assertEquals("b", metadata("a", "b", "x".repeat(512))?.value)
+    }
+
+    @Test
+    fun theWireFieldsParseLeniently() {
+        val json = Json.parseToJsonElement(
+            """{"active":["DYN"],"details":[],"dv_metadata":{"in_file":{"text":"a"},"applied":7,"left_for_display":{"text":"c"}}}""",
+        )
+        val enhancement = checkNotNull(PlaybackEnhancement.fromJson(json))
+        assertEquals(DvMetadataTexts("a", null, "c"), enhancement.dvMetadata)
+        assertEquals(null, PlaybackEnhancement.fromJson(Json.parseToJsonElement("""{"active":["DYN"],"dv_metadata":"x"}"""))?.dvMetadata)
     }
 }

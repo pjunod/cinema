@@ -870,9 +870,11 @@ async fn v6_rebuild_preserves_everything() {
     // retention that keeps a charged source custody's owner job; v130 offloaded titles;
     // v131 saved storage-domain changes; v132 exact FEL demand continuity;
     // v133 optional scoped application login (delegation); v134 F+ curve fits;
-    // v135 library curation; v136 live title qualification in dispatch turns.
+    // v135 library curation; v136 live title qualification in dispatch turns;
+    // v137 the managed v7 view and v138 the analysis view, where a per-file
+    // reader reserves only the library root holding its file.
     assert_eq!(
-        version, 136,
+        version, 138,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

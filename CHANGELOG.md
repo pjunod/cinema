@@ -12,6 +12,46 @@ bump may break compatibility and a **patch** bump never does.
 `Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
 from the landing commits into the dated section below. -->
 
+## [0.9.2] — 2026-11-26
+<!-- changelog-through: 6410a406eb4237e0f13181a6c9be54bbf3bd1664 -->
+
+### Added
+- each version's Dolby Vision details and how it plays on every device the account uses, in the item detail view
+- `GET /api/v1/playback/devices` (scope `playback:read`) lists the playback capabilities each signed-in device reported
+- each version's Dolby Vision details and how it plays on every device in the iOS, tvOS and Android version pickers and version details
+- Playback info on web, Apple, Android and the Linux player shows which Dolby Vision metadata levels a title carries, which Cinema applied and which are left for the display, and the display peak a processed stream was mapped for; the server records each title's levels once in a background pass
+
+### Changed
+- the Linux player's Playback info list is grouped under Input, Processing and Output
+
+### Fixed
+- plurx Player (Linux): the EL pill now follows whether mpv's native Dolby renderer actually composed the enhancement layer, so it turns off when the layer is lost even if mapping continues (needs mpv +rogdv5.7; older builds keep the previous behaviour).
+- CI runners no longer fill up with leftovers from jobs that die early: the runner janitors now reclaim the Docker workspace volumes and Apple simulators that a job which dies before its last step leaves behind.
+- Android read a version's Dolby Vision profile only from the format text, never from the server's profile field
+- An index probe killed by a host out-of-memory event no longer marks a title's delivery route as permanently unindexable; such records are retried once.
+- Linux player: Cinema's playback controls hide again during Dolby Vision playback instead of staying on screen.
+- Resuming a Dolby Vision title partway through can now use the faster in-place enhancement switch when the file carries its HDR10 metadata inside the video stream.
+- Linux player: Cinema's playback controls keep auto-hiding even if drawing them becomes slow, instead of staying on screen.
+- Dolby Vision Profile 7 FEL titles played at Original quality, or at a chosen resolution, now get the same FEL/RPU processed upgrade as Auto. Previously they stayed on the converted Profile 8.1 copy with DYN only, which is what Android clients showed.
+- A server whose network media storage stops answering keeps serving everything else instead of freezing until the storage returns.
+- A Dolby Vision F+ index whose first-packet check timed out or was killed by the host is retried instead of being refused until the file changes.
+- A one-server cluster no longer briefly reports replication as behind while it applies its own writes, so a native desktop stop or restart no longer refuses intermittently with "recovery, activation or stale topology prevents safe local shutdown".
+- The Linux packages and the Windows server download build and publish again.
+
+## [0.9.1] — 2026-11-25
+<!-- changelog-through: c19e68681671c5ced73a9881c30714c06cc0373d -->
+
+### Changed
+- Reopening a playback at a new position costs one replicated write and one claim read fewer.
+
+### Fixed
+- Resuming a Dolby Vision FEL title whose file embeds cover art no longer loses the native enhancement splice.
+- Dolby Vision Profile 7 FEL titles whose luma reshaping curve has more than two pivots are no longer refused by the F+ curve fit.
+- A Dolby Vision title the scanner refuses on its content (for example an untagged Matroska track) now fails once instead of being read in full five times.
+- A Dolby Vision FEL session whose native enhancement splice could not be used now still reaches FEL through the prepared switch instead of staying on the plain conversion.
+- A cluster voter that stalls (for example while its media storage is unreachable) no longer forces a healthy leader to step down when it resumes; voters now pre-vote before starting an election.
+- plurx Player on Linux starts when TMPDIR is a deep directory and XDG_RUNTIME_DIR is unset, instead of failing because mpv's control socket path was too long.
+
 ## [0.9.0] — 2026-11-24
 <!-- changelog-through: 681167543c42d197ff732d1dc0a79c544e61c672 -->
 
@@ -4496,8 +4536,10 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.0
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/pjunod/plurx/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.1
+[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...e3eec613f9de4b2f1a9c705ce058bc14d55a16fc
 [0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...000300ccfcd98b7b3a2221d7031420cd99748bfd
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
