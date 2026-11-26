@@ -1186,10 +1186,32 @@ mod tests {
             }
         ));
         assert!(!status.drained);
-        assert!(status.new_admissions_blocked);
+        // Uncertain native cleanup holds restart drain and shutdown, not open
+        // intake (49ca20583): new work enters through its own resource checks,
+        // and admitting and releasing it never clears the uncertainty.
+        assert!(!status.new_admissions_blocked);
+        let replacement = manager
+            .admit_fragment()
+            .await
+            .expect("open intake admits through its own resource checks");
+        drop(replacement);
+        let (_, inventory, status) = serving
+            .restart_drain_status_with_owned_work(0, || async {
+                panic!("abrupt cleanup uncertainty cannot be cleared by an empty inventory")
+            })
+            .await;
+        assert!(matches!(
+            inventory,
+            crate::serving_fence::OwnedWorkInventory::Unknown {
+                reason: crate::serving_fence::OwnedWorkUnknown::NativeCleanupUncertain {
+                    collector_dropped: true,
+                    ..
+                }
+            }
+        ));
         assert!(
-            manager.admit_fragment().await.is_none(),
-            "no replacement native work"
+            !status.drained,
+            "unrelated work cannot drain the uncertainty"
         );
         // No assertion here treats leader reap, Arc count, or the public DTO
         // as a complete native-group absence or finite-accounting proof.
