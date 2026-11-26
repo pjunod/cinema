@@ -81,7 +81,9 @@ WORKFLOW = 'ci.yml'
 # tags` trigger and the tag-only `publish` job are removed, the badge drops its
 # `publish` need and result, and header/concurrency comments change.
 # preflight, check and every other job are byte-identical.
-WORKFLOW_SHA256 = 'b52554fe32f6c103d26539cedcd8562eca10ade5514d2afb80377f476122cc84'
+# Re-reviewed for the TV navigation evidence retention: only that upload
+# step's `retention-days` (90 -> 14) and its comment change.
+WORKFLOW_SHA256 = 'd672f908f7a7ebd55570cd617c0c3f21ac619c83b2eba639c5430c13226b2af5'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

@@ -3057,6 +3057,7 @@ fn configure_probe_execution(
     Ok(supervisor)
 }
 
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn configure_probe_execution_untracked(
     command: &mut tokio::process::Command,

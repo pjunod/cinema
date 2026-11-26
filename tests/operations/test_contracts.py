@@ -3468,6 +3468,19 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--memory 20g --memory-swap 20g --cpus 4", options)
         self.assertIn("--cpuset-cpus 0-3 --pids-limit 4096", options)
 
+    def test_release_package_smoke_binds_the_host_identity_its_unit_binds(self):
+        # v0.9.1's Linux packages failed their install smoke because plurxd,
+        # started there without systemd, had no host identity to read.
+        job = workflow_job_blocks(".github/workflows/github-release.yml")["linux"]
+        run_in = job.split("          run_in() {\n", 1)[1].split("          }\n", 1)[0]
+        unit = (ROOT / "deploy/plurxd.service").read_text()
+        for source, target in (
+            ("/etc/machine-id", "/run/plurx-host-machine-id"),
+            ("/proc/sys/kernel/random/boot_id", "/run/plurx-host-boot-id"),
+        ):
+            self.assertIn(f"BindReadOnlyPaths={source}:{target}", unit)
+            self.assertIn(f"--mount type=bind,src={source},dst={target},readonly", run_in)
+
     def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
