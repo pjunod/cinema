@@ -337,6 +337,10 @@ pub(crate) fn project_shared_start_with_receiver(
         return Err(SharingResourceUnsupported);
     }
     if let Some(control) = &mut response.control {
+        // B passes the Source's lease through, so it must be the one shared
+        // clients bind and the one the Source honours: the shared session
+        // lease, which a finished VOD and the growing copy behind a bounded
+        // view (`GROWING_LEASE_TIMEOUT_MS`) both keep.
         if control.url != format!("{source_prefix}control")
             || control.protocol != crate::playback_control::PROTOCOL_V1
             || control.control_epoch == 0
@@ -830,15 +834,50 @@ mod tests {
         let source = Uuid::new_v4();
         let receiver = Uuid::new_v4();
         let incarnation = Uuid::new_v4();
+        // A bounded view is the Source's growing copy, whose bootstrap names
+        // the lease the copy keeps: `source_actor::GROWING_LEASE_TIMEOUT_MS`,
+        // the shared session lease.
         let mut bounded = start(source);
         bounded.vod = false;
         bounded.media_origin_ms = Some(-83);
+        bounded.control = crate::playback_control::ControlBootstrap::new(
+            &source.to_string(),
+            &Uuid::new_v4().to_string(),
+            7,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+        );
         assert!(project_shared_start(bounded.clone(), source, receiver, incarnation, 9).is_err());
-        let projected =
-            project_shared_start_with_receiver(bounded, source, receiver, incarnation, 9, true)
-                .expect("affirmed bounded view");
+        let projected = project_shared_start_with_receiver(
+            bounded.clone(),
+            source,
+            receiver,
+            incarnation,
+            9,
+            true,
+        )
+        .expect("affirmed bounded view");
         assert!(!projected.vod);
         assert_eq!(projected.media_origin_ms, Some(-83));
+        let control = projected.control.expect("B control bootstrap");
+        assert_eq!(
+            control.lease_timeout_ms,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS
+        );
+        assert_eq!(control.url, format!("/api/v1/hls/{receiver}/control"));
+        // B passes the Source's lease through, so a rolling lease, which no
+        // shared client binds and B could not honestly promise as more, is
+        // refused for either presentation.
+        for vod in [false, true] {
+            let mut rolling = bounded.clone();
+            rolling.vod = vod;
+            rolling.control.as_mut().expect("control").lease_timeout_ms =
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS;
+            assert!(
+                project_shared_start_with_receiver(rolling, source, receiver, incarnation, 9, true)
+                    .is_err(),
+                "rolling lease, vod {vod}"
+            );
+        }
     }
 
     #[test]

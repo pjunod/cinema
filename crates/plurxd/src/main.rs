@@ -45,6 +45,7 @@ mod dv_disk;
 mod dv_refit_serving;
 #[cfg(unix)]
 mod dv_segment;
+mod dv_tools;
 mod dvpipe;
 mod ffmpeg;
 mod ffmpeg_support;
@@ -171,6 +172,35 @@ use crate::state::{AppState, SystemInfo};
 pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     let root = std::fs::canonicalize(std::env::temp_dir())?;
     tempfile::tempdir_in(root)
+}
+
+/// A loopback node config for an in-process daemon test, and the HTTP socket
+/// its `server.bind` names.
+///
+/// Reading a port from a bound listener and dropping it lets any other socket
+/// on the host take that port before the server binds it again. Here nothing
+/// is dropped: the Raft and API sockets live in `config.cluster.listeners`,
+/// which lends them to every voter start, and the HTTP socket is returned for
+/// the test to serve on, through [`StartupObservationHttp::from_std_listener`]
+/// or by converting it for `axum::serve`. The join and artwork origins name
+/// the HTTP socket.
+#[cfg(test)]
+pub(crate) fn owned_loopback_config(
+    data_dir: &std::path::Path,
+) -> (plurx_core::config::Config, std::net::TcpListener) {
+    let http = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP port");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = data_dir.into();
+    config.server.bind = http.local_addr().expect("owned HTTP address");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    config.cluster.advertise_host = "localhost".into();
+    config.cluster.join_url = format!("http://{}", config.server.bind);
+    config.cluster.artwork_url = config.cluster.join_url.clone();
+    (config, http)
 }
 
 /// Create an executable test fixture (a script standing in for FFmpeg, a
@@ -447,7 +477,7 @@ enum Command {
     /// does and print its identity; exit 1 when this binary would refuse it or
     /// none is installed. The image build runs this, so an image cannot ship a
     /// bundle its own daemon rejects.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
@@ -721,7 +751,7 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
@@ -778,21 +808,16 @@ async fn dispatch(
             );
             Ok(())
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::DvHelperIdentity => {
-            #[cfg(target_os = "linux")]
-            {
-                match crate::vodencode::dv_runtime::installed_helper_identity().await {
-                    Ok(identity) => println!("{identity}"),
-                    Err(error) => {
-                        eprintln!("DV helper bundle refused: {error}");
-                        std::process::exit(1);
-                    }
+            match crate::dv_tools::installed_helper_identity().await {
+                Ok(identity) => println!("{identity}"),
+                Err(error) => {
+                    eprintln!("DV helper bundle refused: {error}");
+                    std::process::exit(1);
                 }
-                Ok(())
             }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("DV helper bundles are supported only on Linux")
+            Ok(())
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {
@@ -2133,6 +2158,15 @@ impl StartupObservationHttp {
         Ok(owner)
     }
 
+    /// [`Self::from_listener`] for a socket bound outside a runtime, such as
+    /// the one [`owned_loopback_config`] returns. Call it inside the runtime
+    /// that will serve the socket.
+    #[cfg(test)]
+    fn from_std_listener(listener: std::net::TcpListener) -> std::io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        Self::from_listener(tokio::net::TcpListener::from_std(listener)?)
+    }
+
     async fn stop_probe(&self) {
         let mut tasks = self.tasks.lock().await;
         if let Some(tasks) = tasks.as_mut() {
@@ -2338,7 +2372,10 @@ impl cluster::StartupClock for StartupObservationHttp {
                     node_id,
                     observer: observer.clone(),
                 })
-                .fallback(startup_pending);
+                .fallback(startup_pending)
+                .layer(axum::middleware::from_fn(
+                    crate::cluster::calls::auth_refusal_response,
+                ));
             *self.router.write().map_err(|_| {
                 plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
             })? = pending;
@@ -3359,6 +3396,7 @@ async fn probe_system(
         pacing: crate::ffmpeg::pacing_caps().await,
         dovi_rpu: crate::ffmpeg::has_dovi_rpu().await,
         dovi_reshape: crate::ffmpeg::has_dovi_reshape().await,
+        dovi_reshape_hardware: crate::ffmpeg::measure_dovi_reshape_hardware(&encoder_caps).await,
         dovi_passthrough: crate::ffmpeg::has_dovi_passthrough().await,
         hdr10_passthrough: crate::ffmpeg::has_hdr10_passthrough().await,
         hdr10_passthrough_qsv: if encoder_caps.qsv {
@@ -3414,6 +3452,7 @@ struct Measured {
     pacing: crate::ffmpeg::PacingCaps,
     dovi_rpu: bool,
     dovi_reshape: bool,
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     dovi_passthrough: bool,
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
@@ -3458,6 +3497,7 @@ fn system_info(
         pacing: measured.pacing,
         dovi_rpu: measured.dovi_rpu,
         dovi_reshape: measured.dovi_reshape,
+        dovi_reshape_hardware: measured.dovi_reshape_hardware,
         dovi_passthrough: measured.dovi_passthrough,
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,

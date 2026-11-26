@@ -176,8 +176,10 @@ peer authority.
 ## Understand playback and retirement
 
 Source-owned copy, encode, embedded subtitle burn, supported HDR and direct
-routes are implemented in the effort. Dolby Vision conversion/re-encoding,
-downloaded subtitle burns, native subtitles beside HDR and Shared progressive
+routes are implemented in the effort, as are Dolby Vision preserve,
+conversion, base strip and compatible-base encodes and native subtitles beside
+HDR (a receiver that does not affirm Dolby Vision relay gets the base).
+Profile 5 encodes, downloaded subtitle burns and Shared progressive
 `stream.mp4` remain typed unsupported shapes. The Source selects delivery
 from the player's actual capabilities. A compiler pass does not establish
 subtitle fidelity, HDR rendering or physical-device playback.

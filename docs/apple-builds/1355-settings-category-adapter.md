@@ -1,6 +1,5 @@
 # Keep settings category input in its remote adapter
 
-Build: 287
 Issue: #1355
 
 The settings category rail routes Right through the existing remote-adapter

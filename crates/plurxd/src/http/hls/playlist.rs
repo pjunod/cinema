@@ -39,6 +39,15 @@ pub(super) async fn playlist_local_before(
     playlist_deadline: Instant,
     request_deadline: Instant,
 ) -> Result<Response, ApiError> {
+    if query.native == Some(crate::media_sessions::PREPARED_VOD_NATIVE_MODE) {
+        return prepared_master_playlist_response_local_before(
+            state,
+            session,
+            playlist_deadline,
+            request_deadline,
+        )
+        .await;
+    }
     let initial_vod_deadline = response_publication_deadline_before(request_deadline);
     // A VOD session's child media playlist is the plan's immutable artifact.
     // The dedicated master path wraps it when native subtitles were requested;
@@ -274,6 +283,53 @@ pub(super) async fn master_playlist_response_local_before(
     let response = playlist_response(
         master_playlist_diagnostic(&file, query.subtitle, &context, query.diagnostic.as_deref())
             .into_bytes(),
+    );
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+        true,
+        response,
+        deadline,
+    )
+    .await
+}
+
+async fn prepared_master_playlist_response_local_before(
+    state: &AppState,
+    session: &str,
+    playlist_deadline: Instant,
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    let route = match state
+        .media_sessions
+        .media_route_resolution_before(session, &state.node_id, playlist_deadline)
+        .await?
+    {
+        DurableRouteResolution::ActiveLocal(route) => route,
+        DurableRouteResolution::Absent => return Err(ApiError::NotFound("prepared playlist")),
+        DurableRouteResolution::ActiveRemote(_) => return Err(media_owner_transition()),
+        DurableRouteResolution::OwnerTransition(route) => {
+            return Err(owner_transition_answer(&route))
+        }
+        DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
+    };
+    let stored_response = serde_json::from_str::<serde_json::Value>(&route.response_json).ok();
+    let shape = stored_response
+        .as_ref()
+        .and_then(|response| response.get(PREPARED_PLAYLIST_SHAPE_FIELD))
+        .and_then(serde_json::Value::as_str);
+    if shape != Some(PREPARED_SINGLE_VARIANT_SHAPE) {
+        return Err(ApiError::NotFound("prepared playlist"));
+    }
+    let (context, file, owner) = session_file(state, session, playlist_deadline).await?;
+    if !owner.is_scalar_vod() {
+        return Err(ApiError::NotFound("prepared playlist"));
+    }
+    let deadline = response_publication_deadline_before(request_deadline);
+    let response = playlist_response(
+        prepared_single_variant_master(&file, &context, owner.prepared_frame_rate()).into_bytes(),
     );
     complete_buffered_response_before(
         state,

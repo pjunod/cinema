@@ -1,6 +1,11 @@
 # Roster applied marks — invalidate directory snapshots by table
 
-**Status:** open — implemented; focused local regressions pass, remaining static/contract checks and review pending. **Owner:** Codex.
+**Status:** built — implemented and independently reviewed. **Owner:** Codex.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Companion to [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md)
 and [the facade contract](CLUSTER-FACADE-BUILD.md). This change makes the

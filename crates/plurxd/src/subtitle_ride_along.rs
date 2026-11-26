@@ -787,7 +787,8 @@ pub(crate) async fn plan_tracks(
     if probed.is_empty() {
         return None;
     }
-    let live = crate::fragment_index_cluster::source_stamp(&source.metadata().ok()?);
+    let live =
+        crate::fragment_index_cluster::source_stamp(&plurx_core::media_io::fstat(source).ok()?);
     {
         let key = (gate.root.clone(), file_id);
         let mut failed = failed_rides();
@@ -2548,8 +2549,7 @@ pub(crate) async fn publish_existing_manifest_rows(
         return Err("invalid portable source attestation".to_owned());
     }
     let live = crate::fragment_index_cluster::source_stamp(
-        &source
-            .metadata()
+        &plurx_core::media_io::fstat(source)
             .map_err(|error| format!("fstat subtitle source: {error}"))?,
     );
     let _guard = store::file_lock(root, file_id).lock().await;

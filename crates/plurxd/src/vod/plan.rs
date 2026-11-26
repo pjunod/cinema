@@ -31,16 +31,30 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
                 .as_bytes(),
         );
     }
-    hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
-    hasher.update([
-        u8::from(recipe.aac),
-        u8::from(recipe.video.preserves_dolby_vision()),
-        u8::from(recipe.video.promotes_parameter_sets()),
-    ]);
-    hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
-    if let Some(audio) = &recipe.audio_delivery {
-        hasher.update(b"audio-delivery-v1\0");
-        hasher.update(audio.byte_identity().as_bytes());
+    if recipe.audio_excluded && recipe.encoding.is_none() {
+        // Language, AAC conversion, offset and audio delivery select no bytes
+        // of a video-only copy; they must not fork the shared video.
+        hasher.update(b"video-only-v1\0");
+        hasher.update([
+            u8::from(recipe.video.preserves_dolby_vision()),
+            u8::from(recipe.video.promotes_parameter_sets()),
+        ]);
+    } else {
+        hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
+        hasher.update([
+            u8::from(recipe.aac),
+            u8::from(recipe.video.preserves_dolby_vision()),
+            u8::from(recipe.video.promotes_parameter_sets()),
+        ]);
+        if recipe.encoding.is_none() && !copy_has_audio(recipe) {
+            // Persisted silent copy plans could promise audio beyond video EOF.
+            hasher.update(b"silent-copy-plan-v1\0");
+        }
+        hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
+        if let Some(audio) = &recipe.audio_delivery {
+            hasher.update(b"audio-delivery-v1\0");
+            hasher.update(audio.byte_identity().as_bytes());
+        }
     }
     match recipe.cluster_cache_key.as_deref() {
         // A v2 artifact key, or `copy-index-v3:` and a v3 contract key.
@@ -87,19 +101,49 @@ pub(super) fn source_rendition_key(
 ///   title whose audio outruns its video would emit trailing audio the plan
 ///   never named — an out-of-plan chunk that poisons the rendition at the end
 ///   of every complete watch.
-/// - `audio_ms` is the container's probed duration: audio is the track that
-///   outruns, and the probe's number is what the c58a4307 rule was written
-///   against.
+/// - When the copy recipe maps audio, `audio_ms` uses the container's probed
+///   duration to account for audio that may outlast video. A silent recipe
+///   ends with indexed video, including when the source timestamps start
+///   after zero.
 pub(super) fn track_durations(
     index: &FragmentIndex,
     recipe: &Recipe,
     container_ms: i64,
 ) -> TrackDurations {
-    TrackDurations {
-        video_ms: index_video_ms(index),
-        audio_ms: container_ms,
-        audio_bits_per_second: audio_rate(recipe),
+    let video_ms = index_video_ms(index);
+    if recipe.audio_excluded {
+        // No audio track: the plan has no audio tail and no audio bytes.
+        return TrackDurations {
+            video_ms,
+            audio_ms: video_ms,
+            audio_bits_per_second: 0,
+        };
     }
+    let (audio_ms, audio_bits_per_second) = if copy_has_audio(recipe) {
+        (container_ms, audio_rate(recipe))
+    } else {
+        (video_ms, 0)
+    };
+    TrackDurations {
+        video_ms,
+        audio_ms,
+        audio_bits_per_second,
+    }
+}
+
+/// Mirrors the copy pipe's optional selected (or first) audio map and `-an`.
+fn copy_has_audio(recipe: &Recipe) -> bool {
+    let index = recipe.audio_index.unwrap_or(0);
+    recipe.audio_delivery.as_ref().is_none_or(|delivery| {
+        !matches!(
+            delivery.action,
+            plurx_core::playback::audio::AudioAction::None
+        )
+    }) && recipe
+        .file
+        .audio_streams
+        .iter()
+        .any(|stream| stream.index == index)
 }
 
 /// The index's total video duration in ms — the sum of its fragment ticks on

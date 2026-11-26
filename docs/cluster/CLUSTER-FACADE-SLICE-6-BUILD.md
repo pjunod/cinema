@@ -1,6 +1,11 @@
 # Cluster facade slice 6 — fresh sharing and custody capabilities
 
-**Status:** open — implementation checkpoint; isolated validation, integration, review and qualification remain pending. **Owner:** Codex.
+**Status:** built — implemented and independently reviewed. **Owner:** Codex.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md) and
 [slice 5](CLUSTER-FACADE-SLICE-5-BUILD.md). Start from slice 5 checkpoint

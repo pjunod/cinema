@@ -6,6 +6,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [One video for two VOD soundtracks](SHARED-VIDEO-MULTILINGUAL-VOD.md) | How to share indexed copy video across language tracks and prove continuous pictures and a single stored video. | open |
 | [MPV startup](MPV-LIVE-STARTUP.md) | MPV admission. | open |
 | [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour runs and attribution. | done |
 | [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Gamut hue and L8 controls. | built |
@@ -22,13 +23,18 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
-| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 Source-owned caption windows, custody initialization race and follow-up qualification. | done |
+| [SHARED-LIBRARY-DV-HDR-PLAN.md](SHARED-LIBRARY-DV-HDR-PLAN.md) | Shared Dolby Vision and HDR plan; M1–M4 status and acceptance. | in progress |
+| [SHARED-DV-PROCESSED-PLAN.md](SHARED-DV-PROCESSED-PLAN.md) | M4 processed Dolby Vision / FEL design and qualification. | in progress |
+| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 caption custody, Start 503 race and qualification. | done |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL splice](FEL-SERVER-SPLICE-BUILD.md) | Native HLS cutover and rollout. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
+| [FEL-REFERENCE-COMPOSITION-PLAN.md](FEL-REFERENCE-COMPOSITION-PLAN.md) | Independent FEL composer reference, measured deviation, matching composition. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | built |
+| [F+ acceptance](FEL-RPU-REFIT-GRADUATION-AND-M7.md) | Physical playback and NP1 trials. | open |
+| [M7 trial](FEL-RPU-REFIT-M7-2026-11-19.json) | Frozen NP1 rejection against served F+. | done |
 | [M6 Q12 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) · [Q23 history](FEL-RPU-REFIT-M6-2026-11-16.json) | Native evidence. | done |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG seek failure: subtitle cancellation, Auto repair and qualification. | open |
@@ -48,7 +54,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md](PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md) | Astra's final implementation review of frozen candidate `2bc1e54e1`; seven findings and the request-changes verdict. | done |
 | [PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) | Source dispositions and outstanding review and qualification evidence for Astra's seven startup findings. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, one fast-lane PR. | open |
-| [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Standalone reader contention, unpublished native attachment, stale inventory/error ownership and separate Apple TV audio evidence; fixes built, deployment and physical acceptance open. | open |
+| [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Reader contention, native attachment, stale inventory and Apple TV audio; deployment and physical acceptance remain open. | open |
 | [BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md](BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md) | Five Apple TV remux interruptions from deploy restarts, quorum fences, rolling retirement and whole-file re-attestation (fixed). | open |
 | [HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md](HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md) | S1E5 outage: WAL correlations and SQL reproduction establish the missing lookup index; reviewed proposal covers migrations, cadence, web recovery. | open |
 | [Heated Rivalry quorum build status](HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, cleanup for the quorum repair. | open |
@@ -59,20 +65,20 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [MACOS-VIDEO-PROCESSING-DESIGN.md](MACOS-VIDEO-PROCESSING-DESIGN.md) | Proposed native Mac acceleration: shared-memory cost model, VideoToolbox/Metal processing, Jellyfin dependency preservation, P5 hardware-decode experiment, contracts and measured acceptance. | open |
 | [MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) | Build handoff: package proof, milestone owners, regressions, rollout and independent codec extensions. | open |
 | [MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md](MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md) | Accepted five-part HDR10 Metal/CPU comparison; broader playback follow-ups remain open. | open |
-| [Metal HDR evidence manifest](evidence/macos-metal-hdr-20261012/evidence-manifest.json) · [all text receipts](evidence/macos-metal-hdr-20261012/text-receipts.tar.gz) | Checksum-indexed captures, neutralized logs and API/CI/landing receipts; screenshots retained privately on PR #1038. | done |
+| [Metal HDR evidence manifest](evidence/macos-metal-hdr-20261012/evidence-manifest.json) · [all text receipts](evidence/macos-metal-hdr-20261012/text-receipts.tar.gz) | Checksum-indexed captures, logs and API/CI/landing receipts; screenshots kept privately on PR #1038. | done |
 | [MACOS-VIDEO-PROCESSING-STATUS.md](MACOS-VIDEO-PROCESSING-STATUS.md) | Completed supported implementation and hardware qualification; final QSV closeout PR, exact evidence, decisions and separate broader acceptance. | done |
 | [MACOS-VIDEO-PROCESSING-EVIDENCE.md](MACOS-VIDEO-PROCESSING-EVIDENCE.md) | Processing, subtitle/font, Linux SDK and AMD evidence, dependency identities and retained failures. | open |
 | [Active-font release and API evidence](evidence/macos-video-20261008/font-active-e9fd-evidence.tar.gz) | Matched release/symbols and actual native subtitle delivery while inactive font configuration changes; performance remains separate. | open |
-| [Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz) | Hash-bound SDK generation, exact-source Linux compilation and isolated runtime dependency evidence; shipping and hardware acceptance remain open. | open |
-| [Linux producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz) | Full-featured Bookworm producer and matching static AC-4 parser build receipts; package and hardware/API acceptance remain open. | open |
-| [Linux package audit evidence](evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz) | Preserved producer/parser identities, exact runtime-base package additions and complete ELF closure; hardware and daemon API qualification remain open. | open |
+| [Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz) | Source-bound SDK, Linux compilation and runtime dependencies; acceptance open. | open |
+| [Linux producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz) | Bookworm producer and static AC-4 parser builds; acceptance open. | open |
+| [Linux package audit evidence](evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz) | Producer/parser identities, runtime packages and ELF closure; acceptance open. | open |
 | [Merged-source compiler evidence](evidence/macos-video-20261008/merged-c10-compile-evidence.tar.gz) | Exact current-main integration checks on Mac and Linux, with the bounded hook continuation retained; no unit or runtime qualification claim. | open |
 | [Merged Mac release and API evidence](evidence/macos-video-20261008/final-c10-release-api-evidence.tar.gz) | Exact merged release/symbols and focused subtitle/caption API delivery; interrupted timing results remain unqualified. | open |
 | [Complete subtitle performance evidence](evidence/macos-video-20261008/final-c10-subtitle-performance-evidence.tar.gz) | Eight uninterrupted CPU/GPU complete-graph comparisons with frame/timestamp validation, exact timing/child-CPU medians and measurement limits. | open |
 | [Intel strict-P5 evidence](evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz) | Intel strict-P5 and 64×64 QSV findings; NVIDIA/deployment remain unqualified. | open |
 | [QSV shipping dependency evidence](evidence/macos-video-20261008/qsv-shipping-dependency-evidence.tar.gz) | Exact installer and both shipping-stage builds preserve audited providers while removing the competing Debian Media SDK; paired Intel hardware acceptance is retained below. | done |
-| [Intel QSV shipping qualification](evidence/macos-video-20261008/intel-qsv-shipping-qualification-evidence.tar.gz) | Corrected shipping image passes all 32 raw controls and forced-QSV ordinary-API delivery; exact historical-daemon control, runtime identities and cleanup retained. | done |
-| [MACOS-VIDEO-PROCESSING-REVIEW.md](MACOS-VIDEO-PROCESSING-REVIEW.md) | Original proposal review and active continuation implementation review: independent coverage, concrete findings, owner repairs and re-review disposition. | open |
+| [Intel QSV shipping qualification](evidence/macos-video-20261008/intel-qsv-shipping-qualification-evidence.tar.gz) | Shipping image passes all 32 raw controls and forced-QSV ordinary-API delivery; daemon control, runtime identities and cleanup retained. | done |
+| [MACOS-VIDEO-PROCESSING-REVIEW.md](MACOS-VIDEO-PROCESSING-REVIEW.md) | Proposal and implementation review, findings and dispositions. | open |
 | [CODEC-AND-GPU-QUALIFICATION.md](CODEC-AND-GPU-QUALIFICATION.md) | Codec/GPU corpus, typed output contract, VUI/scoring, rolling-output census and separate graph/device acceptance. | open |
 | [S11-INTERNAL-ROLLING-CELLS-2026-10-02.md](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md) | Sanitized source/digest ledger for 16 internal rolling cells, failed attempts and public/film/device qualification limits. | done |
 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | DV Profile 5 refusal and dead media-origin probe; `output_job_owned` repair, caller audit and bounded library scan probe. | built |
@@ -84,18 +90,18 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [FFMPEG-SPAWN-UNIFICATION.md](FFMPEG-SPAWN-UNIFICATION.md) | Unified HLS/VOD/remux spawn path and strict progress-line classifier. | open |
 | [ENCODER-RATE-CONTROL-DEFAULTS.md](ENCODER-RATE-CONTROL-DEFAULTS.md) | Per-encoder CRF/QVBR vs ABR evidence before default changes; HDR10 policy and VBV remain separate. | open |
 | [TONE-MAP-CENSUS.md](TONE-MAP-CENSUS.md) | Operator census of each GPU/encoder graph against the CPU chain on authored PQ signals; feeds ruling R2. | built |
-| [TONE-MAP-CHAIN-CORRECTIONS.md](TONE-MAP-CHAIN-CORRECTIONS.md) | Implementation plan from the 2026-09-20 architecture review: the hardware-download metadata test first, then MaxCLL at scan, explicit `peak=`, gamut before curve, dither, with an image-comparison protocol. | open |
+| [TONE-MAP-CHAIN-CORRECTIONS.md](TONE-MAP-CHAIN-CORRECTIONS.md) | 2026-09-20 review plan: the hardware-download metadata test first, then MaxCLL at scan, explicit `peak=`, gamut before curve, dither, with an image-comparison protocol. | open |
 | [INTERLACE-IN-THE-MEDIA-CONTRACT.md](INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Field order contract, deinterlace/frame policy, Live TV field-rate bitrate fix and fixture acceptance. | open |
-| [AUDIO-RESOLVED-INDEPENDENTLY.md](AUDIO-RESOLVED-INDEPENDENTLY.md) | 2026-09-20 plan: audio negotiated apart from video, so a resolution change or burn no longer downmixes compatible multichannel audio; carried through recipe identity, manifests and handoffs. | open |
+| [AUDIO-RESOLVED-INDEPENDENTLY.md](AUDIO-RESOLVED-INDEPENDENTLY.md) | Plan for independent audio negotiation through recipes, manifests and handoffs. | open |
 | [AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) | Shipped Jellyfin 8.1.3 per-side synthetic downmix measurements, clipping and AAC limiter margin; no real-content, listening, device or output enablement claim. | open |
 | [AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md](AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md) | Stereo downmix on real content: the incumbent fold clipped and AC-3/E-AC-3 applied stored levels; shipped float matrix with a −4 dBFS limiter, its encoded-VOD join proof. | open |
 | [VOD-BFRAMES-TIMELINE-DESIGN.md](VOD-BFRAMES-TIMELINE-DESIGN.md) | Strict presentation-grid implementation and optional signed-offset software B-frames; no-reorder default, per-family/client qualification and remaining evidence. | open |
-| [DECODE-FACTS-GATE-AND-FALLBACK.md](DECODE-FACTS-GATE-AND-FALLBACK.md) | Implementation plan from the 2026-09-20 architecture review: instrumenting the decode-fact gate, amortising immutable-image validation without losing tamper checks, classifying fallback reasons. | open |
+| [DECODE-FACTS-GATE-AND-FALLBACK.md](DECODE-FACTS-GATE-AND-FALLBACK.md) | 2026-09-20 review plan: instrumenting the decode-fact gate, amortising immutable-image validation without losing tamper checks, classifying fallback reasons. | open |
 | [TRANSCODE-DECOMPOSITION-PLAN.md](TRANSCODE-DECOMPOSITION-PLAN.md) | Built extraction and all three removal consumers; delegated lifecycle/seam decisions and retained evidence. Optional registry evaluation is deferred; S-05 physical acceptance remains open. | built |
 | [ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md](ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md) | Why immersive AC-4 and delayed AC-3 broke live starts, what the fixes preserve, why the 103.1 capture cannot initialize its decoder. | open |
 | [ATSC 3.0 live audio repair status](ATSC3-AUDIO-STARTUP-STATUS.html) | Implementation, single adversarial review, final fast lane, merge and outstanding live acceptance. | open |
 | [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md) | Why idle tuners reported busy: subtitle backfill blocked admission; pool policy and refusal classification fixes. | built |
-| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded in stereo; copy-first audio track selection, sink-derived AAC channel claim, Android hardware MPEG-2, aspect-ratio report the server could not reproduce. | built |
+| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | Why ATSC 1.0 was encoded in stereo; copy-first selection, AAC channels, Android MPEG-2 and an open aspect-ratio report. | built |
 | [RESUME-ROLLING-PUBLICATION-RCA.md](RESUME-ROLLING-PUBLICATION-RCA.md) | Why resume failed across clients: rolling-engine fallback, unopened web MediaSource and progress update erasing position after failed startup. | open |
 | [PLAYBACK-STARTUP-LATENCY-M2-20261002.json](PLAYBACK-STARTUP-LATENCY-M2-20261002.json) | Candidate floor rejection arithmetic and bounded generated hls.js startup sweep; continuity/native qualification state. | open |
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.md](PLAYBACK-STARTUP-LATENCY-M0-20261002.md) | Native Safari preparation/publication incident and review-reported index backlog, with evidence limits. | done |
@@ -114,15 +120,15 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [Web seek incident evidence](../evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](../evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
 | [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
 | [Seek scratch reservations status](SEEK-SCRATCH-RESERVATIONS-STATUS.html) | Live ledger for the effort: unit state, base and compiler, evidence, review, fast lane and deployment. | open |
-| [Seek scratch reservations receipt](../evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Exact base and compiler, accounting/release/mechanism proofs, which regression covers which acceptance row, what already failed before the change, what is still owed. | open |
+| [Seek scratch reservations receipt](../evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Base/compiler, accounting and release proofs, regression mapping, failures and remaining acceptance. | open |
 | [FFmpeg HLS write boundary receipt](../evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md) | The loopback muxer's per-piece reservation, hole repair and proofs. | open |
 | [FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md](FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md) | Historical design proposal for the owned FFmpeg write boundary; use the receipt above for the implemented mechanism and proof. | done |
 | [MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) | Why one valid MKV was denied immutable VOD, why its rolling fallback violated AVFoundation's playlist-update deadline, packet-duration plus sliding-HLS repair contracts. | open |
-| [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | The build contract for the reviewed MKV-duration and sliding-HLS repair: startup admission, packet evidence, publication scheduling, object grace, acceptance. | open |
+| [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | Build contract for MKV admission, packet evidence, publication timing and acceptance. | open |
 | [MKV-DURATION-AND-SLIDING-HLS-STATUS.md](MKV-DURATION-AND-SLIDING-HLS-STATUS.md) | Live package, compiler, review, qualification, production-authorization ledger for the MKV-duration and sliding-HLS repair. | open |
 | [APPLE-TV-FORWARD-SKIPS-STATUS.md](APPLE-TV-FORWARD-SKIPS-STATUS.md) | Live implementation, review, focused-proof, fast-lane and merge ledger for cumulative rolling-publication pacing and Apple TV position continuity. | open |
 | [APPLE-TV-FORWARD-SKIPS-RCA.md](APPLE-TV-FORWARD-SKIPS-RCA.md) | Why rolling media advancing faster than playback made Apple TV skip forward, with production and AVPlayer replay evidence. | done |
-| [APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md](APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md) | Historical build contract for cumulative publication pacing, protected playback position and focused regressions; use the status above for actual delivery evidence. | done |
+| [APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md](APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md) | Historical build contract; see status above for delivery evidence. | done |
 | [CONTENT-ANALYSIS-REPAIR-STATUS.md](CONTENT-ANALYSIS-REPAIR-STATUS.md) | Live implementation ledger for selected-video completion, bounded retry, exact-identity repair, review, promotion. | open |
 | [CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md](CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md) | Why complete video indexes were labelled incomplete: fleet evidence, selected-stream duration, timeout policy, recovery constraints. | open |
 | [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
@@ -216,11 +222,11 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md](APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md) | Why Apple and web HLS froze on a pacing hold, repair contract. | built |
 | [STUTTER-4K.md](STUTTER-4K.md) | 4K copy-path stutter: what it is, what it isn't, what to try next. | open |
 | [SEGMENTER-PLAN.md](SEGMENTER-PLAN.md) | GOP-aware segmenting — zero boundary drops on the copy path. | built |
-| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | How Auto should preserve smooth original playback, choose display-appropriate intermediate transcodes, recover quality safely across Android, Apple and web. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Adversarial findings on the automatic-quality plan, their disposition, remaining qualification risks. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | The independent Opus review request and the evidence it must challenge before implementation. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Lifecycle wrapper for the independent Opus review; links to its byte-identical source artifact and reconciliation. | done |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Supplied independent Opus review, preserved byte-for-byte: four P1 and ten P2 findings and source evidence. | done |
+| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | Auto plan for smooth playback and display-appropriate transcodes across clients. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Plan review findings, dispositions and remaining qualification risks. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | Independent review request and evidence to challenge. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Review artifact wrapper and reconciliation. | done |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Original review: four P1 and ten P2 findings with source evidence. | done |
 | [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) | The design for bandwidth-aware streaming. | live |
 
 ## Notes moved from the front of the docs index

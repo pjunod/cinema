@@ -1,6 +1,11 @@
 # Cluster facade slice 7 — close ownership and prove honest zero
 
-**Status:** open — 7a and 7b are implemented in preparatory checkpoints; current-base integration, final review and gates remain. The plan preceded implementation. **Owner:** Codex.
+**Status:** built — implemented and independently reviewed. **Owner:** Codex.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Companion to [slice 6](CLUSTER-FACADE-SLICE-6-BUILD.md),
 [the facade contract](CLUSTER-FACADE-BUILD.md), and
@@ -581,4 +586,7 @@ No fleet claim is made here. Deploying stays with Paul.
   - The `fn run` and `fn spawn_background_loops` item pins were re-recorded
     after review: the modeled facts are unchanged.
   - Three desktop protected-filesystem cases still need a protected host.
-- **Not yet claimed.** Effort gate, landing, main promotion and deployment.
+- **Historical checkpoint limits.** At the named 7d checkpoint, no effort
+  gate, landing, main promotion or deployment was claimed. Use the delivery
+  record above for later evidence; fleet acceptance still requires Paul’s
+  deployment.

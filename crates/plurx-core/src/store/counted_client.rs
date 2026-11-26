@@ -167,9 +167,12 @@ impl CountedClient {
         self.client.metrics_db().await
     }
 
-    /// Hiqlite patch 30: stop this node's own database Raft election timer,
-    /// for a node that is stopping. Process-local; not a replicated
-    /// operation.
+    /// Local table-change observation only; performs no SQL or confirmation.
+    pub(crate) fn local_applied_mark(&self) -> Option<hiqlite::AppliedMarkHandle> {
+        self.client.local_db_applied_mark().ok()
+    }
+
+    /// Stop this node’s election timer while stopping (Hiqlite patch 30).
     pub fn disable_local_db_elections(&self) -> Result<(), hiqlite::Error> {
         self.client.disable_local_db_elections()
     }

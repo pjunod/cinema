@@ -213,6 +213,8 @@ pub(super) async fn release_session(
                 .transcode
                 .begin_session_terminal(&session, projected_terminal, projected_reason)
                 .await;
+            // A successor staged to replace this session can no longer commit.
+            super::preparation::cancel_preparations_for_released_incumbent(&route.incarnation_id);
             // R3. A viewer releasing their own stream is the one event that
             // tells the server nobody will read its retired objects again —
             // but only for a client whose teardown ordering has been audited.

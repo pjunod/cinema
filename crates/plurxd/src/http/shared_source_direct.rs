@@ -193,7 +193,9 @@ pub(super) async fn prepare_source_direct(
     let fence = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
         .await
         .map_err(|_| refused)?;
-    let length = fence.handle.metadata().map_err(|_| refused)?.len();
+    let length = plurx_core::media_io::fstat(&fence.handle)
+        .map_err(|_| refused)?
+        .len();
     let object_version = fence.object_version().to_owned();
     drop(fence);
     let SourceDetailsRead::Authorized(current) = read_witness().await.map_err(|_| refused)? else {
@@ -302,22 +304,34 @@ pub(super) async fn prepare_source_start(
     headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     reference: SourcePlaybackTarget,
     session: CreateSession,
+    dolby_vision_withheld: bool,
+    relays_enhancement: bool,
 ) -> Result<PreparedSourceStart, SourceStartFailure> {
     if session.presentation.as_deref() == Some(DIRECT_PRESENTATION) {
         return Box::pin(prepare_source_direct(state, headers, reference, session))
             .await
             .map(|prepared| PreparedSourceStart::Direct(Box::new(prepared)));
     }
-    let prepared = Box::pin(super::super::hls::prepare_source_playback(
+    let mut prepared = Box::pin(super::super::hls::prepare_source_playback(
         state, headers, reference, session,
     ))
     .await
-    .map_err(|error| match error {
-        // The shared planner's own refusal of a burn that would cost this
-        // session its HDR grade: a definite answer, not an outage.
-        ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
-        _ => SourceStartFailure::Unavailable,
+    .map_err(|error| {
+        #[cfg(test)]
+        eprintln!("Source Start diagnostic stage=hls_preparation error={error:?}");
+        match error {
+            // The shared planner's own refusal of a burn that would cost this
+            // session its HDR grade: a definite answer, not an outage.
+            ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
+            _ => SourceStartFailure::Unavailable,
+        }
     })?;
+    if dolby_vision_withheld && plurx_core::playback::is_dolby_vision(prepared.file()) {
+        prepared.add_plan_note(super::receiver_presentation::DOLBY_VISION_WITHHELD_NOTE);
+    }
+    if relays_enhancement {
+        prepared.relay_enhancement();
+    }
     // The delivery policy is decided here, after a fresh claim, from the
     // Source's own prepared request (the player's real caps through the
     // shared planner) and its own scanned file facts. B is never trusted.
@@ -326,9 +340,6 @@ pub(super) async fn prepare_source_start(
         prepared.file(),
         prepared.native_subtitles(),
     ) {
-        Some(crate::transcode::source_actor::SourceDeliveryRefusal::DolbyVision) => {
-            Err(SourceStartFailure::DolbyVisionUnsupported)
-        }
         Some(crate::transcode::source_actor::SourceDeliveryRefusal::Unsupported) => {
             Err(SourceStartFailure::Unsupported)
         }
@@ -380,6 +391,22 @@ fn observe_direct_published(
 
 /// The published direct envelope for Start and live status, held by the
 /// owner's response guard. Status renews the lease, never viewer activity.
+/// A refused published reply: the answer to send, and whether it passes
+/// (then the answer is the typed retry the receiver keeps its session
+/// through).
+pub(super) struct PublishedRefusal {
+    pub(super) answer: ApiError,
+    pub(super) transient: bool,
+}
+impl From<ApiError> for PublishedRefusal {
+    fn from(answer: ApiError) -> Self {
+        Self {
+            answer,
+            transient: false,
+        }
+    }
+}
+
 pub(super) async fn published_reply(
     state: &crate::state::AppState,
     headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
@@ -388,17 +415,32 @@ pub(super) async fn published_reply(
     target: &SourcePlaybackTarget,
     grant: Uuid,
     deadline: std::time::Instant,
-) -> Result<axum::response::Response, ApiError> {
-    super::ingress::publication_allowed(state, &owned.assignment).await?;
+) -> Result<axum::response::Response, PublishedRefusal> {
+    super::ingress::publication_allowed(state, &owned.assignment)
+        .await
+        .map_err(|refusal| PublishedRefusal {
+            transient: refusal.is_transient(),
+            answer: refusal.into(),
+        })?;
     let (start, guard) = owned
         .actor
         .open_direct_start(deadline)
         .await
-        .map_err(|e| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_actor", error_class = ?e, "Source direct status refused"); SourceStartFailure::from(e).response() })?;
+        .map_err(|refusal| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_actor", error_class = ?refusal.error, transient = refusal.is_transient(), "Source direct status refused");
+            PublishedRefusal {
+                transient: refusal.is_transient(),
+                answer: if refusal.is_transient() {
+                    super::live_refusal_retry()
+                } else {
+                    SourceStartFailure::from(refusal.error).response()
+                },
+            }
+        })?;
     let (_, current_grant) = current_reference(state, headers, target).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_reference", error_class = "refused", "Source admission refused"); })?;
     if current_grant != grant || entry.grant != grant {
         tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_grant", error_class = "mismatch", "Source admission refused");
-        return Err(unavailable());
+        return Err(unavailable().into());
     }
     observe_direct_published(entry, owned, &start).inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_observed", error_class = "refused", "Source admission refused"); }).map_err(SourceStartFailure::response)?;
     let response = super::super::shared_library::source_file_json(

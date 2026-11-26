@@ -168,7 +168,7 @@ impl TrialClaim {
 
     /// The trial took its bundle with the reservation: the request is then
     /// kept to its deadline rather than its short refresh lifetime.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn mark_admitted(&self) {
         self.admitted
             .store(true, std::sync::atomic::Ordering::Release);
@@ -397,6 +397,10 @@ pub struct VodSettings {
     /// the 50 GB the settings page shows. Distinct from
     /// `completed_cache_bytes`, whose unset value keeps admission closed.
     pub output_budget_bytes: u64,
+    /// `playback.hls_burst_secs`: seconds of media a producer generation's
+    /// transfer input reads at source speed before epoch pacing engages, the
+    /// burst half of the same burst-then-hold shape rolling input uses.
+    pub source_burst_secs: f64,
 }
 
 /// The Developer switch for complete-output preparation queued by a VOD
@@ -661,6 +665,25 @@ impl ChildMediaRequest {
 }
 
 impl ResponseOwner {
+    pub(crate) fn is_scalar_playlist(&self) -> bool {
+        self.scalar_playlist
+    }
+
+    pub(crate) fn prepared_frame_rate(&self) -> Option<f64> {
+        if !self.scalar_playlist || self.tombstone.is_some() {
+            return None;
+        }
+        let rendition = self.rendition.as_ref()?;
+        // A nominal encode grid does not prove the shortest quantized MP4
+        // sample. Keep this unknown until that output has measured cadence.
+        if rendition.recipe.encoding.is_some() {
+            return None;
+        }
+        let index = rendition.index.as_ref()?;
+        let cadence = index.verified_refit_cadence()?;
+        crate::transcode::prepared_frame_rate_bound(index.timescale, cadence.minimum_interval_ticks)
+    }
+
     pub(crate) fn retained_output_facts(&self) -> Option<crate::transcode::RetainedOutputFacts> {
         let artifact = self.retained_output.as_ref()?;
         Some(artifact.facts())
@@ -836,6 +859,19 @@ impl ProcessingActivity {
             .iter()
             .all(|text| text.len() <= Self::MAX_TEXT)
     }
+}
+
+/// The session's display-target facts beside its current processing report:
+/// what the client reported and what the policy concluded, for the Playback
+/// info `Display target` row. Observation only.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct DvReportDisplay {
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) note: Option<String>,
+    /// Frozen beside the policy at session start; `None` for a route that
+    /// carries no display-target policy.
+    pub(crate) facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1046,6 +1082,10 @@ pub(crate) struct VodRecipeRequest<'a> {
     pub soundtrack: Option<Arc<crate::vodencode::Encoding>>,
     /// The second video of a two-rung autonomous attachment.
     pub companion: Option<(SessionRequest, Arc<crate::vodencode::Encoding>)>,
+    /// Every soundtrack of an admitted split copy presentation, in source
+    /// order, with the shared-audio request that resolves it. Empty means the
+    /// ordinary muxed copy.
+    pub split_soundtracks: Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)>,
 }
 
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
@@ -1059,6 +1099,7 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
             encoding: None,
             soundtrack: None,
             companion: None,
+            split_soundtracks: Vec::new(),
         }
     }
 }
@@ -1151,7 +1192,7 @@ impl ProcessedRootReuse {
                 .rendition
                 .source
                 .as_ref()
-                .is_none_or(|source| source.unchanged())
+                .is_none_or(|source| source.unchanged_in_place())
     }
 }
 
@@ -1377,6 +1418,7 @@ struct Shared {
     /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority
     /// hint, and a refused start asks again.
     local_index_demand: StdMutex<VecDeque<i64>>,
+    resume_predictions: vod_startup_prediction::ResumePredictions,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
     /// failure remains rediscoverable after either a later tick or restart.
@@ -1713,6 +1755,8 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
+#[path = "vod/startup_prediction.rs"]
+mod vod_startup_prediction;
 #[cfg(test)]
 pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
@@ -1722,6 +1766,8 @@ mod vod_serve_delivery;
 mod vod_serve_end;
 #[path = "vod/serve/serve.rs"]
 mod vod_serve_serve;
+#[path = "vod/serve/split.rs"]
+mod vod_serve_split;
 // split: end vod-serve
 
 // split: begin vod-shared
@@ -1744,6 +1790,8 @@ use marker_dispatch::*;
 // split: begin vod-generation
 #[path = "vod/generation.rs"]
 mod generation;
+#[cfg(test)]
+pub(crate) use generation::copy_video_pipeline;
 use generation::*;
 #[path = "vod/stream_format.rs"]
 mod stream_format;
@@ -1756,6 +1804,8 @@ use output_measurement::PublishedOutputMeasurement;
 mod copy_preparation;
 #[path = "vod/preparation_storage.rs"]
 pub(crate) mod preparation_storage;
+#[path = "vod/resume_preparation.rs"]
+mod resume_preparation;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]

@@ -229,7 +229,7 @@ impl SourceLinkIdentity {
         let fence = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
             .ok()?;
-        if !fence.unchanged() {
+        if !fence.unchanged().await {
             return None;
         }
         Some(Self {
@@ -951,7 +951,9 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()?;
-        if !fence.unchanged() || fence.object_version() != captured.source.source_object_version {
+        if !fence.unchanged().await
+            || fence.object_version() != captured.source.source_object_version
+        {
             return None;
         }
         state
@@ -1008,7 +1010,7 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()??;
-        if !fence.unchanged()
+        if !fence.unchanged().await
             || !Self::route_for_observation(&captured, &route, &state.node_id, staged.as_ref())
         {
             return None;
@@ -1787,23 +1789,28 @@ mod tests {
         let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(
             serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]})
         ).expect("actual request caps");
-        let decision = crate::http::stream::decision(
-            crate::http::extract::AuthUser(user.clone()),
-            State(state.clone()),
-            Path(file.id),
-            Query(crate::http::stream::Caps {
-                caps_v2: Some(caps.clone()),
-                force: Some("auto".into()),
-                ..Default::default()
-            }),
-            headers.clone(),
-            crate::http::network::RemoteAddress(Some(remote)),
-        )
-        .await
-        .expect("actual catalog")
-        .0;
+        let (decision, catalog_omissions) =
+            crate::transcode::TranscodeManager::capture_catalog_omissions(
+                crate::http::stream::decision(
+                    crate::http::extract::AuthUser(user.clone()),
+                    State(state.clone()),
+                    Path(file.id),
+                    Query(crate::http::stream::Caps {
+                        caps_v2: Some(caps.clone()),
+                        force: Some("auto".into()),
+                        ..Default::default()
+                    }),
+                    headers.clone(),
+                    crate::http::network::RemoteAddress(Some(remote)),
+                ),
+            )
+            .await;
+        let decision = decision.expect("actual catalog").0;
         let catalog = decision.quality_candidates.expect("catalog");
-        assert!(catalog.len() >= 2, "real distinct candidate recipes");
+        assert!(
+            catalog.len() >= 2,
+            "real distinct candidate recipes; rows={catalog:?}; normalized omissions={catalog_omissions:?}"
+        );
         let incumbent = catalog[0].clone();
         let proposed = catalog
             .iter()
@@ -1819,6 +1826,7 @@ mod tests {
             &user.password_hash,
         ));
         let mut request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -1829,6 +1837,7 @@ mod tests {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: "typed-player".into(),
             request_id: None,

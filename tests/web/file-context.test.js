@@ -284,7 +284,7 @@ test("shipped remux and session-start callers preserve legitimate full engine ca
   assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
 });
 
-test("Shared initial route is direct only for an actual direct decision, else session-first HLS with burn and HDR10, refusing Dolby Vision or absent capability",()=>{
+test("Shared initial route is direct only for an actual direct decision, else session-first HLS with burn, HDR10 and Dolby Vision, refusing absent capability",()=>{
  const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{subs:[]},failed:[],ROUTE:"direct",subLabelFor:(_,i)=>"track "+i});
  vm.runInContext(source+`
  const Hls=window.Hls;
@@ -311,13 +311,13 @@ test("Shared initial route is direct only for an actual direct decision, else se
  assert.equal(ctx.run(c,"remux","hdr10",null),"copy_hls");
  assert.equal(ctx.run(c,"remux","hlg",null),"copy_hls");
  assert.equal(ctx.failed.length,0);
- // Dolby Vision is refused with its own typed reason before any Start:
- // preserved, converted, or a Dolby Vision source re-encoded or burned.
- assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true}),null);
- assert.equal(ctx.run(c,"remux","dolby_vision",null,{convert_dolby_vision:true}),null);
- assert.equal(ctx.run(c,"transcode","sdr",null,{source:{hdr:"dolby_vision"}}),null);
- assert.equal(ctx.run(c,"remux","hdr10",1,{source:{hdr:"dolby_vision"}}),null);
- assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_dolby_vision_unsupported"));
+ // Dolby Vision is the Source's own plan for these caps, as it is Local's:
+ // preserved or converted it is Copy HLS; re-encoded or burned it encodes.
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true}),"copy_hls");
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true,convert_dolby_vision:true}),"copy_hls");
+ assert.equal(ctx.run(c,"transcode","sdr",null,{source:{hdr:"dolby_vision"}}),"transcode_hls");
+ assert.equal(ctx.run(c,"remux","hdr10",1,{source:{hdr:"dolby_vision"}}),"transcode_hls");
+ assert.equal(ctx.failed.length,0);
  // A Dolby Vision source copied as its HDR10 base needs nothing the Source lacks.
  assert.equal(ctx.run(c,"remux","hdr10",null,{source:{hdr:"dolby_vision"}}),"copy_hls");
  ctx.failed.length=0;

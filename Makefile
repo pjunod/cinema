@@ -158,16 +158,16 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
-# The bookkeeping rules CI enforces — index rows, release counters, infra
+# The bookkeeping rules CI enforces — index rows, mobile versions, infra
 # names, Regression-Test lines, route docs — checked in seconds with the fix
 # printed beside each failure. The pre-push hook and the fast lane's first job
 # run the same script. docs/ci/PAPERWORK.md lists every rule.
 .PHONY: paperwork
-paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
+paperwork: ## Fast bookkeeping checks (index rows, mobile versions, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
 
 .PHONY: paperwork-fix
-paperwork-fix: ## Apply the derivable paperwork fixes (counters, Markdown host names, index rows) to the working tree
+paperwork-fix: ## Apply the derivable paperwork fixes (Markdown host names, index rows) to the working tree
 	@python3 scripts/paperwork-fix
 
 .PHONY: history-check
@@ -266,6 +266,40 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::api::tests::write_ack_log_index_is_sent_only_on_a_negotiated_connection \
 	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::pre_vote_variants_follow_every_deployed_raft_stream_ordinal \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::only_the_exact_header_value_advertises_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_older_server_never_receives_a_pre_vote_and_keeps_its_stream \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_advertising_server_answers_the_pre_vote_itself \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::both_raft_stream_handlers_advertise_and_answer_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_local_only_answer_read_from_a_socket_is_refused \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_unreachable_peer_gives_no_pre_vote_answer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_reconnect_renegotiates_pre_vote \
+	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=14 $(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml \
+	  --features serde engine::tests::pre_vote_test:: --lib
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::frame_io::tests::real_tls_tail_backpressure_completes_for_every_payload_direction \
@@ -1092,14 +1126,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::startup_wait_logging_tests::immediate_watermark_errors_cannot_starve_due_startup_log \
 	  --lib -- --exact
-	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
-	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
-	  | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["manifest_path"] for p in data["packages"] if p["name"] == "openraft" and p["version"] == "0.9.25"))' )"; \
-	  CARGO_TARGET_DIR="$(CURDIR)/target/openraft-regression" $(CARGO) test --locked \
-	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
+	$(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
-	PLURX_EXPECT_TEST_COUNT=13 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	PLURX_EXPECT_TEST_COUNT=17 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1584,6 +1614,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/offload.test.js
+	@node --test tests/web/dv-version-facts.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
 	@node --test tests/web/cinema-remote-receiver.test.js
@@ -1594,6 +1625,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
+	@node --test tests/playback/audio-alternation.test.js
 	@node --test tests/playback/prepared-successor-chase.test.js
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
@@ -1629,6 +1661,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/dv-provenance-rows.test.js
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
@@ -1928,10 +1961,6 @@ desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 t
 
 ## ---- apple clients -----------------------------------------------------
 
-.PHONY: apple-build-bump
-apple-build-bump: ## Claim the next Apple build number across every generated surface
-	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
-
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
 # `test-without-building` — the third full Swift compile per run was pure
@@ -2080,6 +2109,10 @@ apk: android ## Build the Android debug APK (alias for android)
 # applies the audited lineage and verifies the effective signer at API 28 and
 # 36. Any missing input or mismatch fails before publishing an APK.
 #
+# The image carries no Git and cannot see a worktree's history, so the store
+# build number is derived here on the host (`scripts/build-number --release`)
+# and handed to Gradle as the plurxVersionCode project property.
+#
 # The keystore path is resolved to an absolute one before `docker run -v`
 # sees it. Docker reads a source that is not absolute as a *volume name*: the
 # `plurx-upload.jks` that PUBLISHING.md's `keytool` line leaves in the cwd
@@ -2094,6 +2127,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
 	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
+	versioncode="$$(scripts/build-number --release)" && \
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -2105,6 +2139,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
 	  -e PLURX_ANDROID_OLD_KEYSTORE=/signing/old.jks \
 	  -e PLURX_ANDROID_LINEAGE=/signing/lineage.bin \
+	  -e ORG_GRADLE_PROJECT_plurxVersionCode="$$versioncode" \
 	  -v "$$keystore":/signing/upload.jks:ro \
 	  -v "$$oldkeystore":/signing/old.jks:ro \
 	  -v "$$lineage":/signing/lineage.bin:ro \

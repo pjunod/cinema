@@ -2834,6 +2834,46 @@ fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
     assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
 }
 
+/// The Main10 decode probe proves the GPU decoded the clip by handing the
+/// picture to a filter that accepts only VA-API surfaces. It must never
+/// download the picture to system memory: that copy, which the renderer
+/// never makes, crashed the shipped FFmpeg in about one probe in nine, and
+/// every crash sent the node's Dolby Vision windows to software decode.
+#[test]
+fn the_main10_decode_probe_keeps_the_picture_on_the_gpu() {
+    let args: Vec<String> = super::hevc_main10_decode_probe_args(
+        "/dev/dri/renderD128",
+        std::path::Path::new("/scratch/main10.mkv"),
+    )
+    .into_iter()
+    .map(|arg| arg.into_string().expect("utf-8 argument"))
+    .collect();
+    let input = args.iter().position(|arg| arg == "-i").expect("input");
+    assert_eq!(args[input + 1], "/scratch/main10.mkv");
+    for pair in [
+        ["-hwaccel", "vaapi"],
+        ["-hwaccel_device", "/dev/dri/renderD128"],
+        ["-hwaccel_output_format", "vaapi"],
+    ] {
+        let at = args.iter().position(|arg| arg == pair[0]).expect(pair[0]);
+        assert!(
+            at < input && args[at + 1] == pair[1],
+            "{pair:?} in {args:?}"
+        );
+    }
+    let filter = args.iter().position(|arg| arg == "-vf").expect("filter");
+    assert!(filter > input, "{args:?}");
+    // A real VA-API render: a same-size, same-format scale_vaapi is a
+    // passthrough that never waits for the decoded surface.
+    assert_eq!(args[filter + 1], "scale_vaapi=w=iw/2:h=ih/2:format=p010");
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.contains("hwdownload") || arg.contains("hwmap")),
+        "the probe copies the picture off the GPU: {args:?}"
+    );
+}
+
 #[tokio::test]
 async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_arguments() {
     let nonce = "0123456789abcdef0123456789ABCDEF";
@@ -2857,4 +2897,82 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
         crate::scratch_put::redact(&format!("({url}), ü {url}/part.m4s")),
         "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
     );
+}
+
+/// A metadata probe killed from outside (the host OOM killer, on lab5 on
+/// 2026-11-25) reports an interruption, not a refusal of the source: the
+/// runner's own deadline and cancellation never reach an exit status.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
+    async fn run(script: &str) -> Result<super::BoundedOutput, super::HeldProbeError> {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        super::metadata_probe_output(
+            command,
+            std::time::Duration::from_secs(10),
+            1024,
+            "index metadata probe",
+            None,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .await
+    }
+    assert_eq!(
+        run("kill -9 $$").await.err(),
+        Some(super::HeldProbeError::Interrupted(
+            "index metadata probe exited signal: 9 (SIGKILL)".into()
+        ))
+    );
+    assert!(matches!(
+        run("exit 1").await,
+        Err(super::HeldProbeError::Failed(_))
+    ));
+    assert!(run("exit 0").await.is_ok());
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command.args(["-c", "exec sleep 30"]);
+    let timed_out = super::metadata_probe_output(
+        command,
+        std::time::Duration::from_millis(100),
+        1024,
+        "index metadata probe",
+        None,
+        crate::process_control::ChildWork::background("test"),
+    )
+    .await
+    .err();
+    assert!(
+        matches!(&timed_out, Some(super::HeldProbeError::Timeout(reason))
+            if reason.starts_with("index metadata probe timed out after ")),
+        "{timed_out:?}"
+    );
+}
+
+/// The F+ first-packet identity's exit statuses, classified by the shared
+/// runner step. The SIGKILL wording is the one revision 5 of the index failure
+/// policy reopens (`FragmentIndexOutcome::state`).
+#[cfg(unix)]
+#[test]
+fn an_f_plus_identity_exit_is_classified_by_its_status() {
+    use std::os::unix::process::ExitStatusExt;
+    let outcome = |raw| super::BoundedCommandOutcome {
+        status: std::process::ExitStatus::from_raw(raw),
+        output: Ok(super::BoundedOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }),
+    };
+    assert_eq!(
+        super::held_probe_outcome("F+ first packet identity", outcome(libc::SIGKILL)).err(),
+        Some(super::HeldProbeError::Interrupted(
+            "F+ first packet identity exited signal: 9 (SIGKILL)".into()
+        ))
+    );
+    assert_eq!(
+        super::held_probe_outcome("F+ first packet identity", outcome(256)).err(),
+        Some(super::HeldProbeError::Failed(
+            "F+ first packet identity exited exit status: 1".into()
+        ))
+    );
+    assert!(super::held_probe_outcome("F+ first packet identity", outcome(0)).is_ok());
 }

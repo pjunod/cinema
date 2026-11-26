@@ -55,11 +55,13 @@ pub struct AdminUser(pub User);
 /// makes the same write with no bound at all.
 pub struct CacheOnlyAdminUser;
 
-const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
+const CACHE_ONLY_ADMIN_PROOF_TTL: Duration =
+    plurx_core::cluster::timing::proofs::CACHE_ONLY_ADMIN_PROOF_TTL;
 const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
 /// Queued callers admitted behind the one active operation, process-wide.
 pub(super) const REVOCATION_WAITERS: usize = 8;
-pub(super) const REVOCATION_ADMISSION_WAIT: Duration = Duration::from_millis(2_500);
+pub(super) const REVOCATION_ADMISSION_WAIT: Duration =
+    plurx_core::cluster::timing::proofs::REVOCATION_ADMISSION_WAIT;
 
 static REVOCATION_COMPLETE: AtomicU64 = AtomicU64::new(0);
 static REVOCATION_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
@@ -149,8 +151,13 @@ struct CachedAdminProofState {
     /// roster proof that every running member implements peer revocation.
     /// Standalone SQLite has no peer writer and initializes this to true.
     cluster_revocation_capability_ready: bool,
+    /// Local backends have no quorum read to save and no persisted protocol
+    /// guards on their direct Store writers. Only a replicated bootstrap can
+    /// admit general-token reuse, after its separate v5 readiness proof.
+    general_token_cache_enabled: bool,
     remote_revocations: BTreeMap<String, RemoteCacheOnlyAdminRevocation>,
     proofs: BTreeMap<String, CachedAdminProof>,
+    token_proofs: BTreeMap<(String, &'static str), CachedTokenProof>,
 }
 
 impl Default for CachedAdminProofState {
@@ -160,8 +167,10 @@ impl Default for CachedAdminProofState {
             local_active_revocations: 0,
             local_ambiguity_expires_at: None,
             cluster_revocation_capability_ready: true,
+            general_token_cache_enabled: false,
             remote_revocations: BTreeMap::new(),
             proofs: BTreeMap::new(),
+            token_proofs: BTreeMap::new(),
         }
     }
 }
@@ -171,6 +180,17 @@ struct CachedAdminProof {
     user_id: i64,
     expires_at: tokio::time::Instant,
 }
+
+struct CachedTokenProof {
+    user: User,
+    source: Arc<dyn plurx_core::store::Store>,
+    source_image: Option<plurx_core::store::TokenProofSource>,
+    observed_at: i64,
+    wall_expires_at: i64,
+    expires_at: tokio::time::Instant,
+}
+
+const MAX_TOKEN_PROOFS: usize = 512;
 
 #[derive(Clone, Copy)]
 pub(crate) struct CacheOnlyAdminAuthenticationTicket(u64);
@@ -187,7 +207,8 @@ struct RemoteCacheOnlyAdminRevocation {
 }
 
 const MAX_REMOTE_CACHE_ONLY_ADMIN_REVOCATIONS: usize = 128;
-const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration = CACHE_ONLY_ADMIN_PROOF_TTL;
+const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration =
+    plurx_core::cluster::timing::proofs::REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL;
 
 /// Brackets a Store mutation with two cache generations. The first removes
 /// existing proof before the mutation starts; the second prevents an ordinary
@@ -236,12 +257,18 @@ impl CacheOnlyAdminRevocation {
 impl CachedAdminProofState {
     fn invalidate_target(&mut self, target: &CacheOnlyAdminRevocationTarget) {
         match target {
-            CacheOnlyAdminRevocationTarget::All => self.proofs.clear(),
+            CacheOnlyAdminRevocationTarget::All => {
+                self.proofs.clear();
+                self.token_proofs.clear();
+            }
             CacheOnlyAdminRevocationTarget::Digest(digest) => {
                 self.proofs.remove(digest);
+                self.token_proofs.retain(|(hash, _), _| hash != digest);
             }
             CacheOnlyAdminRevocationTarget::User(user_id) => {
                 self.proofs.retain(|_, proof| proof.user_id != *user_id);
+                self.token_proofs
+                    .retain(|_, proof| proof.user.id != *user_id);
             }
         }
     }
@@ -262,6 +289,7 @@ impl CachedAdminProofState {
         if local_ambiguity_expired || !expired.is_empty() {
             self.generation = self.generation.wrapping_add(1);
             self.proofs.clear();
+            self.token_proofs.clear();
         }
         for operation_id in expired {
             self.remote_revocations.remove(&operation_id);
@@ -279,6 +307,9 @@ impl CachedAdminProofState {
 impl CacheOnlyAdminProofCache {
     pub(crate) fn new(replicated: bool) -> Self {
         let cache = Self::default();
+        if let Ok(mut state) = cache.inner.lock() {
+            state.general_token_cache_enabled = replicated;
+        }
         cache.set_cluster_revocation_capability_ready(!replicated);
         cache
     }
@@ -328,6 +359,7 @@ impl CacheOnlyAdminProofCache {
             if state.cluster_revocation_capability_ready != ready || !ready {
                 state.generation = state.generation.wrapping_add(1);
                 state.proofs.clear();
+                state.token_proofs.clear();
             }
             state.cluster_revocation_capability_ready = ready;
         }
@@ -383,6 +415,110 @@ impl CacheOnlyAdminProofCache {
             CachedAdminProof {
                 user_id: user.id,
                 expires_at: now + CACHE_ONLY_ADMIN_PROOF_TTL,
+            },
+        );
+    }
+
+    /// General token authority is reusable only under the same v5 global
+    /// revocation fence, source Store identity, audience and exact expiry.
+    fn authenticated_token(
+        &self,
+        token_digest: &str,
+        audience: plurx_core::store::TokenAudience,
+        source: &Arc<dyn plurx_core::store::Store>,
+    ) -> Option<User> {
+        let mut state = self.inner.lock().ok()?;
+        let now = tokio::time::Instant::now();
+        let wall = unix_seconds()?;
+        state.prune_revocations(now);
+        if !state.general_token_cache_enabled || state.revocation_active() {
+            return None;
+        }
+        state.token_proofs.retain(|_, proof| {
+            proof.expires_at > now
+                && proof.wall_expires_at > wall
+                && proof
+                    .source_image
+                    .as_ref()
+                    .is_none_or(|source| source.still_valid())
+        });
+        let proof = state
+            .token_proofs
+            .get(&(token_digest.to_owned(), audience.as_str()))?;
+        (Arc::ptr_eq(&proof.source, source)
+            && wall >= proof.observed_at
+            && proof
+                .source_image
+                .as_ref()
+                .is_none_or(|source| source.still_valid()))
+        .then(|| proof.user.clone())
+    }
+
+    fn record_token_authenticated(
+        &self,
+        ticket: Option<CacheOnlyAdminAuthenticationTicket>,
+        token_digest: String,
+        audience: plurx_core::store::TokenAudience,
+        source: Arc<dyn plurx_core::store::Store>,
+        user: &User,
+        lease: Option<plurx_core::store::TokenAuthenticationLease>,
+    ) {
+        let (Some(ticket), Some(lease), Some(wall)) = (ticket, lease, unix_seconds()) else {
+            return;
+        };
+        if audience == plurx_core::store::TokenAudience::PlaybackHandoff
+            || wall < lease.observed_at
+            || wall >= lease.expires_at
+            || lease
+                .source_image
+                .as_ref()
+                .is_some_and(|source| !source.still_valid())
+        {
+            return;
+        }
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        let now = tokio::time::Instant::now();
+        state.prune_revocations(now);
+        if !state.general_token_cache_enabled
+            || state.revocation_active()
+            || state.generation != ticket.0
+        {
+            return;
+        }
+        state.token_proofs.retain(|_, proof| {
+            proof.expires_at > now
+                && proof.wall_expires_at > wall
+                && proof
+                    .source_image
+                    .as_ref()
+                    .is_none_or(|source| source.still_valid())
+        });
+        let key = (token_digest, audience.as_str());
+        if !state.token_proofs.contains_key(&key) && state.token_proofs.len() >= MAX_TOKEN_PROOFS {
+            let oldest = state
+                .token_proofs
+                .iter()
+                .min_by_key(|(_, proof)| proof.expires_at)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                state.token_proofs.remove(&oldest);
+            }
+        }
+        let remaining = lease
+            .expires_at
+            .saturating_sub(wall)
+            .min(plurx_core::auth::ACTIVITY_REFRESH_SECS) as u64;
+        state.token_proofs.insert(
+            key,
+            CachedTokenProof {
+                user: user.clone(),
+                source,
+                source_image: lease.source_image,
+                observed_at: lease.observed_at,
+                wall_expires_at: lease.expires_at,
+                expires_at: now + Duration::from_secs(remaining),
             },
         );
     }
@@ -445,6 +581,7 @@ impl CacheOnlyAdminProofCache {
         }
         state.generation = state.generation.wrapping_add(1);
         state.proofs.clear();
+        state.token_proofs.clear();
         state.remote_revocations.insert(
             operation_id.to_owned(),
             RemoteCacheOnlyAdminRevocation {
@@ -460,6 +597,7 @@ impl CacheOnlyAdminProofCache {
         state.remote_revocations.remove(operation_id);
         state.generation = state.generation.wrapping_add(1);
         state.proofs.clear();
+        state.token_proofs.clear();
         Ok(())
     }
 
@@ -468,6 +606,9 @@ impl CacheOnlyAdminProofCache {
             state.prune_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.proofs.remove(token_digest);
+            state
+                .token_proofs
+                .retain(|(hash, _), _| hash != token_digest);
         }
     }
 
@@ -477,6 +618,9 @@ impl CacheOnlyAdminProofCache {
             state.prune_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.proofs.retain(|_, proof| proof.user_id != user_id);
+            state
+                .token_proofs
+                .retain(|_, proof| proof.user.id != user_id);
         }
     }
 
@@ -773,13 +917,20 @@ pub(crate) async fn authenticate_token_digest(
     hash: String,
     audience: plurx_core::store::TokenAudience,
 ) -> Result<plurx_core::domain::User, ApiError> {
+    if let Some(user) =
+        state
+            .cache_only_admin_proofs
+            .authenticated_token(&hash, audience, &state.store)
+    {
+        return Ok(user);
+    }
     let ticket = state.cache_only_admin_proofs.authentication_ticket();
     let native = audience == plurx_core::store::TokenAudience::Native;
-    let verdict = if native {
-        state.store.authenticate_token(&hash).await?
-    } else {
-        state.store.authenticate_token_for(&hash, audience).await?
-    };
+    let proof = state
+        .store
+        .authenticate_token_proof_for(&hash, audience)
+        .await?;
+    let verdict = proof.authentication;
     let user = match verdict {
         TokenAuthentication::Authenticated(user) => user,
         TokenAuthentication::Expired { idle_days } => {
@@ -795,8 +946,16 @@ pub(crate) async fn authenticate_token_digest(
     if native {
         state
             .cache_only_admin_proofs
-            .record_authenticated(ticket, hash, &user);
+            .record_authenticated(ticket, hash.clone(), &user);
     }
+    state.cache_only_admin_proofs.record_token_authenticated(
+        ticket,
+        hash,
+        audience,
+        state.store.clone(),
+        &user,
+        proof.lease,
+    );
     Ok(user)
 }
 
@@ -964,7 +1123,8 @@ impl FromRequestParts<AppState> for CacheOnlyAdminUser {
 /// it cannot authorize. Deliberately shorter than any page's own patience:
 /// the point of the bound is that a wedged Store degrades this guard to a
 /// named refusal instead of hanging the request that reports the wedge.
-const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration =
+    plurx_core::cluster::timing::proofs::CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT;
 
 /// A cluster recovery read this node could not authorize. The code is stable
 /// so a client can tell it apart from a verdict on the credential; the sentence
@@ -1056,6 +1216,213 @@ mod tests {
     fn record(cache: &CacheOnlyAdminProofCache, digest: String, user: &User) {
         let ticket = cache.authentication_ticket();
         cache.record_authenticated(ticket, digest, user);
+    }
+
+    fn token_cache() -> CacheOnlyAdminProofCache {
+        let cache = CacheOnlyAdminProofCache::new(true);
+        cache.set_cluster_revocation_capability_ready(true);
+        cache
+    }
+
+    fn token_source() -> std::sync::Arc<dyn plurx_core::store::Store> {
+        std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("source"))
+    }
+
+    fn record_token(
+        cache: &CacheOnlyAdminProofCache,
+        source: std::sync::Arc<dyn plurx_core::store::Store>,
+        digest: &str,
+        audience: plurx_core::store::TokenAudience,
+    ) {
+        let now = super::unix_seconds().expect("clock");
+        cache.record_token_authenticated(
+            cache.authentication_ticket(),
+            digest.to_owned(),
+            audience,
+            source,
+            &user(1, false),
+            Some(plurx_core::store::TokenAuthenticationLease {
+                observed_at: now,
+                expires_at: now + 60,
+                source_image: None,
+            }),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn general_token_proofs_bind_source_and_audience_and_never_slide_expiry() {
+        use plurx_core::store::TokenAudience::{JellyfinCompatibility, Native, PlaybackHandoff};
+        let cache = token_cache();
+        let source = token_source();
+        let standalone = CacheOnlyAdminProofCache::default();
+        record_token(&standalone, source.clone(), "standalone", Native);
+        assert!(
+            standalone
+                .authenticated_token("standalone", Native, &source)
+                .is_none(),
+            "a local bootstrap does not admit general proof reuse"
+        );
+        let different = token_source();
+        record_token(&cache, source.clone(), "native", Native);
+        assert_eq!(
+            cache
+                .authenticated_token("native", Native, &source)
+                .expect("same-source native token proof remains reusable")
+                .id,
+            1
+        );
+        assert!(cache
+            .authenticated_token("native", JellyfinCompatibility, &source)
+            .is_none());
+        assert!(cache
+            .authenticated_token("native", Native, &different)
+            .is_none());
+        record_token(&cache, source.clone(), "handoff", PlaybackHandoff);
+        assert!(cache
+            .authenticated_token("handoff", PlaybackHandoff, &source)
+            .is_none());
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(cache
+            .authenticated_token("native", Native, &source)
+            .is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(cache
+            .authenticated_token("native", Native, &source)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn general_token_proofs_share_revocation_fences_and_reject_stale_publication() {
+        use plurx_core::store::TokenAudience::Native;
+        let cache = token_cache();
+        let source = token_source();
+        record_token(&cache, source.clone(), "token", Native);
+        let ticket = cache.authentication_ticket();
+        let revoke = cache.begin_user_revocation(1);
+        assert!(cache
+            .authenticated_token("token", Native, &source)
+            .is_none());
+        drop(revoke);
+        let now = super::unix_seconds().expect("read fixture wall clock before stale publication");
+        cache.record_token_authenticated(
+            ticket,
+            "late".into(),
+            Native,
+            source.clone(),
+            &user(1, false),
+            Some(plurx_core::store::TokenAuthenticationLease {
+                observed_at: now,
+                expires_at: now + 60,
+                source_image: None,
+            }),
+        );
+        assert!(cache.authenticated_token("late", Native, &source).is_none());
+        record_token(&cache, source.clone(), "token", Native);
+        cache
+            .begin_remote_revocation("peer-operation")
+            .expect("install remote token-proof revocation fence");
+        assert!(cache
+            .authenticated_token("token", Native, &source)
+            .is_none());
+        cache
+            .end_remote_revocation("peer-operation")
+            .expect("finish remote token-proof revocation fence");
+        assert!(cache
+            .authenticated_token("token", Native, &source)
+            .is_none());
+        record_token(&cache, source.clone(), "token", Native);
+        cache.set_cluster_revocation_capability_ready(false);
+        assert!(cache
+            .authenticated_token("token", Native, &source)
+            .is_none());
+        cache.set_cluster_revocation_capability_ready(true);
+        assert!(cache
+            .authenticated_token("token", Native, &source)
+            .is_none());
+        record_token(&cache, source.clone(), "first-user", Native);
+        cache.record_token_authenticated(
+            cache.authentication_ticket(),
+            "second-user".into(),
+            Native,
+            source.clone(),
+            &user(2, true),
+            Some(plurx_core::store::TokenAuthenticationLease {
+                observed_at: now,
+                expires_at: now + 60,
+                source_image: None,
+            }),
+        );
+        assert!(cache
+            .authenticated_token("first-user", Native, &source)
+            .is_some());
+        assert!(cache
+            .authenticated_token("second-user", Native, &source)
+            .is_some());
+        let policy = cache.begin_global_revocation();
+        assert!(cache
+            .authenticated_token("first-user", Native, &source)
+            .is_none());
+        assert!(cache
+            .authenticated_token("second-user", Native, &source)
+            .is_none());
+        drop(policy);
+    }
+
+    #[tokio::test]
+    async fn general_token_proofs_refuse_expired_and_future_witnesses_and_bound_memory() {
+        use plurx_core::store::TokenAudience::Native;
+        let cache = token_cache();
+        let source = token_source();
+        let now =
+            super::unix_seconds().expect("read fixture wall clock for bounded proof witnesses");
+        for (digest, observed, expires) in
+            [("expired", now - 1, now), ("future", now + 1, now + 60)]
+        {
+            cache.record_token_authenticated(
+                cache.authentication_ticket(),
+                digest.into(),
+                Native,
+                source.clone(),
+                &user(1, false),
+                Some(plurx_core::store::TokenAuthenticationLease {
+                    observed_at: observed,
+                    expires_at: expires,
+                    source_image: None,
+                }),
+            );
+            assert!(cache.authenticated_token(digest, Native, &source).is_none());
+        }
+        cache.record_token_authenticated(
+            cache.authentication_ticket(),
+            "no-witness".into(),
+            Native,
+            source.clone(),
+            &user(1, false),
+            None,
+        );
+        assert!(cache
+            .authenticated_token("no-witness", Native, &source)
+            .is_none());
+        for n in 0..=super::MAX_TOKEN_PROOFS {
+            record_token(&cache, source.clone(), &format!("token-{n}"), Native);
+        }
+        assert_eq!(
+            cache
+                .inner
+                .lock()
+                .expect("read bounded token proof map")
+                .token_proofs
+                .len(),
+            super::MAX_TOKEN_PROOFS
+        );
+        let revoke = cache.begin_global_revocation();
+        assert!(cache
+            .inner
+            .lock()
+            .expect("read token proof map after global invalidation")
+            .token_proofs
+            .is_empty());
+        drop(revoke);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1376,15 +1743,43 @@ mod tests {
             .split_once("impl FromRequestParts<AppState> for RawToken")
             .expect("AuthUser extractor end")
             .0;
-        assert!(
-            extractor
-                .find("authentication_ticket()")
-                .expect("auth ticket")
-                < extractor
-                    .find("authenticate_token(&hash)")
-                    .expect("Store auth")
-        );
-        assert!(extractor.contains("record_authenticated(ticket, hash, &user)"));
+        let authentication = extractor
+            .split_once("pub(crate) async fn authenticate_token_digest(")
+            .expect("shared audience-bound authentication")
+            .1
+            .split_once("/// Stable code every client")
+            .expect("shared authentication end")
+            .0;
+        let cache_hit = authentication
+            .find(".authenticated_token(")
+            .expect("bounded proof read");
+        let cache_return = authentication
+            .find("return Ok(user);")
+            .expect("cache hit returns without renewal");
+        let ticket = authentication
+            .find("authentication_ticket()")
+            .expect("auth ticket");
+        let store = authentication
+            .find(".authenticate_token_proof_for(&hash, audience)")
+            .expect("authoritative Store proof read");
+        let admin_publish = authentication
+            .find("record_authenticated(ticket, hash.clone(), &user)")
+            .expect("fresh Store result recovery publication");
+        let token_publish = authentication
+            .find("record_token_authenticated(")
+            .expect("fresh Store result token publication");
+        assert!(cache_hit < cache_return && cache_return < ticket && ticket < store);
+        assert!(store < admin_publish && admin_publish < token_publish);
+        let store_trait = include_str!("../../../plurx-core/src/store/mod.rs");
+        let default_proof = store_trait
+            .split_once("async fn authenticate_token_proof_for(")
+            .expect("default Store proof delegation")
+            .1
+            .split_once("/// Resolve a token hash to its user")
+            .expect("default Store proof delegation end")
+            .0;
+        assert!(default_proof.contains("TokenAuthenticationProof::uncached("));
+        assert!(default_proof.contains("self.authenticate_token_for(token_hash, audience).await?"));
 
         let auth = include_str!("auth.rs");
         let login = auth
@@ -1438,6 +1833,36 @@ mod tests {
                 < setup.find("count_users()").expect("setup Store read")
         );
         assert!(setup.contains("record_authenticated(proof_ticket, token_hash, &user)"));
+
+        let policy = include_str!("system.rs")
+            .split_once(
+                "if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {",
+            )
+            .expect("token policy writer")
+            .1
+            .split_once("if let Some(on) = req.cinema_remote_invitations {")
+            .expect("token policy writer end")
+            .0;
+        let begin = policy
+            .find("ClusterCacheRevocation::begin_token_policy")
+            .expect("global policy revocation");
+        let write = policy
+            .find(".put_auth_token_policy(")
+            .expect("claim-bound policy writer");
+        let finish = policy
+            .find("proof_revocation.finish")
+            .expect("policy peer bracket end");
+        assert!(begin < write && write < finish);
+        assert!(policy.contains("proof_revocation.mutation_claim()"));
+        let policy_begin = include_str!("internal_auth_revocation.rs")
+            .split_once("pub(crate) async fn begin_token_policy(")
+            .expect("policy wrapper")
+            .1
+            .split_once("pub(crate) async fn begin_user(")
+            .expect("policy wrapper end")
+            .0;
+        assert!(policy_begin.contains(".begin_global_revocation()"));
+        assert!(policy_begin.contains("Self::begin(state, local, operation_guard).await"));
 
         let users = include_str!("users.rs");
         let update = users

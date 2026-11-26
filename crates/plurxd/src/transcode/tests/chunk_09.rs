@@ -2106,6 +2106,7 @@ fn actual_audio_delivery_changes_manifest_codec_and_rung_budget() {
 fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
     use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2120,6 +2121,7 @@ fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
         request_id: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         automatic: false,
         previous_session_id: None,
         reopen_reason: None,
@@ -2248,6 +2250,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
         }],
     };
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2262,6 +2265,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
         request_id: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         automatic: true,
         previous_session_id: None,
         reopen_reason: None,
@@ -2469,6 +2473,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
         reason: "retained actual producer".into(),
     };
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2483,6 +2488,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
         request_id: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         automatic: false,
         previous_session_id: None,
         reopen_reason: None,
@@ -3045,6 +3051,7 @@ async fn graph_holding(
         display_target: None,
         display: None,
         display_target_note: None,
+        dv_row_facts: None,
         source_tick: (1, 1000),
         source_origin: DvSourceOrigin::observed_common(
             DvTimestamp::new(0, 1_000_000).expect("origin"),
@@ -3067,6 +3074,7 @@ async fn graph_holding(
         runtime_cache: dir.join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
+        window_run: Default::default(),
         failure_episode: digest(b"episode"),
         preparation_budget: std::time::Duration::from_secs(5),
         report_revision: std::sync::atomic::AtomicU64::new(0),

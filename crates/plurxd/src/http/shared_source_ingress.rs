@@ -272,6 +272,10 @@ pub(super) async fn receiver_effective_body(
     let current = current_reference(state, headers, &input.reference).await;
     // Header interpretation follows the existing exact current grant check.
     let ready = current.is_ok() && receiver_presentation::authenticated_receiver_ready(headers);
+    let dolby_vision =
+        current.is_ok() && receiver_presentation::authenticated_receiver_dolby_vision(headers);
+    let processed_upgrade =
+        current.is_ok() && receiver_presentation::authenticated_receiver_processed_upgrade(headers);
     let route = state
         .store
         .lookup_source_ingress_route(
@@ -307,7 +311,12 @@ pub(super) async fn receiver_effective_body(
         if !cleanup {
             current?;
         }
-        receiver_presentation::normalize_wire(&input.canonical_recipe, ready)?
+        receiver_presentation::normalize_wire_with_upgrade(
+            &input.canonical_recipe,
+            ready,
+            dolby_vision,
+            processed_upgrade,
+        )?
     };
     if !cleanup && receiver_presentation::internal_range(&selected)? && !ready {
         return Err(receiver_presentation::unavailable());
@@ -1061,20 +1070,41 @@ pub(super) async fn end_uses_registered_driver(
     Ok(same_driver)
 }
 
+/// Why the current ingress admission did not allow a publication. A store
+/// that could not answer, or a membership not yet observed, passes and is
+/// answered as a retry; an admission that is not there is a refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PublicationRefusal(pub(super) crate::transcode::source_actor::RefusalPersistence);
+impl PublicationRefusal {
+    pub(super) fn is_transient(self) -> bool {
+        self.0 == crate::transcode::source_actor::RefusalPersistence::Transient
+    }
+}
+impl From<PublicationRefusal> for ApiError {
+    fn from(refusal: PublicationRefusal) -> Self {
+        if refusal.is_transient() {
+            super::live_refusal_retry()
+        } else {
+            unavailable()
+        }
+    }
+}
+
 pub(super) async fn publication_allowed(
     state: &crate::state::AppState,
     value: &SourceDispatchAssignment,
-) -> Result<(), ApiError> {
+) -> Result<(), PublicationRefusal> {
+    use crate::transcode::source_actor::RefusalPersistence::{Terminal, Transient};
     let members = state.cluster.source_members().observe()
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.members_store", error_class = "store", "Source admission refused"); unavailable() })?
-        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.members_store", error_class = "store", "Source admission refused"); PublicationRefusal(Transient) })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_0", error_class = "absent", "Source admission refused"); PublicationRefusal(Transient) })?;
     state
         .store
         .prepare_source_ingress_admission(value, state.sharing.accepted_drivers.boot_id(), &members)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.admission_store", error_class = "store", "Source admission refused"); unavailable() })?
-        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.admission_store", error_class = "store", "Source admission refused"); PublicationRefusal(Transient) })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_1", error_class = "absent", "Source admission refused"); PublicationRefusal(Terminal) })?;
     Ok(())
 }
 

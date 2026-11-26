@@ -122,6 +122,18 @@ impl IndexFailure {
     }
 }
 
+fn index_process_exit_failure(status: std::process::ExitStatus, rows: usize) -> IndexFailure {
+    // Our deadline and cancellation are settled before this path. An
+    // external kill (for example an OOM) does not diagnose the media.
+    let interrupted = crate::ffmpeg::killed_externally(status);
+    IndexFailure::new(
+        IndexFailureCode::IndexProcessFailed,
+        format!("index pipe exited with {status}"),
+        rows,
+    )
+    .transient(interrupted)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CompletionExpectationError {
     Unsupported(String),
@@ -582,6 +594,18 @@ fn tail_packet_end(
         .map(|(minimum, maximum)| (minimum, maximum, count)))
 }
 
+/// A metadata probe that produced no document. Its deadline and an external
+/// kill are interruptions; anything else is the probe refusing this source.
+fn metadata_probe_failure(error: crate::ffmpeg::HeldProbeError) -> IndexFailure {
+    use crate::ffmpeg::HeldProbeError;
+    let (code, transient) = match &error {
+        HeldProbeError::Timeout(_) => (IndexFailureCode::IndexProbeTimeout, true),
+        HeldProbeError::Interrupted(_) => (IndexFailureCode::IndexProcessFailed, true),
+        HeldProbeError::Failed(_) => (IndexFailureCode::IndexProcessFailed, false),
+    };
+    IndexFailure::new(code, error.reason().to_owned(), 0).transient(transient)
+}
+
 fn packet_probe_failure(
     error: crate::ffmpeg::HeldPacketProbeError,
     stream_index: u32,
@@ -596,11 +620,70 @@ fn packet_probe_failure(
         crate::ffmpeg::HeldPacketProbeError::Process(_) => {
             (IndexFailureCode::IndexProcessFailed, false)
         }
+        crate::ffmpeg::HeldPacketProbeError::Interrupted(_) => {
+            (IndexFailureCode::IndexProcessFailed, true)
+        }
     };
     let mut failure = IndexFailure::new(code, error.reason(), 0).transient(transient);
     failure.diagnostic.selected_stream = Some(stream_index);
     failure.diagnostic.output_bytes = Some(output_bytes);
     failure
+}
+
+/// Why the F+ first source packet's identity could not be taken.
+#[derive(Debug, PartialEq, Eq)]
+enum PacketIdentityError {
+    /// The held source could not be read or handed to the child.
+    Source(String),
+    /// The child itself: its own deadline, an outside kill, or its exit.
+    Probe(crate::ffmpeg::HeldProbeError),
+    /// The child answered, but not with one hash of the probed packet.
+    Unverified(String),
+}
+
+impl From<String> for PacketIdentityError {
+    fn from(reason: String) -> Self {
+        Self::Unverified(reason)
+    }
+}
+
+/// A refusal or an unidentified packet after a failed bridge read is the
+/// read's failure. The child's own deadline and an outside kill keep their
+/// classes; they are transient either way.
+fn read_failure_is_the_source(
+    error: PacketIdentityError,
+    read_failed: bool,
+) -> PacketIdentityError {
+    match error {
+        PacketIdentityError::Probe(crate::ffmpeg::HeldProbeError::Failed(reason))
+        | PacketIdentityError::Unverified(reason)
+            if read_failed =>
+        {
+            PacketIdentityError::Source(format!("source read failed during the check: {reason}"))
+        }
+        other => other,
+    }
+}
+
+/// Only an answer about the media is terminal. The child's own deadline, an
+/// outside kill and a source read say nothing about the title, as for the
+/// metadata and packet probes.
+fn packet_identity_failure(error: PacketIdentityError) -> IndexFailure {
+    use crate::ffmpeg::HeldProbeError;
+    let (code, transient, reason) = match error {
+        PacketIdentityError::Source(reason) => (IndexFailureCode::IndexSourceIo, true, reason),
+        PacketIdentityError::Probe(HeldProbeError::Timeout(reason)) => {
+            (IndexFailureCode::IndexProbeTimeout, true, reason)
+        }
+        PacketIdentityError::Probe(HeldProbeError::Interrupted(reason)) => {
+            (IndexFailureCode::IndexProcessFailed, true, reason)
+        }
+        PacketIdentityError::Probe(HeldProbeError::Failed(reason))
+        | PacketIdentityError::Unverified(reason) => {
+            (IndexFailureCode::IndexCompletionUnverified, false, reason)
+        }
+    };
+    IndexFailure::new(code, format!("F+ source packet identity: {reason}"), 0).transient(transient)
 }
 
 async fn packet_probe_attempt(
@@ -948,20 +1031,24 @@ fn held_filtered_packet_hash<'a>(
     budget: Duration,
     cancel: Option<&'a tokio_util::sync::CancellationToken>,
     retain_parameter_sets: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<[u8; 32], String>> + Send + 'a>> {
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<[u8; 32], PacketIdentityError>> + Send + 'a>,
+> {
     Box::pin(async move {
         let (source, object_version, path, runtime_cache) = held;
         let mut view = source;
         view.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
         let input = match crate::background_jobs::source_budget() {
             Some(budget) => Some(
                 crate::source_input::SourceInput::open_background_held(
-                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)?,
+                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)
+                        .map_err(PacketIdentityError::Source)?,
                     crate::http::stream::file_content_type(path),
                     budget,
                 )
-                .await?,
+                .await
+                .map_err(PacketIdentityError::Source)?,
             ),
             None => None,
         };
@@ -980,8 +1067,10 @@ fn held_filtered_packet_hash<'a>(
             let input_url = if let Some(input) = &input {
                 input.url().to_owned()
             } else {
-                let path = crate::ffmpeg::windows_source_path(source)?;
-                crate::ffmpeg::verify_windows_source_path(source, &path)?;
+                let path = crate::ffmpeg::windows_source_path(source)
+                    .map_err(PacketIdentityError::Source)?;
+                crate::ffmpeg::verify_windows_source_path(source, &path)
+                    .map_err(PacketIdentityError::Source)?;
                 path.to_string_lossy().into_owned()
             };
             command.args(filtered_packet_hash_args(
@@ -999,7 +1088,7 @@ fn held_filtered_packet_hash<'a>(
         );
         #[cfg(not(unix))]
         let descriptors = crate::producer_spawn::Descriptors::default();
-        let result = crate::ffmpeg::bounded_ffmpeg_output_descriptors_cancellable(
+        let result = crate::ffmpeg::held_ffmpeg_probe_output(
             command,
             budget.min(Duration::from_secs(30)),
             64 * 1024,
@@ -1013,15 +1102,23 @@ fn held_filtered_packet_hash<'a>(
         } else {
             result.await
         };
+        // FFmpeg reads through the bridge: a failed source read reaches it as
+        // truncated input, so its refusal is then not the media's answer.
+        let read_failed = input
+            .as_ref()
+            .is_some_and(|input| input.source_read_failed());
         if let Some(input) = input {
             input
                 .close_and_wait()
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
         }
         view.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
-        filtered_packet_hash(&result?.stdout, pts, time_base)
+            .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
+        let hash = result
+            .map_err(PacketIdentityError::Probe)
+            .and_then(|output| Ok(filtered_packet_hash(&output.stdout, pts, time_base)?));
+        hash.map_err(|error| read_failure_is_the_source(error, read_failed))
     })
 }
 
@@ -1044,6 +1141,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut resolved_refit_origin = None;
     let mut refit_proofs = Vec::new();
+    let mut refit_cadence = plurx_core::segplan::refit_proof::FittedCadenceAccumulator::default();
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -1138,6 +1236,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     };
                     let mut fragment = fragment;
                     if refit.is_some() {
+                        refit_cadence.observe(&fragment, init);
                         match plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
                             &fragment, init,
                         ) {
@@ -1224,10 +1323,14 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
                     let fragment = fragment;
-                    let row = match IndexRow::from_fragment(&fragment, init) {
+                    let mut row = match IndexRow::from_fragment(&fragment, init) {
                         Ok(row) => row,
                         Err(reason) => return IndexOutcome::Unsupported(reason.into()),
                     };
+                    // Fitted rows already retain their own canonical clock proof.
+                    if refit.is_some() {
+                        row.first_cto = None;
+                    }
                     covered_ticks = covered_ticks.saturating_add(row.duration);
 
                     // Only a clean fragment can begin a segment, so only a
@@ -1446,6 +1549,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     if refit.is_some() {
         built.dv_refit_origin = resolved_refit_origin;
         built.dv_refit_proofs = Some(refit_proofs);
+        built.dv_refit_cadence = refit_cadence.finish();
     }
     IndexOutcome::Built(Box::new(built))
 }
@@ -1522,6 +1626,12 @@ fn identity_for_transform(
     transform: Option<&str>,
 ) -> SourceIdentity {
     let mut recipe = transcode::copy_video_args(file, video);
+    if video.dolby_vision_refit().is_none() {
+        recipe.push(format!(
+            "--plurx-copy-landing-clock={}",
+            plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+        ));
+    }
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
         // A failed pre-repair P5 index is a terminal persisted refusal.
         // Move only the affected recipe so it can rebuild after upgrading.
@@ -1543,6 +1653,9 @@ fn identity_for_transform(
         recipe.push(format!("--plurx-output-transform={transform}"));
         if let Some(digest) = video.dolby_vision_refit() {
             recipe.push(format!("--plurx-dv-refit-digest={}", hex::encode(digest)));
+            // Cadence is immutable index evidence, not a changed curve method.
+            // Rebuild only fitted indexes that predate this measurement.
+            recipe.push("--plurx-dv-refit-cadence=1".into());
         }
     }
     SourceIdentity::new(
@@ -1772,7 +1885,12 @@ impl DvTitleRide {
     /// Start the scanner from the pass's held source capability. A budgeted
     /// scan reads exclusively through the shared source service bridge. The
     /// caller retains and joins this task through scanner and read cleanup.
-    fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
+    fn spawn(
+        &self,
+        source: &std::fs::File,
+        runtime_cache: &Path,
+        wall_time: Duration,
+    ) -> Option<DvTitleScan> {
         let held = match source.try_clone() {
             Ok(held) => held,
             Err(error) => {
@@ -1781,6 +1899,7 @@ impl DvTitleRide {
             }
         };
         let scanner = self.tools.scanner.clone();
+        let runtime_cache = runtime_cache.to_owned();
         let index = self.stream_index.to_string();
         let source_budget = crate::background_jobs::source_budget();
         let pause = plurx_core::process::bounded::source_pause_controller();
@@ -1790,7 +1909,6 @@ impl DvTitleRide {
         let worker_cancel = cancel.clone();
         let task = tokio::spawn(async move {
             let work = async move {
-                use std::os::fd::AsRawFd;
                 let input = match crate::background_jobs::source_budget() {
                     Some(budget) => Some(
                         crate::source_input::SourceInput::open_background_held(
@@ -1802,24 +1920,13 @@ impl DvTitleRide {
                     ),
                     None => None,
                 };
-                let mut command = tokio::process::Command::new(&scanner);
-                command.args([
-                    input
-                        .as_ref()
-                        .map_or("/proc/self/fd/3", |input| input.url()),
+                let output = crate::source_probe::launch_scanner(
+                    &scanner,
                     &index,
-                ]);
-                if input.is_none() {
-                    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-                        &mut command,
-                        &[(held.as_raw_fd(), 3)],
-                        None,
-                    );
-                }
-                let output = plurx_core::process::bounded::output_command_clean_env(
-                    &mut command,
+                    &held,
+                    input.as_ref(),
+                    &runtime_cache,
                     wall_time,
-                    64 * 1024,
                     plurx_core::process::ChildWork::background(
                         "complete-title Dolby Vision scan (content-analysis pass)",
                     ),
@@ -2125,19 +2232,7 @@ async fn probe_completion_expectation_inner(
                 | std::io::ErrorKind::WouldBlock
         )));
     }
-    let raw = result.map_err(|reason| {
-        let timeout = reason.contains("timed out after");
-        IndexFailure::new(
-            if timeout {
-                IndexFailureCode::IndexProbeTimeout
-            } else {
-                IndexFailureCode::IndexProcessFailed
-            },
-            reason,
-            0,
-        )
-        .transient(timeout)
-    })?;
+    let raw = result.map_err(metadata_probe_failure)?;
     // The ride-along's ordinals come from this document — the probe of the
     // very descriptor the pass reads — and never from scan-time facts.
     let subtitle_tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
@@ -2455,6 +2550,15 @@ impl SourceIndexOperation {
 /// Source copy indexing uses current bounded stored H264/HEVC completion
 /// evidence. Missing/ambiguous evidence never starts a fallback live probe.
 #[allow(clippy::too_many_arguments)]
+/// The copies a Source cold index scans: any H264/HEVC copy, Dolby Vision
+/// included. [`index_pass`] takes the strip, preserve and Profile 7 → 8.1
+/// passes from the same options the copy is cut with, exactly as local
+/// indexing does.
+fn source_index_admits(file: &MediaFile) -> bool {
+    matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
+}
+
+#[allow(clippy::too_many_arguments)] // exact fenced Source inputs and owned resources
 pub(crate) fn start_source_index(
     file: MediaFile,
     source: crate::fragment_index_cluster::SourceFence,
@@ -2467,12 +2571,11 @@ pub(crate) fn start_source_index(
     store: Arc<dyn plurx_core::store::Store>,
     hooks: Arc<SourceIndexHookOwner>,
 ) -> Result<SourceIndexOperation, String> {
-    if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
-        || plurx_core::playback::is_dolby_vision(&file)
+    if !source_index_admits(&file)
         || Instant::now() >= deadline
         || file.id.to_string() != authority.assignment().binding().file_id().as_str()
     {
-        return Err("Source index supports bounded non-Dolby H264/HEVC copy only".into());
+        return Err("Source index supports bounded H264/HEVC copy only".into());
     }
     if stored_probe.len() > 1024 * 1024 {
         return Err("Source index has no bounded stored completion evidence".into());
@@ -2533,7 +2636,7 @@ pub(crate) fn start_source_index(
         #[cfg(windows)]
         let (fd, handoff) = (None, Some((&source.handle, std::path::Path::new(&input))));
         let mut result = if Instant::now() >= deadline
-            || !source.unchanged()
+            || !source.unchanged_in_place()
             || authority
                 .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
                 .is_err()
@@ -2565,7 +2668,7 @@ pub(crate) fn start_source_index(
                 .await,
             )
         };
-        result.source_unchanged = source.unchanged();
+        result.source_unchanged = source.unchanged_in_place();
         *owned.result.lock().expect("Source index result") = Some(result);
         crate::transcode::source_preparation::close_source_before_settlement(source, |closed| {
             hooks.record_parent_closed(closed);
@@ -2658,8 +2761,7 @@ pub(crate) async fn build_riding_with_store(
 /// [`build_riding`] for several identities from one read of the held source,
 /// in `videos` order. Every build carries the same `source_unchanged`: one
 /// held source, one fence.
-#[cfg(test)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) async fn build_riding_shared(
     file: &MediaFile,
     videos: &[transcode::CopyVideoOptions],
@@ -2717,7 +2819,7 @@ pub(crate) async fn build_riding_shared_with_store(
         store,
     )
     .await;
-    let unchanged = source.unchanged();
+    let unchanged = source.unchanged().await;
     for built in &mut builds {
         built.source_unchanged = unchanged;
     }
@@ -3083,14 +3185,11 @@ async fn build_attested_pass(
                                 .await
                                 {
                                     Ok(hash) => pending.first_sample_sha256 = Some(hash),
-                                    Err(reason) => {
-                                        builds[slot] = Some(IndexBuild::plain(
-                                            IndexOutcome::Failed(Box::new(IndexFailure::new(
-                                                IndexFailureCode::IndexCompletionUnverified,
-                                                format!("F+ source packet identity: {reason}"),
-                                                0,
-                                            ))),
-                                        ));
+                                    Err(error) => {
+                                        builds[slot] =
+                                            Some(IndexBuild::plain(IndexOutcome::Failed(
+                                                Box::new(packet_identity_failure(error)),
+                                            )));
                                         continue;
                                     }
                                 }
@@ -3161,7 +3260,9 @@ async fn build_attested_pass(
         };
         #[cfg(target_os = "linux")]
         let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
-            Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
+            Some(ride) => ride
+                .spawn(source, runtime_cache, budget)
+                .map(|task| (ride, task)),
             None => None,
         };
         let input = input_bridge
@@ -3752,11 +3853,8 @@ async fn build_with_args_owned(
                     .filter(|(outcome, early)| !is_refusal(outcome, **early))
                     .map(|(outcome, _)| outcome)
                 {
-                    *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
-                        IndexFailureCode::IndexProcessFailed,
-                        format!("index pipe exited with {status}"),
-                        rows,
-                    )));
+                    *outcome =
+                        IndexOutcome::Failed(Box::new(index_process_exit_failure(status, rows)));
                 }
             }
             Some(format!("{status}"))

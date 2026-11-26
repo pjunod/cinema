@@ -867,7 +867,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn claim_analysis_request_for_capacity(
+    async fn claim_analysis_request_for_capacity_in_mode(
         &self,
         node_id: &str,
         pipeline_version: Option<&str>,
@@ -877,6 +877,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         targeted_only: bool,
         cross_node: bool,
         excluded_video_identities: &[String],
+        mode: crate::store::fragment_index_cluster::AnalysisClaimMode,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -885,6 +886,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         {
             return Err(StoreError::Task("invalid analysis claim".to_owned()));
         }
+        let component = mode.component_clause();
         let excluded = super::super::fragment_index_cluster::analysis_claim_exclusions_json(
             excluded_video_identities,
         )?;
@@ -918,16 +920,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
             // them to the voters' claims.
             if !targeted_only {
                 transaction.execute(
-                    "UPDATE analysis_attempts
+                    &format!("UPDATE analysis_attempts
                         SET phase = 'retry_wait', phase_updated_at_ms = ?1,
                             terminal_code = 'lease_expired'
                       WHERE (request_id, claim_epoch) IN (
                         SELECT request_id, fence FROM analysis_requests
-                         WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1)",
+                         WHERE {component} AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1)"),
                     params![now_ms],
                 )?;
                 transaction.execute(
-                    "UPDATE analysis_requests
+                    &format!("UPDATE analysis_requests
                         SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                             not_before_ms = ?1 + MIN(MAX(1000,
                               (?2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
@@ -937,23 +939,23 @@ impl ClusterFragmentIndexStore for SqliteStore {
                                  + attempts * 7) % 51))) / 100), ?3),
                             last_error_code = 'lease_expired',
                             updated_at_ms = ?1
-                      WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1",
+                      WHERE {component} AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1"),
                     params![now_ms, backoff_base_ms, backoff_max_ms],
                 )?;
                 transaction.execute(
-                    "UPDATE analysis_attempts
+                    &format!("UPDATE analysis_attempts
                         SET phase = 'failed', phase_updated_at_ms = ?1,
                             terminal_code = 'attempt_limit'
                       WHERE (request_id, claim_epoch) IN (
                         SELECT request_id, fence FROM analysis_requests
-                         WHERE component <> 'subtitle_source' AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1)",
+                         WHERE {component} AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1)"),
                     params![now_ms, max_attempts],
                 )?;
                 transaction.execute(
-                    "UPDATE analysis_requests
+                    &format!("UPDATE analysis_requests
                         SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                             last_error_code = 'attempt_limit', updated_at_ms = ?1
-                      WHERE component <> 'subtitle_source' AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1",
+                      WHERE {component} AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1"),
                     params![now_ms, max_attempts],
                 )?;
             }
@@ -962,7 +964,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
                           WHERE (target_node_id = ?1 OR {untargeted} OR {cross})
-                            AND component <> 'subtitle_source' AND attempts < ?2
+                            AND {component} AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
                             AND pipeline_version NOT LIKE 'coordination-contract:%'
@@ -991,6 +993,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         last_error_code = NULL, updated_at_ms = ?3
                   WHERE request_id = ?4 AND fence = ?5
                     AND state = 'queued' AND not_before_ms <= ?3
+                    AND {component}
                     AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)
                             AND pipeline_version NOT LIKE 'coordination-contract:%'
                     AND {capacity} AND {viewer}"),

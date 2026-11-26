@@ -118,7 +118,19 @@ fn native_fel_resume_requires_one_unambiguous_copy_video_stream() {
         |streams| native_copy_video_index(&serde_json::json!({"streams": streams}).to_string());
     assert_eq!(select(vec![audio.clone(), video.clone()]), Some(2));
     assert_eq!(select(vec![audio.clone(), cover.clone()]), None);
-    assert_eq!(select(vec![audio, cover, video]), None);
+    // A cover ahead of the picture is what `0:v:0` maps: refused.
+    assert_eq!(select(vec![audio.clone(), cover, video.clone()]), None);
+    // An MKV poster attachment after the picture (a library remux with an
+    // MJPEG poster at stream 45) leaves `0:v:0` on the picture: the resume
+    // keeps it.
+    let poster = serde_json::json!({
+        "index": 45, "codec_type": "video", "codec_name": "mjpeg",
+        "disposition": {"attached_pic": 1}
+    });
+    assert_eq!(select(vec![audio.clone(), video.clone(), poster]), Some(2));
+    // Two real video tracks stay ambiguous.
+    let second = serde_json::json!({"index": 3, "codec_type": "video"});
+    assert_eq!(select(vec![audio, video, second]), None);
 }
 
 #[cfg(target_os = "linux")]
@@ -482,12 +494,14 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         sustainable: true,
     };
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),
         vod_only: false,
         passive_vod: false,
@@ -544,6 +558,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
             live_recovery: true,
             output_preparation: crate::vodserve::OutputPreparation::CopyAndEncoded,
             output_budget_bytes: 4 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         },
         encoding: None,
         session_id: session_id.into(),

@@ -2,6 +2,120 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+/// lab5, 2026-11-25: a host OOM killed file 206's metadata probe and the
+/// kill was recorded as a terminal refusal of that delivery route. A probe
+/// killed from outside is transient, as the index pipe already was; a probe
+/// that refuses the source is not.
+#[test]
+fn an_externally_killed_probe_is_a_transient_failure() {
+    use crate::ffmpeg::{HeldPacketProbeError, HeldProbeError};
+
+    let killed = metadata_probe_failure(HeldProbeError::Interrupted(
+        "index metadata probe exited signal: 9 (SIGKILL)".into(),
+    ));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "index metadata probe exited signal: 9 (SIGKILL)"
+    );
+    let refused = metadata_probe_failure(HeldProbeError::Failed(
+        "index metadata probe exited exit status: 1".into(),
+    ));
+    assert_eq!(refused.code, IndexFailureCode::IndexProcessFailed);
+    assert!(!refused.transient_allowlisted);
+    let timeout = metadata_probe_failure(HeldProbeError::Timeout(
+        "index metadata probe timed out after 30 seconds".into(),
+    ));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+
+    let packet = packet_probe_failure(HeldPacketProbeError::Interrupted("killed".into()), 0, 0);
+    assert_eq!(packet.code, IndexFailureCode::IndexProcessFailed);
+    assert!(packet.transient_allowlisted);
+    let packet = packet_probe_failure(HeldPacketProbeError::Process("refused".into()), 0, 0);
+    assert!(!packet.transient_allowlisted);
+}
+
+/// The F+ first-packet identity recorded every failure, its own deadline and
+/// an outside kill included, as a terminal `index_completion_unverified`.
+/// Only the media's answer is terminal now.
+#[test]
+fn an_interrupted_packet_identity_is_a_transient_failure() {
+    use crate::ffmpeg::HeldProbeError;
+
+    let killed = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Interrupted(
+        "F+ first packet identity exited signal: 9 (SIGKILL)".into(),
+    )));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)"
+    );
+    let timeout = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Timeout(
+        "F+ first packet identity timed out after 30 seconds".into(),
+    )));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+    let source = packet_identity_failure(PacketIdentityError::Source("Input/output error".into()));
+    assert_eq!(source.code, IndexFailureCode::IndexSourceIo);
+    assert!(source.transient_allowlisted);
+
+    let refused = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Failed(
+        "F+ first packet identity exited exit status: 1".into(),
+    )));
+    assert_eq!(refused.code, IndexFailureCode::IndexCompletionUnverified);
+    assert!(!refused.transient_allowlisted);
+    let unverified = packet_identity_failure(PacketIdentityError::from(
+        filtered_packet_hash(b"", 0, (1, 1000)).expect_err("no hash"),
+    ));
+    assert_eq!(unverified.code, IndexFailureCode::IndexCompletionUnverified);
+    assert!(!unverified.transient_allowlisted);
+    assert_eq!(
+        unverified.reason,
+        "F+ source packet identity: F+ packet hash has no time base"
+    );
+
+    // After a failed bridge read, the child's refusal is the read's failure.
+    for error in [
+        PacketIdentityError::Probe(HeldProbeError::Failed("exited exit status: 1".into())),
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+    ] {
+        let failure = packet_identity_failure(read_failure_is_the_source(error, true));
+        assert_eq!(failure.code, IndexFailureCode::IndexSourceIo);
+        assert!(failure.transient_allowlisted);
+    }
+    let clean = read_failure_is_the_source(
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+        false,
+    );
+    assert!(matches!(clean, PacketIdentityError::Unverified(_)));
+    let timeout = read_failure_is_the_source(
+        PacketIdentityError::Probe(HeldProbeError::Timeout("timed out".into())),
+        true,
+    );
+    assert!(matches!(
+        timeout,
+        PacketIdentityError::Probe(HeldProbeError::Timeout(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_external_index_process_kill_is_a_bounded_transient_failure() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    let killed = index_process_exit_failure(ExitStatus::from_raw(libc::SIGKILL), 1089);
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert!(!index_process_exit_failure(ExitStatus::from_raw(256), 0).transient_allowlisted);
+    assert!(
+        !index_process_exit_failure(ExitStatus::from_raw(libc::SIGSEGV), 0).transient_allowlisted
+    );
+}
+
 /// A source with a nonzero start and reordered pictures exercises both parts
 /// of the fitted clock: the source DTS origin removed by the copy muxer and
 /// each sample's signed composition offset. This compares the real ffprobe
@@ -342,6 +456,14 @@ fn dvh1_completeness_revision_retries_only_affected_copy_indexes() {
         let video =
             transcode::CopyVideoOptions::new(true, preserve).with_parameter_set_retention(retain);
         let mut old_recipe = transcode::copy_video_args(&file, video);
+        // Every ordinary copy identity carries its landing-clock revision;
+        // only the dvh1 completeness component may differ here.
+        if video.dolby_vision_refit().is_none() {
+            old_recipe.push(format!(
+                "--plurx-copy-landing-clock={}",
+                plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+            ));
+        }
         old_recipe.push(format!(
             "--plurx-hdr10-index={}",
             fmp4::HDR10_INDEX_METADATA_REVISION
@@ -2245,8 +2367,8 @@ mod dv_title_companion {
             "argv carries no scan"
         );
         let spawn = source
-            .find("Some(ride) => ride.spawn(source, budget)")
-            .expect("spawn");
+            .find(".spawn(source, runtime_cache, budget)")
+            .expect("spawn with the runtime cache");
         let finish = source
             .find("let pending = ride.finish(file.id, task, lead_built, wait).await;")
             .expect("finish");
@@ -2297,7 +2419,7 @@ exec /bin/sleep 60
         let source = std::fs::File::open(source_path).expect("source descriptor");
         let (_store, _job, active) = crate::background_jobs::tests::active().await;
         let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
-            ride.spawn(&source, Duration::from_secs(60))
+            ride.spawn(&source, directory.path(), Duration::from_secs(60))
                 .expect("owned companion")
         })
         .await;
@@ -2437,4 +2559,61 @@ exec /bin/sleep 60
             pending.stats.decoded_frames
         );
     }
+}
+
+#[test]
+fn source_index_accepts_a_dolby_vision_converting_pass() {
+    let mut profile7 = hevc_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+    );
+    profile7.dolby_vision.profile = Some(7);
+    profile7.dolby_vision.level = Some(6);
+    profile7.dolby_vision.bl_compat_id = Some(6);
+    profile7.dolby_vision.el_present = Some(true);
+    profile7.dolby_vision.rpu_present = Some(true);
+    let mut profile8 = hevc_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+    );
+    profile8.dolby_vision.profile = Some(8);
+    profile8.dolby_vision.bl_compat_id = Some(1);
+    for file in [&profile7, &profile8] {
+        assert!(
+            source_index_admits(file),
+            "a Source may index a Dolby Vision copy: {:?}",
+            file.hdr_format
+        );
+    }
+    // The Source's own pass over its held descriptor: the converting
+    // identity indexes the rewritten bytes and declares the 8.1 record.
+    let converting =
+        transcode::CopyVideoOptions::new(true, true).with_dolby_vision_conversion(true);
+    let pass = index_pass(
+        &profile7,
+        converting,
+        Some("/dev/fd/3"),
+        VideoCompletionExpectation {
+            stream_index: 0,
+            duration_num: 60,
+            duration_den: 1,
+            provenance: CompletionProvenance::StreamSeconds,
+            source_object_version: "test".to_owned(),
+        },
+        None,
+    )
+    .expect("a converting Source pass");
+    assert!(pass.args.iter().any(|arg| arg == "/dev/fd/3"));
+    let [output] = pass.outputs.as_slice() else {
+        panic!("one converting output");
+    };
+    let DolbyVisionPass::Rewrite(record) = &output.dolby_vision else {
+        panic!("a converting pass rewrites the record");
+    };
+    assert_eq!(record.profile, 8);
+    assert_eq!(
+        identity_for(&profile7, converting),
+        identity_for(&profile7, output.video),
+        "the Source pass indexes the identity its copy is cut with"
+    );
 }

@@ -1,6 +1,5 @@
 # Apply the playback decision to Library channels
 
-Build: 138
 Issue: #245
 
 Apple Library channels now request the per-file playback decision before

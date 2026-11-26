@@ -567,12 +567,19 @@ pub(super) fn take_active_preparation(
 }
 
 fn take_active_preparations_for_playback(playback_id: &str) -> Vec<ActivePreparedSuccessor> {
+    take_active_preparations_where(|successor| successor.preparation.playback_id == playback_id)
+}
+
+/// Remove, under one registry lock, every staged successor `matches` names.
+fn take_active_preparations_where(
+    matches: impl Fn(&ActivePreparedSuccessor) -> bool,
+) -> Vec<ActivePreparedSuccessor> {
     let mut active = active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let incarnation_ids = active
         .iter()
-        .filter(|(_, preparation)| preparation.preparation.playback_id == playback_id)
+        .filter(|(_, successor)| matches(successor))
         .map(|(incarnation_id, _)| incarnation_id.clone())
         .collect::<Vec<_>>();
     incarnation_ids
@@ -645,6 +652,25 @@ pub(super) async fn settle_cancelled_preparation(
                     .await,
             );
         }
+    }
+}
+
+/// The incumbent a staged successor was prepared to replace has ended. That
+/// successor can never commit, so free its worker, reconstruction slot and
+/// durable row now rather than at its deadline. A committed successor already
+/// left the registry when it committed, so it is never found here; the same
+/// registry transfer keeps an in-flight commit or abort the owner of its entry.
+pub(super) fn cancel_preparations_for_released_incumbent(incumbent_incarnation_id: &str) {
+    let orphaned = take_active_preparations_where(|successor| {
+        successor.preparation.expected_predecessor_incarnation_id == incumbent_incarnation_id
+    });
+    for successor in orphaned {
+        tracing::info!(
+            target: "plurxd::http::hls",
+            successor = %crate::transcode::session_log_id(&successor.preparation.session_id),
+            "prepared successor retired: the session it was staged to replace was released"
+        );
+        spawn_cancelled_preparation(successor, "incumbent released before commit");
     }
 }
 
@@ -1308,6 +1334,10 @@ pub(super) fn preserve_prepared_audio(
     source: &MediaFile,
 ) -> Result<(), ApiError> {
     use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
+    // Soundtrack alternates are the client's negotiated presentation, not a
+    // selection: a successor copy keeps them exactly as its predecessor did.
+    candidate.split_audio = predecessor.split_audio
+        && matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. });
     let same_track_and_route = candidate.audio_index == predecessor.audio_index
         && candidate.audio_claim == predecessor.audio_claim
         && candidate.audio_offset_ms == predecessor.audio_offset_ms;
@@ -1373,6 +1403,7 @@ pub(super) fn preserve_prepared_audio(
 pub(super) fn qualified_upgrade_selection(
     selection: &crate::playback_control::ClientSelection,
     height: u32,
+    candidate: Option<plurx_core::playback::candidate::CandidateId>,
 ) -> crate::playback_control::ClientSelection {
     let mut selection = selection.clone();
     if matches!(
@@ -1381,10 +1412,21 @@ pub(super) fn qualified_upgrade_selection(
     ) {
         selection.quality = crate::playback_control::QualitySelection::Auto {
             height: Some(i64::from(height)),
-            candidate_id: None,
+            candidate_id: candidate,
         };
     }
     selection
+}
+
+pub(super) enum QualifiedUpgradeReplanError {
+    Retry,
+    Terminal(String),
+}
+
+impl From<&str> for QualifiedUpgradeReplanError {
+    fn from(reason: &str) -> Self {
+        Self::Terminal(reason.to_owned())
+    }
 }
 
 /// Re-resolve a completed FEL qualification against the current authority and
@@ -1401,59 +1443,58 @@ pub(super) async fn replan_qualified_upgrade(
     capabilities: Option<&crate::playback_control::DynamicCapabilities>,
     source: &MediaFile,
     previous_target_height: u32,
-) -> Result<crate::transcode::SessionRequest, String> {
+) -> Result<crate::transcode::SessionRequest, QualifiedUpgradeReplanError> {
     let mut recipe = predecessor.clone();
     if let Ok(start) = serde_json::from_str::<StartResponse>(&route.response_json) {
         if let Some(audio) = start.delivered_audio {
             recipe.request.audio_delivery = Some(audio);
         }
     }
-    let mut pinned = qualified_upgrade_selection(selection, previous_target_height);
-    // The retained rolling splice keeps the ordinary copy recipe. A completed
-    // measurement changes the catalog's snapshot binding, so ask the current
-    // catalog to rebind that exact ordinary candidate before using the result.
-    let native_incumbent = if state
+    use crate::playback_control::QualitySelection;
+    use plurx_core::playback::candidate::CandidateRoute;
+    let native_split = state
         .transcode
         .native_split_owns_fel(&route.session_id)
-        .await
-    {
-        use plurx_core::playback::candidate::CandidateRoute;
-        let ordinary = recipe
-            .candidate_catalog
-            .as_ref()
-            .map(|catalog| &catalog.candidate)
-            .or_else(|| {
-                recipe
-                    .request
-                    .candidate_context
-                    .as_ref()
-                    .map(|context| &context.selected_candidate)
-            })
-            .filter(|candidate| {
-                candidate.identity_matches()
-                    && !candidate.processed_dv
-                    && candidate.route == CandidateRoute::Remux
-                    && candidate.target_height == previous_target_height
-            })
-            .ok_or("the incumbent native copy has no exact ordinary candidate")?;
-        let crate::playback_control::QualitySelection::Auto { candidate_id, .. } =
-            selection.quality
-        else {
-            return Err("native splice qualification requires the incumbent Auto selection".into());
-        };
-        if candidate_id.is_some_and(|id| id != ordinary.id)
-            || recipe.request.presentation != crate::transcode::Presentation::Vod
-        {
-            return Err("native splice qualification no longer selects the incumbent copy".into());
-        }
-        pinned.quality = crate::playback_control::QualitySelection::Auto {
-            height: Some(i64::from(previous_target_height)),
-            candidate_id: Some(ordinary.id),
-        };
-        Some(ordinary)
-    } else {
-        None
-    };
+        .await;
+    let ordinary = recipe
+        .candidate_catalog
+        .as_ref()
+        .map(|catalog| &catalog.candidate)
+        .or_else(|| {
+            recipe
+                .request
+                .candidate_context
+                .as_ref()
+                .map(|context| &context.selected_candidate)
+        })
+        .filter(|candidate| {
+            matches!(selection.quality, QualitySelection::Auto { .. })
+                && recipe.request.presentation == crate::transcode::Presentation::Vod
+                && !candidate.processed_dv
+                && candidate.route == CandidateRoute::Remux
+        });
+    if native_split && ordinary.is_none() {
+        return Err("native splice qualification has no exact incumbent Auto copy".into());
+    }
+    if ordinary.is_some_and(|candidate| {
+        !candidate.identity_matches()
+            || candidate.target_height != previous_target_height
+            || recipe.candidate_id.is_some_and(|id| id != candidate.id)
+            || matches!(
+                selection.quality,
+                QualitySelection::Auto { candidate_id: Some(id), .. } if id != candidate.id
+            )
+    }) {
+        return Err("FEL qualification no longer selects the incumbent copy".into());
+    }
+    // Even when the first master selected muxed HLS, an unpinned Auto copy
+    // can build a ladder without binding a candidate. Always ask the fresh
+    // catalog to rebind the ordinary recipe retained by the accepted route.
+    let pinned = qualified_upgrade_selection(
+        selection,
+        previous_target_height,
+        ordinary.map(|candidate| candidate.id),
+    );
     let mut caps = recipe
         .request
         .candidate_context
@@ -1493,10 +1534,18 @@ pub(super) async fn replan_qualified_upgrade(
         delivered.height,
     )
     .await
-    .map_err(|_| "the current playback representation could not be freshly planned")?;
-    if native_incumbent.is_some_and(|incumbent| {
+    .map_err(|error| {
+        if error.http_status() == StatusCode::SERVICE_UNAVAILABLE {
+            return QualifiedUpgradeReplanError::Retry;
+        }
+        let code = error.code().unwrap_or("untyped");
+        QualifiedUpgradeReplanError::Terminal(format!(
+            "the current playback representation could not be freshly planned ({code})"
+        ))
+    })?;
+    if ordinary.is_some_and(|incumbent| {
         fresh.candidate_context.as_ref().is_none_or(|context| {
-            context.owner_node_id.as_deref() != Some(state.node_id.as_str())
+            (native_split && context.owner_node_id.as_deref() != Some(route.owner_node_id.as_str()))
                 || context.selected_candidate.id != incumbent.id
                 || context.selected_candidate.recipe_digest != incumbent.recipe_digest
                 || context.selected_candidate.route != incumbent.route
@@ -1504,12 +1553,11 @@ pub(super) async fn replan_qualified_upgrade(
                 || fresh.transport != recipe.request.transport
         })
     }) {
-        return Err("fresh native splice planning no longer binds the incumbent copy".into());
+        return Err("fresh FEL qualification planning no longer binds the incumbent copy".into());
     }
-    let target = fresh
-        .candidate_context
-        .as_ref()
-        .map(|context| context.selected_candidate.target_height);
+    // The rendition the fresh plan's processed ask describes: its candidate's,
+    // or the accepted ask of an Original or manual start.
+    let target = fresh.processed_ask_target_height();
     if fresh.file_id != recipe.request.file_id
         || fresh.playback_id != recipe.request.playback_id
         || fresh.presentation != recipe.request.presentation
@@ -1858,6 +1906,8 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
+        split_audio: None,
+        processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
         request_id: None,
@@ -2325,6 +2375,10 @@ pub(super) async fn process_preparation_candidate(
             proposed_height = proposed.height, delivered_height = delivered.height,
             decision = decision_name, "Auto preparation planned");
     }
+    tracing::debug!(target: "plurxd::http::hls", context = "prepare", ?decision,
+        delivered_audio = ?delivered.audio_track, proposed_audio = ?proposed.audio_track,
+        delivered_alternates = delivered.audio_alternates, proposed_alternates = proposed.audio_alternates,
+        "preparation decided");
     crate::playback_control::record_preparation_decision(platform, decision);
     // Keep the counterfactual beside the production decision as advisory
     // rollout telemetry. All three clients may advertise the explicit runtime
@@ -2375,6 +2429,21 @@ pub(super) async fn process_preparation_candidate(
         successor_owner
     };
     if let Some(successor_owner) = successor_owner {
+        if let Err(reason) = crate::dv_refit_serving::pin_for_session(
+            state.store.as_ref(),
+            source,
+            &mut candidate,
+            Some(platform),
+        )
+        .await
+        {
+            tracing::warn!(target: "plurxd::http::hls", %reason, "prepared successor could not resolve its F+ fit");
+            PreparationStageOutcome::refused(
+                &session_id,
+                PreparationStageRefusal::RefitUnavailable,
+            );
+            return;
+        }
         // Production always stages and primes. Hooks that decline priming (the
         // test hooks of `AppState::new` do, until a test calls
         // `prime_prepared_successors`) stage the durable row only, on this
@@ -2398,6 +2467,7 @@ pub(super) async fn process_preparation_candidate(
             purpose,
             AcceptedAsk {
                 prepared_proof,
+                platform: Some(platform),
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
                 planning_cancellation: Some(pending.cancellation_token()),
@@ -2455,6 +2525,9 @@ const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_
 pub(super) const PREPARATION_STORE_BUDGET: Duration = Duration::from_secs(5);
 pub(super) const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 
+pub(super) const PREPARED_PLAYLIST_SHAPE_FIELD: &str = "prepared_playlist_shape";
+pub(super) const PREPARED_SINGLE_VARIANT_SHAPE: &str = "single_variant_v1";
+
 /// M6 §3.4 — stage the successor the decision just admitted.
 ///
 /// This joins stage with reserve-and-prime: the durable row is written first,
@@ -2477,6 +2550,8 @@ pub(super) const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 /// a selection that never coexisted.
 pub(super) struct AcceptedAsk {
     pub(super) prepared_proof: Option<super::prepared_link::PreparedProof>,
+    /// Platform from the accepted control exchange, when staging has one.
+    pub(super) platform: Option<crate::playback_control::ClientPlatform>,
     /// The absolute film time the accepted envelope settled on — the viewer's
     /// seek target where they asked for one, their playhead otherwise.
     pub(super) film_time_ms: i64,
@@ -2643,6 +2718,7 @@ pub(super) enum PreparationStageRefusal {
     RelocationSuperseded,
     NoLocalWorkerGate,
     SourceUnavailable,
+    RefitUnavailable,
     PrincipalUnsupported,
     RecipeSerialization,
     ResponseSerialization,
@@ -2777,6 +2853,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     }
     let AcceptedAsk {
         prepared_proof,
+        platform,
         film_time_ms: accepted_film_time_ms,
         desired_digest,
         planning_cancellation,
@@ -2875,7 +2952,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         retain_output: None,
-        dv_refit_digest: None,
+        dv_refit_digest: match candidate.kind {
+            crate::transcode::SessionKind::Copy {
+                convert_dolby_vision: true,
+                ..
+            } => candidate.dv_refit_digest.clone(),
+            _ => None,
+        },
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),
@@ -2960,8 +3043,9 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             )
         })
         .unwrap_or((None, None));
+    let title_scan = super::create::session_title_scan(state, Some(source)).await;
     let mut enhancement = grade.and_then(|grade| {
-        super::create::session_enhancement(
+        super::create::session_enhancement_with_title(
             Some(source),
             &staged_request.kind,
             grade,
@@ -2970,6 +3054,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             None,
             None,
             None,
+            title_scan.as_ref(),
         )
     });
     // Ordinary prepared selections can attach a processed output without
@@ -2985,7 +3070,21 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             enhancement.requires_effective_processing = true;
         }
     }
+    // Media3 reads variant frame rate from a multivariant playlist. Freeze
+    // the Android successor's envelope beside its capability so the serving
+    // owner uses the same shape through preparation, commit and takeover.
+    let single_variant = platform == Some(crate::playback_control::ClientPlatform::Android)
+        && staged_request.presentation == crate::transcode::Presentation::Vod
+        && candidate.continuous_media.is_none();
+    let playlist_url = format!("/api/v1/hls/{staged_session_id}/index.m3u8");
+    let playlist_url = if single_variant {
+        let mode = crate::media_sessions::PREPARED_VOD_NATIVE_MODE;
+        format!("{playlist_url}?native={mode}")
+    } else {
+        playlist_url
+    };
     let response = StartResponse {
+        processed_upgrade: None,
         enhancement,
         effective_processing: None,
         measured_candidate_outputs: None,
@@ -3011,7 +3110,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
                 .collect()
         }),
         session_id: staged_session_id.clone(),
-        playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
+        playlist_url,
         duration_ms: source.duration_ms,
         start_seconds: resume_ms as f64 / 1_000.0,
         // VOD playlists retain the film's absolute zero origin. A rolling
@@ -3042,6 +3141,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
         .to_owned(),
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
@@ -3067,6 +3167,15 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             )
         }
     };
+    if single_variant {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse object")
+            .insert(
+                PREPARED_PLAYLIST_SHAPE_FIELD.to_owned(),
+                serde_json::Value::String(PREPARED_SINGLE_VARIANT_SHAPE.to_owned()),
+            );
+    }
     let captures_output = successor_owner_captures_output(
         state,
         successor_owner,

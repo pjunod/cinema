@@ -6,7 +6,7 @@
 
 - **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-10-26.
 - **Where it stands:**
-  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-26.
+  - Live reference; maintained with behavior changes. The intro states the merged route inventory as of 2026-11-20.
 - **Read further only for:**
   - the five surfaces and credentials: `## 1. Surfaces — five things on one port`; `## 2. Authentication — two bearer kinds and five capabilities`
   - error envelopes: `## 3. Errors — three envelopes, and the gates that answer first`
@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-19, plurx has 442 routes declared by the ordinary listener's
+As of 2026-11-24, plurx has 446 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 442 routes across the registered routers.
+plurx has 446 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -169,27 +169,29 @@ peer revocation.
 
 ### 2.3 Scopes
 
-`plurx_core::domain::scopes` is the complete, closed list — two entries:
+`plurx_core::domain::scopes` is the complete, closed list — three entries:
 
 ```rust
-pub const SCAN_TRIGGER: &str = "scan:trigger";
-pub const STATUS_READ:  &str = "status:read";
+pub const SCAN_TRIGGER:  &str = "scan:trigger";
+pub const STATUS_READ:   &str = "status:read";
+pub const PLAYBACK_READ: &str = "playback:read";
 ```
 
 Matching is exact string equality: no prefixes, no wildcards, and `disabled`
-beats every scope. Two routes accept a key, and nothing else in the codebase
+beats every scope. Three routes accept a key, and nothing else in the codebase
 calls `ScopedKey::require`:
 
 | Route | Scope |
 |---|---|
 | `POST /api/v1/scan` | `scan:trigger` |
 | `GET /api/v1/scan/requests/{id}` | `status:read`, or `scan:trigger` for a request that key created |
+| `GET /api/v1/playback/devices` | `playback:read` (every account's devices); a signed-in user sees their own |
 
 `POST /api/v1/keys` rejects an unknown scope at creation rather than storing
 it, because a typo'd scope would otherwise produce a key that looks correct in
 the settings UI, authorizes nothing, and surfaces as a 403 inside another
 application hours later. Every scope is a promise about what a stolen key can
-do, which is why there are two of them and not twenty.
+do, which is why there are three of them and not twenty.
 
 A key's `last_used_at` is refreshed at most once every 60 seconds, so a busy
 integration does not append a Raft log entry per request. It never affects
@@ -394,6 +396,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | GET | `/api/v1/features` | bearer | Which optional sections to list in navigation: `live_tv`, `recordings` (the DVR switch), `shared_libraries`, `library_channels`. Presentation only — the routes stay reachable |
 | GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` (null while sign-ins do not expire) and `expired` |
 | DELETE | `/api/v1/me/devices/{prefix}` | bearer | Revokes one other device through the cluster revocation fence; the current device must use logout |
+| GET | `/api/v1/playback/devices` | bearer, or scoped key `playback:read` | Signed-in devices with the capabilities each last sent on a `POST /files/{id}/decision` that succeeded: `devices[{id (token prefix), user, device, client, last_seen_at, recorded_at (when the abilities last changed), hdr{dolby_vision, dv_profiles, fel, profile5, hdr10, hlg, hdr10plus}}]`, most recently used first. A user sees their own (at most 256); the key sees every account's (at most 1024), for Curator's HDR ranking (Curator ADR 0031). The record is a row owned by the native login token (`playback_device_caps_r1`, foreign keys cascading from `tokens` and `users`): logout, `DELETE /me/devices/{prefix}`, a password reset and deleting the user remove it with the token; an idle-expired sign-in is not listed. A handoff token and a Jellyfin login record nothing; volatile fields (client build and user agent, window size, peak provenance, learned-limit wording) are not kept, and a document over 16 KiB is not kept |
 | GET | `/api/v1/users` | admin | Every user; never any password hash |
 | POST | `/api/v1/users` | admin | Creates a user |
 | PUT | `/api/v1/users/{id}` | admin | Sets password and/or admin flag |
@@ -519,9 +522,9 @@ of never storing it.
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
-| GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page |
+| GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page. Admin responses include `source_processed[]`: Source-owned Dolby Vision preparation and rendition work with one-way `stop_id`, optional one-way published `session_id`, title, grant, viewer, reason, and `node_id`. They also include `receiver_processed[]` for actual retained B processed successors, with one-way `stop_id`, Receiver node, Source server ID and current import display name where available, viewer ID and an honest shared-item fallback title. The page joins published Source rows to their delivery by `session_id` and shows separate preparation and B successor rows. No trial bytes, progress percentage or invented start time is implied |
 | GET | `/api/v1/activity/starts` | admin | Query `limit`, `before`. One row per playback start across the cluster, newest first: each media-session create (route `vod` or `rolling`, a retry that replayed its owner's session included) and each direct or progressive request that opened a start (route `direct` or `progressive`, so a `vod_index_pending` fallback to the remux is its own row): time, title, client build, route, refusal, phases, owner node, time to first frame, outcome, index state and the `index now` action (from each title's own newest fragment-index request). `outcome` `unobserved` means no client report reached the node that handled the start (the report may have gone to another node). `before` is the `next_before` cursor of the previous page; a node's page never ends inside a millisecond, so rows sharing one are not skipped. Every committed member is asked, learners included; members that did not answer are listed under `unavailable`; their starts are missing, not absent |
-| DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
+| DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one local transcode or VOD session, or a Source processed operation by its Activity `stop_id`. A remote Source stop resolves its committed owner from the signed Activity snapshot and sends a signed, node-bound peer request; 503 means the owner did not confirm physical settlement |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
 | DELETE | `/api/v1/activity/retained/{nonce}` | admin | Releases one retained rolling output this node holds |
@@ -988,7 +991,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | GET | `/api/v1/libraries/{id}/items` | bearer | Paged, sorted, optionally genre-filtered grid |
 | POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application; also the `probe_paths` connection test |
 | GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read`, or the creating `scan:trigger` key | Polls one targeted-scan request |
-| GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading |
+| GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading. Each video file carries its Dolby Vision record (`dv_profile`, `dv_level`, `dv_bl_compat_id`, `dv_el_present`, and `dv_el_kind` `fel`/`mel` once the complete-title scan found it), `dv_facts` (those facts as the one line every client shows as sent, e.g. "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base") and `plays_on[{id, device, client, label, method, el_dropped, full_quality}]`: how it plays on each of the caller's signed-in devices with no track chosen, from the same verdict function `POST /files/{id}/decision` uses (transport-narrowed conversion, learned limits still in force, decoder geometry, the language policy's audio track) |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
 | POST | `/api/v1/items/{id}/refresh-artwork` | admin | Forces an artwork re-fetch for the item and its ancestors |
@@ -1377,7 +1380,16 @@ overwritten by the next refresh. Its fields are doubly optional — absent means
 
 `POST /items/{id}/reanalyze` re-runs ffprobe over **every** file on the item,
 not only the failed ones, synchronously, and returns
-`{attempted, repaired, still_failing, gone, problems}`.
+`{attempted, repaired, still_failing, gone, problems}`. One node at a time
+holds the cluster's probe-repair lease, and only a node that may take
+cluster-wide leases can run the pass. Each refusal is a typed 503 with a
+`{code, message}` body:
+
+| `code` | `Retry-After` | Meaning |
+|---|---|---|
+| `probe_repair_busy` | 30 | A probe repair is running, on another node named in `message` or on this one. |
+| `probe_repair_interrupted` | 5 | This node lost the lease mid-pass. Files already re-probed stay published, so re-read the item before retrying. |
+| `probe_repair_not_eligible` | 5 | This node cannot take cluster-wide leases right now: it is entering maintenance, cannot read committed membership, or has just been demoted. Retry, or send the request to another voter. A learner is refused earlier with `learner_route_ineligible`. |
 
 ### 6.7 Images
 
@@ -1478,9 +1490,9 @@ cadence.
 | POST | `/files/{id}/decision` | bearer | The same, from a v2 capabilities document; body ≤ 64 KiB |
 | PUT | `/files/{id}/audio-offset` | bearer | Deprecated. Validates and echoes `offset_ms` clamped to ±15 000; persists nothing |
 
-Both decision handlers answer the same question and return the same body; the
-`POST` validates the document, marks the caps as v2, and calls the `GET`
-handler's logic directly. The only difference is where the capabilities live.
+Both decision handlers answer the same question and return the same body.
+`POST` validates the document, marks the caps as v2, and uses the same
+decision logic.
 `force`, `audio` and `subtitle` stay on the query string in both forms,
 because they are request-local choices rather than capabilities.
 
@@ -1894,9 +1906,20 @@ the ffmpeg is taken down.
                   DELETE /hls/{session}   → 204 No Content
 ```
 
+A full login can preview the ordinary local playback decision using stored
+evidence at `POST /files/{id}/hls/startup-decision`. The preview uses the
+same capabilities document and selection query as `POST /files/{id}/decision`.
+A full login can then pass the same fresh VOD request to
+`POST /files/{id}/hls/prepare-startup` before Play. The server resolves
+the ordinary create recipe and returns `202` for the advisory request.
+An eligible indexed copy can then prepare media at `start` under the
+existing cache and source budgets. The hint creates no viewer session.
+
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | POST | `/files/{id}/hls/sessions` | bearer | Creates a session; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/startup-decision` | full bearer | Previews local playback using stored evidence; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/prepare-startup` | full bearer | Accepts fresh VOD create inputs for bounded copy preparation; body ≤ 64 KiB |
 | POST | `/files/{id}/hls/continuous-candidates` | bearer | Read-only continuous-quality pair negotiation; body ≤ 64 KiB (§9.6) |
 | POST | `/files/{id}/hls/continuous-sessions` | bearer | Creates a continuous-quality family session; body ≤ 64 KiB (§9.6) |
 | GET | `/files/{id}/hls/start` | bearer | Deprecated bridge over the same handler |
@@ -2016,7 +2039,16 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
   current, generation-matching `effective_processing` report; they clear with
   it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources. A
   tone-mapped SDR play has no `active` badges, but its `details` still say what
-  the source carries and that none of it reaches an SDR picture. A replacement session never inherits its predecessor's; it
+  the source carries and that none of it reaches an SDR picture.
+  `dv_metadata` (omitted for a non-DV source, and for a processed HDR10 or
+  SDR delivery, whose rows ride `effective_processing`) is the Playback info
+  `Dolby Vision metadata` row: `{in_file: {levels, cm_version, text},
+  applied: {levels: [{level, partial?}], text}, left_for_display: {levels,
+  delivered?, text}}`. Clients render each sub-row's `text` in that order
+  (`tests/playback/playback-info-fields.json`). `in_file.levels` is `null`
+  and its text `Unavailable` until the title's levels are recorded
+  (`plurx_dv_levels_v1`); `left_for_display.delivered` is `hdr10` or `sdr`
+  when the delivery carries no Dolby Vision metadata. A replacement session never inherits its predecessor's; it
   carries its own, in its create response and in the `prepare` control action
   that announces it. The route comes from the selected processing plan, so a
   processed-HDR10 play is described as one before its first window report.
@@ -2067,6 +2099,18 @@ clients should not use it.
 All playlists are `application/vnd.apple.mpegurl` with `Cache-Control:
 no-store`, and relay to the owning cluster node when this node is not the
 owner.
+
+An Android prepared scalar VOD successor can use
+`index.m3u8?native=2`. Its durable route selects a single-variant wrapper
+whose child remains the immutable `index.m3u8` without the query. The wrapper
+has no subtitle group or codec declaration. Its optional `FRAME-RATE` is a
+conservative bound from the exact attachment's verified fitted-index sample
+cadence, rounded upward through the client's Float representation; source
+average FPS is not a substitute. Missing cadence leaves the rate absent.
+Other platforms and ordinary creation retain their existing URLs. Older
+local handlers return the bare media playlist for this query, while older
+relay owners reject the unsupported value; neither is evidence for the new
+timing contract.
 
 `master.m3u8` takes `?subtitle=` (initially selected rendition) and
 `?diagnostic=` (`video-only`, `video-only-codecs`, `video-only-range`,
@@ -2314,6 +2358,21 @@ the same completed-processing report as Start. Its `generation` is the current
 playback incarnation, and the report applies only to the delivered HDR10
 selection. Clients clear a previous report when an accepted response omits it;
 saved Developer preferences alone do not establish applied processing.
+A processed HDR10 or SDR report also carries the Playback info rows that
+describe it, built by the session owner and cleared with the report:
+`dv_metadata` (as in `enhancement`, with `applied` naming L1 for a display
+mapping and the grade's trim level, L8 (with L10 when the title has it) on CM v4.0
+or L2 on CM v2.9, marked
+`partial` when only some shots were trimmed) and `display_target`:
+`{reported_peak: {nits, source}|null, reported_peak_text, state:
+{state: "targeted", mapped_nits} | {state: "already_fits", bucket_nits} |
+{state: "not_targeted", reason}, mapped_for_text, title_peak_nits,
+title_peak_text}`. The owner relays them in a second bounded private header
+(4096 bytes, ASCII with JSON escapes) beside the report, so an older
+ingress still parses the report; during a mixed-version upgrade such an
+ingress passes the extra header through to the client unread, and clients
+ignore it. A current ingress removes it and attaches the rows only to a
+report it accepted for the current generation.
 `gpu_decoded: true` says the window's source pictures were decoded on the GPU
 (VA-API); it is omitted for a software decode, including the helper's own
 fallback when the node's device cannot decode HEVC Main10 or the renderer
@@ -4182,6 +4241,16 @@ predicates gate the routes — one for the activity snapshot (committed voters),
 one for exact request authority (any committed member, learners included), a
 read variant under a tighter window, and a voter-only variant.
 
+A private additive response header, `x-plurx-peer-auth-refusal`, distinguishes
+`invalid_proof`, `rate_limited`, `replay_capacity` and
+`authority_unavailable` on a peer-authentication **401**. The status and
+response body are unchanged. Ordinary user-token refusals have no header.
+This is advisory diagnostic metadata, never an acknowledgement, response
+signature or authority proof. Missing, unknown, repeated or over-32-byte
+values remain an unclassified refusal; metadata on a successful response is
+ignored and cannot replace its mandatory exact signature. It neither extends
+a deadline nor requests an automatic retry.
+
 Common checks: the target must be this node; the timestamp must be within
 **30 s** (**5 s** for the read variant); sender and target must differ; the
 signature must be 128 hex characters over the exact method, path and raw body;
@@ -4195,7 +4264,8 @@ streaming, and refuses a response signed for the wrong node or nonce.
 
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
-| GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| GET | `/_internal/v1/activity-snapshot` | — (signed exact member read) | Bounded node-local delivery and Source processed-work snapshot. Includes committed learners. The response is signed by the owner; an older node without this exact exchange appears as an unavailable Activity peer during the coordinated upgrade |
+| POST | `/_internal/v1/activity-source-processed-stop` | 256 B (signed exact member request) | Stops one exact Source processed operation or retained B processed successor on the named member and waits for its owner settlement or confirmed Source End. Body binds `node_id` and one-way `stop_id`; signed empty 204 means settled, 404 absent, 503 unresolved. No household credential crosses this route |
 | POST | `/_internal/v1/activity-starts` | — (signed exact request) | This node's own page of start-attempt rows for the fleet `activity/starts` read; response is signed by the node |
 | GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
@@ -4547,10 +4617,20 @@ admitted operation. Burns encode and sidecars are capped at 64 MiB. B checks
 returned HDR against the viewer's exact PQ/HLG claim; an SDR declaration
 overrides decoder HDR capability.
 
-Non-direct Dolby Vision returns 422 `sharing_start_dolby_vision_unsupported`.
-Direct keeps original bytes when the Source permits it. Downloaded burns and
-native subtitles beside HDR remain unsupported. A typed Start refusal proves
-neither End nor absence of earlier resources. Runtime qualification stays in
+Shared HLS negotiates Dolby Vision preservation, Profile 7 conversion and
+compatible-base encodes from the Source's scanned facts and the viewer's caps.
+DV delivery also requires B's explicit relay affirmation. Native text subtitles
+can accompany HDR without burning it to SDR. Older Sources may still return
+422 `sharing_start_dolby_vision_unsupported`; Direct retains original bytes
+when permitted. Downloaded burns remain unsupported.
+
+An affirming B can request one optional processed successor after first frame.
+Pending Source FEL title qualification answers typed 503
+`sharing_source_not_prepared` with `Retry-After: 1`; this is distinct from an
+owner still working at the caller deadline (`startup_timeout`). B does not
+retry the optional processed Start: it retains ordinary playback and reports
+the generation-bound processing skip. A typed refusal proves neither End nor
+absence of earlier resources. Runtime qualification stays in
 [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold

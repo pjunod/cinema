@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -49,6 +50,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -209,6 +211,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -216,6 +219,7 @@ async fn started_session_cleanup_shipped_shape() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2882,6 +2886,8 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
 /// A create body with nothing set, to be spread over.
 fn bare_create() -> CreateSession {
     CreateSession {
+        split_audio: None,
+        processed_upgrade: None,
         source_telemetry: None,
         intent: None,
         control_sequence: None,
@@ -3056,6 +3062,7 @@ async fn constrained_hevc_create_without_hls_is_refused_before_request_admission
             HeaderMap::new(),
             super::super::network::RemoteAddress(None),
             Json(CreateSession {
+                processed_upgrade: None,
                 playback_id: playback_id.clone(),
                 request_id: Some(request_id.clone()),
                 copy: Some(true),
@@ -3261,6 +3268,7 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
     let id = uuid::Uuid::new_v4().to_string();
     let incarnation = uuid::Uuid::new_v4().to_string();
     let mut request = CreateSession {
+        processed_upgrade: None,
         playback_id: "passive-http-player".to_owned(),
         request_id: Some(incarnation.clone()),
         copy: Some(true),
@@ -3285,6 +3293,7 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
             live_recovery: true,
             output_preparation: crate::vodserve::OutputPreparation::Off,
             output_budget_bytes: 1 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         },
         crate::vodserve::VodAttribution {
             user_name: &user.username,

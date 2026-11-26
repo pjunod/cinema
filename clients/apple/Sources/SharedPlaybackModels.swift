@@ -359,7 +359,6 @@ struct SharedPlaybackPlan {
         guard caps.v == 2, caps.transports.contains("hls"), request.caps == caps,
               request.presentation == "vod" || direct, request.intent == nil,
               request.previousSessionId == nil, request.controlSequence == nil, request.reopenReason == nil,
-              request.preserveDolbyVision != true,
               (request.start ?? 0) == Double(subject.resumeMs) / 1000,
               request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
               direct ? Self.directEligible(decision) && request.copy == nil && request.height == nil && request.aac == nil
@@ -387,6 +386,20 @@ struct SharedPlaybackPlan {
             && (presentation.audio?.count ?? 0) <= 1
     }
 
+    /// The same preservation verdict Local asks with
+    /// (`PlayerController.shouldPreserveDolbyVision`): the decision's explicit
+    /// answer, else a legacy direct Dolby Vision answer. The Source's planner
+    /// clamps the plan to this ask, so a Dolby Vision capable player that
+    /// does not send it gets the HDR10 base.
+    static func shouldPreserveDolbyVision(_ decision: SharedDecision) -> Bool {
+        let presentation = decision.presentation
+        if let preserve = presentation.delivery?.preserveDolbyVision ?? presentation.preserveDolbyVision {
+            return preserve
+        }
+        let mode = presentation.delivery?.mode ?? (decision.method == "direct_play" ? "direct" : decision.method)
+        return mode == "direct" && presentation.source?.hdr?.lowercased() == "dolby_vision"
+    }
+
     /// The one place a shared Start request is composed from a decision: the
     /// initial play and every reopen. A reopen keeps the player's playback id,
     /// so B supersedes the predecessor once the new session publishes.
@@ -409,10 +422,12 @@ struct SharedPlaybackPlan {
             request = CreateSessionRequest(playbackId: playbackId, requestId: requestId, start: start, caps: caps)
             request.presentation = "direct"
         } else {
+            let copy = burn == nil && decision.method != "transcode"
             request = CreateSessionRequest(playbackId: playbackId, requestId: requestId,
                 height: quality.rungHeight, qualityAuto: quality == .auto, start: start, audio: audioIndex ?? decision.presentation.delivery?.audio ?? decision.presentation.audio?.first(where: { $0.default })?.index,
                 subtitleBurn: burn, nativeSubtitles: subtitle == nil ? nil : true, subtitle: subtitle,
-                copy: burn == nil && decision.method != "transcode", aac: decision.presentation.transcodeAudio,
+                copy: copy, aac: decision.presentation.transcodeAudio,
+                preserveDolbyVision: copy ? shouldPreserveDolbyVision(decision) : nil,
                 hdr10: decision.method == "transcode" && decision.presentation.deliveredDynamicRange == "hdr10" ? true : nil, caps: caps)
         }
         return try Self(subject: subject, decision: decision, caps: caps, request: request)

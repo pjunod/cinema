@@ -299,6 +299,11 @@ impl CopyIndexDemand {
         source: AnalysisCoordinationSource,
         recipe: CopyRecipe,
     ) -> Result<Self, &'static str> {
+        // The ordinary Analysis seal has no fitted pre-conversion proofs.
+        // The dedicated fitted index builder owns this recipe.
+        if recipe.video.dolby_vision_refit().is_some() {
+            return Err("fitted copy requires its dedicated index builder");
+        }
         Ok(Self {
             file,
             catalog_namespace,
@@ -773,7 +778,7 @@ impl CopyObservationSet {
     }
 
     fn merge(&mut self, observed: ObservedRows<'_>) -> Result<(), CopyObservationError> {
-        if observed.source_origin != self.source_origin
+        if !observed.source_origin.same_instant(self.source_origin)
             || observed.canonical_title_start != self.canonical_title_start
             || observed.timescale != self.rows.timescale()
             || observed.promotion != &self.promotion

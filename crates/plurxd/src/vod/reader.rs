@@ -11,6 +11,10 @@ pub(super) struct Recipe {
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
     pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    /// The shared video of a split copy presentation: no audio track at all.
+    /// The audio fields above then describe nothing this rendition carries,
+    /// and `rendition_key` omits them so every soundtrack shares one video.
+    pub(super) audio_excluded: bool,
     pub(super) video: CopyVideoOptions,
     /// Read with the exact pinned curve table when this recipe was resolved.
     /// Status only: `rendition_key` and every media identity omit it.
@@ -56,6 +60,8 @@ impl Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Keeps a replaced attachment distinct even if it uses the same reader ID.
+    pub(super) attachment: Arc<()>,
     /// Exact controlled companion attachment. The source-purpose bridge must
     /// survive quality selection, supersession and later producer generations.
     pub(super) companion_bootstrap: bool,
@@ -106,6 +112,7 @@ impl Reader {
         admission_priority: crate::admission::Priority,
     ) -> Self {
         Self {
+            attachment: Arc::new(()),
             companion_bootstrap: false,
             control_required: false,
             quality_required: false,

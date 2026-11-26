@@ -1,0 +1,59 @@
+name: release tag
+
+# A pushed `vX.Y.Z` tag publishes its release (docs/RELEASING.md step 6).
+# The tagged commit's code already passed its fast-lane `Main promotion gate`
+# when it landed, so this does not retest it (Paul, 2026-11-25): it requires
+# that existing evidence (validation/release_evidence.py), then hands the tag
+# to publish-release.yml, which validates and peels the annotated tag, builds
+# the release binaries and images, smoke tests each built platform by digest,
+# and only then assigns the registry aliases. A tag whose commit has no green
+# gate publishes nothing. publish-release.yml stays manually dispatchable for
+# recovery of an existing tag.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: tagged commit passed its promotion gate
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    # Reads git history and two forge endpoints; it runs no test suite.
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require the tagged commit's existing green promotion gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          python3 -m validation.release_evidence --sha "$sha"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  publish:
+    name: publish image (local registry)
+    needs: evidence
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      release_tag: ${{ github.ref_name }}

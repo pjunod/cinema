@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use super::internal_activity::{ActivityDelivery, PeerActivityOutcome, SharedPeerActivity};
+use super::internal_activity::{
+    ActivityDelivery, PeerActivityOutcome, ReceiverProcessedRow, SharedPeerActivity,
+    SourceProcessedRow,
+};
 use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
@@ -1070,6 +1073,11 @@ pub struct ClientLog {
     pub reason: Option<String>,
     /// Seconds of decoded video ahead of the playhead at the moment reported.
     pub runway: Option<f64>,
+    /// The playhead (`currentTime`) in seconds at the moment reported.
+    pub position: Option<f64>,
+    /// The media element's buffered ranges, `start-end` in seconds, comma
+    /// separated, at most eight.
+    pub buffered: Option<String>,
     /// Time from click to first frame, in ms (the `ttff` event).
     pub ms: Option<i64>,
     /// hls.js's bandwidth estimate, in kb/s.
@@ -2238,6 +2246,20 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     });
     if let Some(r) = runway.filter(|v| v.is_finite() && *v >= 0.0) {
         line.push_str(&format!(" runway={r:.1}s"));
+    }
+    if let Some(position) = ev.position.filter(|v| v.is_finite() && *v >= 0.0) {
+        line.push_str(&format!(" position={position:.2}s"));
+    }
+    // Digits, dots, dashes and commas only: the ranges a media element can
+    // report, never free text from the page.
+    if let Some(buffered) = ev.buffered.as_deref().filter(|ranges| {
+        !ranges.is_empty()
+            && ranges.len() <= 128
+            && ranges
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b','))
+    }) {
+        line.push_str(&format!(" buffered={buffered}"));
     }
     if let Some(b) = bandwidth.filter(|v| *v > 0) {
         line.push_str(&format!(" bw={b}kbps"));
@@ -4746,6 +4768,9 @@ pub async fn update_settings(
             .await?;
     }
     if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let proof_revocation =
+            super::internal_auth_revocation::ClusterCacheRevocation::begin_token_policy(&state)
+                .await?;
         let mut values: Vec<(&str, String)> = Vec::new();
         if let Some(days) = req.auth_token_idle_days {
             values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
@@ -4778,7 +4803,16 @@ pub async fn update_settings(
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        state.store.put_settings(&borrowed).await?;
+        let changed = state
+            .store
+            .put_auth_token_policy(&borrowed, proof_revocation.mutation_claim())
+            .await?;
+        proof_revocation.finish(&state).await?;
+        if !changed {
+            return Err(ApiError::Conflict(
+                "token policy lost its cache-revocation exclusion; retry the request".to_owned(),
+            ));
+        }
     }
     if let Some(on) = req.cinema_remote_invitations {
         // Readiness never rejects or rewrites the administrator's choice.
@@ -4908,7 +4942,7 @@ impl ClusterDelivery {
             title: delivery.title,
             started_unix: delivery.started_unix,
             idle_seconds: delivery.idle_seconds,
-            session_id: None,
+            session_id: delivery.session_id,
             delivered_bytes: delivery.delivered_bytes,
             delivered_bps: delivery.delivered_bps,
             node_id,
@@ -4962,6 +4996,7 @@ fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
         PeerActivityOutcome::Unhealthy => "unhealthy",
         PeerActivityOutcome::Unsupported => "unsupported",
         PeerActivityOutcome::Unreachable => "unreachable",
+        PeerActivityOutcome::LocalUnavailable => "local_unavailable",
         PeerActivityOutcome::TimedOut => "timed_out",
         PeerActivityOutcome::Refused => "refused",
         PeerActivityOutcome::HttpError => "http_error",
@@ -5041,6 +5076,115 @@ fn clustered_deliveries(
             .then(left.node_id.cmp(&right.node_id))
     });
     out
+}
+
+fn clustered_source_processed(
+    mut local: Vec<SourceProcessedRow>,
+    peers: &PeerActivityRead,
+) -> Vec<SourceProcessedRow> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.source_processed.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| {
+        right
+            .started_unix
+            .cmp(&left.started_unix)
+            .then(left.stop_id.cmp(&right.stop_id))
+    });
+    local.truncate(128);
+    local
+}
+
+fn clustered_receiver_processed(
+    mut local: Vec<ReceiverProcessedRow>,
+    peers: &PeerActivityRead,
+) -> Vec<ReceiverProcessedRow> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.receiver_processed.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| left.stop_id.cmp(&right.stop_id));
+    local.truncate(128);
+    local
+}
+
+fn receiver_processed_owner<'a>(
+    peers: &'a PeerActivityRead,
+    stop_id: &str,
+) -> Result<Option<&'a str>, ()> {
+    let PeerActivityRead::Peers(outcomes) = peers else {
+        return match peers {
+            PeerActivityRead::LocalOnly => Ok(None),
+            PeerActivityRead::DirectoryUnavailable => Err(()),
+            PeerActivityRead::Peers(_) => unreachable!(),
+        };
+    };
+    let mut owner = None;
+    let mut incomplete = false;
+    for (node_id, outcome) in outcomes.iter() {
+        match outcome {
+            PeerActivityOutcome::Answered(snapshot) => {
+                if snapshot
+                    .receiver_processed
+                    .iter()
+                    .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
+                {
+                    return Err(());
+                }
+            }
+            _ => incomplete = true,
+        }
+    }
+    if owner.is_none() && incomplete {
+        Err(())
+    } else {
+        Ok(owner)
+    }
+}
+
+/// Resolve one signed Stop target only from an answered, node-checked Activity
+/// snapshot. Silence and duplicate ownership cannot become a guessed address.
+fn source_processed_owner<'a>(
+    peers: &'a PeerActivityRead,
+    stop_id: &str,
+) -> Result<Option<&'a str>, ()> {
+    let PeerActivityRead::Peers(outcomes) = peers else {
+        return match peers {
+            PeerActivityRead::LocalOnly => Ok(None),
+            PeerActivityRead::DirectoryUnavailable => Err(()),
+            PeerActivityRead::Peers(_) => unreachable!(),
+        };
+    };
+    let mut owner = None;
+    let mut incomplete = false;
+    for (node_id, outcome) in outcomes.iter() {
+        match outcome {
+            PeerActivityOutcome::Answered(snapshot) => {
+                if snapshot
+                    .source_processed
+                    .iter()
+                    .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
+                {
+                    return Err(());
+                }
+            }
+            _ => incomplete = true,
+        }
+    }
+    if owner.is_none() && incomplete {
+        Err(())
+    } else {
+        Ok(owner)
+    }
 }
 
 fn clustered_live_tv(
@@ -5662,20 +5806,51 @@ pub async fn activity_detail(
     // it. This page polls every few seconds; a name read that waits for the
     // peer fan-out to finish would add its latency to every poll for nothing.
     let replicated = state.cluster_advertisement && state.cluster.role().is_clustered();
-    let ((sessions, deliveries), peers, hostnames) = if replicated {
-        let (local, peers, hostnames) = tokio::join!(
-            deliveries(&state),
-            peer_activity(&state),
-            node_hostnames(&state, user.0.is_admin)
-        );
-        (local, peers, hostnames)
-    } else {
-        (
-            deliveries(&state).await,
-            PeerActivityRead::LocalOnly,
-            BTreeMap::new(),
-        )
-    };
+    let ((sessions, deliveries), peers, hostnames, source_processed, receiver_processed) =
+        if replicated {
+            let (local, peers, hostnames, source_processed, receiver_processed) = tokio::join!(
+                deliveries(&state),
+                peer_activity(&state),
+                node_hostnames(&state, user.0.is_admin),
+                async {
+                    if user.0.is_admin {
+                        super::internal_activity::local_source_processed(&state).await
+                    } else {
+                        Vec::new()
+                    }
+                },
+                async {
+                    if user.0.is_admin {
+                        super::internal_activity::local_receiver_processed(&state).await
+                    } else {
+                        Vec::new()
+                    }
+                },
+            );
+            (
+                local,
+                peers,
+                hostnames,
+                source_processed,
+                receiver_processed,
+            )
+        } else {
+            (
+                deliveries(&state).await,
+                PeerActivityRead::LocalOnly,
+                BTreeMap::new(),
+                if user.0.is_admin {
+                    super::internal_activity::local_source_processed(&state).await
+                } else {
+                    Vec::new()
+                },
+                if user.0.is_admin {
+                    super::internal_activity::local_receiver_processed(&state).await
+                } else {
+                    Vec::new()
+                },
+            )
+        };
     // Topology is configuration, not the number of peers answering this read.
     let clustered = replicated;
     let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
@@ -5774,6 +5949,12 @@ pub async fn activity_detail(
     // This is folded into the existing page read rather than making the web
     // client add a second polling loop beside /activity/detail.
     if user.0.is_admin {
+        response["source_processed"] =
+            serde_json::to_value(clustered_source_processed(source_processed, &peers))
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["receiver_processed"] =
+            serde_json::to_value(clustered_receiver_processed(receiver_processed, &peers))
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
         response["analysis"] = match super::analysis::activity_summary(&state).await {
             Ok(mut summary) => {
                 summary["progress"] = serde_json::Value::Array(clustered_analysis_progress(
@@ -5825,7 +6006,8 @@ pub async fn activity_detail(
 /// through the pidfd taken at spawn, so a number that has since been reused
 /// by an unrelated process cannot be hit. The child's owner sees an ordinary
 /// exit: a playback producer's session reports it as it reports a crashed
-/// encoder, a background probe records a failed probe.
+/// encoder; an index pass or probe records an interrupted attempt and
+/// retries it within its retry window (`ffmpeg::killed_externally`).
 pub async fn stop_process(
     _admin: AdminUser,
     axum::extract::Path(pid): axum::extract::Path<u32>,
@@ -5897,6 +6079,77 @@ pub async fn stop_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if id.starts_with("receiver-s-") {
+        match state
+            .sharing
+            .receiver_starts
+            .stop_processed_activity(std::sync::Arc::new(state.clone()), &id)
+            .await
+        {
+            Ok(true) => return Ok(Json(serde_json::json!({ "ok": true }))),
+            Err(()) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "receiver Source End is still settling".to_owned(),
+                ))
+            }
+            Ok(false) => {}
+        }
+        let peers = peer_activity(&state).await;
+        let owner = receiver_processed_owner(&peers, &id).map_err(|_| {
+            ApiError::ServiceUnavailable(
+                "the receiver owner could not be resolved from current Activity".to_owned(),
+            )
+        })?;
+        let Some(owner) = owner else {
+            return Err(ApiError::NotFound("receiver processed session"));
+        };
+        return match state.peer_activity.stop_processed_on(owner, &id).await {
+            Ok(StatusCode::NO_CONTENT) => Ok(Json(serde_json::json!({ "ok": true }))),
+            Ok(StatusCode::NOT_FOUND) => Err(ApiError::NotFound("receiver processed session")),
+            _ => Err(ApiError::ServiceUnavailable(
+                "receiver Source End is still settling".to_owned(),
+            )),
+        };
+    }
+    if id.starts_with("source-s-") {
+        match state.transcode.stop_source_processed_session(&id).await {
+            Ok(true) => return Ok(Json(serde_json::json!({ "ok": true }))),
+            Err(_) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "Source processed work is still settling".to_owned(),
+                ))
+            }
+            Ok(false) => {}
+        }
+        let peers = peer_activity(&state).await;
+        let owner = source_processed_owner(&peers, &id).map_err(|_| {
+            ApiError::ServiceUnavailable(
+                "the Source owner could not be resolved from current Activity".to_owned(),
+            )
+        })?;
+        if let Some(owner) = owner {
+            let status = state
+                .peer_activity
+                .stop_processed_on(owner, &id)
+                .await
+                .map_err(|_| {
+                    ApiError::ServiceUnavailable(
+                        "the Source node did not confirm the stop".to_owned(),
+                    )
+                })?;
+            return match status {
+                StatusCode::NO_CONTENT => Ok(Json(serde_json::json!({ "ok": true }))),
+                StatusCode::NOT_FOUND => Err(ApiError::NotFound("Source processed session")),
+                StatusCode::SERVICE_UNAVAILABLE => Err(ApiError::ServiceUnavailable(
+                    "Source processed work is still settling".to_owned(),
+                )),
+                _ => Err(ApiError::Internal(
+                    "unexpected Source stop status".to_owned(),
+                )),
+            };
+        }
+        return Err(ApiError::NotFound("Source processed session"));
+    }
     let mut candidates = state.transcode.active_session_ids().await;
     // VOD sessions live in their own registry; without them here the
     // Terminal::AdminStop arm is unreachable from its only intended caller.
@@ -6002,6 +6255,37 @@ impl FromRef<AppState> for MetricsState {
             cluster_directory: state.cluster.directory(),
         }
     }
+}
+
+/// Correlatable timing signals, not Raft authority or physical delivery evidence.
+fn render_cluster_timing_metrics(
+    observations: &crate::cluster::Observations,
+    uptime: std::time::Duration,
+) -> String {
+    let append = observations.append_timing();
+    let wake = observations.monitor_wake();
+    let mut out = format!("# HELP plurx_cluster_timing_epoch_info Process-local timing observation epoch.\n# TYPE plurx_cluster_timing_epoch_info gauge\nplurx_cluster_timing_epoch_info{{epoch=\"{:016x}\"}} 1\nplurx_cluster_timing_uptime_seconds {}\nplurx_cluster_append_observation_evictions_total {}\n", append.process_epoch, uptime.as_secs_f64(), append.evictions);
+    for row in append.rows {
+        let labels = format!("group=\"db\",stage=\"{}\",local=\"{}\",remote=\"{}\",source=\"{}\",term=\"{}\",endpoint=\"{:016x}\"", row.stage.label(), row.local_node, row.remote_node, row.source_epoch, row.term, row.endpoint_fingerprint);
+        for (name, value) in [
+            ("samples_total", row.samples as f64),
+            ("heartbeats_total", row.heartbeats as f64),
+            ("errors_total", row.errors as f64),
+            ("gap_samples_total", row.gap_samples as f64),
+            ("gap_seconds_sum", row.gap_sum_seconds),
+            ("gap_seconds_max", row.gap_max_seconds),
+            ("elapsed_seconds_sum", row.elapsed_sum_seconds),
+            ("elapsed_seconds_max", row.elapsed_max_seconds),
+            ("last_sample_age_seconds", row.since_last_seconds),
+        ] {
+            out.push_str(&format!(
+                "plurx_cluster_append_observation_{name}{{{labels}}} {value}\n"
+            ));
+        }
+    }
+    let labels = format!("source=\"{}\"", wake.instance);
+    out.push_str(&format!("plurx_cluster_serving_monitor_wake_samples_total{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_sum{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_max{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_last{{{labels}}} {}\n",wake.samples,wake.total.as_secs_f64(),wake.maximum.as_secs_f64(),wake.last.as_secs_f64()));
+    out
 }
 
 fn render_passive_membership_metrics(
@@ -6588,7 +6872,8 @@ pub(crate) async fn metrics(
             &state.cluster_observations.read_pool_wait(),
         )
         + &render_writer_abandoned_replies(state.cluster_observations.writer_replies())
-        + &render_cluster_directory_metrics(state.cluster_directory.reads());
+        + &render_cluster_directory_metrics(state.cluster_directory.reads())
+        + &render_cluster_timing_metrics(&state.cluster_observations, state.started_at.elapsed());
     let membership_metrics =
         render_passive_membership_metrics(state.cluster_observations.members());
     let process_metrics = format!(
@@ -6647,6 +6932,9 @@ pub(crate) async fn metrics(
          plurx_notify_received_total {notifications}\n"
     ));
     scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
+    // Reads atomics only. A hung media mount shows here as in-flight calls
+    // pinned while this scrape still answers.
+    scans.push_str(&plurx_core::media_io::prometheus());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\

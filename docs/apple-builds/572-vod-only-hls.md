@@ -1,6 +1,5 @@
 # Require immutable VOD for segmented playback
 
-Build: 84
 Issue: #572
 
 Apple session requests now require the immutable VOD presentation and reject a

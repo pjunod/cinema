@@ -27,7 +27,7 @@ pub(crate) mod subtitle_fixture;
 pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use metrics::claim_skipped;
 use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
@@ -37,7 +37,8 @@ pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
 pub(crate) use source::{
-    budgeted, source_budget, RawRetirement, SourceHolder, SourcePacingClock, SourceReadBudget,
+    budgeted, settle_read_lease, source_budget, RawRetirement, SourceHolder, SourcePacingClock,
+    SourceReadBudget,
 };
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
@@ -279,7 +280,7 @@ struct Inner {
 }
 
 /// What a fenced F+ publication did.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RefitPublication {
     /// The table is the file's current one and the job succeeded.
@@ -1669,7 +1670,7 @@ impl JobFence {
         Ok(published)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn publish_dv_title(
         &self,
         output: plurx_core::store::dv_title_jobs::TitleOutput,
@@ -1720,7 +1721,7 @@ impl JobFence {
     /// I); rows that fail their own check are deterministic and are not
     /// sent. The claim lock is released between tries so the heartbeat can
     /// renew the lease.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn publish_dv_refit(
         &self,
         title: plurx_core::store::dv_refit_jobs::RefitTitle,
@@ -3749,6 +3750,8 @@ pub(crate) mod tests {
             )
             .await
             .expect("stale fence"));
+        // `settle` samples its own request time after this fixture builds the
+        // yield. Keep the due time safely after that second wall-clock read.
         assert!(fence
             .settle(JobSettlement::Yield {
                 error_code: Some("foreground_preempted".into()),

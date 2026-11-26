@@ -848,7 +848,7 @@ pub(crate) async fn held_source_index_probe_json(
     source: &std::fs::File,
     budget: Duration,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, HeldProbeError> {
     let document = held_source_probe_json_with_limits(
         source,
         Duration::from_secs(30).min(budget),
@@ -884,12 +884,36 @@ pub(crate) struct HeldPacketProbeRequest {
     pub packet_limit: Option<u32>,
 }
 
+/// Whether a probe child that exited with `status` was killed by a SIGKILL
+/// its runner did not send — the kernel's OOM killer, or an operator's stop
+/// from Activity (`http::system::stop_process`).
+///
+/// Every held-source probe runner here settles its own deadline and
+/// cancellation as an error before it has an exit status, so a SIGKILL
+/// status is never the runner's own. Either way it says nothing about the
+/// media: the same read may succeed later, and its retries stay bounded by
+/// the index retry window and attempt limit, as the index pipe's do.
+pub(crate) fn killed_externally(status: std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(libc::SIGKILL)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HeldPacketProbeError {
     Timeout,
     OutputLimit,
     Source(String),
     Process(String),
+    /// [`killed_externally`]: the probe was killed, not refused.
+    Interrupted(String),
 }
 
 impl HeldPacketProbeError {
@@ -897,7 +921,53 @@ impl HeldPacketProbeError {
         match self {
             Self::Timeout => "packet probe timed out".to_owned(),
             Self::OutputLimit => "packet probe exceeded its output bound".to_owned(),
-            Self::Source(reason) | Self::Process(reason) => reason.clone(),
+            Self::Source(reason) | Self::Process(reason) | Self::Interrupted(reason) => {
+                reason.clone()
+            }
+        }
+    }
+
+    fn exited(status: std::process::ExitStatus, stderr: &[u8]) -> Self {
+        let reason = format!(
+            "packet probe exited {status}: {}",
+            String::from_utf8_lossy(stderr).trim()
+        );
+        if killed_externally(status) {
+            Self::Interrupted(reason)
+        } else {
+            Self::Process(reason)
+        }
+    }
+}
+
+/// Why a bounded held-source probe child (the metadata probe, the F+
+/// first-packet identity) returned no output.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HeldProbeError {
+    /// Its own deadline stopped it.
+    Timeout(String),
+    /// [`killed_externally`]: the probe was killed, not refused.
+    Interrupted(String),
+    Failed(String),
+}
+
+impl HeldProbeError {
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::Timeout(reason) | Self::Interrupted(reason) | Self::Failed(reason) => reason,
+        }
+    }
+}
+
+impl From<String> for HeldProbeError {
+    /// The bounded runner reports its own deadline in words
+    /// (`bounded_command_capture_cancellable`); every other text error is a
+    /// failure. An external kill never arrives as text: it is an exit status.
+    fn from(reason: String) -> Self {
+        if reason.contains("timed out after") {
+            Self::Timeout(reason)
+        } else {
+            Self::Failed(reason)
         }
     }
 }
@@ -1018,11 +1088,7 @@ pub(crate) async fn held_source_packet_probe_json(
             return Err(HeldPacketProbeError::OutputLimit);
         }
         if !output.status.success() {
-            return Err(HeldPacketProbeError::Process(format!(
-                "packet probe exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(HeldPacketProbeError::exited(output.status, &output.stderr));
         }
         return Ok(output.stdout);
     }
@@ -1051,10 +1117,7 @@ pub(crate) async fn held_source_packet_probe_json(
     let collected = tokio::time::timeout(timeout, collect).await;
     let result = match collected {
         Ok(Ok((stdout, _stderr, status))) if status.success() => Ok(stdout),
-        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::Process(format!(
-            "packet probe exited {status}: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        ))),
+        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::exited(status, &stderr)),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(HeldPacketProbeError::Timeout),
     };
@@ -1199,7 +1262,7 @@ async fn held_source_probe_json_with_limits(
     label: &'static str,
     work: crate::process_control::ChildWork,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, HeldProbeError> {
     if let Some(budget) = crate::background_jobs::source_budget() {
         let input = crate::source_input::SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(source)?,
@@ -1218,15 +1281,13 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
             input.url(),
         ]);
-        let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await;
+        let output = metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await;
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining held probe source input: {error}"))?;
         return String::from_utf8(output?.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into());
     }
 
     #[cfg(windows)]
@@ -1241,7 +1302,9 @@ async fn held_source_probe_json_with_limits(
             .map_err(|error| format!("reading reopened source identity: {error}"))?
             != held_identity
         {
-            return Err("held source path changed before FFprobe launch".to_owned());
+            return Err("held source path changed before FFprobe launch"
+                .to_owned()
+                .into());
         }
         let mut command = tokio::process::Command::new(ffprobe_bin());
         command.args([
@@ -1255,13 +1318,12 @@ async fn held_source_probe_json_with_limits(
         ]);
         command.arg(&source_path);
         let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await?;
+            metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
         if plurx_core::fs_secure::std_file_identity(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
         {
-            return Err("held source changed during FFprobe".to_owned());
+            return Err("held source changed during FFprobe".to_owned().into());
         }
         let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
             .map_err(|error| format!("reopening probed source path: {error}"))?;
@@ -1269,10 +1331,10 @@ async fn held_source_probe_json_with_limits(
             .map_err(|error| format!("reading probed source identity: {error}"))?
             != held_identity
         {
-            return Err("held source path changed during FFprobe".to_owned());
+            return Err("held source path changed during FFprobe".to_owned().into());
         }
         return String::from_utf8(output.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into());
     }
     #[cfg(unix)]
     {
@@ -1289,11 +1351,69 @@ async fn held_source_probe_json_with_limits(
             "/dev/fd/3",
         ]);
         let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await?;
+            metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
         String::from_utf8(output.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into())
     }
+}
+
+/// [`bounded_command_output_cancellable`] for the metadata probe, keeping
+/// the exit status long enough to tell a refusal from an external kill.
+async fn metadata_probe_output(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedOutput, HeldProbeError> {
+    let outcome =
+        bounded_command_capture_cancellable(command, timeout, max_bytes, label, cancel, work)
+            .await?;
+    held_probe_outcome(label, outcome)
+}
+
+/// [`metadata_probe_output`] for an FFmpeg child that reads its source through
+/// inherited descriptors, as [`bounded_ffmpeg_output_descriptors_cancellable`]
+/// runs it.
+pub(crate) async fn held_ffmpeg_probe_output(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+    descriptors: crate::producer_spawn::Descriptors,
+) -> Result<BoundedOutput, HeldProbeError> {
+    let outcome = bounded_command_capture_descriptors_cancellable(
+        command,
+        timeout,
+        max_bytes,
+        label,
+        cancel,
+        work,
+        Some((
+            descriptors,
+            crate::producer_spawn::ArgumentProfile::Ffmpeg { drm_device: None },
+        )),
+    )
+    .await?;
+    held_probe_outcome(label, outcome)
+}
+
+fn held_probe_outcome(
+    label: &'static str,
+    outcome: BoundedCommandOutcome,
+) -> Result<BoundedOutput, HeldProbeError> {
+    if !outcome.status.success() {
+        let reason = format!("{label} exited {}", outcome.status);
+        return Err(if killed_externally(outcome.status) {
+            HeldProbeError::Interrupted(reason)
+        } else {
+            HeldProbeError::Failed(reason)
+        });
+    }
+    Ok(outcome.output?)
 }
 
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
@@ -4166,6 +4286,12 @@ fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
     args
 }
 
+/// The boot capability probe of one Dolby Vision reshape graph (software or
+/// one hardware encoder). It runs only from the boot measurement, never from
+/// a session start.
+pub(crate) const DOVI_RESHAPE_CAPABILITY_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("Dolby Vision reshape capability probe");
+
 async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
@@ -4173,10 +4299,7 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::status_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::background("Dolby Vision reshape capability probe"),
-        ),
+        crate::process_control::status_job_owned(&mut command, DOVI_RESHAPE_CAPABILITY_PROBE),
     )
     .await
     .is_ok_and(|result| result.is_ok_and(|status| status.success()))
@@ -4196,7 +4319,9 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
 ///
 /// Nothing is assumed: each pairing is probed once, exactly like the software
 /// route, and an unproved pairing falls back to software rather than failing a
-/// session in front of a viewer.
+/// session in front of a viewer. Every pairing this node's encoders offer is
+/// probed at boot ([`measure_dovi_reshape_hardware`]); a session reads that
+/// boot record and never starts this probe itself.
 pub async fn has_dovi_reshape_with(encoder: plurx_core::transcode::Encoder) -> bool {
     if encoder == Encoder::Software {
         return has_dovi_reshape().await;
@@ -4228,6 +4353,27 @@ pub async fn has_dovi_reshape_with(encoder: plurx_core::transcode::Encoder) -> b
     }
     memo.insert(key, passed);
     passed
+}
+
+/// The hardware encoders this node's Dolby Vision reshape is proved with:
+/// every hardware encoder `encoders` detected, each probed once. Measured at
+/// boot beside the software pairing (`dovi_reshape`), so no session start
+/// ever spawns a capability probe.
+pub async fn measure_dovi_reshape_hardware(
+    encoders: &plurx_core::transcode::EncoderCaps,
+) -> Vec<Encoder> {
+    let mut proved = Vec::new();
+    for (available, encoder) in [
+        (encoders.nvenc, Encoder::Nvenc),
+        (encoders.qsv, Encoder::Qsv),
+        (encoders.vaapi, Encoder::Vaapi),
+        (encoders.videotoolbox, Encoder::VideoToolbox),
+    ] {
+        if available && has_dovi_reshape_with(encoder).await {
+            proved.push(encoder);
+        }
+    }
+    proved
 }
 
 /// The message `tonemapx` prints when its HDR passthrough mode is asked for
@@ -4528,9 +4674,12 @@ pub async fn has_hdr10_passthrough_vaapi(
 /// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
 /// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
 /// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a shipped
-/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into
-/// `hwdownload`, which accepts only hardware frames, so success means the GPU
-/// decoded it.
+/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into a
+/// `scale_vaapi` render, which accepts only VA-API surfaces: a decoder that
+/// fell back to software hands it system-memory frames and the graph fails,
+/// so success means the GPU decoded it. The pictures stay on the GPU, as they do in the
+/// renderer, which maps its VA-API surfaces into Vulkan and never copies them
+/// to system memory (see [`hevc_main10_decode_probe_args`]).
 ///
 /// A success is kept for the process. A failure is not: it may be a device
 /// still settling at boot, so the probe runs again on the next need after a
@@ -4584,6 +4733,55 @@ fn main10_probe_backoff(failures: u32) -> Duration {
         .min(Duration::from_secs(3600))
 }
 
+/// The Main10 decode probe's FFmpeg arguments.
+///
+/// The decoded picture goes to `scale_vaapi`, never to `hwdownload`. The
+/// half-size scale makes it a real VA-API video-processing render (at the
+/// same size and format the filter passes the surface through untouched),
+/// so the GPU must finish decoding the picture and read it, and the picture
+/// stays on the GPU as it does in the renderer, which maps its surfaces into
+/// Vulkan. The probe used to download the picture to system memory, which
+/// the renderer never does, and on an Intel iHD node the shipped FFmpeg
+/// crashed in that download (SIGSEGV, sometimes abort) in 28 of 260 runs,
+/// about one in nine, with or without frame threads. Each crash left Main10
+/// decode unproved, and until a later probe passed every Dolby Vision window
+/// was admitted for a software decode: 2.0-3.3 s of work for each 2.002 s 4K
+/// window, against 1.3-1.6 s on the GPU, so the player's runway drained. The
+/// same node passed this graph 240 times in 240, alone and beside other GPU
+/// work, and it still fails on software frames and without a decode device.
+fn hevc_main10_decode_probe_args(device: &str, clip: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-hwaccel",
+        "vaapi",
+        "-hwaccel_device",
+        device,
+        "-hwaccel_output_format",
+        "vaapi",
+        "-i",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    args.push(clip.as_os_str().to_owned());
+    args.extend(
+        [
+            "-vf",
+            "scale_vaapi=w=iw/2:h=ih/2:format=p010",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ]
+        .into_iter()
+        .map(Into::into),
+    );
+    args
+}
+
 async fn probe_hevc_main10_vaapi_decode() -> bool {
     let device = plurx_core::transcode::vaapi_device();
     if !std::path::Path::new(&device).exists() {
@@ -4601,24 +4799,7 @@ async fn probe_hevc_main10_vaapi_decode() -> bool {
     }
     let mut decode = tokio::process::Command::new(ffmpeg_bin());
     decode
-        .args(["-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi"])
-        .args([
-            "-hwaccel_device",
-            &device,
-            "-hwaccel_output_format",
-            "vaapi",
-            "-i",
-        ])
-        .arg(&clip)
-        .args([
-            "-vf",
-            "hwdownload,format=p010le",
-            "-frames:v",
-            "1",
-            "-f",
-            "null",
-            "-",
-        ])
+        .args(hevc_main10_decode_probe_args(&device, &clip))
         .kill_on_drop(true);
     tokio::time::timeout(
         HEVC_MAIN10_PROBE_DEADLINE,
@@ -4675,12 +4856,11 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
         .await
 }
 
-async fn dovi_probe_output(
-    file: &MediaFile,
-    apply: bool,
-    class: crate::process_control::ChildClass,
-    source: &std::fs::File,
-) -> Result<Vec<String>, String> {
+/// The seek point and filter graph of one Dolby Vision pixel probe run: three
+/// frames a fifth of the way in, through the production renderer with RPU
+/// application on or off. Shared by the local proof and the Source's owned
+/// proof, so both measure exactly the same thing.
+fn dovi_pixel_probe_graph(file: &MediaFile, apply: bool) -> Result<(String, String), String> {
     let seek = file
         .duration_ms
         .map(|duration| (duration / 5).saturating_sub(1_000) as f64 / 1_000.0)
@@ -4692,16 +4872,71 @@ async fn dovi_probe_output(
         .filters(Some(width), height, Some("dolby_vision"))
         .ok_or_else(|| "Dolby Vision renderer produced no filter graph".to_owned())?
         .replace("apply_dovi=1", &format!("apply_dovi={}", u8::from(apply)));
+    Ok((format!("{seek:.3}"), filter))
+}
+
+fn dovi_pixel_probe_args(
+    command: &mut tokio::process::Command,
+    seek: &str,
+    input: &str,
+    filter: String,
+) {
+    command
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(["-ss", seek, "-i", input])
+        .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
+        .arg(filter)
+        .args(["-f", "framemd5", "-"]);
+}
+
+/// The frame hashes one pixel probe run printed.
+pub(crate) fn dovi_pixel_probe_frames(stdout: &[u8]) -> Result<Vec<String>, String> {
+    let frames: Vec<String> = String::from_utf8_lossy(stdout)
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!frames.is_empty())
+        .then_some(frames)
+        .ok_or_else(|| "Dolby Vision pixel probe produced no frame hashes".to_owned())
+}
+
+/// One run of the per-source Dolby Vision pixel proof, reading the Source's
+/// held descriptor as fd 3, for the Source to run as its own child under its
+/// copy permit, file fence, deadline and cancellation. No path is reopened.
+pub(crate) fn source_dovi_pixel_probe_command(
+    source: &std::fs::File,
+    file: &MediaFile,
+    apply: bool,
+) -> Result<tokio::process::Command, String> {
+    let (seek, filter) = dovi_pixel_probe_graph(file, apply)?;
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    {
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+        dovi_pixel_probe_args(&mut command, &seek, "/dev/fd/3", filter);
+    }
+    #[cfg(windows)]
+    {
+        let path = windows_source_path(source)?;
+        verify_windows_source_path(source, &path)?;
+        dovi_pixel_probe_args(&mut command, &seek, &path.to_string_lossy(), filter);
+    }
+    Ok(command)
+}
+
+async fn dovi_probe_output(
+    file: &MediaFile,
+    apply: bool,
+    class: crate::process_control::ChildClass,
+    source: &std::fs::File,
+) -> Result<Vec<String>, String> {
+    let (seek, filter) = dovi_pixel_probe_graph(file, apply)?;
     let input = crate::source_input::SourceInput::open_current_held(source, "dovi-pixel-probe")
         .await?
         .ok_or("Dolby Vision pixel probe has no original source read owner")?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
-    command
-        .args(["-hide_banner", "-loglevel", "error"])
-        .args(["-ss", &format!("{seek:.3}"), "-i", input.url()])
-        .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
-        .arg(filter)
-        .args(["-f", "framemd5", "-"]);
+    dovi_pixel_probe_args(&mut command, &seek, input.url(), filter);
     let child = BoundedDiagnosticChild::spawn_piped_output(
         &mut command,
         crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
@@ -4730,14 +4965,7 @@ async fn dovi_probe_output(
             stderr.trim()
         ));
     }
-    let frames: Vec<String> = String::from_utf8_lossy(&stdout)
-        .lines()
-        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
-        .map(str::to_owned)
-        .collect();
-    (!frames.is_empty())
-        .then_some(frames)
-        .ok_or_else(|| "Dolby Vision pixel probe produced no frame hashes".to_owned())
+    dovi_pixel_probe_frames(&stdout)
 }
 
 /// Prove, on the requested Profile 5 source, that the decoder exports RPU side

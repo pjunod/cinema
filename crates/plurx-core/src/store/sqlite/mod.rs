@@ -1374,6 +1374,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::library_curation_schema::SCHEMA,
     // v136: live title qualification takes precedence over manual library turns.
     super::background_job_turns::LIVE_TITLE_MIGRATION,
+    // v137: a per-file background job reads only the library root holding its file.
+    super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
+    // v138: a per-file analysis request reads only the library root holding its file.
+    super::analysis_source_scope::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1658,6 +1662,10 @@ impl SqliteStore {
         // planning generation too. An idempotent extension, not a migration:
         // `user_version` stays where it is, so an older binary still opens it.
         super::playback_input_keys::install_sqlite(&conn)?;
+        super::fragment_publication::install_sqlite(&conn)?;
+        // Each signed-in device's capability record, owned by its token. The
+        // same additive extension shape as the planning keys.
+        super::playback_device_caps::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
@@ -1853,6 +1861,12 @@ impl SqliteStore {
             if version == 136 {
                 super::background_job_turns::verify_catalog(&tx, false)?;
             }
+            if version == super::subtitle_managed_schema::FILE_ROOT_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_file_root_predecessor(&tx)?;
+            }
+            if version == 138 {
+                super::analysis_source_scope::verify_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1954,6 +1968,7 @@ impl SqliteStore {
         super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
         super::dv_refit_jobs::verify_sqlite(conn)?;
+        super::analysis_source_scope::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

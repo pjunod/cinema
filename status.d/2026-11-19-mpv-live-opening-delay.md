@@ -1,0 +1,1 @@
+- **2026-11-19 · MPV live opening delay:** Codex. ROG baseline seek passed. Patched Play and seek measurements are pending. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).

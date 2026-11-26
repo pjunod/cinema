@@ -1,6 +1,5 @@
 # Connect and play through a server's generated HTTPS identity
 
-Build: 286
 Issue: #1352
 
 Cinema remembers a selected server's self-signed HTTPS certificate on first

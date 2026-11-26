@@ -23,7 +23,7 @@ PACKAGE_ROOT = os.path.dirname(HERE)
 if PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, PACKAGE_ROOT)
 
-from plurx_player.launcher import Deps, main  # noqa: E402
+from plurx_player.launcher import Deps, main, socket_fits  # noqa: E402
 from plurx_player.playback import Timing  # noqa: E402
 from plurx_player.trust import TrustStore  # noqa: E402
 
@@ -271,8 +271,10 @@ class MpvFiles:
             json.dump(self.state, handle)
         os.replace(temp, os.path.join(self.dir, "state.json"))
 
-    def props(self, **values):
-        self.state.setdefault("props", {}).update({k.replace("_", "-"): v for k, v in values.items()})
+    def props(self, *, for_load=None, **values):
+        props = (self.state.setdefault("props", {}) if for_load is None else
+                 self.state.setdefault("props_by_load", {}).setdefault(str(for_load), {}))
+        props.update({k.replace("_", "-"): v for k, v in values.items()})
         self._write_state()
 
     def seek(self, seconds):
@@ -325,8 +327,13 @@ class LauncherCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="plurx-player-test-")
         self.config = os.path.join(self.tmp, "config", "plurx-player")
-        self.runtime = os.path.join(self.tmp, "run")
-        os.makedirs(self.runtime, mode=0o700)
+        # The runtime dir the launcher is given must leave room for mpv's
+        # socket; a deep TMPDIR would make the launcher (rightly) pass it over.
+        self.runtime = tempfile.mkdtemp(prefix="ppt-run-")
+        if not socket_fits(self.runtime):
+            os.rmdir(self.runtime)
+            self.runtime = tempfile.mkdtemp(prefix="ppt-run-", dir="/tmp")
+        assert socket_fits(self.runtime), self.runtime
         mpv_dir = os.path.join(self.tmp, "mpv")
         os.makedirs(mpv_dir)
         self.bin = os.path.join(self.tmp, "bin")
@@ -354,6 +361,7 @@ class LauncherCase(unittest.TestCase):
             os.environ["FAKE_MPV_DIR"] = self._env
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.runtime, ignore_errors=True)
 
     def refuse(self, origin):
         self.confirms.append(origin)

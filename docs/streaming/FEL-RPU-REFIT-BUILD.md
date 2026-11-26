@@ -654,7 +654,9 @@ landed on 2026-11-19 (`8630ee431`).
      current-main byte-identity verification. UI state checks run in the fast
      lane. Physical playback on every platform remains the Developer card's
      graduation requirement; this M3 qualification does not claim it.
-7. **Re-encode trials (§5):** plan first, then build.
+7. **Re-encode trials (§5):** plan first, then build. The remaining
+   [physical graduation and M7 sequence](FEL-RPU-REFIT-GRADUATION-AND-M7.md)
+   records baseline calibration, evidence reuse and the no-deployment boundary.
 
 ## 7. Non-goals
 

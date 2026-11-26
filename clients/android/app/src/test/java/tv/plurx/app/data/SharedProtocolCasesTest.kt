@@ -117,18 +117,25 @@ class SharedProtocolCasesTest {
         val legacyPublic = JsonObject(public + ("media_origin_ms" to JsonPrimitive(0)))
         val session = start.getValue("receiver").string("session_id")
         val base = base()
-        val bound = SharedStart.decode(legacyPublic.toString()).bindInitial(base, hlsRequest())
+        val legacyRequest = hlsRequest()
+        val rangeRequest = hlsRequest(rangeCapable = true)
+        val bound = SharedStart.decode(legacyPublic.toString()).bindInitial(base, legacyRequest)
         assertEquals(session, bound.sessionId)
         assertEquals(start.getValue("receiver").string("incarnation_id"), bound.start.response.control!!.generation)
-        assertFalse(accepts { SharedStart.decode(public.toString()).bindInitial(base, hlsRequest()) })
+        assertEquals(session, SharedStart.decode(public.toString()).bindInitial(base, rangeRequest).sessionId)
+        assertFalse(accepts { SharedStart.decode(public.toString()).bindInitial(base, legacyRequest) })
         val rows = clientRows(start.getValue("mutations").jsonArray)
         assertTrue(rows.size >= 15)
         for (row in rows) {
-            val response = mutated(legacyPublic, row, session).toString()
-            val rangeCapable = row.string("id") == "negative-media-origin"
-            if (rangeCapable) assertFalse(accepts { SharedStart.decode(response).bindInitial(base, hlsRequest()) })
-            assertEquals(row.string("id"), row.string("expected") == "accepted",
-                accepts { SharedStart.decode(response).bindInitial(base, hlsRequest(rangeCapable)) })
+            val id = row.string("id")
+            val expected = row.string("expected") == "accepted"
+            val legacyResponse = mutated(legacyPublic, row, session).toString()
+            val rangeResponse = mutated(public, row, session).toString()
+            assertEquals("$id with whole-VOD request", expected && id != "negative-media-origin",
+                accepts { SharedStart.decode(legacyResponse).bindInitial(base, legacyRequest) })
+            val rangeExpected = row["bounded_range_expected"]?.jsonPrimitive?.content?.let { it == "accepted" } ?: expected
+            assertEquals("$id with bounded-range request", rangeExpected,
+                accepts { SharedStart.decode(rangeResponse).bindInitial(base, rangeRequest) })
         }
     }
 

@@ -179,6 +179,7 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
                 "owned-registration",
                 None,
                 Recipe {
+                    audio_excluded: false,
                     dv_refit_gain: None,
                     source_telemetry: false,
                     // Physical legacy-AAC fixture, no candidate or retained artifact.
@@ -305,6 +306,7 @@ async fn source_physical_build_and_spawn_refuse_identity_drift_and_symlinks() {
     let serve = bare_serve(&base.path().join("renditions"));
     let plan = encoding.grid.plan(96_000, 428_000);
     let recipe = |file: MediaFile| Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         audio_delivery: None,
@@ -402,6 +404,7 @@ async fn source_missing_cached_init_refuses_before_head_regeneration() {
     let (file, encoding) = encoded_fixture(base.path()).await;
     let serve = bare_serve(&base.path().join("renditions"));
     let recipe = Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         audio_delivery: None,
@@ -512,6 +515,7 @@ async fn source_copy_actual_cpu_admission_and_bounded_argv_retain_until_reap() {
         SourceCopyPermitRead::Capacity
     ));
     let recipe = Recipe {
+        audio_excluded: false,
         dv_refit_gain: None,
         source_telemetry: false,
         audio_delivery: None,

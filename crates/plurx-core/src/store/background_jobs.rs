@@ -238,8 +238,12 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
           AND json_extract(body,'$.request.consumer_kind')='native_fel_head'
           AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
           AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
-          AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.request.identity')=json_extract(body,'$.request.request_digest')
-          AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.verdict.admitted')=1
+          AND (
+            (json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.request.identity')=json_extract(body,'$.request.request_digest')
+             AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.verdict.admitted')=1)
+            OR (json_extract(body,'$.native_fel_head_measure_missing')=1
+             AND json_type(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')) IS NULL)
+          )
           AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
             AND j.state IN ('queued','running','cancelling') AND json_extract(j.payload_json,'$.file_id')=d.file_id)
       END) THEN 'no_demand'
@@ -3032,6 +3036,13 @@ pub trait BackgroundJobStore: Send + Sync {
         through: i64,
         now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
+    /// Read a recent native FEL target independently of the maintenance cursor.
+    async fn dv_title_demand_for_file(
+        &self,
+        scanner: &str,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<super::dv_title_jobs::TitleDemand>, StoreError>;
     async fn bind_dv_title_demand(
         &self,
         revision: i64,
@@ -4204,7 +4215,19 @@ LIMIT 1
         through: i64,
         now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        super::dv_title_jobs::demands(self, scanner, after, through, now_ms).await
+        super::dv_title_jobs::demands(self, scanner, after, through, now_ms, None).await
+    }
+    async fn dv_title_demand_for_file(
+        &self,
+        scanner: &str,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<super::dv_title_jobs::TitleDemand>, StoreError> {
+        Ok(
+            super::dv_title_jobs::demands(self, scanner, 0, i64::MAX, now_ms, Some(file_id))
+                .await?
+                .pop(),
+        )
     }
     async fn bind_dv_title_demand(
         &self,

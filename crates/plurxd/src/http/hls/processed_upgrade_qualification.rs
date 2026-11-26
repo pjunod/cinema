@@ -20,7 +20,7 @@ pub(super) struct AwaitingQualification {
     selection: Option<ClientSelection>,
     checking: Option<u64>,
     /// When this viewer's live demand on its title's scan was last renewed.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     demand_renewed: Option<std::time::Instant>,
 }
 
@@ -91,7 +91,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
     });
 }
 
-// FEL measurement workers and their installed scanner exist only on Linux.
+// Live FEL measurement is scheduled only on Linux.
 #[cfg(not(target_os = "linux"))]
 pub(in crate::http::hls) fn hold_viewer_demand(
     _state: &AppState,
@@ -128,6 +128,7 @@ pub(super) fn retain(
             presented_at: run.presented_at,
             selection: None,
             checking: None,
+            #[cfg(target_os = "linux")]
             demand_renewed: None,
         })),
     );
@@ -190,9 +191,7 @@ impl Check {
                 selection,
                 wait.intent
                     .request
-                    .candidate_context
-                    .as_ref()
-                    .map(|context| context.selected_candidate.target_height)
+                    .processed_ask_target_height()
                     .unwrap_or(wait.wait.request.output.height),
             )
         }) {
@@ -243,11 +242,18 @@ impl Check {
         }
         let playback_id = wait.intent.playback_id.clone();
         let generation = wait.intent.incarnation_id.clone();
-        let reason = reason
+        let reason: String = reason
             .chars()
             .filter(|c| !c.is_control())
             .take(512)
             .collect();
+        tracing::info!(
+            target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(&self.session),
+            file_id = self.wait.file_id,
+            %reason,
+            "FEL qualification continuation stopped"
+        );
         entries.insert(
             self.session.clone(),
             Entry::Skipped {
@@ -272,10 +278,7 @@ impl Check {
         }
         let mut intent = wait.intent.clone();
         let mut request = request;
-        request
-            .candidate_context
-            .as_mut()?
-            .required_fel_qualification = Some(wait.wait.clone());
+        request.require_fel_qualification(wait.wait.clone())?;
         intent.auto_policy = request.automatic;
         intent.request = request;
         let report = ProcessingSkip { generation: intent.incarnation_id.clone(),
@@ -343,9 +346,7 @@ pub(in crate::http::hls) fn note_accepted_control(
     let previous_target_height = check
         .intent
         .request
-        .candidate_context
-        .as_ref()
-        .map(|context| context.selected_candidate.target_height)
+        .processed_ask_target_height()
         .unwrap_or(0);
     let inputs = ControlInputs {
         route: route.clone(),
@@ -469,13 +470,17 @@ async fn resolve_current(
         inputs.previous_target_height,
     )
     .await;
+    use super::super::preparation::QualifiedUpgradeReplanError;
     let fresh = match fresh {
         Ok(request) => request,
-        Err(reason) => return Ok(Resolution::Terminal(reason)),
+        Err(QualifiedUpgradeReplanError::Retry) => return Ok(Resolution::Pending),
+        Err(QualifiedUpgradeReplanError::Terminal(reason)) => {
+            return Ok(Resolution::Terminal(reason));
+        }
     };
     let current = state
         .transcode
-        .validate_candidate_planning_binding(&fresh, None, None)
+        .processed_planning_authority(&fresh)
         .await
         .map_err(|_| ())?;
     if current.as_ref().is_none_or(|current| {

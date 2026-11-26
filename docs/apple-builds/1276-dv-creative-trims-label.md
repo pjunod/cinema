@@ -1,6 +1,5 @@
 # Say whether display-targeted Dolby Vision applied the creative trims
 
-Build: 275
 Issue: #1276
 
 Playback information for a Dolby Vision–processed SDR session now says

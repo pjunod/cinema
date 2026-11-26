@@ -1,12 +1,23 @@
 # Cluster layer audit — what the quorum costs, who goes around it, and what to change
 
-**Status:** open — findings and action items; nothing here is built ·
+**Status:** open — original findings; implementation and qualification tracked in the linked build records ·
 **Owner:** Claude (Fable 5.2), session `session_01BCWLA3JD1HCNMEid3AZrc3` ·
 **Verified against:** `main @ 8785492be` ·
 **Fleet measured:** 2026-11-14 20:32–20:34 UTC (media1, lab6, lab4 voters;
 lab3 learner) · **Written:** 2026-11-14 ·
 **Reviewed:** one adversarial agent review (Fable), 12 findings, all
 addressed in this revision
+
+**Progress, 2026-11-20:** the original measurements and findings below are
+historical. C7 is on main. The remaining owned facade, applied-mark,
+learner-discovery, watch, peer-proof, catalogue and timing implementation is
+built and independently reviewed. Delivery and qualification evidence is
+tracked in [promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811); this paragraph does not claim a passing final
+qualification receipt. B3/C1 and the cluster-wide source reader (#1597)
+retain their separate owners. C4 instrumentation is built, while actual
+post-C2 voter observations and the election-floor decision remain open.
+C5 is a tracked evaluation, not an upgrade or patch retirement. Paul owns
+deployment; no completed fleet acceptance is claimed.
 
 > **Who reads this.** Paul: §1 for the verdict, §8 for the rulings made.
 > This is the review, not a build plan. The P0 items in §7 are small enough
@@ -309,15 +320,21 @@ There is no refusal-reason metric; the only event is `claim_refused`.
 
 ### R1. A stalled voter can depose a healthy leader
 
-Heartbeat 800 ms, election timeout 2.4–4.0 s
-(`migration.rs:160-164`). A voter starved for ~2 s campaigns with a higher
-term and the healthy leader ends up stepping down.† The exact mechanism is
-unverified: OpenRaft is pinned at 0.9.25 but not vendored, so whether
-followers reject the vote and the leader steps down on a later reply, or the
-vote succeeds outright, has to be checked against that source. Either way
-this is the probable trigger of the 2026-10-31 failure
-([PLAYBACK-QUORUM-GAPS-RCA.md](PLAYBACK-QUORUM-GAPS-RCA.md)), and nothing
-structural has changed since.
+Heartbeat 800 ms, configured election timeout 2.4–4.0 s. **Source verified
+2026-11-19:** [the exact OpenRaft 0.9.25 chain](OPENRAFT-010-EVALUATION.md#3-c4-source-result--a-failed-campaign-can-still-disturb-the-leader)
+allows an expired voter to increment its own term even while healthy peers
+reject its vote under their current leader lease. A later old-term append
+can receive its higher vote and make the healthy leader step down; winning
+a majority is not required.
+
+The earlier approximate two-second starvation threshold was not verified.
+A committed follower normally waits the 4 s leader lease plus its randomized
+2.4–less-than-4 s election timeout since the last vote touch; candidate and
+greater-log states use different bounds. The source permits the mechanism,
+but does not prove the historical incident's RPC order or the duration of a
+real scheduling stall. C4 still requires post-C2 fleet measurement before
+choosing a remedy; [the RCA](PLAYBACK-QUORUM-GAPS-RCA.md) remains incident
+evidence rather than a measured threshold for this change.
 
 ### R2. Every election fences every node
 
@@ -523,7 +540,7 @@ classes that must stay linearizable.
 | C2 | A leader never restarts cold: plurxd's graceful shutdown hands leadership off first, and the deploy path puts a leader through maintenance (restart-preparation refuses a leader). Read the playbooks first. **Built in this PR, not merged:** the shutdown half, [build plan and log](LEADER-SHUTDOWN-HANDOFF-BUILD.md); the deploy-path half waits on the playbooks. | R3 |
 | C3 | The single timing module; derive lease, grace, `STORE_TIMEOUT` and feature timeouts from it. | R2, R4 |
 | C4 | Election behaviour under a starved voter: verify the mechanism against OpenRaft 0.9.25, then pre-vote if 0.10 is taken, otherwise a wider floor chosen from a measurement. | R1 |
-| C5 | Open a tracked item for OpenRaft 0.10 and retire patches 4, 6 and 28 against it. | R6 |
+| C5 | [Tracked OpenRaft 0.10 evaluation](OPENRAFT-010-EVALUATION.md): replace the 0.9 mechanisms of patches 4, 6 and 28 only after native transfer, read-linearizer and independent heartbeat transports preserve the existing contracts. No dependency upgrade or patch retirement is claimed by tracking alone. | R6 |
 | C6 | Explain R7's two observations. Done 2026-11-15 for the learner polling; the failed writes wait for A2's method label and the next leader restart. | R7 |
 | C7 | A plurxd whose Raft core has exited on a storage error exits non-zero, so the supervisor restarts it and the node recovers when the cause clears. Snapshot admission that still lacks room when its deferral expires skips the build instead of attempting it, and a failed build removes its `.temp` file. | R8 |
 | C8 | The Bonjour companion stops asking a learner for a route it refuses: either the learner answers `GET /api/v1/server` (it is node-local identity) or the companion reads a learner-eligible path. Decide whether a learner is advertised to clients at all. | R7 |

@@ -258,10 +258,56 @@ async function cycleSub(){
   const s=PLAYER.subs.find(x=>x.index===next);
   toast("Subtitles: "+(next<0?"off":subLabelFor(s,next)));
 }
+// A split copy master advertises every soundtrack as an alternate on the one
+// hls.js attachment (STABLE-RENDITION-ID "a<audio index>"). Changing language
+// then selects a rendition; the session, element and video keep playing.
+function splitAudioTrackFor(p,idx){
+  const hls=p&&p.hls, track=p&&p.audio&&p.audio[idx];
+  if(!hls||!track||!Array.isArray(hls.audioTracks)||hls.audioTracks.length<2) return -1;
+  const want="a"+track.index;
+  return hls.audioTracks.findIndex(t=>t&&t.attrs&&t.attrs["STABLE-RENDITION-ID"]===want);
+}
+// The requested and the confirmed selection are kept apart: only a switch
+// hls.js confirms on this attachment commits the menu, preference and the
+// generated-caption language. Late events for a superseded choice are ignored.
+function requestSplitAudio(me,idx,alternate){
+  me.requestedAudio={index:idx,track:alternate,hls:me.hls};
+  me.hls.audioTrack=alternate;
+}
+function splitAudioSwitched(me,hls,trackId){
+  const want=me&&me.requestedAudio;
+  if(!want||want.hls!==hls||me.hls!==hls||want.track!==trackId) return;
+  me.requestedAudio=null;
+  if(typeof translationRetire==="function")translationRetire("audio changed");
+  me.curAudio=want.index;
+  const track=me.audio[want.index];
+  rememberPlaybackSelection("audio", track?track.index:want.index);
+  renderPlayerInfo();
+  toast("Audio: "+(langName(track&&track.language)||("Track "+(want.index+1))));
+}
+// A soundtrack that cannot be prepared leaves the incumbent audible.
+function splitAudioRefused(me,hls,trackId){
+  const want=me&&me.requestedAudio;
+  if(!want||want.hls!==hls||me.hls!==hls||want.track!==trackId) return;
+  me.requestedAudio=null;
+  const incumbent=splitAudioTrackFor(me,me.curAudio);
+  if(incumbent>=0&&hls.audioTrack!==incumbent) hls.audioTrack=incumbent;
+  renderPlayerInfo();
+  toast("That soundtrack could not be prepared; keeping the current one");
+}
 async function switchAudio(idx){
   closeMenu();
   const me=PLAYER, v=document.getElementById("video");
+  if(me&&me.requestedAudio&&idx===me.curAudio){
+    // Back to the incumbent before the pending choice confirmed.
+    const incumbent=splitAudioTrackFor(me,idx);
+    me.requestedAudio=null;
+    if(incumbent>=0&&me.hls.audioTrack!==incumbent) me.hls.audioTrack=incumbent;
+    return;
+  }
   if(!me||!v||idx===me.curAudio) return;
+  const alternate=splitAudioTrackFor(me,idx);
+  if(alternate>=0){ requestSplitAudio(me,idx,alternate); return; }
   endWait(false); // cancel a timer armed for the stream this switch replaces
   if(typeof translationRetire==="function")translationRetire("audio changed");
   me.curAudio=idx;

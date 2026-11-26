@@ -507,9 +507,14 @@ struct PlurxAPI {
         caps: DeviceCaps,
         query: [URLQueryItem],
         legacyQuery: () -> [URLQueryItem],
-        fileContext: PlaybackFileContext? = nil
+        fileContext: PlaybackFileContext? = nil,
+        speculative: Bool = false
     ) async throws -> Decision {
         let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
+        if speculative {
+            return try await post(try context.apiPath("hls/startup-decision"),
+                                  query: query, body: DecisionBody(caps: caps))
+        }
         do {
             return try await post(
                 try context.apiPath("decision"),
@@ -639,6 +644,14 @@ struct PlurxAPI {
             using: preparationSession
         )
         return Self.acceptHlsSessionPresentation(started)
+    }
+
+    func prepareHlsStartup(fileId: Int, body: CreateSessionRequest) async throws {
+        let context = try PlaybackFileContext.local(fileId)
+        var request = try jsonRequest(try context.apiPath("hls/prepare-startup"), body: body)
+        Session.shared.authorize(&request)
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: preparationSession)
+        try Self.check(response, data: data)
     }
 
     // MARK: - Library channels

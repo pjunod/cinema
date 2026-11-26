@@ -76,7 +76,7 @@ pub(crate) enum ReceiverStartError {
 }
 /// A Source that could not be reached or was busy is unavailable, not a
 /// refusal; anything the Source affirmatively answered stays unresolved.
-pub(super) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
+pub(crate) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
     match error {
         crate::sharing_client::PeerError::Unavailable
         | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::PeerUnavailable,
@@ -163,6 +163,16 @@ pub(super) fn resource_busy_response(retry_after_secs: u64) -> super::error::Api
     }
 }
 fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
+    log_source_peer_failure("status", stage, error);
+}
+/// What the Source answered when this receiver is about to tell its viewer
+/// only "unresolved". The viewer's message cannot tell one Source refusal
+/// from another; this line can.
+fn log_source_peer_failure(
+    operation: &'static str,
+    stage: &'static str,
+    error: crate::sharing_client::PeerError,
+) {
     use crate::sharing_client::PeerError;
     let (error_class, http_status) = match error {
         PeerError::Unavailable => ("unavailable", None),
@@ -174,8 +184,9 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::Busy { .. } => ("busy", Some(429)),
         PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
         PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
+        PeerError::StartNotPrepared { .. } => ("source_not_prepared", Some(503)),
     };
-    tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
+    tracing::warn!(target: "plurx::sharing", operation, stage, error_class, http_status, "receiver Source exchange refused");
 }
 
 #[derive(Default)]
@@ -187,6 +198,17 @@ pub(crate) struct ReceiverStartRegistry {
     /// registered before it, so an older Start that publishes late can never
     /// retire the newer session that replaced it.
     registered: std::sync::atomic::AtomicU64,
+}
+/// An actual retained B owner for a processed Source successor. The session
+/// correlation is one-way; it is never the playback bearer capability.
+#[derive(Clone)]
+pub(crate) struct ReceiverProcessedActivity {
+    pub stop_id: String,
+    pub source_server_id: uuid::Uuid,
+    pub import_id: uuid::Uuid,
+    pub catalogue_epoch: uuid::Uuid,
+    pub item_id: String,
+    pub viewer_id: i64,
 }
 struct SettledReceiverAttempt {
     user_id: i64,
@@ -514,6 +536,93 @@ pub(crate) enum ReceiverPublished {
 #[derive(Clone)]
 pub(crate) struct ReceiverStartActor(Arc<ReceiverStartInner>);
 impl ReceiverStartRegistry {
+    pub(crate) fn processed_activities(&self) -> Vec<ReceiverProcessedActivity> {
+        self.entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .filter_map(|entry| {
+                let processed =
+                    serde_json::from_str::<serde_json::Value>(&entry.intent.recipe.request_json)
+                        .ok()
+                        .and_then(|request| {
+                            request.get("processed_upgrade").and_then(|v| v.as_bool())
+                        })
+                        == Some(true);
+                if !processed {
+                    return None;
+                }
+                let owned = entry.state.lock().expect("receiver owner");
+                let owner = owned.owner.as_ref()?;
+                if owned.prepared.is_none() || owned.retirement_started || owned.retired {
+                    return None;
+                }
+                Some(ReceiverProcessedActivity {
+                    stop_id: format!(
+                        "receiver-{}",
+                        crate::transcode::session_log_id(&owner.session_id.to_string())
+                    ),
+                    source_server_id: entry.intent.scope.source_server_id,
+                    import_id: entry.intent.scope.import_id,
+                    catalogue_epoch: entry.intent.scope.catalogue_epoch,
+                    item_id: entry.intent.recipe.reference.item_id.as_str().to_owned(),
+                    viewer_id: entry.intent.user_id,
+                })
+            })
+            .take(64)
+            .collect()
+    }
+
+    /// Retire only the exact retained B successor; its ordinary incumbent is
+    /// not selected. The existing retirement owner must confirm Source End.
+    pub(crate) async fn stop_processed_activity(
+        &self,
+        state: Arc<AppState>,
+        id: &str,
+    ) -> Result<bool, ()> {
+        let entry = self
+            .entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .find(|entry| {
+                let owned = entry.state.lock().expect("receiver owner");
+                let Some(owner) = owned.owner.as_ref() else {
+                    return false;
+                };
+                owned.prepared.is_some()
+                    && !owned.retired
+                    && format!(
+                        "receiver-{}",
+                        crate::transcode::session_log_id(&owner.session_id.to_string())
+                    ) == id
+                    && serde_json::from_str::<serde_json::Value>(&entry.intent.recipe.request_json)
+                        .ok()
+                        .and_then(|request| {
+                            request.get("processed_upgrade").and_then(|v| v.as_bool())
+                        })
+                        == Some(true)
+            })
+            .cloned();
+        let Some(entry) = entry else {
+            return Ok(false);
+        };
+        let session = entry
+            .state
+            .lock()
+            .expect("receiver owner")
+            .owner
+            .as_ref()
+            .ok_or(())?
+            .session_id;
+        let actor = ReceiverStartActor(entry);
+        actor.begin_retirement(
+            state,
+            plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Deleted,
+        );
+        actor.wait_confirmed_end(session).await.map_err(|_| ())?;
+        Ok(true)
+    }
     fn confirmed_end(&self, session: Uuid) -> bool {
         // Retirement publishes the actual receipt on its retained entry. The
         // settled cache is populated only when a later Start prunes entries;
@@ -1384,7 +1493,7 @@ impl ReceiverStartActor {
                     () = tokio::time::sleep_until(looked + Duration::from_secs(1)) => {}
                 }
                 // Re-armed before the look it follows.
-                watch = state.applied.sharing_watch(RECEIVER_CONNECTION_WATCH);
+                watch = state.cluster.watch(RECEIVER_CONNECTION_WATCH);
                 looked = tokio::time::Instant::now();
                 // Original B login and exact delivery binding remain required
                 // while a writer has queued bytes, including after Body EOF.
@@ -1543,7 +1652,7 @@ impl ReceiverStartActor {
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
-            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", "receiver Source status refused");
+            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", operation = "status", "receiver Source exchange refused");
             return Err(ReceiverStartError::Ending);
         }
         // Current B policy precedes the network operation; every following
@@ -1553,12 +1662,12 @@ impl ReceiverStartActor {
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unknown
             })?
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", operation = "status", "receiver Source exchange refused");
             })?;
         let received = self
             .0
@@ -1569,7 +1678,7 @@ impl ReceiverStartActor {
             .clone()
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", operation = "status", "receiver Source exchange refused");
             })?;
         let expected = plurx_core::sharing::SharingIdentity {
             server_id: self.0.intent.scope.source_server_id,
@@ -1590,7 +1699,7 @@ impl ReceiverStartActor {
         let known = received
             .lineage()
             .map_err(|_| {
-                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", "receiver Source status refused");
+                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", operation = "status", "receiver Source exchange refused");
                 ReceiverStartError::Unresolved
             })?;
         peer.file_status(
@@ -1937,6 +2046,22 @@ async fn run_owner(
     let dispatch_owner = pending.clone();
     let dispatch_entry = entry.clone();
     let retry_entry = entry.clone();
+    // Only B's prepared-successor owner can retain this true bit: public B
+    // ingress rejects it, and ordinary Start retries keep their old policy.
+    let processed_successor = entry
+        .state
+        .lock()
+        .expect("receiver owner")
+        .prepared
+        .is_some()
+        && serde_json::from_str::<serde_json::Value>(&entry.intent.recipe.request_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("processed_upgrade")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            == Some(true);
     let connection_lifetime: Arc<dyn Send + Sync> = entry.bodies.reserve()?;
     let start = state.sharing.start_file_source(
         &state,
@@ -1958,13 +2083,14 @@ async fn run_owner(
         move |retry| {
             // The Source keeps its entry for this request alive; so does B.
             // The waiters present now take this answer, typed, and the owner
-            // re-posts the same Start unless this attempt is being stopped.
+            // re-posts an ordinary Start unless stopped. A processed
+            // successor spends its Source offer on this first typed answer.
             let mut owned = retry_entry.state.lock().expect("receiver owner");
             let count = owned.source_retry.map_or(0, |(count, _)| count) + 1;
             owned.source_retry = Some((count, retry));
             drop(owned);
             retry_entry.changed.notify_waiters();
-            !retry_entry.stop.is_cancelled()
+            !processed_successor && !retry_entry.stop.is_cancelled()
         },
     );
     tokio::pin!(start);
@@ -1981,11 +2107,21 @@ async fn run_owner(
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
                 crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
+                error @ (crate::sharing_client::PeerError::StartNotPrepared { .. }
+                    | crate::sharing_client::PeerError::StartNotYet { .. }
+                    | crate::sharing_client::PeerError::Busy { .. }) if processed_successor => {
+                    ReceiverStartError::NotYet(crate::sharing_client::StartRetry::from_peer(error)
+                        .expect("typed processed Start refusal"))
+                },
                 // A retryable answer that escaped the re-post loop: the
                 // viewer's whole window is spent, and nobody is left to retry.
-                crate::sharing_client::PeerError::StartNotYet { .. }
+                crate::sharing_client::PeerError::StartNotPrepared { .. }
+                | crate::sharing_client::PeerError::StartNotYet { .. }
                 | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::Deadline,
-                _ => ReceiverStartError::Unresolved,
+                other => {
+                    log_source_peer_failure("start", "start_exchange", other);
+                    ReceiverStartError::Unresolved
+                }
             })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {
@@ -2452,6 +2588,83 @@ pub(crate) async fn receiver_media(
     )
     .await
 }
+/// The Source HLS resource a viewer's public B request names.
+///
+/// A native HLS element cannot set headers, so the web player carries its
+/// login as `?token=` on every playlist URL it fetches (`core/api.js` `tok`),
+/// as it does for every Local stream. On this route the B session in the path
+/// is the capability and the token authorizes nothing, so B takes at most one
+/// and drops it, as the shared asset routes do (`shared_receiver_assets`): it
+/// is never parsed as a resource parameter and never crosses to a peer or the
+/// Source. Every other key stays the closed Source grammar.
+pub(super) fn receiver_hls_resource(
+    suffix: &str,
+    query: Option<&str>,
+) -> Option<plurx_core::sharing_resources::SharingHlsResource> {
+    let mut token = false;
+    let mut kept = Vec::new();
+    // An empty query or pair (`index.m3u8?`, `?&native=1`) is refused, as the
+    // Source grammar refuses it, rather than silently normalized away.
+    for pair in query.map(|query| query.split('&')).into_iter().flatten() {
+        if pair.is_empty() {
+            return None;
+        }
+        if pair.split_once('=').map(|(key, _)| key) == Some("token") {
+            if std::mem::replace(&mut token, true) {
+                return None;
+            }
+        } else {
+            kept.push(pair);
+        }
+    }
+    let relative = if kept.is_empty() {
+        suffix.to_owned()
+    } else {
+        format!("{suffix}?{}", kept.join("&"))
+    };
+    plurx_core::sharing_resources::SharingHlsResource::parse(&relative).ok()
+}
+/// B's answer to a public HLS request it will not relay: a typed 422 and one
+/// line naming the step. The line carries the B incarnation, never the B
+/// session UUID (the viewer's bearer capability), and only the query's key
+/// names, never a value, so the viewer's login token cannot reach a log.
+pub(super) fn unsupported_resource(
+    incarnation: &str,
+    suffix: &str,
+    query: Option<&str>,
+    stage: &'static str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let named = |text: &str, extra: &[u8], limit: usize| {
+        !text.is_empty()
+            && text.len() <= limit
+            && text.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || b"_-".contains(&byte) || extra.contains(&byte)
+            })
+    };
+    let keys = query
+        .unwrap_or("")
+        .split('&')
+        .take(16)
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if named(key, b"", 32) => key,
+            _ => "<invalid>",
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let suffix = if named(suffix, b"./", 96) {
+        suffix
+    } else {
+        "<invalid>"
+    };
+    tracing::warn!(target: "plurx::sharing", stage, incarnation, suffix, query_keys = %keys, "receiver HLS resource refused");
+    super::error::ApiError::typed(
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        "sharing_resource_unsupported",
+        "This shared playback resource is unavailable",
+    )
+    .into_response()
+}
 pub(super) async fn receiver_media_actor(
     state: AppState,
     actor: ReceiverStartActor,
@@ -2565,12 +2778,13 @@ pub(super) async fn receiver_media_actor(
         )
             .into_response();
     }
-    let relative = match request.uri().query() {
-        Some(query) => format!("{suffix}?{query}"),
-        None => suffix.to_owned(),
-    };
-    let Ok(resource) = plurx_core::sharing_resources::SharingHlsResource::parse(&relative) else {
-        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    let Some(resource) = receiver_hls_resource(suffix, request.uri().query()) else {
+        return unsupported_resource(
+            &actor.0.intent.recipe.source_request_id.to_string(),
+            suffix,
+            request.uri().query(),
+            "resource_grammar",
+        );
     };
     let Some(connection) = request
         .extensions()
@@ -2591,7 +2805,18 @@ pub(super) async fn receiver_media_actor(
         Ok(guard) => guard,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let opened = match actor.open_source_resource(&state, &resource).await {
+    let relay_started = tokio::time::Instant::now();
+    let range = request
+        .headers()
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(relay_log::bounded_range);
+    let opened = match actor
+        .open_source_resource(&state, &resource)
+        .await
+        .inspect_err(|error| {
+            relay_log::refused(suffix, range.as_deref(), relay_started.elapsed(), error);
+        }) {
         Ok(opened) => opened,
         Err(ReceiverStartError::Capacity) => return resource_busy_response(1).into_response(),
         // Neither ends the session: the owner and the connection monitors
@@ -2611,7 +2836,12 @@ pub(super) async fn receiver_media_actor(
                     | plurx_core::sharing_resources::SharingHlsResourceKind::SubtitleSegment { .. }
             ) =>
         {
-            return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+            return unsupported_resource(
+                &actor.0.intent.recipe.source_request_id.to_string(),
+                suffix,
+                request.uri().query(),
+                "subtitle_unsupported",
+            );
         }
         Err(_) => {
             actor.begin_retirement(
@@ -2623,8 +2853,16 @@ pub(super) async fn receiver_media_actor(
     };
     let subtitle_complete = opened.subtitle_complete;
     let subtitle_absent = opened.subtitle_absent;
+    let mut relayed = relay_log::Relayed::new(
+        suffix,
+        range,
+        if subtitle_absent { 204 } else { 200 },
+        opened.length,
+        relay_started,
+    );
     let stream = opened.body.into_data_stream().map(move |frame| {
         let _writer_ownership = &guard;
+        relayed.frame(&frame);
         frame
     });
     let mut builder = axum::http::Response::builder()
@@ -2707,7 +2945,64 @@ impl ReceiverStartRegistry {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    /// Safari's native HLS element cannot set headers, so the web player
+    /// carries its login as `?token=` on every playlist URL it fetches
+    /// (`core/api.js` `tok`, `player.js` `nativeHlsResourceUrl`). A shared
+    /// Dolby Vision or HDR copy is played natively from `master.m3u8`, so B
+    /// must take exactly those URLs, and the token must never reach a peer.
+    #[test]
+    fn native_hls_readiness_urls_name_the_source_resource_without_the_login_token() {
+        use plurx_core::sharing_resources::SharingHlsResourceKind;
+        let master = super::receiver_hls_resource("master.m3u8", Some("token=b%2Fsecret"))
+            .expect("the native readiness master");
+        assert_eq!(master.kind(), SharingHlsResourceKind::Master);
+        assert_eq!(master.as_str(), "master.m3u8");
+        let index = super::receiver_hls_resource("index.m3u8", Some("subtitle=2&token=secret"))
+            .expect("the master's media playlist");
+        assert_eq!(index.kind(), SharingHlsResourceKind::Index);
+        assert_eq!(index.as_str(), "index.m3u8?subtitle=2");
+        assert!(!index.as_str().contains("token"));
+        // One login token at most; every other key stays closed.
+        assert!(super::receiver_hls_resource("master.m3u8", Some("token=a&token=b")).is_none());
+        assert!(super::receiver_hls_resource("master.m3u8", Some("session=a")).is_none());
+        assert!(super::receiver_hls_resource("seg1.m4s", Some("token=a")).is_some());
+        // An empty query or pair is refused, exactly as the Source refuses it.
+        for query in ["", "&native=1", "native=1&&token=a", "token=a&"] {
+            assert!(
+                super::receiver_hls_resource("index.m3u8", Some(query)).is_none(),
+                "{query:?}"
+            );
+        }
+        assert_eq!(
+            super::receiver_hls_resource("index.m3u8", None)
+                .expect("plain index")
+                .as_str(),
+            "index.m3u8"
+        );
+    }
+    /// A request B will not relay is answered with a typed refusal the web
+    /// player can name, not a bare status.
+    #[tokio::test]
+    async fn unrelayed_hls_resource_answers_a_typed_refusal() {
+        let response = super::unsupported_resource(
+            "00000000-0000-4000-8000-000000000000",
+            "master.m3u8",
+            Some("token=secret&url=x"),
+            "resource_grammar",
+        );
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("bounded refusal");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("typed refusal");
+        assert_eq!(body["code"], "sharing_resource_unsupported");
+        assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+    }
     use plurx_core::{
         sharing::SourceId,
         sharing_catalogue::SharedReference,
@@ -3841,5 +4136,268 @@ mod outage_policy_tests {
             observation.matches("SharingObservation::of_term(").count(),
             3
         );
+    }
+}
+
+/// One line per HLS resource B relays from the Source: its name (never its
+/// query), status, bytes sent against the declared length, how long it took,
+/// any `Range` header, and whether the body completed. Debug normally; info
+/// when the body did not complete or took longer than one advertised target
+/// duration, which is when a player can starve on it.
+pub(crate) mod relay_log {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// The client's own header, so at most 64 bytes of it reach a log line.
+    /// `to_str` already admitted only visible ASCII.
+    pub(crate) fn bounded_range(range: &str) -> String {
+        range.chars().take(64).collect()
+    }
+
+    fn slow() -> Duration {
+        Duration::from_secs(u64::from(
+            plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
+        ))
+    }
+
+    /// A refused open. Capacity and a busy resource are answered with a
+    /// retry and say nothing new on their own: debug. Anything else: info.
+    pub(crate) fn refused(
+        resource: &str,
+        range: Option<&str>,
+        elapsed: Duration,
+        error: &super::ReceiverStartError,
+    ) {
+        macro_rules! line {
+            ($level:ident) => {
+                tracing::$level!(
+                    target: "plurx::sharing",
+                    resource,
+                    range = range.unwrap_or(""),
+                    error_class = ?error,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "receiver HLS resource refused"
+                )
+            };
+        }
+        if matches!(
+            error,
+            super::ReceiverStartError::Capacity | super::ReceiverStartError::ResourceBusy { .. }
+        ) {
+            line!(debug);
+        } else {
+            line!(info);
+        }
+    }
+
+    pub(crate) struct Relayed {
+        resource: String,
+        range: Option<String>,
+        status: u16,
+        length: u64,
+        sent: u64,
+        started: Instant,
+        complete: bool,
+        failed: bool,
+    }
+    impl Relayed {
+        pub(crate) fn new(
+            resource: &str,
+            range: Option<String>,
+            status: u16,
+            length: u64,
+            started: Instant,
+        ) -> Self {
+            Self {
+                resource: resource.to_owned(),
+                range,
+                status,
+                length,
+                sent: 0,
+                started,
+                complete: length == 0,
+                failed: false,
+            }
+        }
+        pub(crate) fn frame<E>(&mut self, frame: &Result<bytes::Bytes, E>) {
+            match frame {
+                Ok(bytes) => {
+                    self.sent = self.sent.saturating_add(bytes.len() as u64);
+                    self.complete = self.sent >= self.length;
+                }
+                Err(_) => self.failed = true,
+            }
+        }
+    }
+    impl Drop for Relayed {
+        fn drop(&mut self) {
+            let elapsed = self.started.elapsed();
+            let complete = self.complete && !self.failed;
+            macro_rules! line {
+                ($level:ident) => {
+                    tracing::$level!(
+                        target: "plurx::sharing",
+                        resource = %self.resource,
+                        status = self.status,
+                        bytes = self.sent,
+                        length = self.length,
+                        complete,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        range = self.range.as_deref().unwrap_or(""),
+                        "receiver HLS resource relayed"
+                    )
+                };
+            }
+            if !complete || elapsed > slow() {
+                line!(info);
+            } else {
+                line!(debug);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        fn capture() -> (Arc<crate::logbuf::LogBuffer>, impl Sized) {
+            use tracing_subscriber::prelude::*;
+            let logs = Arc::new(crate::logbuf::LogBuffer::new(16));
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs))),
+            );
+            (logs, guard)
+        }
+
+        /// A segment whose body stops short is reported at info with what was
+        /// sent; a whole, prompt one only at debug. No query value is logged.
+        #[tokio::test(start_paused = true)]
+        async fn relayed_resources_report_bytes_completion_and_slowness() {
+            let (logs, _guard) = capture();
+            let ok: Result<bytes::Bytes, std::io::Error> =
+                Ok(bytes::Bytes::from_static(b"0123456789"));
+            let mut whole = Relayed::new("seg00001.m4s", None, 200, 10, Instant::now());
+            whole.frame(&ok);
+            drop(whole);
+            let mut short = Relayed::new(
+                "seg00002.m4s",
+                Some("bytes=0-".into()),
+                200,
+                40,
+                Instant::now(),
+            );
+            short.frame(&ok);
+            drop(short);
+            let started = Instant::now();
+            let mut slow = Relayed::new("seg00003.m4s", None, 200, 10, started);
+            slow.frame(&ok);
+            tokio::time::advance(Duration::from_secs(17)).await;
+            drop(slow);
+            let lines: Vec<String> = logs
+                .tail("debug", 16)
+                .into_iter()
+                .map(|entry| format!("{} {}", entry.level, entry.message))
+                .collect();
+            assert_eq!(lines.len(), 3, "{lines:?}");
+            assert!(
+                lines[0].starts_with("DEBUG receiver HLS resource relayed"),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("resource=seg00001.m4s") && lines[0].contains("complete=true")
+            );
+            assert!(
+                lines[1].starts_with("INFO receiver HLS resource relayed"),
+                "{}",
+                lines[1]
+            );
+            for field in [
+                "resource=seg00002.m4s",
+                "bytes=10",
+                "length=40",
+                "complete=false",
+                "range=\"bytes=0-\"",
+            ] {
+                assert!(lines[1].contains(field), "{field} in {}", lines[1]);
+            }
+            assert!(
+                lines[2].starts_with("INFO receiver HLS resource relayed"),
+                "{}",
+                lines[2]
+            );
+            assert!(
+                lines[2].contains("complete=true") && lines[2].contains("elapsed_ms=17000"),
+                "{}",
+                lines[2]
+            );
+        }
+
+        /// The receiver's own mapping of a Source answer: unavailable for
+        /// now (a 503 with Retry-After) keeps its session, through both its
+        /// Status owner and its resource relay; a refusal does not.
+        #[test]
+        fn a_source_retry_keeps_the_receiver_session_and_a_refusal_does_not() {
+            use crate::sharing_client::PeerError;
+            assert!(matches!(
+                super::super::peer_failure(crate::sharing_client::peer_status_refusal(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Some(&axum::http::HeaderValue::from_static("1"))
+                )),
+                super::super::ReceiverStartError::PeerUnavailable
+            ));
+            assert!(matches!(
+                super::super::peer_failure(PeerError::Busy {
+                    retry_after_secs: 1
+                }),
+                super::super::ReceiverStartError::PeerUnavailable
+            ));
+            assert!(matches!(
+                super::super::peer_failure(crate::sharing_client::peer_status_refusal(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    None
+                )),
+                super::super::ReceiverStartError::Unresolved
+            ));
+            assert!(matches!(
+                super::super::peer_failure(PeerError::InvalidResponse),
+                super::super::ReceiverStartError::Unresolved
+            ));
+        }
+
+        /// The client's Range is bounded, and a retry answer is not news.
+        #[test]
+        fn relay_refusals_and_ranges_are_bounded_and_leveled() {
+            let (logs, _guard) = capture();
+            assert_eq!(bounded_range(&"x".repeat(200)).len(), 64);
+            assert_eq!(bounded_range("bytes=0-1023"), "bytes=0-1023");
+            refused(
+                "seg00001.m4s",
+                None,
+                Duration::ZERO,
+                &super::super::ReceiverStartError::Capacity,
+            );
+            refused(
+                "seg00001.m4s",
+                None,
+                Duration::ZERO,
+                &super::super::ReceiverStartError::ResourceBusy {
+                    retry_after_secs: 1,
+                },
+            );
+            refused(
+                "seg00001.m4s",
+                None,
+                Duration::ZERO,
+                &super::super::ReceiverStartError::Unresolved,
+            );
+            let levels: Vec<String> = logs
+                .tail("debug", 16)
+                .into_iter()
+                .map(|entry| entry.level)
+                .collect();
+            assert_eq!(levels, ["DEBUG", "DEBUG", "INFO"]);
+        }
     }
 }

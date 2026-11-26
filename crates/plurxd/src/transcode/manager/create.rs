@@ -1,5 +1,15 @@
 use crate::vodserve::StagedProcessedPredecessor;
 
+/// Evidence and ownership retained together for one Source preparation.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct SourceProcessedInput<'a> {
+    evidence: &'a crate::transcode::source_preparation::SourceHeldProbeEvidence,
+    proof: &'a plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    producer: Arc<crate::prodrun::ProducerSlot>,
+    cancel: tokio_util::sync::CancellationToken,
+    authority: Arc<crate::transcode::source_actor::SourceProducerAuthority>,
+}
+
 fn native_fel_transport(req: &SessionRequest) -> bool {
     cfg!(target_os = "linux")
         && req.transport.as_deref() == Some("native")
@@ -807,6 +817,38 @@ impl TranscodeManager {
     /// create's plan (D3b) the binding is checked against the plan this
     /// request already read — one revision, no second read; without one the
     /// source and settings are read again, as before.
+    /// The current planning snapshot a processed upgrade of `request` may run
+    /// on, or `None` when its ask no longer has one. A candidate start
+    /// revalidates its planning binding. An accepted ask (Original or a manual
+    /// rung) has no binding: the current snapshot must still be the source
+    /// revision its catalog query was accepted for. The trial and the FEL
+    /// qualification continuation both decide authority here.
+    pub(crate) async fn processed_planning_authority(
+        &self,
+        request: &SessionRequest,
+    ) -> Result<Option<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        if request.candidate_context.is_some() {
+            return self
+                .validate_candidate_planning_binding(request, None, None)
+                .await;
+        }
+        let Some(query) = request
+            .accepted_processed_ask
+            .as_ref()
+            .and_then(|ask| ask.catalog_query.as_ref())
+        else {
+            return Ok(None);
+        };
+        let snapshot = self
+            .revalidated_planning_snapshot(request.file_id, None)
+            .await?;
+        Ok(snapshot.filter(|snapshot| {
+            snapshot.file.id == query.file_id
+                && snapshot.file.size == query.source_size
+                && snapshot.file.mtime == query.source_mtime
+        }))
+    }
+
     pub(crate) async fn validate_candidate_planning_binding(
         &self,
         request: &SessionRequest,
@@ -828,23 +870,36 @@ impl TranscodeManager {
             }
             return Ok(Some((*plan.snapshot).clone()));
         }
-        let deadline = deadline
-            .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
-        let snapshot = tokio::time::timeout_at(
-            deadline,
-            self.store
-                .playback_planning_snapshot(request.file_id, &super::QUALITY_PLANNING_KEYS),
-        )
-        .await
-        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
-        .map_err(|error| catalog_input_error(error.to_string()))?
-        .ok_or_else(|| catalog_input_error("candidate source missing"))?;
+        let snapshot = self
+            .revalidated_planning_snapshot(request.file_id, deadline)
+            .await?
+            .ok_or_else(|| catalog_input_error("candidate source missing"))?;
         if *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot) {
             return Err(catalog_input_error(
                 "candidate source or settings changed before admission",
             ));
         }
         Ok(Some(snapshot))
+    }
+
+    /// The current planning snapshot for `file_id`, read under the bounded
+    /// create-stage deadline (2 s unless the caller holds one). Both planning
+    /// authorities revalidate against this one read.
+    async fn revalidated_planning_snapshot(
+        &self,
+        file_id: i64,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        let deadline = deadline
+            .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
+        tokio::time::timeout_at(
+            deadline,
+            self.store
+                .playback_planning_snapshot(file_id, &super::QUALITY_PLANNING_KEYS),
+        )
+        .await
+        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
+        .map_err(|error| catalog_input_error(error.to_string()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1199,7 +1254,11 @@ impl TranscodeManager {
                             // not include streams nobody ever received.
                             let session =
                                 self.sessions.lock().await.get(&started.session_id).cloned();
-                            if let Some(session) = session {
+                            // A retained reader consumes no source I/O. The
+                            // temporary suspension is restored by its owner.
+                            if let Some(session) =
+                                session.filter(|session| session.rolling_artifact.is_none())
+                            {
                                 fallback_interest.transfer(&session);
                             }
                             record_live_recovery(reason);
@@ -1587,6 +1646,27 @@ impl TranscodeManager {
         }
     }
 
+    /// Whether this preparation captures the DV tools and renders a processed
+    /// first window inside the Start. Only the processed upgrade's own trial
+    /// does (plan ruling 3: processed output is never work before the
+    /// viewer's first frame). Every ordinary start, with or without an Auto
+    /// candidate, reaches processing through that post-first-frame upgrade;
+    /// a Source never renders one here, outside its custody.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn start_renders_a_processed_window(
+        selection: &plurx_core::transcode::dv_processing::DvSelection,
+        processed_trial: bool,
+        source: bool,
+    ) -> bool {
+        matches!(
+            selection,
+            plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
+                plurx_core::transcode::dv_processing::DvFallbackReason::AwaitingFirstWindow
+            )
+        ) && !source
+            && processed_trial
+    }
+
     pub(crate) fn vod_dv_processing_from_snapshot(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         request: &SessionRequest,
@@ -1622,6 +1702,48 @@ impl TranscodeManager {
         String,
     > {
         Self::display_target_policy_with_source(enabled, display, probe, None, None)
+    }
+
+    /// The title facts the Playback info rows report, read once beside
+    /// [`Self::display_target_policy`] from the same caps and probe snapshot:
+    /// the recorded levels, the scanned title peak, and whether the policy
+    /// declines because the eligible title already fits the reported bucket.
+    /// That `TitleFits` outcome only the HDR branch produces, and source
+    /// resolution never changes it. Decides nothing.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn dv_row_facts(
+        enabled: bool,
+        display: Option<&plurx_core::playback::caps::DisplayCaps>,
+        probe: Option<&str>,
+    ) -> plurx_core::playback::dv_provenance::DvRowFacts {
+        use plurx_core::transcode::dv_processing::{
+            DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline,
+        };
+        let document =
+            probe.and_then(|probe| serde_json::from_str::<serde_json::Value>(probe).ok());
+        let stats = document
+            .as_ref()
+            .and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_value);
+        let sdr = display.is_some_and(|display| !display.hdr && !display.dolby_vision);
+        let title_fits_nits = display
+            .and_then(|display| display.hdr10_target_bucket())
+            .filter(|_| enabled && !sdr)
+            .filter(|bucket| {
+                matches!(
+                    DvDisplayTarget::for_title(*bucket, stats),
+                    Ok(DvDisplayTargetChoice::Master {
+                        reason: DvDisplayTargetDecline::TitleFits { .. }
+                    })
+                )
+            });
+        plurx_core::playback::dv_provenance::DvRowFacts {
+            levels: document
+                .as_ref()
+                .and_then(plurx_core::scan::dv_levels::DvLevelsRecord::from_probe_value)
+                .and_then(|record| record.title_levels()),
+            title_peak_nits: stats.and_then(plurx_core::transcode::dv_processing::title_peak_nits),
+            title_fits_nits,
+        }
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -2400,6 +2522,23 @@ impl TranscodeManager {
         )
     }
 
+    /// Whether another live play holds this worker's reconstruction slot. A
+    /// FEL qualification holding it is not counted: a play preempts that one.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reconstruction_slot_held_by_play(&self) -> bool {
+        let qualification = self
+            .reconstruction_qualification
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.processed_reconstruction_slots.available_permits() == 0 && qualification.is_none()
+    }
+
+    /// Whether a refusal is exactly [`Self::reconstruction_slot_busy`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_reconstruction_slot_busy(reason: &str) -> bool {
+        reason == Self::reconstruction_slot_busy()
+    }
+
     /// Why a second live FEL reconstruction on this worker was declined.
     #[cfg(target_os = "linux")]
     pub(crate) fn reconstruction_slot_busy() -> String {
@@ -2431,9 +2570,19 @@ impl TranscodeManager {
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
         hdr10_intent: bool,
     ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
+        let ask = request.processed_upgrade_ask();
+        Self::processed_upgrade_gates_with_ask(request, planning, hdr10_intent, ask.as_ref())
+    }
+
+    pub(crate) fn processed_upgrade_gates_with_ask(
+        request: &SessionRequest,
+        planning: &plurx_core::store::PlaybackPlanningSnapshot,
+        hdr10_intent: bool,
+        ask: Option<&ProcessedUpgradeAsk>,
+    ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (request, planning, hdr10_intent);
+            let _ = (request, planning, hdr10_intent, ask);
             Ok(None)
         }
         #[cfg(target_os = "linux")]
@@ -2444,7 +2593,9 @@ impl TranscodeManager {
             // Any other HDR10 delivery becomes HDR10-E under Dolby Vision
             // processing.
             use plurx_core::transcode::dv_processing::DvDestination;
-            let Some(destination) = Self::processed_qualification_destination(request)? else {
+            let Some(destination) =
+                Self::processed_qualification_destination_with_ask(request, ask)?
+            else {
                 return Ok(None);
             };
             let profile81 = destination == DvDestination::Profile81;
@@ -2464,7 +2615,7 @@ impl TranscodeManager {
             {
                 return Ok(None);
             }
-            let Some(original) = request.candidate_context.as_ref() else {
+            let Some(original) = ask else {
                 if request.dv_processing_destination.is_some() {
                     return Err(
                         "processed destination requires fresh admitted owner qualification".into(),
@@ -2479,7 +2630,7 @@ impl TranscodeManager {
                 && !profile81
                 && destination != DvDestination::Sdr
                 && !hdr10_intent
-                && original.selected_candidate.grade != OutputGrade::Hdr10
+                && original.grade != OutputGrade::Hdr10
             {
                 return Ok(None);
             }
@@ -2519,6 +2670,17 @@ impl TranscodeManager {
             }
             // The setting is on for a DV source: from here every decline is
             // reported with the ordinary start it falls back to.
+            if destination == DvDestination::Sdr
+                && !plurx_core::store::stored_switch(
+                    planning
+                        .settings
+                        .get(keys::DV_DISPLAY_TARGET)
+                        .map(String::as_str),
+                    false,
+                )
+            {
+                return Err("SDR processing needs the display-target setting".into());
+            }
             if request.continuous_media.is_some() {
                 return Err("the continuous adaptive route has no processed rendition yet".into());
             }
@@ -2564,19 +2726,103 @@ impl TranscodeManager {
         recovery: &SessionRecoveryIdentity,
         hdr10_intent: bool,
     ) -> Result<Option<ProcessedUpgradeTrial>, String> {
+        let Some(ask) = request.processed_upgrade_ask() else {
+            return Ok(None);
+        };
+        self.prepare_processed_upgrade_with_source(
+            session_id,
+            request,
+            recovery,
+            hdr10_intent,
+            &ask,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // the exact accepted trial and its Source custody
+    pub(in crate::transcode) async fn prepare_source_processed_upgrade(
+        &self,
+        request: &SessionRequest,
+        ask: &ProcessedUpgradeAsk,
+        evidence: &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+        proof: &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+        authority: Arc<crate::transcode::source_actor::SourceProducerAuthority>,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> Result<ProcessedUpgradeTrial, String> {
+        let recovery = SessionRecoveryIdentity {
+            principal: proof.assignment().binding().principal().clone(),
+            incarnation_id: proof.assignment().binding().incarnation_id().to_string(),
+            recovery_epoch: String::new(),
+        };
+        if cancel.is_cancelled() {
+            return Err("Source processed preparation cancelled".into());
+        }
+        let trial = self
+            .prepare_processed_upgrade_with_source(
+                &recovery.incarnation_id,
+                request,
+                &recovery,
+                request.hdr10,
+                ask,
+                Some(SourceProcessedInput {
+                    evidence,
+                    proof,
+                    producer,
+                    cancel: cancel.clone(),
+                    authority,
+                }),
+                Some(deadline),
+            )
+            .await?
+            .ok_or("Source processed upgrade no longer applies")?;
+        if cancel.is_cancelled() {
+            return Err("Source processed preparation cancelled".into());
+        }
+        Ok(trial)
+    }
+
+    #[allow(clippy::too_many_arguments)] // the exact accepted trial and its Source custody
+    async fn prepare_processed_upgrade_with_source(
+        &self,
+        session_id: &str,
+        request: &SessionRequest,
+        recovery: &SessionRecoveryIdentity,
+        hdr10_intent: bool,
+        original: &ProcessedUpgradeAsk,
+        source: Option<SourceProcessedInput<'_>>,
+        source_deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<ProcessedUpgradeTrial>, String> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (session_id, request, recovery, hdr10_intent);
+            let _ = (
+                session_id,
+                request,
+                recovery,
+                hdr10_intent,
+                original,
+                source,
+                source_deadline,
+            );
             Ok(None)
         }
         #[cfg(target_os = "linux")]
         {
             use plurx_core::transcode::dv_processing::DvDestination;
-            let Some(planning) = self
-                .validate_candidate_planning_binding(request, None, None)
-                .await?
-            else {
-                return Ok(None);
+            let planning = if source.is_some() {
+                self.store
+                    .playback_planning_snapshot(request.file_id, &super::QUALITY_PLANNING_KEYS)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or("Source processed planning file missing")?
+            } else {
+                let Some(planning) = self.processed_planning_authority(request).await? else {
+                    return Ok(None);
+                };
+                planning
             };
             let request = &processed_upgrade_request(
                 request,
@@ -2588,16 +2834,16 @@ impl TranscodeManager {
                     true,
                 ),
             );
-            let Some(destination) =
-                Self::processed_upgrade_gates(request, &planning, hdr10_intent)?
+            let Some(destination) = Self::processed_upgrade_gates_with_ask(
+                request,
+                &planning,
+                hdr10_intent,
+                Some(original),
+            )?
             else {
                 return Ok(None);
             };
             let profile81 = destination == DvDestination::Profile81;
-            let original = request
-                .candidate_context
-                .as_ref()
-                .ok_or("processed destination requires fresh admitted owner qualification")?;
             let caps = original
                 .canonical_caps
                 .as_ref()
@@ -2614,6 +2860,7 @@ impl TranscodeManager {
             // create budget: one bounded trial, the same 8 s the in-create
             // qualification was allowed at most.
             let deadline = tokio::time::Instant::now() + PROCESSED_UPGRADE_TRIAL_BUDGET;
+            let deadline = source_deadline.map_or(deadline, |bound| deadline.min(bound));
             let mut file = planning.file.clone();
             file.audio_offset_ms = if file.audio_streams.is_empty() {
                 0
@@ -2626,8 +2873,7 @@ impl TranscodeManager {
                 .height
                 .filter(|height| u32::try_from(*height).is_ok_and(|value| value > 0))
                 .ok_or("the source has no valid picture height to process")?;
-            let height =
-                source_height.min(i64::from(original.selected_candidate.target_height)) & !1;
+            let height = source_height.min(i64::from(original.target_height)) & !1;
             if height < 32 {
                 return Err("the source has no picture height to process".into());
             }
@@ -2653,38 +2899,72 @@ impl TranscodeManager {
             .map_err(|_| {
                 "display-target source verification exceeded the preparation budget".to_owned()
             })??;
+            let dv_row_facts = Some(Self::dv_row_facts(
+                target_enabled,
+                caps.display.as_ref(),
+                planning.probe_json.as_deref(),
+            ));
             if destination == DvDestination::Sdr
                 && !display_target.is_some_and(|target| target.is_sdr())
             {
                 return Err(display_target_note.unwrap_or_else(|| "SDR display targeting needs a complete eligible L1 scan and the display-target setting".into()));
             }
             let (mut trial, projected) =
-                Self::processed_qualification_input(&planning, request, height)?;
+                Self::processed_qualification_input_with_ask(&planning, request, height, original)?;
             trial.request_id = Some(recovery.incarnation_id.clone());
-            let context = trial
-                .candidate_context
-                .as_mut()
-                .ok_or("processed trial context missing")?;
-            context.required_fel_qualification = original.required_fel_qualification.clone();
-            context.display_target = display_target;
-            context.display_target_note = display_target_note.clone();
-            context.retained_output = None;
-            context.normalized_geometry = false;
-            context.profile = None;
-            context.planning_snapshot = Some(Arc::new(planning.clone()));
+            if let Some(context) = trial.candidate_context.as_mut() {
+                context.required_fel_qualification = original.required_fel_qualification.clone();
+                context.display_target = display_target;
+                context.display_target_note = display_target_note.clone();
+                context.dv_row_facts = dv_row_facts.clone();
+                context.retained_output = None;
+                context.normalized_geometry = false;
+                context.profile = None;
+                context.planning_snapshot = Some(Arc::new(planning.clone()));
+            } else if let Some(ask) = trial.accepted_processed_ask.as_mut() {
+                ask.required_fel_qualification = original.required_fel_qualification.clone();
+                ask.display_target = display_target;
+                ask.display_target_note = display_target_note.clone();
+            }
+            let processed_work = source.as_ref().map(|input| {
+                let mut ask = original.clone();
+                ask.display_target = display_target;
+                ask.display_target_note = display_target_note.clone();
+                ask.dv_row_facts = dv_row_facts.clone();
+                SourceProcessedWork {
+                    ask,
+                    authority: Arc::clone(&input.authority),
+                    assignment: input.proof.assignment().clone(),
+                    producer: Arc::clone(&input.producer),
+                    cancel: input.cancel.clone(),
+                }
+            });
+            let source_evidence = source.as_ref().map(|input| (input.evidence, input.proof));
             let reuse_scope = original
                 .catalog_query
                 .as_ref()
                 .and_then(|query| self.processed_hint_key(&planning, query));
             let reused = if let Some(scope) = reuse_scope {
-                self.vod
-                    .capture_processed_root(
-                        request,
-                        &recovery.supersession_scope(),
-                        scope,
-                        deadline.into_std(),
-                    )
-                    .await
+                let captured = if source.is_some() {
+                    self.vod
+                        .capture_source_processed_root(
+                            request,
+                            &recovery.supersession_scope(),
+                            scope,
+                            deadline.into_std(),
+                        )
+                        .await
+                } else {
+                    self.vod
+                        .capture_processed_root(
+                            request,
+                            &recovery.supersession_scope(),
+                            scope,
+                            deadline.into_std(),
+                        )
+                        .await
+                };
+                captured
                     .filter(|root| root.encoding.options.target_height == height
                         && matches!(&root.encoding.dv_processing,
                             plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination)
@@ -2695,7 +2975,7 @@ impl TranscodeManager {
             let reused = if matches!(destination, DvDestination::Hdr10 | DvDestination::Profile81) {
                 match reused {
                     Some(root) => {
-                        let desired = Self::processed_enhancement_envelope_with_source_rate(
+                        let desired = Self::processed_enhancement_envelope_with_ask(
                             &planning,
                             &trial,
                             &root.encoding.options,
@@ -2704,6 +2984,7 @@ impl TranscodeManager {
                             destination,
                             root.encoding.plan.enhancement_rate_envelope().filter(|envelope|envelope.provenance()==plurx_core::transcode::EnhancementRateProvenance::HeldVideoStream)
                                 .map(|envelope|u64::from(envelope.target_kbps())*1000),
+                            original,
                         )?;
                         if destination == DvDestination::Profile81 {
                             self.reconstruction_qualified(
@@ -2717,9 +2998,7 @@ impl TranscodeManager {
                                     .ok_or("reused FEL root lost its runtime recipe")?
                                     .encoder,
                                 &root.encoding.source_object_version,
-                                request.candidate_context.as_ref().and_then(|context| {
-                                    context.required_fel_qualification.as_ref()
-                                }),
+                                original.required_fel_qualification.as_ref(),
                             )
                             .await?;
                         }
@@ -2745,11 +3024,11 @@ impl TranscodeManager {
                         .prepare_vod_encoding_with_source(
                             &trial,
                             &file,
-                            None,
+                            source_evidence,
                             Some(super::planning_hwaccel_preference(&planning)),
                             Some((&mut credit, deadline)),
                             None,
-                            None,
+                            processed_work.as_ref(),
                         )
                         .await?
                     else {
@@ -2788,7 +3067,7 @@ impl TranscodeManager {
                 );
             }
             let digest = encoding.processed_candidate_digest(&file, &binding)?;
-            if original.selected_candidate.processed_dv && digest != original.recipe_digest {
+            if original.names_processed && digest != original.recipe_digest {
                 return Err(vod_refusal_error(
                     "candidate_recipe_changed",
                     "processed candidate inputs changed during qualification",
@@ -2844,7 +3123,7 @@ impl TranscodeManager {
             {
                 return Err("the processed executable changed during qualification".into());
             }
-            if !runtime.source.unchanged() {
+            if !runtime.source.unchanged().await {
                 return Err("the source changed during processed qualification".into());
             }
             let facts = Self::quality_facts_from_snapshot(&planning)
@@ -2862,6 +3141,7 @@ impl TranscodeManager {
             let mut context = Self::candidate_context(&candidate);
             context.display_target = display_target;
             context.display_target_note = display_target_note;
+            context.dv_row_facts = dv_row_facts.clone();
             context.catalog_query = original.catalog_query.clone();
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = Some(binding);
@@ -2872,8 +3152,11 @@ impl TranscodeManager {
             // graph falls back to that request, with the reason; a client that
             // named the processed candidate itself has no such fallback.
             context.ordinary_request =
-                (!original.selected_candidate.processed_dv).then(|| Box::new(request.clone()));
+                (!original.names_processed).then(|| Box::new(request.clone()));
             trial.candidate_context = Some(Box::new(context));
+            // The successor is the processed candidate: its context is now the
+            // only ask it carries, whatever the ordinary start was chosen by.
+            trial.accepted_processed_ask = None;
             trial.hdr10 = destination != DvDestination::Sdr;
             tracing::info!(target: "plurxd::transcode",
                 session = %crate::transcode::session_log_id(session_id),
@@ -2996,23 +3279,21 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         hwaccel: Option<&str>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_vod_encoding_noting(req, file, hwaccel, None, None)
+        self.prepare_vod_encoding_noting(req, file, hwaccel, None)
             .await
     }
 
-    /// [`Self::prepare_vod_encoding_with_preference`] that also reports why an
-    /// ordinary start's processing was declined (`decline`), so the session's
-    /// enhancement detail names the real reason instead of a generic one.
+    /// [`Self::prepare_vod_encoding_with_preference`] against the create's
+    /// start plan, refusing an encoding that plan cannot admit.
     pub(super) async fn prepare_vod_encoding_noting(
         &self,
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
         hwaccel: Option<&str>,
-        decline: Option<&mut Option<String>>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         let encoding = Box::pin(
-            self.prepare_vod_encoding_with_source(req, file, None, hwaccel, None, decline, plan),
+            self.prepare_vod_encoding_with_source(req, file, None, hwaccel, None, plan, None),
         )
         .await?;
         if let Some(encoding) = encoding.as_ref() {
@@ -3090,8 +3371,8 @@ impl TranscodeManager {
             &mut Option<crate::vodencode::EncodePermit>,
             tokio::time::Instant,
         )>,
-        _decline: Option<&mut Option<String>>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
+        processed_work: Option<&SourceProcessedWork>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         let request = crate::source_custody::current_request().or_else(|| {
             self.foreground_source_request(
@@ -3114,8 +3395,8 @@ impl TranscodeManager {
             source_evidence,
             hwaccel,
             prepared_admission,
-            _decline,
             plan,
+            processed_work,
         ));
         crate::source_custody::with_request(request, planning).await
     }
@@ -3134,16 +3415,19 @@ impl TranscodeManager {
             &mut Option<crate::vodencode::EncodePermit>,
             tokio::time::Instant,
         )>,
-        _decline: Option<&mut Option<String>>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
+        processed_work: Option<&SourceProcessedWork>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         // The create's plan answers the HWACCEL preference when the caller
         // brought none (D3b); a caller-held preference still wins.
         let hwaccel =
             hwaccel.or_else(|| plan.map(|plan| super::planning_hwaccel_preference(&plan.snapshot)));
-        #[cfg(target_os = "linux")]
-        let mut decline = _decline;
         let processed_trial = prepared_admission.is_some();
+        if source_evidence.is_some() && processed_trial && processed_work.is_none()
+            || processed_work.is_some() && (!processed_trial || source_evidence.is_none())
+        {
+            return Err("Source processed trial requires its operation custody".into());
+        }
         req.dv_processing_route()?;
         if req.dv_processing_destination.is_some() && !processed_trial {
             return Err(vod_refusal_error(
@@ -3187,31 +3471,21 @@ impl TranscodeManager {
             }
         }
         #[cfg(target_os = "linux")]
-        let dv_tools = if matches!(
-            &dv_processing,
-            plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
-                plurx_core::transcode::dv_processing::DvFallbackReason::AwaitingFirstWindow
-            )
-        ) && (req.candidate_context.is_none() || processed_trial)
-        {
+        let dv_tools = if processed_work.is_some()
+            || Self::start_renders_a_processed_window(
+                &dv_processing,
+                processed_trial,
+                source_evidence.is_some(),
+            ) {
+            // Only a processed trial captures the tools (Source work is one
+            // too). It exists only to qualify processing: with no backend it
+            // has nothing to qualify, and says so.
             match crate::vodencode::dv_runtime::ToolSet::capture().await {
                 Ok(Some(tools)) => Some(tools),
-                // A processed trial exists only to qualify processing: with no
-                // backend it has nothing to qualify, and says so.
-                Ok(None) if processed_trial => {
+                Ok(None) => {
                     return Err("no Dolby Vision processing backend is installed".into());
                 }
-                Ok(None) => None,
-                Err(reason) if processed_trial => {
-                    return Err(format!("DV backend unavailable: {reason}"));
-                }
-                Err(reason) => {
-                    tracing::warn!(target: "plurxd::transcode", %reason, "DV backend unavailable; retaining ordinary delivery");
-                    if let Some(decline) = decline.as_deref_mut() {
-                        decline.get_or_insert(reason);
-                    }
-                    None
-                }
+                Err(reason) => return Err(format!("DV backend unavailable: {reason}")),
             }
         } else {
             None
@@ -3402,36 +3676,64 @@ impl TranscodeManager {
             // or stored-account probe can authorize the foreign descriptor.
             (evidence.document().to_owned(), None)
         } else {
-            let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
-                vod_refusal_error(
-                    "vod_source_rescan_required",
-                    format!("the held source could not be retained for verification: {error}"),
-                )
-            })?;
-            let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
-            match collected {
-                Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
-                // Platforms without a sealed probe keep their existing source
-                // verification and stored-facts planning behavior.
-                None => (
-                    crate::ffmpeg::held_source_probe_json_bound(
-                        &source.handle,
-                        VOD_START_HELD_PROBE,
-                        legacy_clock_reporter
-                            .as_ref()
-                            .expect("legacy held reporter captured"),
+            let probe = async {
+                let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+                    vod_refusal_error(
+                        "vod_source_rescan_required",
+                        format!("the held source could not be retained for verification: {error}"),
                     )
-                    .await
-                    .map_err(|error| {
-                        vod_refusal_error(
-                            "vod_source_rescan_required",
-                            format!(
-                                "the held source could not be verified against its scan: {error}"
-                            ),
+                })?;
+                let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
+                Ok::<_, String>(match collected {
+                    Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
+                    // Platforms without a sealed probe keep their existing source
+                    // verification and stored-facts planning behavior.
+                    None => (
+                        crate::ffmpeg::held_source_probe_json_bound(
+                            &source.handle,
+                            VOD_START_HELD_PROBE,
+                            legacy_clock_reporter
+                                .as_ref()
+                                .expect("legacy held reporter captured"),
                         )
-                    })?,
-                    None,
-                ),
+                        .await
+                        .map_err(|error| {
+                            vod_refusal_error(
+                                "vod_source_rescan_required",
+                                format!(
+                                    "the held source could not be verified against its scan: {error}"
+                                ),
+                            )
+                        })?,
+                        None,
+                    ),
+                })
+            };
+            // Every soundtrack of one split copy start holds the same source
+            // revision: one held verification serves them all.
+            let shared = req
+                .continuous_media
+                .as_ref()
+                .is_some_and(|media| media.role == ContinuousMediaRole::SharedAudio)
+                .then(|| split_held_probe(file.id, source.object_version()))
+                .flatten();
+            match shared {
+                Some(cell) => {
+                    let (verified, held) = cell
+                        .get_or_try_init(|| async {
+                            probe.await.map(|held| (source.object_version().to_owned(), held))
+                        })
+                        .await?;
+                    if verified != source.object_version() {
+                        // Another start verified a different revision first.
+                        return Err(vod_refusal_error(
+                            "vod_source_rescan_required",
+                            "the source changed while its soundtracks were being prepared",
+                        ));
+                    }
+                    held.clone()
+                }
+                None => probe.await?,
             }
         };
         note_phase("held_source_probe", phase_started);
@@ -3847,7 +4149,7 @@ impl TranscodeManager {
             None
         };
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
                 "the source changed during encoded recipe preparation; rescan it before playback",
@@ -3862,7 +4164,7 @@ impl TranscodeManager {
         } else {
             None
         };
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
                 "the source changed while attesting the encoded engine; rescan it before playback",
@@ -3934,13 +4236,20 @@ impl TranscodeManager {
                         Encoder::Software, file, target_height, 0.0, req.audio_index, None, Some(1),
                         OutputGrade::Hdr10).pipeline;
                     processed_options.software_threads = Some(1);
+                    // The request's own ask: its Auto candidate's, or the accepted
+                    // ask of an Original or manual start. A Source trial brings its
+                    // ask in its processed work instead.
+                    let request_ask = req.processed_upgrade_ask();
                     let enhancement_envelope = if matches!(destination,
                         plurx_core::transcode::dv_processing::DvDestination::Profile81 |
                         plurx_core::transcode::dv_processing::DvDestination::Hdr10) {
-                        let envelope = Self::processed_enhancement_envelope_with_source_rate(&planning, req,
+                        let processing_ask = processed_work.map(|work| &work.ask).or(request_ask.as_ref())
+                            .ok_or("processed rate requires current admitted client facts")?;
+                        let envelope = Self::processed_enhancement_envelope_with_ask(&planning, req,
                             &processed_options, retained.0.options().input_has_audio,
                             crate::ffmpeg::has_dovi_rpu().await, destination,
-                            plurx_core::transcode::enhancement_stream_rate(&document,retained.0.decode().input_video_stream()))?;
+                            plurx_core::transcode::enhancement_stream_rate(&document,retained.0.decode().input_video_stream()), processing_ask)?;
+                        processed_options.video_bitrate_kbps = envelope.target_kbps();
                         Some(envelope)
                     } else { None };
                     let (processed_plan, processed_encoder) = self.resolve_completed_dv_window_plan(
@@ -3955,7 +4264,8 @@ impl TranscodeManager {
                         self.reconstruction_qualified(&planning,
                             enhancement_envelope.ok_or("FEL recipe lost its frozen envelope")?,
                             &processed_plan,grid,processed_encoder,&source_object_version,
-                            req.candidate_context.as_ref().and_then(|context| context.required_fel_qualification.as_ref())).await?;
+                            processed_work.and_then(|work| work.ask.required_fel_qualification.as_ref())
+                                .or_else(|| request_ask.as_ref().and_then(|ask| ask.required_fel_qualification.as_ref()))).await?;
                     }
                     if source_frame_probe.as_ref().is_some_and(|probe| probe.absolute_stream() != retained.0.decode().input_video_stream()) {
                         return Err("source frame metadata selected stream differs from the held decoder plan".into());
@@ -3970,7 +4280,8 @@ impl TranscodeManager {
                     let source_mastering = crate::decode_facts::mastering::source_mastering_metadata(stream);
                     let source_mastering_minimum = crate::decode_facts::mastering::source_mastering_minimum(stream);
                     let source_master_metadata = crate::decode_facts::mastering::source_master_metadata(stream);
-                    let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
+                    let display_target = processed_work.and_then(|work| work.ask.display_target)
+                        .or_else(|| request_ask.as_ref().filter(|_| processed_trial).and_then(|ask| ask.display_target));
                     // Recheck against the exact stored document compared with
                     // this held source. A title scan replacement cannot reuse
                     // an older live policy or silently change a later window.
@@ -4002,15 +4313,16 @@ impl TranscodeManager {
                     let runtime = RuntimeRecipe { tools, source, source_offsets, source_frame_probe,
                         source_tick, source_origin, native_bl, source_clock, preferences,
                         display_target,
-                        display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
-                        display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
+                        display: processed_work.and_then(|work| work.ask.canonical_caps.as_ref()).or_else(|| request_ask.as_ref().and_then(|ask| ask.canonical_caps.as_ref())).and_then(|caps| caps.display.clone()),
+                        display_target_note: processed_work.and_then(|work| work.ask.display_target_note.clone()).or_else(|| request_ask.as_ref().and_then(|ask| ask.display_target_note.clone())),
+                        dv_row_facts: processed_work.map_or_else(|| request_ask.as_ref().and_then(|ask| ask.dv_row_facts.clone()), |work| work.ask.dv_row_facts.clone()),
                         source_mastering, source_mastering_minimum, source_master_metadata,
                         destination, mode, decode: renderer_decode, reconstruction_slot, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
                         shader_cache: Arc::new(tempfile::Builder::new().prefix("dv-shader-cache-")
                             .tempdir_in(&self.runtime_cache).map_err(|e| e.to_string())?),
-                        prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
+                        prepared: std::sync::Mutex::new(None), window_run: Default::default(), failure_episode, preparation_budget,
                         report_revision: std::sync::atomic::AtomicU64::new(0),
                         published_receipt: std::sync::Mutex::new(None) };
                     let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode, renderer_decode);
@@ -4043,18 +4355,32 @@ impl TranscodeManager {
                     // The same explicitly scoped FG/BG owner that prepared
                     // this recipe must own its first actual original reads.
                     // Clone the held descriptor; never reacquire path authority.
+                    if processed_work.is_some_and(|work| work.cancel.is_cancelled()) {
+                        return Err("Source processed preparation cancelled".to_owned());
+                    }
+                    if let Some(work) = processed_work {
+                        work.authority.current_preparation(&work.assignment).await
+                            .map_err(|_| "Source preparation authority changed before processed launch".to_owned())?;
+                        if work.cancel.is_cancelled() {
+                            return Err("Source processed preparation cancelled".to_owned());
+                        }
+                    }
                     let source_open_started = tokio::time::Instant::now();
                     let input=crate::source_input::SourceInput::open_current_held(
                         &runtime.source.handle,"processed-first-window").await?
                         .ok_or("processed first window has no original source read owner")?;
                     let (verified, selected) = match runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path, admission,
-                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
-                        input, processing_deadline, Some(source_open_started.elapsed())).await {
+                        processed_work.map_or_else(|| Arc::new(crate::prodrun::ProducerSlot::new()), |work| Arc::clone(&work.producer)),
+                        processed_work.map_or_else(tokio_util::sync::CancellationToken::new, |work| work.cancel.clone()), None,
+                        input, if processed_work.is_some() { None } else { processing_deadline }, Some(source_open_started.elapsed()), &[]).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
-                            Err(cause) => { runtime.refuse_episode(); return Err(cause); },
+                            Err(cause) => {
+                                if !processed_work.is_some_and(|work| work.cancel.is_cancelled()) { runtime.refuse_episode(); }
+                                return Err(cause);
+                            },
                             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
                             Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return Err("processed preparation cancelled".into()),
                         };
@@ -4071,24 +4397,12 @@ impl TranscodeManager {
                     // The trial's whole purpose was that window: its refusal
                     // is the qualification's answer, reported with the
                     // ordinary start, not an ordinary recipe nobody asked for.
-                    Err(reason) if processed_trial => {
-                        if pending_fel_qualification(&reason).is_some() { return Err(reason); }
-                        return Err(format!("processed window refused: {reason}"));
-                    }
                     Err(reason) => {
-                        // Process-private continuation data is consumed only
-                        // by a deferred trial. Legacy/direct preparations keep
-                        // the explanatory sentence, never its source/recipe token.
-                        let reason = ordinary_processing_decline(reason);
-                        retained.3 = plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
-                            plurx_core::transcode::dv_processing::DvFallbackReason::BackendFailure);
-                        tracing::warn!(target: "plurxd::transcode", %reason,
-                            "DV window refused; retaining ordinary delivery");
-                        // The reason, not the generic fallback class, is what
-                        // the session's enhancement detail shows.
-                        if let Some(decline) = decline.as_deref_mut() {
-                            decline.get_or_insert(reason);
-                        }
+                        // Waiting answers stay recognisable to the upgrade:
+                        // a pending measurement, or another play's slot.
+                        if pending_fel_qualification(&reason).is_some()
+                            || Self::is_reconstruction_slot_busy(&reason) { return Err(reason); }
+                        return Err(format!("processed window refused: {reason}"));
                     }
                 }
             }
@@ -4142,17 +4456,7 @@ impl TranscodeManager {
         if let Some((sink, _)) = prepared_admission.as_mut() { **sink = prepared_credit; }
         Ok(Some(encoding))
         }.await;
-        if copy_attempt && !processed_trial {
-            match result {
-                Err(reason) => {
-                    tracing::warn!(target: "plurxd::transcode", %reason, "DV copy processing refused; retaining source fallback");
-                    Ok(None)
-                }
-                value => value,
-            }
-        } else {
-            result
-        }
+        result
     }
 
     async fn prepare_vod_companion(
@@ -4241,6 +4545,97 @@ impl TranscodeManager {
         Ok(soundtrack)
     }
 
+    /// One shared AAC soundtrack per source audio stream for a split copy
+    /// presentation, each prepared exactly as the continuous family prepares
+    /// its soundtrack. Split delivery is all-or-nothing: if any soundtrack
+    /// cannot be prepared, the session stays on the ordinary muxed copy.
+    pub(crate) async fn prepare_vod_split_soundtracks(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Result<Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)>, String> {
+        if !req.split_audio
+            || encoding.is_some()
+            // The split master describes an AVC copy; HEVC and Dolby Vision
+            // copies keep the muxed presentation they already qualify.
+            || !matches!(
+                req.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                    ..
+                }
+            )
+            || !matches!(file.video_codec.as_deref(), Some("h264" | "avc" | "avc1"))
+            || req.continuous_media.is_some()
+            || req.subtitle_burn.is_some()
+            || req.presentation != Presentation::Vod
+            || file.audio_streams.len() < 2
+            // The family reserves every encoded role atomically; its group
+            // admission holds at most three. Larger sets stay muxed for now.
+            || file.audio_streams.len() > 3
+        {
+            return Ok(Vec::new());
+        }
+        let height = file.height.unwrap_or(0).max(2);
+        let generation = uuid::Uuid::new_v4().to_string();
+        let _held_probe = hold_split_held_probe(file.id);
+        let mut requests = Vec::with_capacity(file.audio_streams.len());
+        for stream in &file.audio_streams {
+            let mut audio = req.clone();
+            audio.split_audio = false;
+            audio.kind = SessionKind::Transcode { height };
+            audio.audio_index = Some(stream.index);
+            audio.audio_delivery = None;
+            audio.candidate_context = None;
+            audio.hdr10 = false;
+            audio.continuous_media = Some(Box::new(ContinuousMediaRequest {
+                version: 1,
+                controlled: false,
+                family_generation: generation.clone(),
+                role: ContinuousMediaRole::SharedAudio,
+                autonomous_companion: None,
+                companion_catalog: None,
+                family_descriptor: None,
+                companion_context: None,
+            }));
+            requests.push(audio);
+        }
+        // Soundtracks are independent recipes over one held source: prepare
+        // them together so start waits for the slowest, not their sum.
+        let prepared = futures_util::future::join_all(
+            requests
+                .iter()
+                .map(|audio| self.prepare_vod_encoding(audio, file)),
+        )
+        .await;
+        let mut soundtracks = Vec::with_capacity(requests.len());
+        for (audio, outcome) in requests.into_iter().zip(prepared) {
+            match outcome {
+                Ok(Some(soundtrack)) if soundtrack.shared_audio.is_some() => {
+                    soundtracks.push((audio, soundtrack))
+                }
+                outcome => {
+                    let reason = match outcome {
+                        Err(error) => error,
+                        Ok(Some(_)) => "the soundtrack recipe is not shared AAC".to_owned(),
+                        Ok(None) => "no encoded soundtrack recipe was resolved".to_owned(),
+                    };
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = file.id,
+                        audio_index = ?audio.audio_index,
+                        %reason,
+                        "split copy soundtrack unavailable; serving the muxed copy"
+                    );
+                    return Err(reason);
+                }
+            }
+        }
+        Ok(soundtracks)
+    }
+
     /// Negotiation shares native encoded preparation and the exact copy
     /// prerequisite resolver, without allocating a media session or producer.
     pub(crate) async fn preview_compatibility_vod(
@@ -4271,6 +4666,7 @@ impl TranscodeManager {
         self.vod
             .preview_recipe(
                 crate::vodserve::VodRecipeRequest {
+                    split_soundtracks: Vec::new(),
                     admission_priority: crate::admission::Priority::Live,
                     root_admission: None,
                     measured_candidate: None,
@@ -4378,7 +4774,7 @@ impl TranscodeManager {
                         Some(&engine.digest),
                         raster,
                     );
-                    if !source.unchanged() {
+                    if !source.unchanged().await {
                         return Err(vod_refusal_error(
                             "candidate_recipe_changed",
                             "copy source changed during equality validation",
@@ -4665,11 +5061,14 @@ impl TranscodeManager {
             ));
         }
         #[cfg(target_os = "linux")]
-        if prepared
-            .encoding
-            .dv_runtime
-            .as_ref()
-            .is_none_or(|runtime| !runtime.source.unchanged())
+        if crate::fragment_index_cluster::HeldSource::missing_or_changed(
+            prepared
+                .encoding
+                .dv_runtime
+                .as_ref()
+                .map(|runtime| &*runtime.source),
+        )
+        .await
         {
             return Err(vod_refusal_error(
                 "candidate_recipe_changed",
@@ -4791,13 +5190,11 @@ impl TranscodeManager {
             }
             None => req,
         };
-        let mut processing_note = None;
         let encoding = self
             .prepare_vod_encoding_noting(
                 req,
                 &file,
                 revalidated.map(super::planning_hwaccel_preference),
-                Some(&mut processing_note),
                 plan,
             )
             .await?;
@@ -4834,6 +5231,11 @@ impl TranscodeManager {
         let soundtrack = self
             .prepare_vod_soundtrack(req, &file, encoding.as_ref())
             .await?;
+        let split_soundtracks = self
+            .prepare_vod_split_soundtracks(req, &file, encoding.as_ref())
+            .await
+            .unwrap_or_default();
+        let split_master = !split_soundtracks.is_empty();
         let companion = self.prepare_vod_companion(req, &file).await?;
         // A continuous family role executes a video-only or shared-AAC split of
         // its muxed catalog candidate, already verified against that catalog
@@ -4887,6 +5289,7 @@ impl TranscodeManager {
             request: req,
             encoding,
             soundtrack,
+            split_soundtracks,
         };
         // Cluster activation is make-before-break: the Store pointer CAS and
         // exact post-CAS terminal projection are the only operations allowed
@@ -4978,12 +5381,16 @@ impl TranscodeManager {
             processed_dv_profile,
             processed_fel,
             degraded_processing,
-            processing_note,
             retained_output: response_facts
                 .as_ref()
                 .and_then(|facts| facts.response_owner.retained_output_facts()),
             audio_delivery: response_facts.and_then(|facts| facts.audio_delivery),
-            playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
+            // A split copy's entry point is its family master.
+            playlist_url: if split_master {
+                format!("/api/v1/hls/{}/master.m3u8", start.session_id)
+            } else {
+                format!("/api/v1/hls/{}/index.m3u8", start.session_id)
+            },
             session_id: start.session_id,
             duration_ms: Some(start.duration_ms),
             // Like a cached generation: the timeline is the whole film from
@@ -5004,6 +5411,43 @@ impl TranscodeManager {
     /// Read the VOD serving settings. Absence means enabled; an explicit `0`
     /// is a maintenance kill switch that refuses playback rather than routing
     /// it through the removed live presentation.
+    pub(crate) async fn prepare_selected_copy(
+        &self,
+        request: &SessionRequest,
+        mut file: plurx_core::domain::MediaFile,
+        user_id: i64,
+        position_ms: i64,
+        shutdown: tokio_util::sync::CancellationToken,
+        slot: crate::subtitle_translation::ReadPreparationSlot,
+    ) {
+        if !matches!(request.kind, SessionKind::Copy { .. })
+            || request.subtitle_burn.is_some()
+            || request.continuous_media.is_some()
+            || request.passive_vod
+        {
+            return;
+        }
+        let Ok(Some(settings)) = self.vod_settings(request).await else {
+            return;
+        };
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            request.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        self.vod
+            .prepare_selected_copy(
+                request.into(),
+                &file,
+                &settings,
+                user_id,
+                position_ms,
+                shutdown,
+                slot,
+            )
+            .await;
+    }
+
     pub(super) async fn vod_settings(
         &self,
         req: &SessionRequest,
@@ -5157,6 +5601,11 @@ impl TranscodeManager {
                 read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
             )
             .unwrap_or(0),
+            // The same burst seconds rolling input pacing reads.
+            source_burst_secs: read(plurx_core::store::keys::HLS_BURST_SECS)
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                .unwrap_or(crate::transcode::HLS_BURST_SECS_DEFAULT),
         })
     }
 
@@ -5284,6 +5733,14 @@ impl TranscodeManager {
                 result: publication.result,
                 owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
             })
+    }
+
+    pub(crate) fn vod_startup_seek_ready_ms(
+        &self,
+        session_id: &str,
+        requested_ms: i64,
+    ) -> Option<i64> {
+        self.vod.startup_seek_ready_ms(session_id, requested_ms)
     }
 
     /// True for an attached VOD capability or one still in the slow
@@ -5970,6 +6427,11 @@ impl TranscodeManager {
             let Ok(companion) = self.prepare_vod_companion(&req, &file).await else {
                 return false;
             };
+            // A resurrected split copy keeps its soundtrack alternates.
+            let split_soundtracks = self
+                .prepare_vod_split_soundtracks(&req, &file, encoding.as_ref())
+                .await
+                .unwrap_or_default();
             let measured_candidate = if first_capture && root_admission.is_none() {
                 match self
                     .resolved_retained_candidate_binding(&req, &file, &encoding)
@@ -6034,6 +6496,7 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        split_soundtracks,
                         admission_priority: if speculative {
                             Priority::Speculative
                         } else {
@@ -6727,6 +7190,37 @@ mod retained_recovery_tests;
 #[path = "processed_reuse_tests.rs"]
 mod processed_reuse_tests;
 
+/// A held-source verification for one split copy start's soundtracks.
+type SplitHeldProbe = (String, Option<crate::decode_facts::FreshSourceProbe>);
+type SplitHeldProbeCell = tokio::sync::OnceCell<(String, SplitHeldProbe)>;
+
+static SPLIT_HELD_PROBES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<i64, std::sync::Weak<SplitHeldProbeCell>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Held by a split copy start while its soundtracks prepare. The entry dies
+/// with the last holder, so nothing outlives one start.
+fn hold_split_held_probe(file_id: i64) -> Arc<SplitHeldProbeCell> {
+    let mut probes = SPLIT_HELD_PROBES.lock().expect("split held probe memo");
+    probes.retain(|_, cell| cell.strong_count() > 0);
+    if let Some(cell) = probes.get(&file_id).and_then(std::sync::Weak::upgrade) {
+        return cell;
+    }
+    let cell = Arc::new(SplitHeldProbeCell::new());
+    probes.insert(file_id, Arc::downgrade(&cell));
+    cell
+}
+
+/// The held start's memo, only while unset or verified for this exact source
+/// revision; any other revision probes for itself.
+fn split_held_probe(file_id: i64, version: &str) -> Option<Arc<SplitHeldProbeCell>> {
+    let probes = SPLIT_HELD_PROBES.lock().expect("split held probe memo");
+    let cell = probes.get(&file_id).and_then(std::sync::Weak::upgrade)?;
+    cell.get()
+        .is_none_or(|(verified, _)| verified == version)
+        .then_some(cell)
+}
+
 #[cfg(test)]
 mod display_target_policy_tests {
     use super::*;
@@ -6734,6 +7228,75 @@ mod display_target_policy_tests {
         playback::caps::{DisplayCaps, DisplayPeakSource},
         scan::dv_title::*,
     };
+
+    /// The row facts agree with the policy itself: "already fits" exactly when
+    /// the policy declines with TitleFits, never for an unscanned title, an
+    /// unsupported peak, an SDR display or targeting switched off.
+    #[test]
+    fn row_facts_report_already_fits_only_when_the_policy_declines_for_it() {
+        let stats = |max_l1_pq: u16| DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(max_l1_pq),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+            el_kind: TitleConstant::Unknown,
+        };
+        let hdr = |nits| DisplayCaps {
+            hdr: true,
+            max_nits: Some(nits),
+            peak_source: Some(DisplayPeakSource::Viewer),
+            ..Default::default()
+        };
+        let levels = serde_json::json!({"outcome":"recorded","schema":1,"levels":[1,2,6],"cm_v40":false,"rpus":2,"unparsed":0});
+        // A dim title (PQ 2081 is about 100 nits) fits a 1000-nit display.
+        let dim =
+            serde_json::json!({PROBE_FIELD: stats(2081), "plurx_dv_levels_v1": levels}).to_string();
+        let bright = serde_json::json!({PROBE_FIELD: stats(3696)}).to_string();
+        for (enabled, display, probe, fits) in [
+            (true, Some(hdr(1000)), Some(dim.as_str()), true),
+            (true, Some(hdr(1000)), Some(bright.as_str()), false),
+            (true, Some(hdr(1000)), None, false),
+            (true, Some(hdr(300)), Some(dim.as_str()), false),
+            (false, Some(hdr(1000)), Some(dim.as_str()), false),
+            (
+                true,
+                Some(DisplayCaps::default()),
+                Some(dim.as_str()),
+                false,
+            ),
+        ] {
+            let facts = TranscodeManager::dv_row_facts(enabled, display.as_ref(), probe);
+            // A targeted outcome may still refuse for unrelated mastering
+            // facts; that is not a TitleFits decline either.
+            let note = TranscodeManager::display_target_policy(enabled, display.as_ref(), probe)
+                .ok()
+                .and_then(|(_, note)| note);
+            let policy_fits = note
+                .as_deref()
+                .is_some_and(|note| note.contains("already fits"));
+            assert_eq!(
+                facts.title_fits_nits.is_some(),
+                fits,
+                "{enabled} {display:?} {probe:?}"
+            );
+            assert_eq!(policy_fits, fits, "the policy agrees: {note:?}");
+        }
+        let facts = TranscodeManager::dv_row_facts(true, Some(&hdr(1000)), Some(&dim));
+        assert_eq!(facts.title_fits_nits, Some(1000));
+        assert_eq!(facts.levels.expect("recorded").levels, [1, 2, 6].into());
+        assert!(facts
+            .title_peak_nits
+            .is_some_and(|nits| (95..=105).contains(&nits)));
+        assert_eq!(
+            TranscodeManager::dv_row_facts(true, Some(&hdr(1000)), Some(&bright)).levels,
+            None
+        );
+    }
     #[test]
     fn explicit_sdr_capability_uses_100_without_converting_unknown_hdr_peak_to_sdr() {
         use plurx_core::playback::caps::DisplayCaps;

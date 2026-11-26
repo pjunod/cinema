@@ -175,7 +175,7 @@ Re-verify these names against current source before editing:
 | Bounded voter path | Same file: `voter_smoke_plan`, `run_transport_recovery_voter_smoke` |
 | Cluster lifecycle | Same file: `run_role_campaign`, `start_recovery_cluster`, `admit_learner` |
 | Workload | Same file: `exercise_role_campaign` |
-| Resource verdict | Same file: `resource_envelopes`, `envelope_is_asserted`, `resource_envelopes_over_allowance` |
+| Resource verdict | Same file: `resource_envelopes`, `envelope_is_asserted`, `resource_envelope_verdict`, `upward_trend_is_significant`, `step_separation_is_significant` |
 | Offline validation | Same file: `validate_transport_recovery_artifact`, `validate_role_campaign` |
 | Node kill/reap | [`lib.rs`](../../crates/plurx-cluster-check/src/lib.rs): `NodeProcess::kill`, `ClusterProcesses::kill` |
 | Build identity | [`topology.rs`](../../crates/plurx-cluster-check/src/topology.rs): `resolve_build_sha` |

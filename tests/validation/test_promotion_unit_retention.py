@@ -353,7 +353,7 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
             self.assertEqual(live_logs.get(api, 77, 88), base64.b64decode(records[0]['log']['base64']))
             self.assertEqual(live_logs.bytes, len(base64.b64decode(records[0]['log']['base64'])))
         with patch.object(receipts, 'verify_attestor'), \
-                patch.object(retention, 'expanded_document', side_effect=lambda value: value), \
+                patch.object(retention, 'expanded_document', side_effect=lambda value, objects=None, **_: value), \
                 patch.object(commands, 'authenticate', side_effect=typed_auth), \
                 patch.object(retention, 'validate', return_value=({'rust': {}}, {})):
             retention.verify(shared_api, shared_raw, retention.digest(shared_raw), binding, 'd' * 40, 1, '0' * 36)

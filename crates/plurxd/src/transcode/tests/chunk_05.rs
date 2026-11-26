@@ -1272,6 +1272,7 @@
         };
         let rates = artifact.bandwidth().expect("complete mux rates");
         assert!(rates.average_bps > 0 && rates.peak_bps >= rates.average_bps);
+        assert!(!artifact.covers_resume(13.0), "retained media cannot serve a seek past its actual end");
         let next = manager.start_copy(file_id, 0.0, None, options, "owner", "second")
             .await.expect("compatible new attachment");
         let second = manager.sessions.lock().await.get(&next.session_id).cloned().expect("second owner");
@@ -1285,7 +1286,48 @@
         let body = manager.segment(&next.session_id, &media_name).await.expect("verified GET")
             .expect("retained media ready");
         drop(body);
+        let resume = manager.start_copy(file_id, 4.0, None, options, "owner", "resume")
+            .await.expect("resume from the same completed output");
+        let resumed = manager.sessions.lock().await.get(&resume.session_id).cloned().expect("resume owner");
+        assert!(resume.vod);
+        assert_eq!(resume.start_seconds, 4.0);
+        assert_eq!(resume.media_origin_seconds, 0.0);
+        assert_eq!(resumed.start_seconds, 4.0);
+        assert_eq!(resumed.media_origin_seconds, 0.0);
+        assert!(Arc::ptr_eq(resumed.rolling_artifact.as_ref().expect("retained resume"), &artifact));
+        assert!(resumed.child.lock().await.is_none(), "resume must not start a second remux");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (resume_playlist, owner) = manager.playlist_with_owner_before(&resume.session_id, deadline)
+            .await.map_err(|failure| failure.error).expect("resume playlist");
+        assert_eq!(playlist, resume_playlist, "resume keeps the complete zero-origin timeline");
+        let retained_windows: Vec<_> = std::str::from_utf8(&resume_playlist).expect("playlist")
+            .lines()
+            .filter_map(|line| line.strip_prefix("#EXTINF:"))
+            .scan(0.0, |cursor, duration| {
+                let start = *cursor;
+                *cursor += duration.trim_end_matches(',').parse::<f64>().expect("duration");
+                Some((start, *cursor))
+            })
+            .collect();
+        let (sequence, &(start, end)) = retained_windows.iter().enumerate()
+            .find(|(_, (start, end))| *start <= 4.0 && 4.0 < *end)
+            .expect("resume segment");
+        // Hold the dynamic index so an asynchronous refresh cannot satisfy
+        // the first subtitle window request.
+        let dynamic_index = resumed.segments.lock().await;
+        let window = manager.segment_window_for_owner_before(&resume.session_id, sequence as i64, &owner, deadline)
+            .await.expect("retained subtitle window");
+        let (window_start, window_end) = window.expect("subtitle window");
+        assert!((window_start - start).abs() < 0.0000005);
+        assert!((window_end - end).abs() < 0.0000005);
+        assert!(manager.segment_window_for_owner_before(&next.session_id, sequence as i64, &owner, deadline)
+            .await.is_err(), "the window is scoped to the retained session owner");
+        drop(dynamic_index);
+        let &(last_start, _) = retained_windows.last().expect("EOF segment");
+        assert!(!artifact.covers_resume((last_start * 1_000_000.0).round() / 1_000_000.0),
+            "the final cut needs explicit evidence of video coverage");
         assert!(first.rolling_artifact.is_none(), "already-issued cold owner is never rebound");
+        manager.stop_session(&resume.session_id, "test_done").await;
         manager.stop_session(&next.session_id, "test_done").await;
         manager.stop_session(&initial.session_id, "test_done").await;
     }

@@ -1,6 +1,11 @@
 # Cluster facade slice 5 — own bounded peer calls and fresh owner lookup
 
-**Status:** open — implemented with focused local regressions passed; integration, final checks, review and qualification remain pending. **Owner:** Codex.
+**Status:** built — implemented and independently reviewed. **Owner:** Codex.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md) and
 [slice 4](CLUSTER-FACADE-SLICE-4-BUILD.md). This task follows slice 4's

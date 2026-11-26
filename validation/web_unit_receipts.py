@@ -90,7 +90,7 @@ def source_inputs(commit):
         mode, kind, oid = header.split()
         require(mode in ('100644', '100755') and kind == 'blob',
                 'Web source tree contains a symlink/submodule: ' + path)
-        if path in EXEMPT or path.startswith('clients/apple/UITests/'):
+        if path in EXEMPT or path.startswith(('clients/apple/UITests/', 'tests/client-fixes.d/')):
             continue
         files[path] = (mode, kind, oid)
     return files

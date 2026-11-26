@@ -97,6 +97,75 @@ async fn directory_invalidation_fixture() {
         .expect("the voter's applied mark");
     let directory = RosterDirectory::new(manager.clone(), Some(mark));
     let leader = manager.replicated_inner().expect("actual leader");
+
+    // Exercise the real replicated Store policy path under the installed
+    // exclusion and permanent guard, before the fixture adds its learner.
+    let mut policy_claim = MembershipManager::prepare_cache_admin_revocation_claim(
+        &selected.identity.node_id,
+        Duration::from_secs(5),
+    )
+    .expect("prepare exact policy exclusion");
+    manager
+        .commit_cache_admin_revocation_lease(&mut policy_claim)
+        .await
+        .expect("install real policy exclusion");
+    assert!(manager
+        .cache_admin_revocation_peers(policy_claim.claim_id())
+        .await
+        .expect("activate exact singleton roster")
+        .is_empty());
+    assert!(manager
+        .cache_admin_revocation_activated_locally()
+        .await
+        .expect("permanent guard"));
+    let policy = [(crate::store::keys::AUTH_TOKEN_EXPIRY_ENABLED, "0")];
+    let wrong = CacheAdminMutationClaim::new("wrong-policy-claim".to_owned());
+    assert!(!selected
+        .store
+        .put_auth_token_policy(&policy, Some(&wrong))
+        .await
+        .expect("refuse wrong claim"));
+    assert!(selected
+        .store
+        .put_auth_token_policy(&policy, Some(policy_claim.mutation_claim()))
+        .await
+        .expect("write policy under the exact installed claim"));
+    assert!(
+        selected.store.put_settings(&policy).await.is_err(),
+        "legacy policy SQL cannot bypass the activated guard"
+    );
+    manager
+        .release_cache_admin_revocation_lease(&policy_claim)
+        .await
+        .expect("release exact policy exclusion");
+    assert!(!selected
+        .store
+        .put_auth_token_policy(&policy, Some(policy_claim.mutation_claim()))
+        .await
+        .expect("refuse released claim"));
+    let policy_user = selected
+        .store
+        .create_user("policy-proof-viewer", "hash", false)
+        .await
+        .expect("proof user");
+    let policy_token = crate::auth::hash_token("policy-source-bound-token");
+    selected
+        .store
+        .create_token(&policy_token, policy_user.id, None)
+        .await
+        .expect("proof token");
+    let token_proof = selected
+        .store
+        .authenticate_token_proof_for(&policy_token, crate::store::TokenAudience::Native)
+        .await
+        .expect("actual local token witness");
+    let policy_source = token_proof
+        .lease
+        .expect("known local source can issue a bounded lease")
+        .source_image
+        .expect("opaque image witness");
+    assert!(policy_source.still_valid());
+
     // One instant for the whole test: rows are written at it and every
     // purpose is evaluated at it, so nothing depends on how long a step took.
     let t0 = unix_ms().expect("t0");
@@ -388,4 +457,8 @@ async fn directory_invalidation_fixture() {
         Err(error) => panic!("learner shutdown task: {error}"),
     }
     selected.shutdown().await.expect("leader drain");
+    assert!(
+        !policy_source.still_valid(),
+        "a closed local Raft watch cannot keep token proof alive"
+    );
 }

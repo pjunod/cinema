@@ -106,6 +106,17 @@ impl TitleEligibility {
 }
 
 impl DvTitleStats {
+    /// The enhancement-layer kind, when every displayed RPU declared the same
+    /// one. The scanner reads it from each RPU's NLQ: an identity residual
+    /// (zero offset, dead-zone slope and threshold) is a minimal layer (MEL),
+    /// anything else a full one (FEL).
+    pub fn consistent_el_kind(self) -> Option<TitleElKind> {
+        match self.el_kind {
+            TitleConstant::Consistent(kind) => Some(kind),
+            TitleConstant::Unknown | TitleConstant::Inconsistent => None,
+        }
+    }
+
     pub fn eligibility(self) -> TitleEligibility {
         let total = self
             .valid_l1_frames
@@ -159,10 +170,21 @@ impl DvTitleStats {
 
     /// Old or future probe documents are unknown, never eligible by default.
     pub fn from_probe_json(document: &str) -> Option<Self> {
-        let document: serde_json::Value = serde_json::from_str(document).ok()?;
+        Self::from_probe_value(&serde_json::from_str(document).ok()?)
+    }
+
+    /// The same, from a probe document a caller already parsed.
+    pub fn from_probe_value(document: &serde_json::Value) -> Option<Self> {
         let stats: Self = serde_json::from_value(document.get(PROBE_FIELD)?.clone()).ok()?;
         (stats.schema == SCHEMA).then_some(stats)
     }
+}
+
+/// The enhancement-layer kind the complete-title scan recorded in a probe
+/// document; `None` before the scan, for an unreadable record, or when the
+/// title's RPUs disagree.
+pub fn title_el_kind_from_probe(document: Option<&str>) -> Option<TitleElKind> {
+    DvTitleStats::from_probe_json(document?)?.consistent_el_kind()
 }
 
 #[cfg(test)]

@@ -678,6 +678,10 @@ struct DvrRecordingsPanel: View {
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @FocusState private var focusedControl: String?
     @State private var nativePanel: DvrNativePanel?
+    #if os(tvOS)
+    @Namespace private var ruleOptionsFocus
+    @Environment(\.resetFocus) private var resetRuleOptionsFocus
+    #endif
     @State private var openerKey = "chip:upcoming"
     @State private var lastFocusedControl: String?
     @State private var previousOrder: [String] = []
@@ -1211,9 +1215,14 @@ struct DvrRecordingsPanel: View {
                 DvrActionButton(label: rule.newOnly ? "Record every showing" : "Record new episodes only") {
                     performNative { await dvr.setRule(rule, newOnly: !rule.newOnly) }
                 }
+                .prefersDefaultFocus(true, in: ruleOptionsFocus)
                 DvrActionButton(label: "Delete rule…") { nativePanel = .ruleConfirm(rule) }
                 DvrActionButton(label: "Close") { navigation.closeModal() }
             }.padding(48).frame(maxWidth: 900)
+            .focusScope(ruleOptionsFocus)
+            .background(RemoteChoiceFocusReadiness(ready: {
+                resetRuleOptionsFocus(in: ruleOptionsFocus)
+            }).allowsHitTesting(false))
         case .channels:
             DvrChannelPicker(selected: manualChannel, onCancel: { navigation.closeModal() }) { channel in
                 guard nativeGeneration == Session.shared.playbackAuthorization.generation else { navigation.closeModal(); return }

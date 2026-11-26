@@ -95,11 +95,10 @@ async fn actual_nonowner_b(
         .await
         .expect("B worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    drop(worker_listener); // Preserve the chosen origin for the startup socket owner.
     let fixture = real_receiver_fixture_at(
         address,
         SourceFixtureMode::Copy,
-        worker_address,
+        worker_listener,
         fixture_body_budget,
     )
     .await;
@@ -197,9 +196,13 @@ async fn actual_nonowner_b(
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = address.to_string();
-    drop((raft, api));
-    drop(second_listener);
-    let observation = Arc::new(crate::StartupObservationHttp::new(second_address));
+    // Keep the bound sockets: the voter and the startup observation serve on
+    // them, so no other socket can take any of these ports before they start.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    let observation = Arc::new(
+        crate::StartupObservationHttp::from_listener(second_listener)
+            .expect("owned B ingress observation listener"),
+    );
     let mut selected = Box::pin(select_daemon_store_observing(
         &config,
         Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
@@ -377,6 +380,33 @@ async fn actual_nonowner_b(
         .await
         .expect("protected bytes");
     assert!(bytes.starts_with(b"#EXTM3U"));
+    // The native readiness shape through the non-owner ingress: the login
+    // token is dropped there and the forwarded resource is the playlist.
+    let native = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "http://{second_address}{playlist}{}token={}",
+            if playlist.contains('?') { '&' } else { '?' },
+            fixture.original_login
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", fixture.original_login),
+        )
+        .body(Body::empty())
+        .expect("native readiness resource");
+    let response = sender
+        .send_request(native)
+        .await
+        .expect("forwarded native readiness resource");
+    assert_eq!(response.status(), StatusCode::OK);
+    let native_bytes = axum::body::to_bytes(Body::new(response.into_body()), 1024 * 1024)
+        .await
+        .expect("native readiness bytes");
+    assert!(
+        native_bytes.starts_with(b"#EXTM3U"),
+        "the playlist, without the token"
+    );
     assert!(
         ingress
             .sharing

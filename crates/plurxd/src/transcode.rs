@@ -617,6 +617,92 @@ pub(crate) struct LiveReconstructionFacts {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
 
+/// Descriptive inputs to the one processed-upgrade planner. An Auto start
+/// takes them from its candidate context. A start without one (a shared
+/// Source's copy, or a viewer who chose Original or a manual rung) derives
+/// them from its accepted capabilities, the rendition it runs and its
+/// selection catalog query: [`ProcessedUpgradeAsk::accepted`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessedUpgradeAsk {
+    pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
+    pub(crate) target_height: u32,
+    pub(crate) grade: plurx_core::transcode::OutputGrade,
+    pub(crate) names_processed: bool,
+    pub(crate) route: plurx_core::playback::candidate::CandidateRoute,
+    pub(crate) average_bps: Option<u64>,
+    pub(crate) peak_bps: Option<u64>,
+    pub(crate) recipe_digest: [u8; 32],
+    pub(crate) required_fel_qualification: Option<PendingFelQualification>,
+    pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
+}
+impl ProcessedUpgradeAsk {
+    /// The ask of a start that has no Auto candidate. Nothing here is a
+    /// measurement: the rate fields stay empty and the recipe digest zero,
+    /// so the processed envelope is sized from the rendition's own rung and
+    /// the held source rate, exactly as for a shared Source's copy.
+    pub(crate) fn accepted(
+        caps: plurx_core::playback::DeviceCaps,
+        target_height: u32,
+        grade: plurx_core::transcode::OutputGrade,
+        copy: bool,
+        catalog_query: crate::media_pool::QualityCatalogRequest,
+    ) -> Self {
+        use plurx_core::playback::candidate::CandidateRoute;
+        Self {
+            canonical_caps: Some(caps),
+            target_height,
+            grade,
+            names_processed: false,
+            route: if copy {
+                CandidateRoute::Remux
+            } else {
+                CandidateRoute::Encode
+            },
+            average_bps: None,
+            peak_bps: None,
+            recipe_digest: [0; 32],
+            required_fel_qualification: None,
+            catalog_query: Some(catalog_query),
+            display_target: None,
+            display_target_note: None,
+            dv_row_facts: None,
+        }
+    }
+
+    pub(crate) fn from_candidate(context: &CandidateExecutionContext) -> Self {
+        Self {
+            canonical_caps: context.canonical_caps.clone(),
+            target_height: context.selected_candidate.target_height,
+            grade: context.selected_candidate.grade,
+            names_processed: context.selected_candidate.processed_dv,
+            route: context.selected_candidate.route,
+            average_bps: context.selected_candidate.average_bps,
+            peak_bps: context.selected_candidate.peak_bps,
+            recipe_digest: context.recipe_digest,
+            required_fel_qualification: context.required_fel_qualification.clone(),
+            catalog_query: context.catalog_query.clone(),
+            display_target: context.display_target,
+            display_target_note: context.display_target_note.clone(),
+            dv_row_facts: context.dv_row_facts.clone(),
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct SourceProcessedWork {
+    pub(crate) ask: ProcessedUpgradeAsk,
+    pub(crate) authority: Arc<source_actor::SourceProducerAuthority>,
+    pub(crate) assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    pub(crate) producer: Arc<crate::prodrun::ProducerSlot>,
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+}
+
 /// One verified processed upgrade: the successor request (its incarnation
 /// already the staged successor's), the candidate it plays, and the exact
 /// prepared root its first window was produced on.
@@ -914,6 +1000,10 @@ pub struct TranscodeManager {
     /// Whether boot proved the exact software/tonemapx/software renderer used
     /// for non-backward-compatible Dolby Vision.
     dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape with
+    /// ([`crate::ffmpeg::measure_dovi_reshape_hardware`]). A session reads
+    /// this record; it never probes a pairing itself.
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this daemon's ffmpeg proved the HDR10 passthrough renderer at
     /// boot ([`crate::ffmpeg::has_dovi_passthrough`]). Its own field, and its
     /// own probe: the SDR reshape graph proves nothing about a PQ output.

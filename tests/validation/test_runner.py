@@ -178,6 +178,18 @@ class CatalogCase(unittest.TestCase):
         self.assertIn("apple-simulators", check_ids)
         self.assertNotIn("web-layout", check_ids)
 
+    def test_bundled_ios_reader_assets_select_apple_compile_and_client_catalog(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for asset in ("reader.js", "offline-reader.js", "offline-reader.html"):
+            path = "crates/plurxd/src/web/" + asset
+            with self.subTest(asset=asset):
+                self.assertTrue(scope_for_paths(catalog, (path,))["apple"])
+                selection = select_points(catalog, (path,))
+                self.assertIn("apple.client", selection.point_ids)
+                checks = {check.id for check in selected_checks(catalog, selection, profile="ci")}
+                self.assertIn("apple-simulators", checks)
+        self.assertFalse(scope_for_paths(catalog, ("crates/plurxd/src/web/reader.css",))["apple"])
+
     def test_the_browser_gate_selects_the_only_job_that_has_a_browser(self):
         """A gate that never runs is worse than no gate.
 

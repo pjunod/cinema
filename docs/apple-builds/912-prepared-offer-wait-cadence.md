@@ -1,6 +1,5 @@
 # Make the prepared-offer wait winnable, and bound the switch it leads to
 
-Build: 167
 Issue: #912
 
 Three things the adversarial review of the wait found.

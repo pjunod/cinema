@@ -182,6 +182,24 @@ class PlaybackIntentTest {
     }
 
     @Test
+    fun preparedOriginalPresentationKeepsTheNextSeekOnItsAttachedPlan() {
+        for (presented in listOf(false, true)) {
+            val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+            val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)
+            val reloads = mutableListOf<Pair<Long, PlaybackQuality>>()
+            replacement.retain { target, quality -> reloads += target to quality }
+            val requested = intent.beginQualityChange(PlaybackQuality.Original)
+            if (presented) replacement.presented(requested.quality)
+
+            val seek = intent.beginRelativeSeek(-10_000L, 76_000L, 206_864L)
+            assertEquals(!presented, replacement.route(intent))
+            assertSame(seek, intent.pendingSeek)
+            assertEquals(66_000L, seek.targetMs)
+            assertEquals(if (presented) emptyList() else listOf(66_000L to PlaybackQuality.Original), reloads)
+        }
+    }
+
+    @Test
     fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
         val first = intent.beginQualityChange(PlaybackQuality.Q1080)

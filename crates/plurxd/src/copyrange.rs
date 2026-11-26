@@ -27,9 +27,11 @@ mod fill;
 #[cfg(unix)]
 pub(crate) use fill::{fill_copy_gap, CopyGapFill, CopyGapFillError};
 #[cfg(unix)]
+mod meter;
+#[cfg(unix)]
 mod production;
 #[cfg(unix)]
-pub(crate) use production::CopyRangeProduction;
+pub(crate) use production::{CommitWaiter, CopyRangeProduction, DeadlineEnd};
 
 #[cfg(unix)]
 pub(crate) const SOURCE_SEEK_BOOTSTRAP_BYTES: u64 = observed::MAX_HELD as u64

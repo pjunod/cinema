@@ -89,6 +89,7 @@ struct SetRow {
     generation_id: String,
     version: i64,
     annotations_json: String,
+    chapter_evidence: i64,
 }
 
 impl From<&mut Row<'_>> for SetRow {
@@ -97,6 +98,7 @@ impl From<&mut Row<'_>> for SetRow {
             generation_id: row.get("generation_id"),
             version: row.get("version"),
             annotations_json: row.get("annotations_json"),
+            chapter_evidence: row.get("chapter_evidence"),
         }
     }
 }
@@ -146,11 +148,11 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         Ok(())
     }
 
-    async fn timeline_annotation_set(
+    async fn timeline_annotation_set_with_evidence(
         &self,
         file_id: i64,
         source: &SourceIdentity,
-    ) -> Result<Option<TimelineAnnotationSet>, StoreError> {
+    ) -> Result<Option<(TimelineAnnotationSet, bool)>, StoreError> {
         let source_size = match i64::try_from(source.size) {
             Ok(value) => value,
             Err(_) => return Ok(None),
@@ -159,10 +161,20 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
             .client()
             .query_consistent_map::<SetRow, _>(
                 "timeline_annotation_set",
-                "SELECT generation_id, version, annotations_json
-                   FROM timeline_annotation_sets
-                  WHERE file_id = $1 AND source_size = $2
-                    AND source_mtime = $3 AND argv_fingerprint = $4",
+                "SELECT base.generation_id, base.version, base.annotations_json,
+                              (base.version >= 2 OR base.publication_priority = 'forced' OR EXISTS (
+                                  SELECT 1 FROM analysis_requests request
+                                   WHERE request.file_id = base.file_id
+                                     AND request.source_size = base.source_size
+                                     AND request.source_mtime = base.source_mtime
+                                     AND request.component = 'skip_markers'
+                                     AND request.state = 'ready'
+                                     AND request.requested_generation = base.generation_id
+                                     AND request.result_cache_key = base.generation_id
+                              )) AS chapter_evidence
+                   FROM timeline_annotation_sets base
+                  WHERE base.file_id = $1 AND base.source_size = $2
+                    AND base.source_mtime = $3 AND base.argv_fingerprint = $4",
                 params!(
                     file_id,
                     source_size,
@@ -171,7 +183,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
                 ),
             )
             .await?;
-        let (mut generation_id, version, mut annotations) = match rows.pop() {
+        let (mut generation_id, version, mut annotations, chapter_evidence) = match rows.pop() {
             Some(row) => {
                 let version = u32::try_from(row.version).map_err(|_| {
                     StoreError::Database("invalid timeline annotation version".to_owned())
@@ -179,10 +191,22 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
                 let annotations = serde_json::from_str(&row.annotations_json).map_err(|error| {
                     StoreError::Database(format!("decode timeline annotations: {error}"))
                 })?;
-                (row.generation_id, version, annotations)
+                (
+                    row.generation_id,
+                    version,
+                    annotations,
+                    row.chapter_evidence != 0,
+                )
             }
-            None => (String::new(), 1, Vec::new()),
+            None => (String::new(), 1, Vec::new(), false),
         };
+        // A manual edit may hide the authored marker, but the base still
+        // proves that the source's chapters were read.
+        let chapter_evidence = chapter_evidence
+            || annotations.iter().any(|annotation: &TimelineAnnotation| {
+                annotation.provenance == AnnotationProvenance::Authored
+            });
+
         let manual = self
             .client()
             .query_consistent_map::<ManualRow, _>(
@@ -224,12 +248,15 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
             return Ok(None);
         }
         annotations.sort_by_key(|annotation| (annotation.start_ms, annotation.kind));
-        Ok(Some(TimelineAnnotationSet {
-            source_identity: source.clone(),
-            generation_id,
-            version,
-            annotations,
-        }))
+        Ok(Some((
+            TimelineAnnotationSet {
+                source_identity: source.clone(),
+                generation_id,
+                version,
+                annotations,
+            },
+            chapter_evidence,
+        )))
     }
 
     async fn put_timeline_annotation_set_if_missing(

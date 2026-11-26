@@ -1,6 +1,5 @@
 # Keep complete Apple TV library cards visible
 
-Build: 271
 Issue: #1245
 
 **Status:** built; physical Apple TV acceptance pending.

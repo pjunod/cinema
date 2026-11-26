@@ -3057,6 +3057,7 @@ fn configure_probe_execution(
     Ok(supervisor)
 }
 
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn configure_probe_execution_untracked(
     command: &mut tokio::process::Command,
@@ -4129,6 +4130,7 @@ async fn probe_version(
 
 /// One freshly collected document and the typed facts derived from the same
 /// executable and source. The document is transient; only facts enter cache.
+#[derive(Clone)]
 pub(crate) struct FreshSourceProbe {
     pub(crate) document: String,
     facts: Result<DecodeFacts, DecodeFactError>,
@@ -5882,12 +5884,15 @@ pub(crate) fn legacy_ordinal_facts(
 ) -> Result<DecodeFacts, plurx_core::transcode::PlanError> {
     // The catalog row describes the film. Applied to an attached picture it
     // would claim that a JPEG is Dolby Vision.
-    match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
+    let facts = match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
         Some(catalog) => {
             DecodeFacts::from_ffprobe_json_at_with_catalog(json, source_identity, index, catalog)
         }
         None => DecodeFacts::from_ffprobe_json_at(json, source_identity, index),
-    }
+    }?;
+    // A scan verdict an earlier probe persisted for this revision answers the
+    // missing scan metadata without probing the source again.
+    Ok(facts.with_stored_hevc_scan(json))
 }
 
 pub(crate) fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32> {

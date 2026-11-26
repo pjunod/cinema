@@ -59,6 +59,18 @@ class MetadataAdmission(unittest.TestCase):
                             str(binary)], check=True, timeout=30)
             subprocess.run([str(binary)], check=True, timeout=10)
 
+    def test_fel_reference_composer_vectors(self):
+        """Hand-computed vectors for each stage of the ETSI GS CCM 001
+        composer reference, under the undefined-behaviour sanitizer."""
+        source = Path(__file__).with_name("test_fel_reference_composer.c")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "fel-reference-composer"
+            subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall",
+                            "-Wextra", "-Werror", "-fsanitize=undefined",
+                            "-fno-sanitize-recover=undefined", str(source),
+                            "-o", str(binary)], check=True, timeout=30)
+            subprocess.run([str(binary)], check=True, timeout=10)
+
     def test_finite_rgb48_rounding(self):
         source = Path(__file__).with_name("test_rgb48.c")
         with tempfile.TemporaryDirectory() as directory:

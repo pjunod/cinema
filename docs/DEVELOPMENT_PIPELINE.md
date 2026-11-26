@@ -16,6 +16,13 @@
 > dependency audit remains. These rules supersede the older automatic
 > qualification and post-merge instructions below pending their rewrite.
 
+> **Requested-lane amendment, 2026-11-24:** marking ready now starts only the
+> cheap gate (paperwork, scope, fast Rust fmt/Clippy, web syntax and types,
+> Android compile), and so does every later push. The heavy jobs and the
+> `Main promotion gate` run once per head when a session adds the `lane`
+> label (`ci-fleet lane request`); `scripts/land` then requires that gate.
+> The merge train is retired. [docs/ci/REQUESTED-LANE.md](ci/REQUESTED-LANE.md).
+
 > **Test-lane amendment, 2026-10-07, superseding 2026-09-20:** The ready
 > main-bound fast Rust job compiles every target and runs workspace and
 > vendored Hiqlite Clippy on the pinned FFmpeg 6 runner surface. The full
@@ -170,7 +177,7 @@ required before an effort push, and ordinary changes still need their affected
 validation before a pull request.
 
 `make hooks` also installs a pre-push hook that runs `scripts/paperwork`: the
-bookkeeping rules — doc index rows, release counters, infra names, API route
+bookkeeping rules — doc index rows, mobile versions, infra names, API route
 docs, status-page shape, `Regression-Test:` lines — in seconds, with the fix
 printed beside each failure. The fast lane, the effort lane and every pull
 request into an effort branch run the same script as their first job, and no

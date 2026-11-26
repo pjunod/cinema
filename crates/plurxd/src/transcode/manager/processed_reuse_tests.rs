@@ -774,6 +774,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -803,6 +804,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
             file_id,
             range,
             profile,
+            None,
         )
         .await
         .expect("fresh enhancement from the actual primed owner");
@@ -826,6 +828,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                     wrong_file,
                     wrong_range,
                     wrong_profile,
+                    None,
                 )
                 .await
                 .is_none(),
@@ -848,6 +851,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -874,6 +878,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -1880,6 +1885,7 @@ printf '%s\n' '{}'
         display_target,
         display: caps.display.clone(),
         display_target_note: display_target_note.clone(),
+        dv_row_facts: None,
         source_tick,
         source_origin,
         native_bl: (64, 64),
@@ -1898,6 +1904,7 @@ printf '%s\n' '{}'
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
+        window_run: Default::default(),
         failure_episode: digest(b"lifecycle failure"),
         preparation_budget: Duration::from_secs(5),
         report_revision: AtomicU64::new(0),
@@ -1985,9 +1992,11 @@ printf '%s\n' '{}'
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
         retain_output: None,
         dv_refit_digest: None,

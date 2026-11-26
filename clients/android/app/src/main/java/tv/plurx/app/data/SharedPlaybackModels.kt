@@ -343,7 +343,6 @@ internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decisi
         subject.validate(); decision.validated(subject.context)
         require(caps.v == 2 && "hls" in caps.transports && request.caps == caps)
         require(request.presentation in setOf("vod", "direct") && request.intent == null && request.previous_session_id == null && request.control_sequence == null && request.reopen_reason == null)
-        require(request.preserve_dolby_vision != true)
         require((request.start ?: 0.0) == subject.resumeMs.toDouble() / 1000)
         require(request.height?.let { it in 1..8192 } != false)
         if (direct) {

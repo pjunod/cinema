@@ -847,11 +847,16 @@ pub mod scopes {
     pub const SCAN_TRIGGER: &str = "scan:trigger";
     /// Read the progress/result of a scan this key asked for.
     pub const STATUS_READ: &str = "status:read";
+    /// Read the signed-in playback devices and what each decodes
+    /// (`GET /api/v1/playback/devices`), so Curator can rank releases by what
+    /// the household's screens actually show. Read-only, and no secrets: a
+    /// device label, a client family and a capability summary.
+    pub const PLAYBACK_READ: &str = "playback:read";
 
     /// Every scope that exists, for validation at creation time — a key
     /// created with a typo'd scope would otherwise look fine and silently
     /// authorize nothing.
-    pub const ALL: &[&str] = &[SCAN_TRIGGER, STATUS_READ];
+    pub const ALL: &[&str] = &[SCAN_TRIGGER, STATUS_READ, PLAYBACK_READ];
 }
 
 // ---------------------------------------------------------------------------

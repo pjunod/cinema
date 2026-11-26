@@ -615,6 +615,9 @@ mod tests {
             "index.m3u8?native=1&native=0",
             "index.m3u8?native=2",
             "index.m3u8?subtitle=4096",
+            // The viewer's login token is B's to drop before it names a
+            // Source resource (`shared_receiver_playback::receiver_hls_resource`);
+            // the Source grammar never admits it.
             "index.m3u8?token=secret",
             "index.m3u8?diagnostic=unknown",
             "index.m3u8?",

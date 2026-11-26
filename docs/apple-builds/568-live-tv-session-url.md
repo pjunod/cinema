@@ -2,7 +2,6 @@
 
 **Status:** built
 
-Build: 189
 Issue: #568
 
 Live TV on iPhone, iPad, and Apple TV accepts the server's station playlist

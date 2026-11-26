@@ -2011,6 +2011,34 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn merge_file_probe_chapters_if_missing(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        chapters_json: &str,
+    ) -> Result<(), StoreError> {
+        let chapters = chapters_json.to_owned();
+        self.with_conn(move |conn| {
+            // `json_set` rather than read-modify-write in Rust: the whole
+            // document is rewritten either way, but doing it in SQL keeps the
+            // update atomic against a concurrent scan writing the same row.
+            // Guarded on NOT NULL because json_set(NULL, …) is NULL, which
+            // would erase the probe-failed marker `probe_json IS NULL` — the
+            // one fingerprint the repair job keys on.
+            conn.execute(
+                "UPDATE files SET probe_json = json_set(probe_json, '$.chapters', json(?2))
+                 WHERE id = ?1 AND size = ?3 AND mtime = ?4
+                   AND CASE WHEN json_valid(probe_json)
+                            THEN json_type(probe_json, '$.chapters') IS NOT 'array'
+                            ELSE 0 END",
+                params![file_id, chapters, size, mtime],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn merge_file_probe_hevc_parameter_sets(
         &self,
         file_id: i64,
@@ -2027,6 +2055,27 @@ impl MediaStore for SqliteStore {
                     SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json(?1))
                   WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
                 params![census, file_id, size, mtime],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn merge_file_probe_hevc_scan(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        scan_json: &str,
+    ) -> Result<bool, StoreError> {
+        let scan = scan_json.to_owned();
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the census above, fenced to the
+            // measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_hevc_scan_v1', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![scan, file_id, size, mtime],
             )? == 1)
         })
         .await
@@ -2049,6 +2098,52 @@ impl MediaStore for SqliteStore {
                   WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
                 params![report, file_id, size, mtime],
             )? == 1)
+        })
+        .await
+    }
+
+    async fn merge_file_probe_dv_levels(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        record: &crate::scan::dv_levels::DvLevelsRecord,
+    ) -> Result<bool, StoreError> {
+        let record = serde_json::to_string(record)
+            .map_err(|error| StoreError::Task(format!("encode DV levels record: {error}")))?;
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the content encoding above, fenced to
+            // the measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_dv_levels_v1', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![record, file_id, size, mtime],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn files_missing_dv_levels(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MediaFile>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_COLS} FROM files
+                  WHERE video_codec = 'hevc' AND dv_profile IN (5,7,8)
+                    AND dv_rpu_present = 1
+                    AND probe_json IS NOT NULL
+                    AND json_type(probe_json, '$.plurx_dv_levels_v1') IS NULL
+                    AND id > ?1
+                  ORDER BY id
+                  LIMIT ?2"
+            ))?;
+            let files = stmt
+                .query_map(params![after_id, limit.max(0)], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(files)
         })
         .await
     }
@@ -2405,6 +2500,8 @@ impl MediaStore for SqliteStore {
     async fn get_file_probe_chapters_json(
         &self,
         file_id: i64,
+        size: i64,
+        mtime: i64,
     ) -> Result<Option<String>, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn
@@ -2413,8 +2510,8 @@ impl MediaStore for SqliteStore {
                        WHEN probe_json IS NOT NULL AND json_valid(probe_json)
                         AND json_type(probe_json, '$.chapters') = 'array'
                        THEN json_extract(probe_json, '$.chapters') END
-                       FROM files WHERE id = ?1",
-                    params![file_id],
+                       FROM files WHERE id = ?1 AND size = ?2 AND mtime = ?3",
+                    params![file_id, size, mtime],
                     |row| row.get::<_, Option<String>>(0),
                 )
                 .optional()?

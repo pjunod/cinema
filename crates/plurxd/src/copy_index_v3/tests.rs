@@ -4,7 +4,8 @@ use plurx_core::segplan::{IndexRow, SourceIdentity};
 use plurx_core::store::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_output_identity,
     cluster_fragment_index_v3_key, copy_index_v3_source_key, encode_cluster_fragment_index_blob_v3,
-    BackgroundJobStore, FragmentIndexEngineProvenance, SettingsStore, SqliteStore,
+    BackgroundJobStore, FragmentIndexEngineProvenance, FragmentIndexStore, SettingsStore,
+    SqliteStore,
 };
 use std::path::PathBuf;
 
@@ -19,6 +20,7 @@ fn rows() -> Vec<IndexRow> {
     (0..3u64)
         .map(|n| IndexRow {
             dts: n * 3_003,
+            first_cto: None,
             duration: 3_003,
             bytes: 4_500,
             video_bytes: 3_100,
@@ -232,6 +234,15 @@ impl Fixture {
     }
 
     async fn resolve(&self) -> Option<ResolvedCopyIndex> {
+        self.resolve_with_mode(ResolveMode::Foreground)
+            .await
+            .expect("resolution")
+    }
+
+    async fn resolve_with_mode(
+        &self,
+        mode: ResolveMode,
+    ) -> Result<Option<ResolvedCopyIndex>, String> {
         resolve(
             &self.store,
             None,
@@ -242,10 +253,10 @@ impl Fixture {
             &self.file,
             self.video,
             Some(&self.defects),
+            mode,
         )
         .await
-        .expect("resolution")
-        .index
+        .map(|resolution| resolution.index)
     }
 
     /// Every defect the reader has reported since the last call.
@@ -402,6 +413,116 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
     assert!(fixture.resolve().await.is_some());
     refuse_on_this_engine(&resolved.rendition_cache_key);
     assert!(fixture.resolve().await.is_none());
+}
+
+#[tokio::test]
+async fn local_only_resolution_uses_verified_bytes_without_repairing_the_head() {
+    let fixture = fixture().await;
+    let mode = ResolveMode::LocalOnly;
+    assert!(fixture
+        .resolve_with_mode(mode)
+        .await
+        .expect("no head")
+        .is_none());
+
+    let source_sha256 = hex64('a');
+    let (artifact, blob) = variant(
+        &fixture.namespace,
+        fixture.file.id,
+        &sealed_index(&source_sha256, true),
+        &source_sha256,
+    );
+    fixture.publish(NODE, &fixture.object_version, &artifact);
+    assert!(
+        fixture.resolve_with_mode(mode).await.is_err(),
+        "missing blob"
+    );
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
+
+    fixture.install(&artifact, &blob).await;
+    let path = crate::copy_analysis::v3_blob_path(
+        &crate::copy_analysis::v3_root(&fixture.cache),
+        &artifact.blob_sha256,
+    )
+    .expect("blob path");
+    let mut corrupt = blob.clone();
+    *corrupt.last_mut().expect("rows") ^= 1;
+    std::fs::write(&path, &corrupt).expect("corrupt the blob");
+    assert!(
+        fixture.resolve_with_mode(mode).await.is_err(),
+        "corrupt blob"
+    );
+    assert_eq!(std::fs::read(&path).expect("retained blob"), corrupt);
+    assert_eq!(fixture.holders(&artifact).await, vec![NODE.to_owned()]);
+
+    std::fs::write(path, blob).expect("restore the verified blob");
+    assert!(fixture
+        .store
+        .forget_copy_index_v3_location(&artifact.contract_key, &artifact.blob_sha256, NODE)
+        .await
+        .expect("retire the holder"));
+    let resolved = fixture
+        .resolve_with_mode(mode)
+        .await
+        .expect("resolution")
+        .expect("verified local blob");
+    assert!(fixture.holders(&artifact).await.is_empty());
+    assert!(fixture.reported().is_empty());
+    assert_eq!(sealed_init_defect(&resolved.rendition_cache_key), None);
+}
+
+#[tokio::test]
+async fn fitted_copy_prefers_v3_only_when_it_carries_the_complete_fitted_proof() {
+    for v3_has_proofs in [false, true] {
+        let mut fixture = fixture().await;
+        fixture.file.hdr = Some("dolby_vision".into());
+        fixture.video = CopyVideoOptions::new(true, false)
+            .with_dolby_vision_conversion(true)
+            .with_dolby_vision_refit(Some([7; 32]));
+        let source_sha256 = hex64('5');
+        let mut local = sealed_index(&source_sha256, true);
+        local.source = crate::fragindex::identity_for(&fixture.file, fixture.video);
+        local.dv_refit_origin = Some(plurx_core::segplan::DvRefitOrigin {
+            first_dts: 0,
+            first_pts: 0,
+            time_base_num: 1,
+            time_base_den: 90_000,
+        });
+        let proof = serde_json::from_value(serde_json::json!("ab".repeat(72)))
+            .expect("well-formed fitted proof fixture");
+        local.dv_refit_proofs = Some(vec![proof; local.rows.len()]);
+        fixture
+            .store
+            .put_fragment_index(fixture.file.id, &local)
+            .await
+            .expect("existing exact local index");
+
+        let v3 = if v3_has_proofs {
+            local.clone()
+        } else {
+            sealed_index(&source_sha256, true)
+        };
+        let (artifact, blob) = variant(&fixture.namespace, fixture.file.id, &v3, &source_sha256);
+        fixture.publish(NODE, &fixture.object_version, &artifact);
+        fixture.install(&artifact, &blob).await;
+
+        // The serving path prefers the shared resolution and keeps the
+        // existing exact local index when the shared resolution misses.
+        let resolved = fixture.resolve().await;
+        assert_eq!(resolved.is_some(), v3_has_proofs);
+        let selected = match resolved {
+            Some(resolved) => resolved.index,
+            None => fixture
+                .store
+                .fragment_index(fixture.file.id, &local.source)
+                .await
+                .expect("exact local lookup")
+                .expect("local fitted fallback"),
+        };
+        assert_eq!(selected.dv_refit_origin, local.dv_refit_origin);
+        assert_eq!(selected.dv_refit_proofs, local.dv_refit_proofs);
+        assert!(fixture.reported().is_empty(), "no defect or quarantine");
+    }
 }
 
 /// Another origin's head describes this node's bytes only when this node's
@@ -685,4 +806,41 @@ async fn a_planned_variant_names_its_head_for_a_sealed_init_refusal() {
             kind: CopyIndexDefectKind::SealedInit,
         })
     );
+}
+
+/// A fast corrupt answer is not a winner, and a stalled first holder does
+/// not prevent the later verified artifact from being selected.
+#[tokio::test]
+async fn holder_race_selects_verified_bytes_after_a_fast_corrupt_answer() {
+    use futures_util::StreamExt;
+    let source = hex64('8');
+    let (artifact, blob) = variant("race", 100, &sealed_index(&source, true), &source);
+    let requests = (0..3).map(|holder| {
+        let blob = &blob;
+        async move {
+            match holder {
+                0 => std::future::pending::<Vec<u8>>().await,
+                1 => b"corrupt first answer".to_vec(),
+                _ => {
+                    tokio::task::yield_now().await;
+                    blob.clone()
+                }
+            }
+        }
+    });
+    let responses = crate::cluster::calls::race_holders(
+        requests,
+        crate::cluster::calls::deadline_after(PEER_DEADLINE),
+    );
+    futures_util::pin_mut!(responses);
+    let mut refused = 0;
+    let selected = loop {
+        let bytes = responses.next().await.expect("a valid holder remains");
+        if blob_matches(&bytes, &artifact) {
+            break bytes;
+        }
+        refused += 1;
+    };
+    assert_eq!(refused, 1);
+    assert_eq!(selected, blob);
 }

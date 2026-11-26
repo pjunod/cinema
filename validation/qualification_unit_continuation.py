@@ -1855,7 +1855,7 @@ def authenticate(api, proof, document, repository, live_logs=None):
             receipts.require(retention.digest(raw) == record['log']['sha256_ref']
                              and command_log(proof, record).encode() == raw, 'Authenticated command log mismatch')
 
-def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen_python_ids):
+def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen_python_ids, *, selected_pr=False):
     """Only a complete source-applicable union authorizes command adoption."""
     receipts.require(set(proof) == {'version', 'source_commit', 'commands', 'logs'} and proof['version'] in {1, 2}
                      and proof['source_commit'] == candidate, 'Unknown or stale command proof')
@@ -1878,7 +1878,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                              'Unknown or repeated non-Rust source-cohort command')
             seen.add(name)
             source_cohorts[name] = cohort.validate(item, proof, candidate, discovery,
-                                                  changed_inputs, clean_log, source_archive_digest)
+                                                  changed_inputs, clean_log, source_archive_digest, selected_pr=selected_pr)
             continue
         receipts.require(set(item) in ({'name', 'invocation', 'environment', 'inventory', 'records', 'obligations'}, {'name', 'invocation', 'environment', 'inventory', 'records', 'obligations','references'}),
                          'Unknown command unit fields')

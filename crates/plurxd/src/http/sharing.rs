@@ -902,6 +902,7 @@ pub(crate) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'sta
         PeerError::Unavailable
         | PeerError::Rejected(_)
         | PeerError::Busy { .. }
+        | PeerError::StartNotPrepared { .. }
         | PeerError::StartNotYet { .. }
         | PeerError::DolbyVisionUnsupported => "sharing_peer_unavailable",
     }

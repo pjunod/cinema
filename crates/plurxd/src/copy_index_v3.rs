@@ -26,10 +26,12 @@ use plurx_core::store::{
 use plurx_core::transcode::CopyVideoOptions;
 
 use crate::copy_analysis::{CopyAnalysisRegistry, CopyIndexDefect, CopyIndexDefectKind};
+use futures_util::StreamExt;
+
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/copy-index-v3/";
-const PEER_DEADLINE: Duration = Duration::from_secs(8);
+const PEER_DEADLINE: Duration = plurx_core::cluster::timing::holders::COPY_INDEX_V3_PEER_DEADLINE;
 
 /// The body of the one 404 that means "this route knows the variant and this
 /// node does not hold its bytes". Only that answer retires a holder's row: a
@@ -58,6 +60,12 @@ pub(crate) struct ResolvedCopyIndex {
 pub(crate) struct Resolution {
     pub(crate) index: Option<ResolvedCopyIndex>,
     pub(crate) own: plurx_core::store::analysis_coordination::AnalysisCoordinationSource,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolveMode {
+    Foreground,
+    LocalOnly,
 }
 
 /// Contracts whose sealed init this process's engine does not produce. The
@@ -152,7 +160,9 @@ struct Consumer<'a> {
     root: std::path::PathBuf,
     file: &'a MediaFile,
     identity: SourceIdentity,
+    needs_refit_proofs: bool,
     object_version: String,
+    mode: ResolveMode,
     /// Where a defective healthy head is reported. None reports nothing.
     defects: Option<&'a CopyAnalysisRegistry>,
 }
@@ -160,7 +170,9 @@ struct Consumer<'a> {
 /// Resolve the v3 index for one copy of `file` on this node, or `None` when no
 /// usable head, holder or valid blob exists. `namespace` is the cluster's
 /// catalogue identity, as the publisher keyed it. `defects` is the Analysis
-/// worker's inbox for a healthy head found defective.
+/// worker's inbox for a healthy head found defective in foreground resolution.
+/// Local-only resolution returns an error if it cannot verify a matching
+/// head's local bytes, since foreground may still hydrate and use that head.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve(
     store: &dyn Store,
@@ -172,6 +184,7 @@ pub(crate) async fn resolve(
     file: &MediaFile,
     video: CopyVideoOptions,
     defects: Option<&CopyAnalysisRegistry>,
+    mode: ResolveMode,
 ) -> Result<Resolution, String> {
     // This node's current object: a stat checked against the scanner's facts.
     let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
@@ -195,8 +208,13 @@ pub(crate) async fn resolve(
         root: crate::copy_analysis::v3_root(runtime_cache),
         file,
         identity,
+        needs_refit_proofs: video.dolby_vision_refit().is_some(),
         object_version,
-        defects,
+        mode,
+        defects: match mode {
+            ResolveMode::Foreground => defects,
+            ResolveMode::LocalOnly => None,
+        },
     };
     // This node's own head, by primary key.
     let own_variant = store
@@ -304,6 +322,7 @@ impl Consumer<'_> {
             &self.root,
             variant,
             artifact,
+            self.mode,
         )
         .await?
         {
@@ -338,6 +357,17 @@ impl Consumer<'_> {
                 return Ok(None);
             }
         };
+        // The v3 decoder has already checked proof encoding, row coverage and
+        // the planning digest. A fitted rendition requires both optional
+        // evidence fields; ordinary copy observations do not supply them.
+        if self.needs_refit_proofs
+            && (index.dv_refit_proofs.is_none()
+                || index
+                    .dv_refit_origin
+                    .is_none_or(|origin| origin.time_base_num == 0 || origin.time_base_den == 0))
+        {
+            return Ok(None);
+        }
         index.source = self.identity.clone();
         if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
             if !proof.bind_equivalent_source(
@@ -353,7 +383,9 @@ impl Consumer<'_> {
                 return Ok(None);
             }
         }
-        remember_planned(&rendition_cache_key, variant, &artifact.blob_sha256);
+        if self.mode == ResolveMode::Foreground {
+            remember_planned(&rendition_cache_key, variant, &artifact.blob_sha256);
+        }
         Ok(Some(ResolvedCopyIndex {
             index,
             object_version: self.object_version.clone(),
@@ -559,6 +591,7 @@ enum Loaded {
 /// The variant's exact bytes: this node's verified blob, or one hydrated from
 /// a listed holder. A hydrating node installs under the publisher's staged
 /// write and disk budget and then records itself as a verified location.
+#[allow(clippy::too_many_arguments)] // one variant's exact store, peer, directory and resolve inputs
 async fn load_blob(
     store: &dyn Store,
     calls: Option<&PeerTransport>,
@@ -567,6 +600,7 @@ async fn load_blob(
     root: &Path,
     variant: &CopyIndexV3Variant,
     artifact: &CopyIndexV3Artifact,
+    mode: ResolveMode,
 ) -> Result<Loaded, String> {
     let path = crate::copy_analysis::v3_blob_path(root, &artifact.blob_sha256)
         .ok_or("invalid v3 blob digest")?;
@@ -577,6 +611,15 @@ async fn load_blob(
             .map_err(|error| format!("copy index v3 blob is busy: {error}"))?;
         read_local(&path, artifact).await
     };
+    if mode == ResolveMode::LocalOnly {
+        return match local {
+            LocalBlob::Verified(blob) => Ok(Loaded::Blob(blob)),
+            LocalBlob::Missing => Err("local copy index v3 blob is missing".into()),
+            LocalBlob::Unreadable(reason) | LocalBlob::Corrupt(reason) => Err(format!(
+                "local copy index v3 blob could not be verified: {reason}"
+            )),
+        };
+    }
     match local {
         LocalBlob::Verified(blob) => {
             // The head read already said whether this node is a listed
@@ -626,7 +669,7 @@ async fn load_blob(
     }
     // This node's own row, if any, is gone or was never there: its bytes are
     // not here. Whether anyone else holds them is what remains.
-    let locations = store
+    let mut locations = store
         .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
         .await
         .map_err(|error| format!("listing copy index holders: {error}"))?
@@ -655,49 +698,75 @@ async fn load_blob(
         .collect::<HashMap<_, _>>();
     let transport = calls;
     let request_path = peer_path(source_key, &artifact.blob_sha256);
-    for location in locations {
-        let Some((base, _)) = peers.get(&location.node_id) else {
-            continue;
+    enum HolderAnswer {
+        Absent,
+        Blob(String, Vec<u8>),
+        Unknown,
+    }
+    locations.sort_by_cached_key(|location| {
+        peers.get(&location.node_id).map_or(1, |(base, _)| {
+            transport.preference(&location.node_id, base, PEER_DEADLINE)
+        })
+    });
+    let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
+    let requests = locations.into_iter().filter_map(|location| {
+        let (base, _) = peers.get(&location.node_id)?;
+        let request_path = &request_path;
+        Some(async move {
+            let response = transport
+                .request(
+                    &location.node_id,
+                    base,
+                    reqwest::Method::GET,
+                    request_path,
+                    Vec::new(),
+                    deadline,
+                    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await;
+            let Ok(response) = response else {
+                return HolderAnswer::Unknown;
+            };
+            if response.status == reqwest::StatusCode::NOT_FOUND && response.body == ABSENT_BODY {
+                // Only the exact holder's absence can retire its row. Keep
+                // this cleanup independent of other candidate responses.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ForgetMissingPeerIndex,
+                    crate::store_result::Discard::BestEffort,
+                    store
+                        .forget_copy_index_v3_location(
+                            &artifact.contract_key,
+                            &artifact.blob_sha256,
+                            &location.node_id,
+                        )
+                        .await,
+                );
+                return HolderAnswer::Absent;
+            }
+            if response.status.is_success() && blob_matches(&response.body, artifact) {
+                HolderAnswer::Blob(location.node_id, response.body)
+            } else {
+                HolderAnswer::Unknown
+            }
+        })
+    });
+    let responses = crate::cluster::calls::race_holders(requests, deadline);
+    futures_util::pin_mut!(responses);
+    while let Some(answer) = responses.next().await {
+        let (holder, body) = match answer {
+            HolderAnswer::Absent => {
+                possible -= 1;
+                continue;
+            }
+            HolderAnswer::Unknown => continue,
+            HolderAnswer::Blob(holder, body) => (holder, body),
         };
-        let response = transport
-            .request(
-                &location.node_id,
-                base,
-                reqwest::Method::GET,
-                &request_path,
-                Vec::new(),
-                tokio::time::Instant::now() + PEER_DEADLINE,
-                MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-                PeerAuthMode::ExactRequest,
-            )
-            .await;
-        let Ok(response) = response else { continue };
-        if response.status == reqwest::StatusCode::NOT_FOUND && response.body == ABSENT_BODY {
-            // Best-effort: the holder itself said it lacks these bytes. Any
-            // other answer (a node without this route, a refusal, a damaged
-            // transfer) leaves its row alone.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetMissingPeerIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_copy_index_v3_location(
-                        &artifact.contract_key,
-                        &artifact.blob_sha256,
-                        &location.node_id,
-                    )
-                    .await,
-            );
-            possible -= 1;
-            continue;
-        }
-        if !response.status.is_success() || !blob_matches(&response.body, artifact) {
-            continue;
-        }
         crate::copy_analysis::install_blob(
             root,
             &artifact.contract_key,
             &artifact.blob_sha256,
-            &response.body,
+            &body,
         )
         .await?;
         // Only now is this node a holder: the exact bytes are verified and
@@ -707,10 +776,10 @@ async fn load_blob(
             file_id = artifact.file_id,
             contract_key = artifact.contract_key,
             blob_sha256 = artifact.blob_sha256,
-            holder = location.node_id,
+            holder,
             "copy index v3 hydrated from a peer"
         );
-        return Ok(Loaded::Blob(response.body));
+        return Ok(Loaded::Blob(body));
     }
     Ok(if possible == 0 {
         Loaded::NoHolder

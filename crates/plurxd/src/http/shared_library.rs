@@ -774,11 +774,18 @@ pub(super) async fn guard_source_response(
         .into_response();
     };
     let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
-        return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
+        // Load, not an outage: typed, so the receiver reads it as a wait.
+        return ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "sharing_body_capacity",
+            message: "sharing body capacity".into(),
+            retry_after_seconds: 1,
+        }
+        .into_response();
     };
     // Armed before the admission look, so a revocation applied after the
     // look's read wakes the monitor below (A6 M3).
-    let mut watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+    let mut watch = state.cluster.watch(SOURCE_BODY_WATCH);
     let observed = source_content_observation(&state, &authority).await;
     if observed != SharingObservation::Current {
         return content_refusal(observed).into_response();
@@ -825,7 +832,7 @@ pub(super) async fn guard_source_response(
                 () = tokio::time::sleep_until(looked + std::time::Duration::from_secs(1)) => {},
             }
             // Re-armed before the look it follows.
-            watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+            watch = state.cluster.watch(SOURCE_BODY_WATCH);
             looked = tokio::time::Instant::now();
             tokio::select! {
                 () = body_live.cancelled() => break,
@@ -921,6 +928,25 @@ enum ReceiverAccess {
     Viewer,
     Administrator,
 }
+/// A success body made only of B's own viewing history (its ordered watch
+/// row and the sequence a beat committed), with nothing read from a Source.
+/// [`receiver_content_guard`] releases it as such: there is no Source content
+/// whose current authority could be checked.
+#[derive(Clone, Copy)]
+struct ReceiverPrivateHistory;
+
+/// B's own history answer, marked for [`receiver_content_guard`].
+fn receiver_private_history(status: StatusCode, value: Value) -> Response {
+    let mut response = (
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(value),
+    )
+        .into_response();
+    response.extensions_mut().insert(ReceiverPrivateHistory);
+    response
+}
+
 #[derive(Clone)]
 struct ReceiverContentAuthority {
     access: ReceiverAccess,
@@ -1284,6 +1310,16 @@ pub(super) async fn receiver_content_guard(
     if !response.status().is_success() {
         return response;
     }
+    // Progress and watched answers carry B-private history only. Without this
+    // they were refused as unauthorized Source content after committing, so
+    // every shared watch-progress beat answered 503.
+    if response
+        .extensions()
+        .get::<ReceiverPrivateHistory>()
+        .is_some()
+    {
+        return response;
+    }
     let Some(authority) = response
         .extensions()
         .get::<ReceiverContentAuthority>()
@@ -1396,6 +1432,7 @@ fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
     } else if matches!(
         error,
         crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            | crate::sharing_client::PeerError::Busy { .. }
     ) {
         fail(StatusCode::TOO_MANY_REQUESTS, "sharing_metadata_capacity")
     } else {
@@ -1602,7 +1639,10 @@ async fn viewer_continue_import(
             }
             "online"
         }
-        Err(crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)) => "busy",
+        Err(
+            crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            | crate::sharing_client::PeerError::Busy { .. },
+        ) => "busy",
         Err(_) => "unavailable",
         _ => return Err(invalid()),
     };
@@ -1982,12 +2022,7 @@ async fn viewer_progress(
             ))
         }
     };
-    Ok((
-        status,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(value),
-    )
-        .into_response())
+    Ok(receiver_private_history(status, value))
 }
 /// Explicit B-private watched state. Current Source membership comes from one
 /// fresh pinned read under current assignment; the Store write then takes the
@@ -2035,12 +2070,10 @@ async fn viewer_watched(
         .await
         .map_err(unavailable)?;
     match (outcome, watch) {
-        (RemoteProgressOutcome::Applied, Some(watch)) => Ok((
+        (RemoteProgressOutcome::Applied, Some(watch)) => Ok(receiver_private_history(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(json!({"updated":1,"watch":watch})),
-        )
-            .into_response()),
+            json!({"updated":1,"watch":watch}),
+        )),
         (RemoteProgressOutcome::Conflict, _) => Err(fail(
             StatusCode::CONFLICT,
             "sharing_history_library_changed",

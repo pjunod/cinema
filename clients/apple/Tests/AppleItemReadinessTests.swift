@@ -172,6 +172,25 @@ final class AppleItemReadinessTests: XCTestCase {
         }
     }
 
+    func testStartupSeekRequiresExactPositivePreparationReceipt() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let cold = try decoder.decode(HlsStart.self, from: Data("""
+        {"session_id":"cold","playlist_url":"/cold.m3u8","vod":true}
+        """.utf8))
+        var prepared = try decoder.decode(HlsStart.self, from: Data("""
+        {"session_id":"prepared","playlist_url":"/prepared.m3u8","vod":true,"startup_seek_ready_ms":27527}
+        """.utf8))
+
+        XCTAssertFalse(cold.isStartupSeekReady(at: 27_527))
+        XCTAssertFalse(prepared.isStartupSeekReady(at: 27_528))
+        XCTAssertTrue(prepared.isStartupSeekReady(at: 27_527))
+        prepared.startupSeekReadyMs = 0
+        XCTAssertFalse(prepared.isStartupSeekReady(at: 0))
+        prepared.startupSeekReadyMs = -1
+        XCTAssertFalse(prepared.isStartupSeekReady(at: -1))
+    }
+
     func testPlaylistReadinessDecodesOptionallyForOlderServers() throws {
         // AppModel uses convertFromSnakeCase through APIClient.
         let decoder = JSONDecoder()

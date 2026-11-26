@@ -3378,6 +3378,12 @@ separate placement cohorts. Build skew alone does not prevent placement.
 Strict media-pool envelope changes require a protocol bump and dated note
 here (`make paperwork` checks this). Newest first:
 
+- 2026-11-22: protocol 12 — `split_audio` on the strict `SessionRequest`
+  media-worker envelope: a copy session whose client selects soundtracks
+  itself is served one shared video with every soundtrack as an alternate.
+  A protocol-11 worker refuses the field, so drain with the cohort procedure
+  above before web clients reach a mixed fleet. Detail:
+  [SHARED-VIDEO-MULTILINGUAL-VOD.md](streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md).
 - 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
   `SessionRequest` media-worker envelope, combined with protocol 10 catalog
   provenance. Use the cohort/drain procedure above; clients send no new
@@ -5016,6 +5022,12 @@ tick, across the whole queue.
 snapshot. When the optional retained-output lookup cannot plan, the start goes
 ahead without it and counts
 `plurx_rolling_retained_lookup_skipped_total{reason}`.
+
+A copy resume can attach a complete retained output on the serving node when
+the source, selected audio, playback recipe and media engine match. The
+playlist retains its original timeline, and the player seeks to the saved
+position. If the complete output is unavailable, the server produces media
+from the requested position using the normal startup window.
 
 **Pre-transcode audio and the rollout rule.** Speculative pre-transcodes are
 now produced with the canonical stereo AAC audio claim, so a current client

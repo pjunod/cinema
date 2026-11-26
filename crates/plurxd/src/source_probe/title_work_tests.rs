@@ -839,6 +839,7 @@ fn stored_title() -> TitleDemand {
         queued_job_id: None,
         active_job_id: None,
         fel_head_target: None,
+        fel_head_recipe: None,
         playback_requested: false,
         scanner_digest: None,
         playback_recipes: Vec::new(),
@@ -889,7 +890,10 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
         .find("demand.probe_revision = revision;")
         .expect("rebind");
     assert!(wait < bind && bind < reuse && reuse < moved);
-    assert!(source.contains("let stats = match reused {\n        Some(stats) => stats,"));
+    // A reusable generation aggregate replaces the title scan in every mode.
+    assert!(source.contains(
+        "match reused {\n            Some(stats) => Ok(stats),\n            None => scan.await,"
+    ));
 }
 
 #[test]
@@ -932,7 +936,7 @@ async fn live_title_qualification_publishes_its_receipt_without_polling_full_sca
     use std::sync::atomic::{AtomicBool, Ordering};
     let visible = AtomicBool::new(false);
     let acquired = acquire_title(
-        true,
+        TitleAcquisitionMode::Playback,
         None,
         async { panic!("a live qualification must not read the whole title") },
         async {
@@ -951,7 +955,7 @@ async fn live_title_qualification_publishes_its_receipt_without_polling_full_sca
     );
     let stats = reusable_aggregate(&stored_title(), 7).expect("existing aggregate");
     let acquired = acquire_title(
-        true,
+        TitleAcquisitionMode::Playback,
         Some(stats),
         async { panic!("a stored aggregate does not turn live work into a scan") },
         async {},
@@ -969,7 +973,7 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
     let order = std::sync::Mutex::new(Vec::new());
     let stats = reusable_aggregate(&stored_title(), 7).expect("aggregate");
     let acquired = acquire_title(
-        false,
+        TitleAcquisitionMode::Maintenance,
         None,
         async {
             order.lock().expect("order").push("scan");
@@ -984,13 +988,360 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
     assert!(matches!(acquired, TitleAcquisition::Complete(_)));
     assert_eq!(*order.lock().expect("order"), vec!["scan", "qualify"]);
     let failed = acquire_title(
-        false,
+        TitleAcquisitionMode::Maintenance,
         None,
-        async { Err("source changed".to_owned()) },
+        async { Err(TitleScanError::from("source changed")) },
         async { panic!("failed source acquisition cannot qualify") },
     )
     .await;
-    assert!(matches!(failed, Err(error) if error == "source changed"));
+    assert!(matches!(failed, Err(TitleScanError::Failed(error)) if error == "source changed"));
+    let interrupted = acquire_title(
+        TitleAcquisitionMode::Maintenance,
+        None,
+        async { Err(TitleScanError::SourceInterrupted("read".into())) },
+        async { panic!("an interrupted acquisition cannot qualify") },
+    )
+    .await;
+    assert!(matches!(
+        interrupted,
+        Err(TitleScanError::SourceInterrupted(_))
+    ));
+}
+
+#[test]
+fn title_scanner_verdict_separates_source_interruption_from_file_refusal() {
+    use super::super::dv_title::{scanner_verdict, SourceRead};
+    use std::os::unix::process::ExitStatusExt;
+    let output = |raw: i32, stdout: &[u8], stderr: &[u8]| {
+        Ok(plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        })
+    };
+    // Readable input: success returns the aggregate bytes.
+    assert_eq!(
+        scanner_verdict(output(0, b"{}", b""), SourceRead::Clean).expect("aggregate"),
+        b"{}".to_vec()
+    );
+    // A failure that names no content refusal keeps its exit status and the
+    // end of stderr, and stays a charged, retried failure.
+    let long = format!("{}\nfatal: no RPU in frame 9\n", "noise ".repeat(400));
+    let Err(TitleScanError::Failed(reason)) =
+        scanner_verdict(output(256, b"", long.as_bytes()), SourceRead::Clean)
+    else {
+        panic!("a non-zero exit without a content refusal is not a verdict");
+    };
+    assert!(reason.contains("exit status: 1"), "{reason}");
+    assert!(reason.contains("fatal: no RPU in frame 9"), "{reason}");
+    assert!(!reason.contains('\n'));
+    assert!(reason.len() < 700, "stderr is bounded: {}", reason.len());
+    // The bridge's private capability URL never reaches a log line.
+    let Err(TitleScanError::Failed(reason)) = scanner_verdict(
+        output(
+            256,
+            b"",
+            b"http://127.0.0.1:41234/0123456789abcdef0123456789abcdef: I/O error",
+        ),
+        SourceRead::Clean,
+    ) else {
+        panic!("refusal");
+    };
+    assert!(
+        !reason.contains("0123456789abcdef0123456789abcdef"),
+        "{reason}"
+    );
+    // A failed served read outranks the scanner's own exit, including a
+    // success: an aggregate over truncated input must never be trusted.
+    // The storage class and the service class stay distinct.
+    for raw in [256, 0] {
+        assert!(matches!(
+            scanner_verdict(output(raw, b"{}", b"short read"), SourceRead::Interrupted),
+            Err(TitleScanError::SourceInterrupted(reason)) if reason.contains("short read")
+        ));
+        assert!(matches!(
+            scanner_verdict(output(raw, b"{}", b"short read"), SourceRead::StorageFailed),
+            Err(TitleScanError::SourceReadFailed(reason)) if reason.contains("short read")
+        ));
+    }
+    assert!(matches!(
+        scanner_verdict(
+            Err(std::io::Error::other("deadline")),
+            SourceRead::Interrupted
+        ),
+        Err(TitleScanError::SourceInterrupted(_))
+    ));
+    assert!(matches!(
+        scanner_verdict(Err(std::io::Error::other("deadline")), SourceRead::Clean),
+        Err(TitleScanError::Failed(reason)) if reason.contains("deadline")
+    ));
+}
+
+/// Production refusals seen on the fleet after #1856: only the scanner's
+/// exit-1 refusal line naming a content check over clean reads is a verdict.
+#[test]
+fn title_content_refusal_is_a_verdict_and_environment_refusals_are_not() {
+    use super::super::dv_title::{scanner_verdict, SourceRead};
+    use std::os::unix::process::ExitStatusExt;
+    let output = |raw: i32, stderr: &str| {
+        Ok(plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    };
+    let endpoint =
+        "DV title scan refused: independent complete selected-video endpoint unavailable\n";
+    let Err(TitleScanError::Refused(reason)) =
+        scanner_verdict(output(256, endpoint), SourceRead::Clean)
+    else {
+        panic!("an untagged Matroska endpoint refusal is a verdict on the bytes");
+    };
+    assert!(reason.contains("exit status: 1"), "{reason}");
+    assert!(reason.contains("endpoint unavailable"), "{reason}");
+    // A demuxer warning before the refusal line does not hide it.
+    assert!(matches!(
+        scanner_verdict(
+            output(
+                256,
+                "[matroska,webm @ 0x5bec3b432040] File ended prematurely\n\
+                 DV title scan refused: contiguous decoded title coverage\n"
+            ),
+            SourceRead::Clean
+        ),
+        Err(TitleScanError::Refused(_))
+    ));
+    // Environment refusals, unknown reasons, prefixes of a listed reason,
+    // other exit codes and signals all keep the charged retry.
+    for (raw, stderr) in [
+        (256, "DV title scan refused: source open\n"),
+        (256, "DV title scan refused: complete demux EOF\n"),
+        (256, "DV title scan refused: bounded demux buffer\n"),
+        (256, "DV title scan refused: corrupt demux packet\n"),
+        (256, "DV title scan refused: selected HEVC video\n"),
+        (
+            256,
+            "DV title scan refused: held regular title source or private source capability\n",
+        ),
+        (
+            256,
+            "DV title scan refused: a reason a newer scanner adds\n",
+        ),
+        (256, "DV title scan refused: complete selected video\n"),
+        (512, endpoint),
+        (9, endpoint),
+    ] {
+        assert!(
+            matches!(
+                scanner_verdict(output(raw, stderr), SourceRead::Clean),
+                Err(TitleScanError::Failed(_))
+            ),
+            "{raw} {stderr}"
+        );
+    }
+    // A failed served read still outranks a content refusal.
+    assert!(matches!(
+        scanner_verdict(output(256, endpoint), SourceRead::StorageFailed),
+        Err(TitleScanError::SourceReadFailed(_))
+    ));
+    assert!(matches!(
+        scanner_verdict(output(256, endpoint), SourceRead::Interrupted),
+        Err(TitleScanError::SourceInterrupted(_))
+    ));
+}
+
+/// Every listed verdict is a refusal the scanner can actually print, so the
+/// list cannot drift from `scan_title.c` without failing here.
+#[test]
+fn title_content_refusals_name_scanner_checks() {
+    let scanner = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/dv_processing/scan_title.c"
+    ))
+    .expect("scanner source");
+    for reason in super::super::dv_title::CONTENT_REFUSALS {
+        assert!(
+            scanner.contains(&format!("\"{reason}\");")),
+            "{reason} is not a scan_title.c refusal"
+        );
+    }
+}
+
+#[tokio::test]
+async fn interrupted_title_scan_yields_without_charging_but_storage_and_refusal_charge() {
+    use plurx_core::store::background_jobs::{JobState, SettleJob};
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let start = now_ms();
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::FragmentIndexBuild {
+                file_id: 1,
+                source_generation: "source:1".to_owned(),
+                source_size: 100,
+                source_mtime: 1,
+                source_sha256: "d".repeat(64),
+                cache_key: "c".repeat(64),
+                pipeline_digest: "a".repeat(64),
+            },
+            dedupe_key: "fragment:1".to_owned(),
+            priority: 1,
+            not_before_ms: start,
+            now_ms: start,
+            request: JobRequest {
+                scope: "user:1".to_owned(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "b".repeat(64),
+                consumer_kind: "analysis".to_owned(),
+                consumer_ref: "analysis:1".to_owned(),
+                target_node_id: None,
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("enqueue");
+    let claim = |revision: i64, at: i64| ClaimJob {
+        job_id: id.clone(),
+        expected_revision: revision,
+        node_id: "node-a".to_owned(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::FragmentIndexBuild,
+        payload_version: 1,
+        now_ms: at,
+        dispatched_at_ms: at,
+    };
+    let claimed = |outcome| match outcome {
+        ClaimOutcome::Claimed { job } => *job,
+        outcome => panic!("expected claim, got {outcome:?}"),
+    };
+    let settle = |token, settlement, at| SettleJob {
+        token,
+        settlement,
+        now_ms: at,
+    };
+
+    let first = claimed(store.claim_job(claim(0, start)).await.expect("claim"));
+    let interrupted = scan_failure_settlement(
+        &TitleScanError::SourceInterrupted("source read failed".into()),
+        &id,
+        first.failed_attempts,
+    );
+    assert!(matches!(interrupted, JobSettlement::Yield { .. }));
+    let JobSettlement::Yield { not_before_ms, .. } = &interrupted else {
+        unreachable!()
+    };
+    assert!(*not_before_ms > start, "a whole-title reread is backed off");
+    assert!(store
+        .settle_job(settle(first.token.expect("token"), interrupted, start))
+        .await
+        .expect("yield"));
+    let yielded = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(yielded.state, JobState::Queued);
+    assert_eq!(yielded.failed_attempts, 0, "interruption is not a verdict");
+    assert_eq!(
+        yielded.last_error_code.as_deref(),
+        Some("title_source_interrupted")
+    );
+
+    // Reclaim once the yield's backoff has elapsed. The refusal below computes
+    // the same uncharged-attempt delay from a later clock, so its retry time is
+    // never earlier than this settlement time.
+    let later = yielded.not_before_ms;
+    let second = claimed(
+        store
+            .claim_job(claim(yielded.revision, later))
+            .await
+            .expect("reclaim"),
+    );
+    let refused = scan_failure_settlement(
+        &TitleScanError::Failed("complete-title DV scan failed (exit status: 1)".into()),
+        &id,
+        second.failed_attempts,
+    );
+    assert!(store
+        .settle_job(settle(second.token.expect("token"), refused, later))
+        .await
+        .expect("retry"));
+    let charged = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(
+        charged.failed_attempts, 1,
+        "a file refusal is still charged"
+    );
+    assert_eq!(
+        charged.last_error_code.as_deref(),
+        Some("title_scan_failed")
+    );
+
+    // A storage read failure (a bad sector) must stay bounded by the attempt
+    // limit, so it is charged too, under its own code.
+    let third_at = charged.not_before_ms;
+    let third = claimed(
+        store
+            .claim_job(claim(charged.revision, third_at))
+            .await
+            .expect("third claim"),
+    );
+    let storage = scan_failure_settlement(
+        &TitleScanError::SourceReadFailed("source storage read failed".into()),
+        &id,
+        third.failed_attempts,
+    );
+    assert!(matches!(storage, JobSettlement::Retry { .. }));
+    assert!(store
+        .settle_job(settle(third.token.expect("token"), storage, third_at))
+        .await
+        .expect("storage retry"));
+    let bounded = store.background_job(&id).await.expect("read").expect("job");
+    assert_eq!(bounded.failed_attempts, 2, "a storage failure is charged");
+    assert_eq!(
+        bounded.last_error_code.as_deref(),
+        Some("title_source_read_failed")
+    );
+
+    // A content refusal of clean, unchanged input is a verdict: it fails the
+    // job now instead of rereading the whole title. What that does to a
+    // dv_title_scan job and its demand is pinned on every store backend by
+    // title_scan_refusal_settles_the_demand_until_the_source_or_scanner_changes.
+    let verdict = scan_failure_settlement(
+        &TitleScanError::Refused(
+            "complete-title DV scan refused (exit status: 1; stderr: DV title scan refused: \
+             independent complete selected-video endpoint unavailable)"
+                .into(),
+        ),
+        &id,
+        bounded.failed_attempts,
+    );
+    assert!(matches!(
+        verdict,
+        JobSettlement::Fail { ref error_code } if error_code == "title_scan_refused"
+    ));
+}
+
+#[tokio::test]
+async fn native_prewarm_precedes_the_whole_title_scan() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ready = AtomicBool::new(false);
+    let stats = reusable_aggregate(&stored_title(), 7).expect("aggregate");
+    let acquired = acquire_title(
+        TitleAcquisitionMode::NativePrewarm,
+        None,
+        async {
+            assert!(
+                ready.load(Ordering::Acquire),
+                "head must precede the full scan"
+            );
+            Ok(stats)
+        },
+        async {
+            ready.store(true, Ordering::Release);
+        },
+    )
+    .await
+    .expect("native title work");
+    assert!(matches!(acquired, TitleAcquisition::Complete(_)));
 }
 
 #[tokio::test]

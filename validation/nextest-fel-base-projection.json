@@ -1,0 +1,267 @@
+{
+  "additional_retained_ids_due": [
+    "plurx-core fmp4::tests::base_layer_witness_matches_across_el_and_rpu_transformation",
+    "plurx-core fmp4::video_splice::tests::moves_decode_clock_at_the_splice_without_moving_presented_pictures",
+    "plurx-core fmp4::video_splice::tests::refuses_fractional_tick_conversion_and_overlapping_payloads",
+    "plurx-core fmp4::video_splice::tests::replacement_uses_the_copy_cadence_even_when_decode_order_differs",
+    "plurx-core fmp4::video_splice::tests::requires_a_single_explicit_decode_time_and_nonempty_track",
+    "plurx-core fmp4::video_splice::tests::witness_uses_display_order_and_refuses_a_later_matching_interval"
+  ],
+  "changes": {
+    "crates/plurx-core/src/fmp4.rs": {
+      "additional_retained_ids_due": [
+        "plurx-core fmp4::tests::base_layer_witness_matches_across_el_and_rpu_transformation",
+        "plurx-core fmp4::video_splice::tests::witness_uses_display_order_and_refuses_a_later_matching_interval"
+      ],
+      "after": "61f78a5ed865c43154fec90e2d261523a88e4eba1781b0be9e06afc57136ff0d",
+      "before": "a8d3bfd718422361949daa26e7e7343a20ee05d4ecd9a9c568130a489dc0aea2",
+      "new_ids": [],
+      "reason": "base digest acceptance changed"
+    },
+    "crates/plurx-core/src/fmp4/tests.rs": {
+      "additional_retained_ids_due": [],
+      "after": "6b6a80b814523f38381e304cbd1bdabfdbdf237a31286b56c53400e67932cece",
+      "before": "98813b5f5bb9b742c24cb11752663237b899cc38d2411389fc8ee82c2bb8043f",
+      "new_ids": [
+        "plurx-core fmp4::tests::base_layer_clock_witness_matches_vcl_only_cbs_output"
+      ],
+      "reason": "new test only"
+    },
+    "crates/plurx-core/src/fmp4/track_projection.rs": {
+      "additional_retained_ids_due": [],
+      "after": "b00ffac66f69d39ebb5b4cf741ac9c5616f10ad597c761d55635a9e45ab701ec",
+      "before": "9fa036540e47342bd413110a13dfb1f9e0441c0ee517f6cd00cb4d21ba59c2c4",
+      "new_ids": [],
+      "reason": "existing extent helper visibility only"
+    },
+    "crates/plurx-core/src/fmp4/video_splice.rs": {
+      "additional_retained_ids_due": [
+        "plurx-core fmp4::video_splice::tests::moves_decode_clock_at_the_splice_without_moving_presented_pictures",
+        "plurx-core fmp4::video_splice::tests::refuses_fractional_tick_conversion_and_overlapping_payloads",
+        "plurx-core fmp4::video_splice::tests::replacement_uses_the_copy_cadence_even_when_decode_order_differs",
+        "plurx-core fmp4::video_splice::tests::requires_a_single_explicit_decode_time_and_nonempty_track",
+        "plurx-core fmp4::video_splice::tests::witness_uses_display_order_and_refuses_a_later_matching_interval"
+      ],
+      "after": "376ff0d803396fd40a187e5e4baa0b74a176bba280400a4c1f242e5161f70765",
+      "before": "cdbe705bd1a73fc6ab8288e5fa918af82c1b986b37f6b90eeff546b2c21376f1",
+      "new_ids": [
+        "plurx-core fmp4::video_splice::tests::copy_picture_clock_binds_resume_to_the_kept_media",
+        "plurx-core fmp4::video_splice::tests::copy_picture_clock_matches_real_hevc_aac_mux"
+      ],
+      "reason": "shared old single-track validation and new multi-track clock"
+    },
+    "crates/plurx-core/src/segplan/packet_clock.rs": {
+      "additional_retained_ids_due": [],
+      "after": "d9fc154f7e0a16ec158160f982d029ad4af6a5dfbdd0439b6862b1ab9deb7cdc",
+      "before": "5ca000357b386d2510cea96df7039c75a318cb6b2212f0fafb5e03b9429a16c5",
+      "new_ids": [
+        "plurx-core segplan::packet_clock::association_tests::picture_clock_requires_exact_sha256_and_preserves_source_order"
+      ],
+      "reason": "new SHA-256 parser and shared parser refactor with preserved false-mode CRC behavior"
+    },
+    "crates/plurx-core/src/transcode/dv_processing.rs": {
+      "additional_retained_ids_due": [],
+      "after": "2dc353dbf83623d6af3ce4c0a1b836cae6c0e0008033305b25765484319afb5d",
+      "before": "5224181f24c5cb490ddf87a00ec1215d3fc624dcefc828a8aa499962cf5b5bc2",
+      "new_ids": [],
+      "reason": "additive observed grid solver and source-index getter"
+    },
+    "crates/plurx-core/src/transcode/dv_processing/tests.rs": {
+      "additional_retained_ids_due": [],
+      "after": "2c1d3ba5293e74dfeac6bf30cf6ce8d08038a4aede6092e5be789bd41f2a9d3e",
+      "before": "91fc085f0a43741706e8a214e7b6c4a88c75476bbffa5d6921931176b51aacac",
+      "new_ids": [
+        "plurx-core transcode::dv_processing::tests::observed_resume_clock_recovers_the_actual_first_frame_and_requires_a_complete_grid"
+      ],
+      "reason": "new test only"
+    },
+    "crates/plurx-core/src/transcode/index_pipe_tests.rs": {
+      "additional_retained_ids_due": [],
+      "after": "43296d907a3004166f0379fd0b5baa1bd4827a3a1bbc80c441c5c7a151d2c885",
+      "before": "ba18e79fce5a21d75798f988f865bdcbcc32abe8cf4c84e52d73a5dd1b369517",
+      "new_ids": [
+        "plurx-core transcode::index_pipe_tests::picture_clock_keeps_existing_av_output_and_bounds_only_the_observation"
+      ],
+      "reason": "new test only"
+    },
+    "crates/plurx-core/src/transcode/mod.rs": {
+      "additional_retained_ids_due": [],
+      "after": "c0655d5a586cdc1b217c7508354a995a944bc39d33a5acb1294bd1516479bf53",
+      "before": "6a63b54c16d1e72cabcae0f7233e4a9089641b82b0b842ae9779e2c81a639835",
+      "new_ids": [],
+      "reason": "new Linux-used argv recipe and identical inherited descriptor extraction"
+    },
+    "crates/plurx-core/tests/fixtures/dv-runtime/authored-with-aac.framehash": {
+      "additional_retained_ids_due": [],
+      "after": "7ef97344b0d49f042155a8c3343798e9a5eb789dcb01821957731bd47a3ef4cc",
+      "before": null,
+      "new_ids": [],
+      "reason": "New checked-in fixture used by the portable copy-picture clock and AAC mux regression."
+    },
+    "crates/plurx-core/tests/fixtures/dv-runtime/authored-with-aac.mp4": {
+      "additional_retained_ids_due": [],
+      "after": "df7fc9a0d4aa05e277abf235550abac9b1dc52031d995edc2d9c2de8f669985c",
+      "before": null,
+      "new_ids": [],
+      "reason": "New checked-in fixture used by the portable copy-picture clock and AAC mux regression."
+    },
+    "crates/plurx-core/tests/store_contract/dv_title_jobs.rs": {
+      "additional_retained_ids_due": [],
+      "after": "95646795c4013d1dd79a799aa26e7dc2cae324dd32d5b32b5b105f9a85ea4ec0",
+      "before": "5bcf53c4f3bd8a98b21c6940a102b7c80e8ace99524c07f8d47780ea3bc79bcc",
+      "new_ids": [],
+      "reason": "already-due AE case replaces unwraps with diagnostic expects"
+    },
+    "crates/plurxd/src/copyrange.rs": {
+      "additional_retained_ids_due": [],
+      "after": "125f55627830af6cf6fadc7d8c80150c7243bc85bfedcb3540a126b94c155690",
+      "before": "3362b3fd92986a32571cb27244b08d463827f2508248665a16255ad3a442b46e",
+      "new_ids": [],
+      "reason": "Unix visibility only"
+    },
+    "crates/plurxd/src/copyrange/pipes.rs": {
+      "additional_retained_ids_due": [],
+      "after": "4bae1024d9576800a4d7bb7ef8c0f72dba08da94c6a93f164efb8015bab5013c",
+      "before": "f5bc4f4368142b173e6ba8d48a59ba70fcdc56f3b336595e908f942a70e3c94a",
+      "new_ids": [],
+      "reason": "Unix visibility only"
+    },
+    "crates/plurxd/src/copyseg.rs": {
+      "additional_retained_ids_due": [],
+      "after": "95f768094b2b147ccc3eec53df0d9f85e9733e833431e0df4d5b96bca8d14166",
+      "before": "63c528924ef200b9d8a713f5c3b87181cc960c6c8d6dfa988a6ead7dac91ef16",
+      "new_ids": [
+        "plurxd::bin/plurxd copyseg::native_copy_picture_clock_binds_before_pipe_eof"
+      ],
+      "reason": "Linux split-only readiness, clock pipe, and FEL converter qualification"
+    },
+    "crates/plurxd/src/producer_spawn.rs": {
+      "additional_retained_ids_due": [],
+      "after": "588d0ac89a834f3fb15fb16c6fc2df3607c0cfe49d514d799034a7f2666d5af4",
+      "before": "6cdfb6c0d1f73814dd1a9f506ab4f28c559d21efe877dbecb75b361b05baed20",
+      "new_ids": [],
+      "reason": "additive Linux FD7 picture-clock output"
+    },
+    "crates/plurxd/src/source_input.rs": {
+      "additional_retained_ids_due": [],
+      "after": "fb1b2fb227b7f133446e8adbddcbe06f5fb34069932e0073c1c331428f3706bc",
+      "before": "70f7a947db0600d63caba5f4c886fb5ff837a81d2a03fa5aea56e494cbd386d3",
+      "new_ids": [],
+      "reason": "additive Linux unchanged-source version getter"
+    },
+    "crates/plurxd/src/source_probe.rs": {
+      "additional_retained_ids_due": [],
+      "after": "bf2e9b04282098022692b0bb1c0aa7e878a0368ceb2376137c47cb80b7d06a0b",
+      "before": "6bf11539b4666ca3ebcc289f831a70fbd8b3673cb1ed02b8f5ff667074915f8f",
+      "new_ids": [],
+      "reason": "Linux FEL hardware-only initialization"
+    },
+    "crates/plurxd/src/source_probe/title_work.rs": {
+      "additional_retained_ids_due": [],
+      "after": "514d0192688ec471836a455c04630187a49e7db22f5aae43c1efc6b32d7c9a32",
+      "before": "327f4d2ff2345997d2fa1eace78a516a015e44e4f3c7bd26ed558b7db951926d",
+      "new_ids": [],
+      "reason": "Linux title admission observes backend before demand discovery"
+    },
+    "crates/plurxd/src/transcode.rs": {
+      "additional_retained_ids_due": [],
+      "after": "7dddf450ba0b83489f497c758181ae9ff20e4df248fcc594977c913691977552",
+      "before": "3a3a8ca0f0bee61b51cfc30963e42ce89cb89417af13e045f25679499393e02b",
+      "new_ids": [],
+      "reason": "Linux-only backend state field"
+    },
+    "crates/plurxd/src/transcode/manager/construct.rs": {
+      "additional_retained_ids_due": [],
+      "after": "16f88ecf66ee3e256536cec33dad37a72d2aa5cc3dd304fd30acacb14334cb3c",
+      "before": "d56b41d8524d65b5ae52b5dbe31d63ffa561d8057e6ec9e0f42ed4da6aa9493c",
+      "new_ids": [],
+      "reason": "Linux-only None initialization of backend field"
+    },
+    "crates/plurxd/src/transcode/manager/create.rs": {
+      "additional_retained_ids_due": [],
+      "after": "61cdbc1e5a12ee25888614315d21c05e52568e4101bee5c46feeb71b80343c2e",
+      "before": "2c046cf5dd2168a7688b5a242d00d93d59691b278cb50c7547fcd235766558e2",
+      "new_ids": [],
+      "reason": "Linux prepared/cold/resume admission and deadline fallback"
+    },
+    "crates/plurxd/src/transcode/manager/native_fel.rs": {
+      "additional_retained_ids_due": [],
+      "after": "49022c135348d74d21b081116a66e68cd9f829c6f33a48067f84630ca781f8fc",
+      "before": "fdf9c7aa70066ed42a5937b60fcc68e8871a22eb870f3e308d60bf2a2dae7338",
+      "new_ids": [],
+      "reason": "Linux backend cached verdict and equivalently factored warm-head admission"
+    },
+    "crates/plurxd/src/transcode/manager/publication.rs": {
+      "additional_retained_ids_due": [],
+      "after": "6b33315bccc88c6b09f8a3d0b4603be819121287b0f0effdccc910e12bb619c6",
+      "before": "2f70ab1e324eedda8ffcfa68a94d2c356d13827a7541084169bafbd5e5deeba0",
+      "new_ids": [],
+      "reason": "Linux source-proof join and resume source-frame ordinal"
+    },
+    "crates/plurxd/src/transcode/manager/retained_recovery_tests.rs": {
+      "additional_retained_ids_due": [],
+      "after": "ed060a902b8a2c3e3b012d5e07649402d8f096fd00c528487ab3c7b524337e88",
+      "before": "c6e06af4c6cc17ef167feda2ad17b9a4106eb618de8eb309935405cb4983610a",
+      "new_ids": [
+        "plurxd::bin/plurxd transcode::manager_create::retained_recovery_tests::native_fel_local_start_failure_can_try_vod_before_deadline",
+        "plurxd::bin/plurxd transcode::manager_create::retained_recovery_tests::native_fel_resume_requires_one_unambiguous_copy_video_stream"
+      ],
+      "reason": "one already-due AE case expanded and two Linux test additions"
+    },
+    "crates/plurxd/src/transcode/manager/start.rs": {
+      "additional_retained_ids_due": [],
+      "after": "e3bd66e511832295b89cb49cfc17d91075a9768dc6fbf917ba1c3c4354f1b418",
+      "before": "9d5c2895b9fdaf1879afd7d8d4bbbc0275b55a781f4f78bb882717b9751d6c05",
+      "new_ids": [],
+      "reason": "split startup reservation/retention order, Linux resume child and bounded failure classification"
+    },
+    "crates/plurxd/src/transcode/producer/prepublication_executor.rs": {
+      "additional_retained_ids_due": [],
+      "after": "4962b3443c21bff140902a7b34fe2f2fa125f263e69d6c5eebb77de167325a71",
+      "before": "12608d59f6bb8a88c5052e87e292c342f7fbf4ea3f582db7003306357e5a2937",
+      "new_ids": [],
+      "reason": "new Linux-only copy clock delivery"
+    },
+    "crates/plurxd/src/transcode/rolling/session.rs": {
+      "additional_retained_ids_due": [],
+      "after": "958d166015d57af4c66f3bd95cbba9c9a22159a7fa14502ee751bfd0fa7cc7bb",
+      "before": "62b2d2a085afb011a66a03eda00956fbb821370f4669e8af759aa09e56f09580",
+      "new_ids": [],
+      "reason": "same spawn fence and custody, richer callback argument"
+    }
+  },
+  "ci_current_main": "f45c8d14e4078ea0555f19b801b91acf1123b601",
+  "new_linux_only_ids": [
+    "plurxd::bin/plurxd copyseg::native_copy_picture_clock_binds_before_pipe_eof",
+    "plurxd::bin/plurxd transcode::manager_create::retained_recovery_tests::native_fel_local_start_failure_can_try_vod_before_deadline",
+    "plurxd::bin/plurxd transcode::manager_create::retained_recovery_tests::native_fel_resume_requires_one_unambiguous_copy_video_stream"
+  ],
+  "new_portable_ids": [
+    "plurx-core fmp4::tests::base_layer_clock_witness_matches_vcl_only_cbs_output",
+    "plurx-core fmp4::video_splice::tests::copy_picture_clock_binds_resume_to_the_kept_media",
+    "plurx-core segplan::packet_clock::association_tests::picture_clock_requires_exact_sha256_and_preserves_source_order",
+    "plurx-core transcode::dv_processing::tests::observed_resume_clock_recovers_the_actual_first_frame_and_requires_a_complete_grid",
+    "plurx-core transcode::index_pipe_tests::picture_clock_keeps_existing_av_output_and_bounds_only_the_observation",
+    "plurx-core fmp4::video_splice::tests::copy_picture_clock_matches_real_hevc_aac_mux"
+  ],
+  "source_before": "ae5605765e2bb99a8424ecec60ef29f22e056a0b",
+  "source_before_base": "214e4fb7821d494d84bdf368a355075e3ebed86c",
+  "unchanged_upstream_case_sources": {
+    "crates/plurxd/src/copyseg.rs": "95f768094b2b147ccc3eec53df0d9f85e9733e833431e0df4d5b96bca8d14166",
+    "crates/plurxd/src/transcode/manager/create.rs": "61cdbc1e5a12ee25888614315d21c05e52568e4101bee5c46feeb71b80343c2e",
+    "crates/plurxd/src/transcode/manager/native_fel.rs": "49022c135348d74d21b081116a66e68cd9f829c6f33a48067f84630ca781f8fc",
+    "crates/plurxd/src/transcode/manager/processed_reuse_tests.rs": "3aad281fcdf6ce36710e84d886b1ec0670c8ba38e3c72d902177737b2453c409",
+    "crates/plurxd/src/transcode/manager/retained_recovery_tests.rs": "ed060a902b8a2c3e3b012d5e07649402d8f096fd00c528487ab3c7b524337e88",
+    "crates/plurxd/src/transcode/manager/start.rs": "e3bd66e511832295b89cb49cfc17d91075a9768dc6fbf917ba1c3c4354f1b418"
+  },
+  "upstream_linux_execution_commit": "4483aa841ee40ecec69205f4d329993f5573a087",
+  "upstream_linux_log_driver_sha256": "fa17a270d69641f69a425508c6300dba165a7cf03c42a28660a367ae98dc808a",
+  "upstream_linux_log_sha256": "4d0fd221b50fc3a22050298aa61e9a14af7f89f80f4c91e80ed803f10c186acd",
+  "upstream_observed_former_ae_due_ids": [
+    "plurxd::bin/plurxd copyseg::tests::prepared_native_fel_keeps_the_single_session_when_split_activation_fails",
+    "plurxd::bin/plurxd transcode::manager_create::processed_reuse_tests::native_fel_window_requires_reaped_success_and_keeps_verified_evidence",
+    "plurxd::bin/plurxd transcode::manager_create::retained_recovery_tests::clustered_initial_vod_start_primes_a_cold_native_fel_head",
+    "plurxd::bin/plurxd transcode::manager_create::retained_recovery_tests::ready_native_fel_admission_is_limited_to_the_original_auto_copy",
+    "plurxd::bin/plurxd transcode::manager_start::prepared_native_fel_requires_the_full_startup_scratch_grant"
+  ]
+}

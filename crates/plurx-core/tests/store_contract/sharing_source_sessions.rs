@@ -973,7 +973,9 @@ async fn installed_source_lifecycle(cluster: &source_contract::SourceContractClu
             )
             .await
             .expect("unresolved owned refusal"),
-        SourceOwnedRouteAuthorityRead::Unavailable
+        SourceOwnedRouteAuthorityRead::Unavailable(
+            plurx_core::sharing_source_sessions::SourceRouteUnavailable::NotPublished
+        )
     ));
     // Actual coupled Store publication; this installed SQL receipt does not
     // allocate a producer or qualify physical readiness.

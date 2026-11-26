@@ -1,6 +1,5 @@
 # Apple TV focus — isolate frequent input updates from the app shell
 
-Build: 276
 Issue: #1130
 
 **Status:** simulator regressions passed on 2026-10-25; physical Apple TV

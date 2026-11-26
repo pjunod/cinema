@@ -1238,7 +1238,8 @@ final class AppModel: ObservableObject {
         selection: PrePlaySelection = .none,
         quality: PlaybackQuality = .auto,
         audioOffsetMs: Int = 0,
-        fileContext: PlaybackFileContext? = nil
+        fileContext: PlaybackFileContext? = nil,
+        speculative: Bool = false
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
@@ -1252,11 +1253,12 @@ final class AppModel: ObservableObject {
                 caps: document,
                 query: query,
                 legacyQuery: { snapshot.legacyQuery + query },
-                fileContext: fileContext
+                fileContext: fileContext,
+                speculative: speculative
             )
             return (decision, document)
         } catch {
-            noteAuthFailure(error)
+            if !speculative { noteAuthFailure(error) }
             throw error
         }
     }
@@ -1350,6 +1352,10 @@ final class AppModel: ObservableObject {
             noteAuthFailure(error)
             throw error
         }
+    }
+
+    func prepareHlsStartup(fileId: Int, body: CreateSessionRequest) async throws {
+        try await requireAPI().prepareHlsStartup(fileId: fileId, body: body)
     }
 
     func hlsStatus(_ sessionId: String) async throws -> PlaybackSessionStatus {

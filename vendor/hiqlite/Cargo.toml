@@ -125,6 +125,9 @@ validation-test-helpers = ["sqlite"]
 # vendor/s3-simple/PLURX-PATCH.md.
 [patch.crates-io]
 s3-simple = { path = "../s3-simple" }
+# Plurx patch 37: this fork and hiqlite-wal build on the vendored OpenRaft with
+# pre-vote, as the workspace does. See vendor/openraft/PLURX-PATCH.md.
+openraft = { path = "../openraft" }
 
 [lib]
 name = "hiqlite"

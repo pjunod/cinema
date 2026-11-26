@@ -164,6 +164,7 @@ impl TranscodeManager {
             dv_strippable: false,
             dv_convertible: false,
             dovi_reshape: false,
+            dovi_reshape_hardware: Vec::new(),
             dovi_passthrough: false,
             dovi_passthrough_qsv: false,
             hdr10_passthrough: false,
@@ -265,6 +266,14 @@ impl TranscodeManager {
 
     pub fn with_dovi_reshape(mut self, dovi_reshape: bool) -> Self {
         self.dovi_reshape = dovi_reshape;
+        self
+    }
+
+    pub fn with_dovi_reshape_hardware(
+        mut self,
+        proved: Vec<plurx_core::transcode::Encoder>,
+    ) -> Self {
+        self.dovi_reshape_hardware = proved;
         self
     }
 
@@ -1514,7 +1523,7 @@ impl TranscodeManager {
     }
 
     /// The title scanner has one software decoder thread and never uses a GPU.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn admit_dv_title(
         &self,
         playback_requested: bool,
@@ -1522,6 +1531,18 @@ impl TranscodeManager {
         if !playback_requested {
             return self.admit_source_work(1).await;
         }
+        #[cfg(target_os = "linux")]
+        {
+            self.admit_playback_dv_title().await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn admit_playback_dv_title(&self) -> Option<FragmentAdmission> {
         // Qualification prepares a successor for somebody already playing.
         // Publish distinct pressure while waiting for the heavy lane so local
         // maintenance can yield without creating a foreground encoder waiter.
@@ -1848,8 +1869,7 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {

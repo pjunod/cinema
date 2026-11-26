@@ -616,30 +616,45 @@ impl CopyPicturePipe {
         }
     }
 
+    /// Bind the rolling child's first fragment to its source pictures, or
+    /// say which part of the binding was missing.
     async fn observe(
         &mut self,
         init: &Init,
         fragment: &fmp4::Fragment,
-    ) -> Option<RollingCopySourceClock> {
-        let count = fragment.track(init.video()?.id)?.sample_count();
-        if !(2..=COPY_PICTURE_LIMIT).contains(&count)
-            || fragment.len() > plurx_core::transcode::COPY_SEGMENT_MAX_BYTES
-        {
-            return None;
+    ) -> Result<RollingCopySourceClock, &'static str> {
+        let count = init
+            .video()
+            .and_then(|video| fragment.track(video.id))
+            .map(|track| track.sample_count())
+            .ok_or("resume_clock_no_video_track")?;
+        if !(2..=COPY_PICTURE_LIMIT).contains(&count) {
+            return Err("resume_clock_sample_count");
+        }
+        if fragment.len() > plurx_core::transcode::COPY_SEGMENT_MAX_BYTES {
+            return Err("resume_clock_fragment_too_large");
         }
         let observations = tokio::time::timeout(std::time::Duration::from_millis(50), async {
             let mut observations = Vec::with_capacity(count);
             for _ in 0..count {
-                observations.push(self.observations.recv().await?);
+                observations.push(
+                    self.observations
+                        .recv()
+                        .await
+                        .ok_or("resume_clock_pipe_closed")?,
+                );
             }
-            Some(observations)
+            Ok::<_, &'static str>(observations)
         })
         .await
-        .ok()??;
+        .map_err(|_| "resume_clock_records_late")??;
         let clock = fmp4::video_splice::observe_copy_picture_clock(fragment, init, &observations)
-            .inspect_err(|error| tracing::debug!(%error, "native splice copy clock declined"))
-            .ok()?;
-        Some(RollingCopySourceClock {
+            .map_err(|error| {
+            tracing::info!(target: "plurxd::copyseg", %error, samples = count,
+                    "native splice copy clock did not match the copied pictures");
+            "resume_clock_mismatch"
+        })?;
+        Ok(RollingCopySourceClock {
             version: self.version.clone(),
             attempt: self.attempt,
             absolute_video_index: self.absolute_video_index,
@@ -688,11 +703,57 @@ async fn native_copy_picture_clock_binds_before_pipe_eof() {
     drop(write);
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[tokio::test]
+async fn native_copy_picture_clock_names_why_it_could_not_bind() {
+    let mut reader = FragmentReader::new();
+    reader.push(include_bytes!(
+        "../../plurx-core/tests/fixtures/dv-runtime/authored-with-aac.mp4"
+    ));
+    let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+        panic!("missing fixture init");
+    };
+    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+        panic!("missing fixture fragment");
+    };
+    // The side output ends before one record per copied picture arrived.
+    let (read, write) = tokio::net::UnixStream::pair().expect("fixture picture pipe");
+    drop(write);
+    let mut clock = CopyPicturePipe::spawn("fixture-source".into(), 12, 3, read);
+    assert_eq!(
+        clock.observe(&init, &fragment).await.err(),
+        Some("resume_clock_pipe_closed")
+    );
+    // An open side output that never writes is late, not closed.
+    let (read, _write) = tokio::net::UnixStream::pair().expect("fixture picture pipe");
+    let mut clock = CopyPicturePipe::spawn("fixture-source".into(), 12, 3, read);
+    assert_eq!(
+        clock.observe(&init, &fragment).await.err(),
+        Some("resume_clock_records_late")
+    );
+    // The writer's decline is the layout's recorded reason, once, and it does
+    // not decide the layout: the resumed split still owns its FEL processing
+    // until the master chooses, so no hidden successor can start meanwhile.
+    let split = NativeSplitInventory::with_startup_budget(100).require_resume_clock();
+    split.decline_unselected("resume_clock_records_late", "fixture-session");
+    split.decline_unselected("enhancement_layer_not_full", "fixture-session");
+    assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
+    assert!(split.owns_fel_processing(), "the layout is still undecided");
+    assert!(split.choose(Some((0, 0))).is_none());
+    assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
+    assert!(
+        !split.owns_fel_processing(),
+        "the master chose the ordinary mux"
+    );
+}
+
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
     startup_budget: u64,
     init_ids: std::sync::OnceLock<NativeSplitInitIds>,
     chosen: std::sync::OnceLock<bool>,
+    /// Why the layout settled on the ordinary mux, set by the decision itself.
+    declined: std::sync::OnceLock<&'static str>,
     reported_presentation: std::sync::atomic::AtomicBool,
     pub(crate) changed: tokio::sync::Notify,
     rendered_fel: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitFelReport>>,
@@ -922,8 +983,18 @@ impl NativeSplitInventory {
 
     pub(crate) fn choose(&self, range: Option<(u64, u64)>) -> Option<NativeSplitInitIds> {
         let enabled = self.chosen.get_or_init(|| {
-            self.init_ids.get().is_some()
-                && range.is_some_and(|(first, last)| self.window(first, last).is_some())
+            let reason = if self.init_ids.get().is_none() {
+                "split_init_unavailable"
+            } else if let Some((first, last)) = range {
+                if self.window(first, last).is_some() {
+                    return true;
+                }
+                "served_range_not_staged"
+            } else {
+                "no_served_range"
+            };
+            let _ = self.declined.set(reason);
+            false
         });
         if *enabled {
             self.init_ids.get().cloned()
@@ -932,12 +1003,55 @@ impl NativeSplitInventory {
         }
     }
 
+    /// Settle the layout where the writer cannot wait for the master: keep a
+    /// split the master already chose, otherwise decline it for `reason`. The
+    /// first decision is final either way. Returns whether this call declined.
+    fn settle(&self, reason: &'static str) -> (Option<NativeSplitInitIds>, bool) {
+        let mut decided_here = false;
+        let enabled = *self.chosen.get_or_init(|| {
+            decided_here = true;
+            let _ = self.declined.set(reason);
+            false
+        });
+        let ids = enabled.then(|| self.init_ids.get().cloned()).flatten();
+        (ids, decided_here)
+    }
+
+    /// The writer is abandoning the split before the master chose a layout:
+    /// record why, once, so the layout line and this log name the cause. The
+    /// layout itself stays undecided, so a resumed split keeps owning its FEL
+    /// processing until the master chooses, exactly as before.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn decline_unselected(&self, reason: &'static str, session_id: &str) {
+        if self.chosen.get() == Some(&true) {
+            return;
+        }
+        if self.declined.set(reason).is_ok() {
+            tracing::info!(
+                target: "plurxd::copyseg",
+                session = %crate::transcode::session_log_id(session_id),
+                reason,
+                "native split layout declined before selection"
+            );
+        }
+    }
+
+    /// The reason the ordinary mux was selected, once that is decided.
+    pub(crate) fn decline_reason(&self) -> Option<&'static str> {
+        self.declined.get().copied()
+    }
+
+    /// Whether this session's FEL upgrade belongs to the native splice rather
+    /// than to a prepared successor. A prepared or resumed native start owns
+    /// it while the master has not yet chosen a layout, so no successor starts
+    /// beside a splice that may still be selected. Once the master settles on
+    /// the ordinary mux the splice can never run, and the successor is the
+    /// session's only route to FEL: keeping ownership then would decline every
+    /// upgrade and strand the viewer without FEL.
     pub(crate) fn owns_fel_processing(&self) -> bool {
         #[cfg(target_os = "linux")]
-        if self.compare_prepared_head || (self.resume_clock_required && self.chosen.get().is_none())
+        if self.chosen.get().is_none() && (self.compare_prepared_head || self.resume_clock_required)
         {
-            // A prepared native start has chosen a single media element.
-            // Losing split activation must not start a hidden successor.
             return true;
         }
         self.active_ids().is_some()
@@ -1318,8 +1432,19 @@ impl SessionDir {
         {
             // Never start either member of a pair with the original copy's
             // startup grant. A selected layout already owns a live reserve.
-            active = inventory.choose(None).is_some();
+            let (ids, declined_here) = inventory.settle("startup_budget_exceeded");
+            active = ids.is_some();
             if !active {
+                if declined_here {
+                    tracing::info!(
+                        target: "plurxd::copyseg",
+                        staged_bytes = self.split_staged_bytes,
+                        payload_bytes = payload,
+                        largest_bytes = largest,
+                        startup_budget = inventory.startup_budget,
+                        "native split layout declined before selection: its startup staging exceeds the split budget"
+                    );
+                }
                 return Ok(false);
             }
         }
@@ -1330,7 +1455,7 @@ impl SessionDir {
                 && result
                     .as_ref()
                     .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
-                && inventory.choose(None).is_some()
+                && inventory.settle("optional_write_blocked").0.is_some()
             {
                 // The master selected the split while this write was
                 // optional. No bytes landed, so this member now waits for
@@ -1340,10 +1465,18 @@ impl SessionDir {
             }
             if let Err(error) = result {
                 self.optional_write = false;
-                if active || inventory.choose(None).is_some() {
+                let (ids, declined_here) = inventory.settle("split_stage_failed");
+                if active || ids.is_some() {
                     return Err(error);
                 }
-                tracing::debug!(%error, "split layout could not stage its first media");
+                if declined_here || inventory.decline_reason() == Some("optional_write_blocked") {
+                    tracing::info!(
+                        target: "plurxd::copyseg",
+                        %error,
+                        reason = inventory.decline_reason(),
+                        "native split layout declined before selection: it could not stage its first media"
+                    );
+                }
                 return Ok(false);
             }
         }
@@ -1354,7 +1487,7 @@ impl SessionDir {
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
         let committed = self.publish_file("init.mp4", &init.bytes).await?;
-        self.observe_object("init.mp4", committed);
+        self.observe_object("init.mp4", committed, None);
         if self.split_inventory.is_some() {
             match NativeSplitAuthor::new(init.clone()) {
                 Ok(author) => {
@@ -1386,8 +1519,16 @@ impl SessionDir {
                     self.split_author = Some(author);
                 }
                 Err(error) => {
-                    self.split_inventory = None;
-                    tracing::debug!(%error, "copy output declined native FEL splice packaging");
+                    // Settle the layout with this cause, so the master names
+                    // it rather than the generic `split_init_unavailable`.
+                    if let Some(inventory) = self.split_inventory.take() {
+                        inventory.settle("split_init_unsplittable");
+                    }
+                    tracing::info!(
+                        target: "plurxd::copyseg",
+                        %error,
+                        "native split layout declined: the copy initialization cannot be split"
+                    );
                 }
             }
         }
@@ -1416,9 +1557,16 @@ impl SessionDir {
                             "committed split layout lost its next media: {error}"
                         )));
                     }
-                    inventory.choose(None);
+                    let (_, declined_here) = inventory.settle("segment_packaging_failed");
+                    if declined_here {
+                        tracing::info!(
+                            target: "plurxd::copyseg",
+                            %error,
+                            segment = published.index,
+                            "native split layout declined before selection: a copy segment cannot be split"
+                        );
+                    }
                 }
-                tracing::debug!(%error, "copy segment declined native FEL splice packaging");
                 return Ok(());
             }
         };
@@ -1470,7 +1618,12 @@ impl SessionDir {
         }
         let name = published.name();
         let committed = self.publish_file(&name, &published.segment.bytes).await?;
-        self.observe_object(&name, committed);
+        // Ordinary cuts are timed by video. At EOF the mux may continue
+        // after video ends, so the last cuts cannot qualify a retained seek.
+        let video_index = (published.segment.video_ticks > 0
+            && published.reason != fmp4::CutReason::EndOfStream)
+            .then_some(published.index);
+        self.observe_object(&name, committed, video_index);
         self.write_split_segment(published).await?;
         if self.published_secs == 0.0 {
             tracing::info!(
@@ -1530,12 +1683,16 @@ impl SessionDir {
         &self,
         name: &str,
         committed: Option<crate::rolling_output::CommittedObject>,
+        video_index: Option<u64>,
     ) {
         let (Some(measurement), Some(committed)) = (&self.measurement, committed) else {
             return;
         };
         if let Ok(mut measurement) = measurement.lock() {
             measurement.committed(name, committed);
+            if let Some(index) = video_index {
+                measurement.extend_video_prefix(index);
+            }
         }
     }
 }
@@ -1905,12 +2062,18 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                         {
                             pipe.observe(init, &fragment).await
                         } else {
-                            None
+                            Err("resume_clock_pipe_missing")
                         };
-                        if let (Some(clock), Some(split)) = (clock, out.split_inventory.as_ref()) {
-                            let _ = split.source_clock.set(clock);
-                        } else {
-                            out.split_inventory = None;
+                        match (clock, out.split_inventory.as_ref()) {
+                            (Ok(clock), Some(split)) => {
+                                let _ = split.source_clock.set(clock);
+                            }
+                            (outcome, split) => {
+                                if let (Err(reason), Some(split)) = (outcome, split) {
+                                    split.decline_unselected(reason, session_id);
+                                }
+                                out.split_inventory = None;
+                            }
                         }
                     }
                     if let Some(converter) = converter.as_mut() {
@@ -1936,6 +2099,12 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                             if report.enhancement_layer
                                 != plurx_core::transcode::dvconvert::EnhancementLayer::Full
                             {
+                                if let Some(split) = out.split_inventory.as_ref() {
+                                    split.decline_unselected(
+                                        "enhancement_layer_not_full",
+                                        session_id,
+                                    );
+                                }
                                 out.split_inventory = None;
                             }
                             tracing::info!(
@@ -2305,9 +2474,43 @@ async fn blocking_reserved_write<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn split_layout_records_why_it_settled_on_the_ordinary_mux() {
+        let uninitialized = super::NativeSplitInventory::with_startup_budget(100);
+        assert!(uninitialized.decline_reason().is_none());
+        assert!(uninitialized.choose(Some((0, 3))).is_none());
+        assert_eq!(
+            uninitialized.decline_reason(),
+            Some("split_init_unavailable")
+        );
+
+        let unstaged = super::NativeSplitInventory::with_startup_budget(100);
+        unstaged.seed_for_http_test(2);
+        // The served window runs past what the split layout has staged.
+        assert!(unstaged.choose(Some((0, 3))).is_none());
+        assert_eq!(unstaged.decline_reason(), Some("served_range_not_staged"));
+
+        let budget = super::NativeSplitInventory::with_startup_budget(100);
+        assert_eq!(budget.settle("startup_budget_exceeded"), (None, true));
+        // The first decision is final: later callers neither change the
+        // layout nor overwrite the reason.
+        assert_eq!(budget.settle("split_stage_failed"), (None, false));
+        assert!(budget.choose(Some((0, 0))).is_none());
+        assert_eq!(budget.decline_reason(), Some("startup_budget_exceeded"));
+
+        let selected = super::NativeSplitInventory::with_startup_budget(100);
+        let ids = selected.seed_for_http_test(4);
+        assert_eq!(selected.choose(Some((0, 3))), Some(ids.clone()));
+        assert_eq!(
+            selected.settle("startup_budget_exceeded"),
+            (Some(ids), false)
+        );
+        assert!(selected.decline_reason().is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn prepared_native_fel_keeps_the_single_session_when_split_activation_fails() {
+    fn prepared_native_fel_leaves_the_successor_open_once_the_split_is_lost() {
         let unprepared = super::NativeSplitInventory::with_startup_budget(100);
         assert!(unprepared.choose(None).is_none());
         assert!(!unprepared.owns_fel_processing());
@@ -2315,8 +2518,31 @@ mod tests {
         let prepared =
             super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
         prepared.decline_prepared_head();
-        assert!(prepared.choose(None).is_none());
+        // Undecided: the splice may still be chosen, so no successor yet.
         assert!(prepared.owns_fel_processing());
+        assert!(prepared.choose(None).is_none());
+        // The master chose the ordinary mux: the splice can never run, so the
+        // upgrade must be free to stage a successor instead of declining.
+        assert!(!prepared.owns_fel_processing());
+
+        // A chosen split keeps ownership.
+        let selected =
+            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        let ids = selected.seed_for_http_test(2);
+        assert_eq!(selected.choose(Some((0, 1))), Some(ids));
+        assert!(selected.owns_fel_processing());
+
+        // A writer that cannot split the copy's initialization settles the
+        // layout with that cause before the master asks.
+        let unsplittable =
+            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        assert_eq!(unsplittable.settle("split_init_unsplittable"), (None, true));
+        assert!(unsplittable.choose(Some((0, 1))).is_none());
+        assert_eq!(
+            unsplittable.decline_reason(),
+            Some("split_init_unsplittable")
+        );
+        assert!(!unsplittable.owns_fel_processing());
     }
 
     #[cfg(target_os = "linux")]

@@ -26,6 +26,7 @@ async fn a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_front
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -343,6 +344,7 @@ fn preparation_row(
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -352,6 +354,7 @@ fn preparation_row(
         ..staged_candidate_request()
     };
     let response = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
         delivered_audio: None,
@@ -368,6 +371,7 @@ fn preparation_row(
         height: 1080,
         encoder: "staged".to_owned(),
         vod: true,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: Some("sdr".to_owned()),
@@ -476,6 +480,7 @@ async fn activate_superseding_route(
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -507,6 +512,7 @@ async fn activate_superseding_route(
         request: request.clone(),
     };
     let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
         delivered_audio: None,
@@ -523,6 +529,7 @@ async fn activate_superseding_route(
         height: 1080,
         encoder: "test".to_owned(),
         vod: true,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: Some("sdr".to_owned()),
@@ -847,6 +854,7 @@ async fn delivery_preparation_says_offered_with_the_prepare_action() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -855,6 +863,7 @@ async fn delivery_preparation_says_offered_with_the_prepare_action() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -928,6 +937,7 @@ async fn delivery_preparation_says_none_when_the_slot_is_empty() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -936,6 +946,7 @@ async fn delivery_preparation_says_none_when_the_slot_is_empty() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1178,6 +1189,7 @@ async fn a_second_ask_supersedes_a_preparation_in_the_registration_window() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1196,6 +1208,7 @@ async fn a_second_ask_supersedes_a_preparation_in_the_registration_window() {
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1379,6 +1392,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1387,6 +1401,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1496,7 +1511,8 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
         "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
         "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
             {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
-    let body = CreateSession { playback_id: playback.clone(), copy: Some(true), audio: Some(2), caps: Some(caps.clone()), ..bare_create() };
+    let body = CreateSession {
+            processed_upgrade: None, playback_id: playback.clone(), copy: Some(true), audio: Some(2), caps: Some(caps.clone()), ..bare_create() };
     let query = body.selection_catalog_request(source, &caps, body.reviewed_copy_scope(None));
     assert!(query.copy_contract.is_some(), "the source route really is Copy");
     let candidate = QualityCandidate {
@@ -1527,7 +1543,7 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
     predecessor.decoder_caps = Some(decoder.clone());
     fixture.state.transcode.vod_for_test().install_http_test_session(&session_id, source.clone(), dir.path()).await;
     stage_prepared_successor(&fixture.state, &session_id, &route, &predecessor, &processed, Some(source),
-        AcceptedAsk { prepared_proof: None, planning_registration: None, quality_intent: None,
+        AcceptedAsk { platform: None, prepared_proof: None, planning_registration: None, quality_intent: None,
             planning_cancellation: None, film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS, desired_digest: None }).await;
     let staged = fixture.store.staged_media_session_for_playback(&route.principal, &playback).await
         .expect("staged read").expect("successor staged");
@@ -1688,6 +1704,7 @@ async fn a_supersession_in_the_registration_window_still_frees_the_preparation()
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1706,6 +1723,7 @@ async fn a_supersession_in_the_registration_window_still_frees_the_preparation()
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1792,6 +1810,7 @@ async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration()
         dv_refit_digest: None,
         continuous_media: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         playback_id: playback_id.clone(),
         ..staged_candidate_request()
     };
@@ -1808,6 +1827,7 @@ async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration()
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -2271,6 +2291,7 @@ fn staged_source_file() -> plurx_core::domain::MediaFile {
 
 fn staged_candidate_request() -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2278,6 +2299,7 @@ fn staged_candidate_request() -> crate::transcode::SessionRequest {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2632,6 +2654,7 @@ async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
             .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
             response_json: serde_json::to_string(&StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
                 delivered_audio: None,
@@ -2648,6 +2671,7 @@ async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
                 height: 720,
                 encoder: "software".to_owned(),
                 vod: false,
+                startup_seek_ready_ms: None,
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
@@ -3189,4 +3213,39 @@ async fn continuous_family_quality_does_not_stage_a_legacy_successor() {
         &recipe,
         &request.selection
     ));
+}
+
+/// A planned successor of a split copy keeps the negotiated soundtrack
+/// alternates, so a language change never re-plans into a muxed recipe that
+/// would cross the audio axis and stage a replacement session.
+#[test]
+fn a_split_copy_successor_keeps_its_soundtrack_alternates() {
+    let mut source = staged_source_file();
+    source.audio_streams = (0..2)
+        .map(|index| plurx_core::domain::AudioStream {
+            index,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        })
+        .collect();
+    let copy = crate::transcode::SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    let mut predecessor = staged_candidate_request();
+    predecessor.kind = copy;
+    predecessor.audio_index = Some(0);
+    predecessor.split_audio = true;
+    let mut candidate = predecessor.clone();
+    candidate.split_audio = false; // a re-planned successor has no negotiation of its own
+    candidate.audio_index = Some(1);
+    let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
+    assert!(candidate.split_audio);
+    candidate.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+    let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
+    assert!(!candidate.split_audio, "an encoded successor is not a split copy");
 }

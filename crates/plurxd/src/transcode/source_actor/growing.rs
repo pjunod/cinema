@@ -24,13 +24,36 @@ impl SourceGrowingPreparation {
         self.source_owner.detach_and_wait().await
     }
 }
+/// The control lease a growing copy keeps: the shared session lease every
+/// shared client is promised (`lease_timeout_ms` 300 000). Its Start
+/// bootstrap advertises it, its control replies report it, and the copy
+/// retires only once that long has passed without viewer activity, so each
+/// layer names the lease that is actually honoured.
+pub(crate) const GROWING_LEASE_TIMEOUT_MS: u32 = crate::playback_control::VOD_LEASE_TIMEOUT_MS;
+
+/// When a growing copy last saw its viewer, against an explicit clock.
+pub(crate) struct GrowingActivity(std::sync::Mutex<Instant>);
+impl GrowingActivity {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self(std::sync::Mutex::new(now))
+    }
+    pub(crate) fn note_at(&self, now: Instant) {
+        let mut last = self.0.lock().expect("Source growing activity");
+        *last = (*last).max(now);
+    }
+    pub(crate) fn expired_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(*self.0.lock().expect("Source growing activity"))
+            >= Duration::from_millis(u64::from(GROWING_LEASE_TIMEOUT_MS))
+    }
+}
+
 pub(crate) struct SourceGrowingBacking {
     pub(crate) session_id: String,
     pub(crate) file: Arc<plurx_core::domain::MediaFile>,
     pub(crate) request: SessionRequest,
     pub(crate) production: Arc<CopyRangeProduction>,
     pub(crate) delivery: Arc<crate::meter::Meter>,
-    activity: std::sync::Mutex<Instant>,
+    activity: GrowingActivity,
     pub(crate) lifecycle: tokio::sync::Mutex<()>,
     pub(crate) control: tokio::sync::Mutex<super::control::GrowingControlState>,
     pub(crate) owners: Arc<SourceRenditionOwners>,
@@ -46,31 +69,41 @@ pub(crate) struct SourceGrowingBacking {
 impl SourceGrowingBacking {
     /// The path is independently reopened and checked against this range's
     /// held object, so a replacement cannot authorize cached old AV bytes.
+    /// A copy that is no longer live, or an object proven not the one this
+    /// range holds, is the session's end: a retry could only keep failing
+    /// against a replaced file. An object that could not be read just now
+    /// passes; the caller bounds that by the confirmed lease.
     pub(crate) async fn physical_fence(
         &self,
-    ) -> Result<crate::fragment_index_cluster::SourceFence, SourceWorkerError> {
+    ) -> Result<crate::fragment_index_cluster::SourceFence, super::LiveRefusal> {
         if !self.is_live() {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(super::LiveRefusal::terminal(SourceWorkerError::Unavailable));
         }
         self.source
-            .reopen(&self.file)
+            .reopen_classified(&self.file)
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)
+            .map_err(|error| super::LiveRefusal::from_fence(&error))
     }
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
             && self.owners.contains_live_assignment(&self.assignment)
-            && self.source.unchanged()
+            && self.source.unchanged_in_place()
     }
+    /// Viewer activity: the first publication, an authenticated resource
+    /// fetch, or a control exchange the fence accepted. A refused exchange is
+    /// not, or a viewer whose anchor never reaches the produced range would
+    /// hold this copy without being served; neither is B's own Status, which
+    /// says B's owner is alive, not that anyone is watching.
     pub(crate) fn note_activity(&self) {
-        *self.activity.lock().expect("Source growing activity") = Instant::now();
+        self.activity.note_at(Instant::now());
+    }
+    /// Whether the lease has run out at `now`: one lease after the last
+    /// viewer activity. The retirement loop asks it for the current instant.
+    pub(crate) fn activity_expired_at(&self, now: Instant) -> bool {
+        self.activity.expired_at(now)
     }
     fn activity_expired(&self) -> bool {
-        self.activity
-            .lock()
-            .expect("Source growing activity")
-            .elapsed()
-            >= Duration::from_millis(u64::from(crate::playback_control::ROLLING_LEASE_TIMEOUT_MS))
+        self.activity_expired_at(Instant::now())
     }
     pub(crate) async fn observe_demand(
         &self,
@@ -95,12 +128,19 @@ impl SourceGrowingBacking {
 }
 
 impl SourceViewerActor {
+    /// Every refusal states whether it passes ([`super::LiveRefusal`]): a
+    /// resource the receiver must not retire a live session over is
+    /// `transient`; a malformed request or a session that is over is not.
     pub(super) async fn open_growing_resource_owned(
         &self,
         backing: Arc<SourceGrowingBacking>,
         resource: &SharingHlsResource,
         deadline: Instant,
-    ) -> Result<SourceOpenedResource, SourceWorkerError> {
+    ) -> Result<SourceOpenedResource, super::LiveRefusal> {
+        use super::LiveRefusal;
+        let unsupported = LiveRefusal::terminal(SourceWorkerError::Unsupported);
+        let ended = LiveRefusal::terminal(SourceWorkerError::Unavailable);
+        let pending = LiveRefusal::transient(SourceWorkerError::Unavailable);
         let native = self
             .0
             .state
@@ -119,7 +159,7 @@ impl SourceViewerActor {
             })
         }) || (query.is_some() && native.is_none())
         {
-            return Err(SourceWorkerError::Unsupported);
+            return Err(unsupported);
         }
         let kind = if resource.kind() == SharingHlsResourceKind::Index
             && query.is_some_and(|query| query.split('&').any(|part| part == "native=1"))
@@ -131,14 +171,17 @@ impl SourceViewerActor {
         {
             let mut current = self.0.state.lock().expect("Source worker state");
             if current.retirement_requested
-                || current.bodies >= 64
                 || current
                     .start
                     .as_ref()
                     .and_then(|start| start.as_ref().ok())
                     .is_none_or(|start| start.session_id != backing.session_id)
             {
-                return Err(SourceWorkerError::Unavailable);
+                return Err(ended);
+            }
+            // Bodies close as their transfers end.
+            if current.bodies >= 64 {
+                return Err(pending);
             }
             current.bodies += 1;
         }
@@ -148,10 +191,16 @@ impl SourceViewerActor {
             source_request: None,
         };
         let initial = self.0.gate.current_owned(&self.0.assignment).await?;
+        // An observation older than its bound is refreshed by the next read.
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-            .map_err(|_| SourceWorkerError::Unavailable)?;
-        guard.source = Some(backing.physical_fence().await?);
+            .map_err(|_| pending)?;
+        guard.source = Some(
+            backing
+                .physical_fence()
+                .await
+                .map_err(|refusal| self.0.gate.bounded(refusal))?,
+        );
         let guard = Arc::new(guard);
         let custody = resource::SourceResourceReadCustody::new(
             Arc::clone(&guard),
@@ -170,6 +219,13 @@ impl SourceViewerActor {
                     .rsplit('/')
                     .next()
                     .unwrap_or("");
+                // The wait window starts here: what production has
+                // committed by now is what a deadline is judged against.
+                let waiter = crate::copyrange::CommitWaiter::begin(
+                    backing.production.as_ref(),
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await;
                 let mut ready = loop {
                     let changed = backing.production.changed.notified();
                     tokio::pin!(changed);
@@ -189,26 +245,41 @@ impl SourceViewerActor {
                                 .round()
                                 .clamp(0.0, u32::MAX as f64) as u32
                         });
+                        // The published segment is immutable. Open it with the
+                        // range released: the renewal tick and the read bank
+                        // need this lock, and an open on a slow or hung share
+                        // must not hold them.
+                        let payload = files.payload.clone();
+                        let path = files.payload_path.join(name);
+                        drop(files);
                         let mut ready = custody
-                            .open_ready_child(
-                                &files.payload,
-                                &files.payload_path.join(name),
-                                name,
-                                &etag,
-                                &backing.delivery,
-                            )
+                            .open_ready_child(&payload, &path, name, &etag, &backing.delivery)
                             .await
-                            .map_err(|_| SourceWorkerError::Unavailable)?;
+                            .map_err(|_| pending)?;
                         ready.observed_media_duration_ms = duration;
                         break ready;
                     }
+                    // A range that ended without it, or a copy that died,
+                    // will never publish it; one still running may yet.
                     if files.complete() || !backing.is_live() {
-                        return Err(SourceWorkerError::Unavailable);
+                        return Err(ended);
                     }
                     drop(files);
-                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
-                        .await
-                        .map_err(|_| SourceWorkerError::Deadline)?;
+                    if let Err(end) = waiter.changed(changed).await {
+                        // Anything not yet published is at or past the
+                        // production head. A viewer waiting there while the
+                        // bank holds is ahead of the bank's own picture of
+                        // it: re-anchor the bank to it, so production resumes,
+                        // and a hold that persists no longer excuses a wait.
+                        if end == crate::copyrange::DeadlineEnd::Slow
+                            && backing.production.is_holding()
+                        {
+                            backing.production.reanchor_at_head();
+                        }
+                        return Err(
+                            self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
+                        );
+                    }
                 };
                 // The opened immutable segment is pinned through the real body.
                 ready.delivery = Arc::clone(&backing.delivery);
@@ -217,25 +288,30 @@ impl SourceViewerActor {
             SharingHlsResourceKind::Master
             | SharingHlsResourceKind::SubtitlePlaylist { .. }
             | SharingHlsResourceKind::SubtitleSegment { .. } => {
-                let tracks = native.as_ref().ok_or(SourceWorkerError::Unsupported)?;
-                if !tracks.matches(&self.0.assignment, &backing.file) {
-                    return Err(SourceWorkerError::Unavailable);
+                // The master needs no prepared subtitle tracks: without them
+                // it admits none and still declares the session's range.
+                let tracks = native.as_ref();
+                if kind != SharingHlsResourceKind::Master && tracks.is_none() {
+                    return Err(unsupported);
                 }
-                let manager = self
+                if tracks.is_some_and(|tracks| !tracks.matches(&self.0.assignment, &backing.file)) {
+                    return Err(ended);
+                }
+                let manager = self.0.manager.upgrade().ok_or(ended)?;
+                let probe = self
                     .0
-                    .manager
-                    .upgrade()
-                    .ok_or(SourceWorkerError::Unavailable)?;
-                let probe = tracks.presentation_probe();
+                    .state
+                    .lock()
+                    .expect("Source copy presentation")
+                    .presentation_probe
+                    .clone();
                 let files = backing.production.files.lock().await;
                 let video = files.playlist();
-                let origin = files
-                    .media_origin_ms()
-                    .ok_or(SourceWorkerError::Unavailable)? as f64
-                    / 1000.0;
+                // Known once the copy's first landing is verified.
+                let origin = files.media_origin_ms().ok_or(pending)? as f64 / 1000.0;
                 drop(files);
-                match kind {
-                    SharingHlsResourceKind::Master => {
+                match (kind, tracks) {
+                    (SharingHlsResourceKind::Master, tracks) => {
                         let SessionKind::Copy {
                             aac,
                             preserve_dolby_vision,
@@ -243,7 +319,7 @@ impl SourceViewerActor {
                             dual_layer_as_copied,
                         } = backing.request.kind
                         else {
-                            return Err(SourceWorkerError::Unsupported);
+                            return Err(unsupported);
                         };
                         let (codecs, supplemental_codecs) = copied_hls_codecs(
                             &backing.file,
@@ -272,25 +348,28 @@ impl SourceViewerActor {
                         };
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
                             &backing.file,
-                            tracks.selected(),
+                            tracks.and_then(|tracks| tracks.selected()),
                             &context,
-                            &tracks.indexes(),
+                            &tracks.map(|tracks| tracks.indexes()).unwrap_or_default(),
                         ))
                     }
-                    SharingHlsResourceKind::SubtitlePlaylist { index } => {
+                    (SharingHlsResourceKind::SubtitlePlaylist { index }, Some(tracks)) => {
                         if !tracks.has_track(index) {
-                            return Err(SourceWorkerError::Unsupported);
+                            return Err(unsupported);
                         }
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_playlist(
                             &video,
                         ))
                     }
-                    SharingHlsResourceKind::SubtitleSegment { index } => {
+                    (SharingHlsResourceKind::SubtitleSegment { index }, Some(tracks)) => {
                         if !tracks.has_track(index) {
-                            return Err(SourceWorkerError::Unsupported);
+                            return Err(unsupported);
                         }
                         if let Some(revision) = resource.cached_subtitle_revision() {
-                            let cached = tracks.cached(index, revision, &custody).await?;
+                            let cached = tracks
+                                .cached(index, revision, &custody)
+                                .await
+                                .map_err(subtitle_refusal)?;
                             let absent = cached.is_none();
                             let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
@@ -311,36 +390,37 @@ impl SourceViewerActor {
                                 .strip_prefix("seg")
                                 .and_then(|name| name.strip_suffix(".vtt"))
                                 .and_then(|name| name.parse::<u64>().ok())
-                                .ok_or(SourceWorkerError::Unsupported)?;
+                                .ok_or(unsupported)?;
                             // The same windowed sparse read the full-VOD
                             // Source uses; no separate whole-track extraction.
                             let bytes = tracks
                                 .segment(
                                     &manager, index, &video, sequence, origin, &custody, deadline,
                                 )
-                                .await?
-                                .ok_or(SourceWorkerError::Unavailable)?;
+                                .await
+                                .map_err(subtitle_refusal)?
+                                .ok_or(pending)?;
                             if bytes.len() > 2 * 1024 * 1024 {
-                                return Err(SourceWorkerError::Capacity);
+                                return Err(LiveRefusal::terminal(SourceWorkerError::Capacity));
                             }
                             SourceResourcePayload::SubtitleText(bytes)
                         }
                     }
-                    _ => return Err(SourceWorkerError::Unsupported),
+                    _ => return Err(unsupported),
                 }
             }
         };
         if let SourceResourcePayload::Playlist(bytes) = &payload {
             plurx_core::sharing_resources::validate_sharing_playlist(resource, bytes)
-                .map_err(|_| SourceWorkerError::Unsupported)?;
+                .map_err(|_| unsupported)?;
         }
         if Instant::now() >= deadline {
-            return Err(SourceWorkerError::Deadline);
+            return Err(LiveRefusal::transient(SourceWorkerError::Deadline));
         }
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
         proof
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|_| pending)?;
         if !backing.is_live()
             || self
                 .0
@@ -349,25 +429,50 @@ impl SourceViewerActor {
                 .expect("Source worker state")
                 .retirement_requested
         {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(ended);
         }
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != backing.session_id
             || route.publication_ready_at_ms != 0
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
-            return Err(SourceWorkerError::Unavailable);
+            return Err(ended);
         }
+        // Every authenticated resource the viewer fetches is activity; only
+        // a served media segment is presentation evidence.
+        backing.note_activity();
         if kind == SharingHlsResourceKind::MediaSegment {
-            backing.note_activity();
             backing.note_media_served().await;
         }
         drop(custody);
-        let guard = Arc::try_unwrap(guard).map_err(|_| SourceWorkerError::Unresolved)?;
+        // A response body still shares this guard; it is released with it.
+        let guard = Arc::try_unwrap(guard)
+            .map_err(|_| LiveRefusal::transient(SourceWorkerError::Unresolved))?;
         Ok(SourceOpenedResource { payload, guard })
+    }
+}
+
+impl SourceViewerActor {
+    /// A resource wait that reached its deadline. It passes only if the
+    /// range's production advanced during the wait
+    /// ([`crate::copyrange::CopyRangeProduction::stalled_since`]): a slow
+    /// producer is still producing, and the viewer's next request will find
+    /// more. A producer that committed nothing in a whole wait window,
+    /// without holding by design, is stuck: no retry can be served, so the
+    /// refusal is terminal and the session is retired, closing its
+    /// connections, rather than kept alive by its viewer's polling.
+    pub(super) fn deadline_refusal(&self, stalled: bool) -> super::LiveRefusal {
+        if !stalled {
+            return super::LiveRefusal::transient(SourceWorkerError::Deadline);
+        }
+        // The inner wait and the request's own deadline can both judge the
+        // same stall; only the one that starts the retirement says so.
+        if !self.is_retiring() {
+            tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.producer_stalled", "Source growing copy committed nothing in a resource wait; retiring it");
+        }
+        let stuck = super::LiveRefusal::terminal(SourceWorkerError::Unavailable);
+        self.retire_on_terminal(Some(&stuck));
+        stuck
     }
 }
 
@@ -379,12 +484,13 @@ impl TranscodeManager {
         prepared: &crate::http::hls::PreparedSourcePlayback,
         session_id: String,
         deadline: Instant,
+        stage: &mut &'static str,
     ) -> Result<Arc<SourceGrowingBacking>, SourceWorkerError> {
         use crate::copyrange::{
             run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
             ObservedCopyMux,
         };
-        use plurx_core::transcode::CopyVideoOptions;
+        *stage = "growing.copy_kind";
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -394,7 +500,9 @@ impl TranscodeManager {
         else {
             return Err(SourceWorkerError::Unsupported);
         };
+        *stage = "growing.preparation_authority";
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        *stage = "growing.probe_evidence";
         let probe = self
             .store
             .source_index_probe_evidence(&authority)
@@ -404,26 +512,25 @@ impl TranscodeManager {
             .as_ref()
             .is_some_and(|probe| probe.len() > 1024 * 1024)
         {
+            *stage = "growing.probe_bound";
             return Err(SourceWorkerError::Unsupported);
         }
-        // The native master presents the same probe this copy was planned from.
-        if let Some(tracks) = owner
+        // The master presents the same probe this copy was planned from.
+        owner
             .state
             .lock()
             .expect("Source copy presentation")
-            .native
-            .as_ref()
-        {
-            tracks.set_presentation_probe(probe.as_deref());
-        }
-        let video = CopyVideoOptions::from_probe(
+            .presentation_probe
+            .clone_from(&probe);
+        let video = self.source_copy_video_options(
             prepared.file(),
             probe.as_deref(),
-            false,
             preserve_dolby_vision,
-        )
-        .with_dolby_vision_conversion(convert_dolby_vision);
+            convert_dolby_vision,
+        );
+        *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
+        *stage = "growing.rendition_owner";
         let owners = Arc::new(SourceRenditionOwners::default());
         let source_owner = owners
             .attach(&owner.assignment)
@@ -439,14 +546,17 @@ impl TranscodeManager {
         {
             let mut current = owner.state.lock().expect("Source worker state");
             if current.retirement_requested {
+                *stage = "growing.retirement_requested";
                 return Err(SourceWorkerError::Unavailable);
             }
             current.backing = SourceBacking::PreparingRange(Arc::clone(&preparing));
         }
         let file = Arc::new(prepared.file().clone());
+        *stage = "growing.playback_fence";
         let source = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.source_request";
         let request = self
             .foreground_source_request(
                 &file,
@@ -455,13 +565,22 @@ impl TranscodeManager {
                 plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
             )
             .ok_or(SourceWorkerError::Unavailable)?;
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.head_dispatch";
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
+        *stage = "growing.head_input";
         let input = crate::source_input::SourceInput::open_foreground_held(
             request.clone(),
             source
@@ -472,6 +591,7 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.copy_head_census";
         let census = Arc::new(
             run_source_census(
                 input,
@@ -494,14 +614,17 @@ impl TranscodeManager {
                 SourceWorkerError::copy_failure(&error)
             })?,
         );
+        *stage = "growing.copy_head_clock";
         if census.format_start.is_none() {
             return Err(SourceWorkerError::CopyClockUnknown);
         }
         // Every later generation reads this same held object; a census of a
         // different witness cannot establish its clock or normalization.
         if census.source_object_version != source.object_version() {
+            *stage = "growing.object_version";
             return Err(SourceWorkerError::RescanRequired);
         }
+        *stage = "growing.normalization_contract";
         let contract = Arc::new(
             crate::copy_normalization::CopyNormalizationContract::from_head(
                 &file,
@@ -511,23 +634,27 @@ impl TranscodeManager {
             )
             .map_err(|_| SourceWorkerError::Unsupported)?,
         );
+        *stage = "growing.copy_head_begin";
         let head = contract
             .begin(
                 census.raw_canonical_init.clone(),
                 census.raw_av_init.clone(),
             )
             .map_err(|_| SourceWorkerError::RescanRequired)?;
+        *stage = "growing.copy_head_caps";
         prepared
             .validate_copy_head(head.canonical_init())
             .map_err(|_| SourceWorkerError::RescanRequired)?;
         // The cluster's shared catalogue identity: file ids are scoped to it,
         // and every member reports the same value.
+        *stage = "growing.catalog_namespace";
         let namespace = state
             .store
             .instance_id()
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
         let video_identity = crate::fragindex::identity_for(&file, video).argv_fingerprint;
+        *stage = "growing.observation_source";
         let observation_source = crate::copy_analysis::source_for_copy(
             &namespace,
             &file,
@@ -536,11 +663,13 @@ impl TranscodeManager {
             owner.assignment.owner_node_id(),
         )
         .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.observation_root";
         let observation_root = state
             .copy_observation_dir
             .as_ref()
             .ok_or(SourceWorkerError::Unavailable)?;
         let range_id = uuid::Uuid::new_v4();
+        *stage = "growing.range_files";
         let files = CopyRangeFiles::create(
             &self.work_dir,
             observation_root,
@@ -564,6 +693,7 @@ impl TranscodeManager {
             transcode_audio: aac,
             audio_delivery: prepared.request().audio_delivery.clone(),
         };
+        *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
             census.first_dts,
@@ -573,18 +703,28 @@ impl TranscodeManager {
             file.video_codec.as_deref() == Some("hevc"),
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
+        *stage = "growing.copy_args";
         let args = recipe
             .args(&file, prepared.request().start_seconds)
             .map_err(|_| SourceWorkerError::Unsupported)?;
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.primary_dispatch";
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         // The census Input and every reader are joined. Reopen independently
         // against the exact object before the primary operation gets a URL.
+        *stage = "growing.primary_input";
         let mut input = crate::source_input::SourceInput::open_foreground_held(
             request,
             source
@@ -603,11 +743,13 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unavailable);
                 }
             };
+        *stage = "growing.source_observer";
         let observer = input.observer();
         input
             .publish_source_observer(&owners, 1)
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.primary_spawn";
         let running = spawn_source_generation(
             input,
             &file.path,
@@ -639,7 +781,7 @@ impl TranscodeManager {
             request: prepared.request().clone(),
             production,
             delivery: Arc::new(crate::meter::Meter::for_method("copy")),
-            activity: std::sync::Mutex::new(Instant::now()),
+            activity: GrowingActivity::new(Instant::now()),
             lifecycle: tokio::sync::Mutex::new(()),
             control: Default::default(),
             owners,
@@ -674,10 +816,12 @@ impl TranscodeManager {
         let actor = SourceViewerActor(Arc::clone(&owner));
         let mut unowned_existing = true;
         let mut backing = None;
+        let mut startup_stage = "growing.deadline";
         let start = async {
             if Instant::now() >= deadline {
                 return Err(SourceWorkerError::Deadline);
             }
+            startup_stage = "growing.existing_route";
             if self
                 .store
                 .media_session_route_by_incarnation(
@@ -690,6 +834,7 @@ impl TranscodeManager {
                 return Err(SourceWorkerError::Unresolved);
             }
             unowned_existing = false;
+            startup_stage = "growing.delivery_refusal";
             if source_delivery_refusal(
                 prepared.request(),
                 prepared.file(),
@@ -701,11 +846,13 @@ impl TranscodeManager {
             {
                 return Err(SourceWorkerError::Unsupported);
             }
+            startup_stage = "growing.start_budget";
             let startup_budget = self
                 .source_start_budget_for_request(prepared.request())
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
             let deadline = deadline.min(Instant::now() + startup_budget);
+            startup_stage = "growing.native_tracks";
             if prepared.native_subtitles().0 {
                 let tracks = super::super::source_subtitles::SourceNativeTracks::prepare(
                     prepared.file(),
@@ -718,7 +865,14 @@ impl TranscodeManager {
             }
             let session_id = uuid::Uuid::new_v4().to_string();
             let actual = self
-                .prepare_source_growing(&owner, &state, &prepared, session_id.clone(), deadline)
+                .prepare_source_growing(
+                    &owner,
+                    &state,
+                    &prepared,
+                    session_id.clone(),
+                    deadline,
+                    &mut startup_stage,
+                )
                 .await?;
             backing = Some(Arc::clone(&actual));
             // Existing fresh shared Apple/Android attachment starts at 1x.
@@ -729,6 +883,7 @@ impl TranscodeManager {
             } else {
                 RollingStartupPolicy::NativePresentationWindow
             };
+            startup_stage = "growing.eligible_window";
             let origin = actual
                 .production
                 .wait_eligible(
@@ -739,12 +894,23 @@ impl TranscodeManager {
                     deadline,
                 )
                 .await
-                .map_err(|error| SourceWorkerError::copy_failure(&error))?;
+                .map_err(|error| {
+                    // copy_failure folds nine distinct copy-clock codes into
+                    // CopyClockUnknown; keep the producer's own code, as the
+                    // census stage does ("Source copy head refused").
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        reason = %error,
+                        start_ms = (prepared.request().start_seconds * 1000.0).round() as i64,
+                        "Source copy range window refused"
+                    );
+                    SourceWorkerError::copy_failure(&error)
+                })?;
+            startup_stage = "growing.source_height";
             let facts = StartInfo {
                 processed_dv_profile: None,
                 processed_fel: None,
                 degraded_processing: None,
-                processing_note: None,
                 retained_output: None,
                 audio_delivery: prepared.request().audio_delivery.clone(),
                 session_id: session_id.clone(),
@@ -760,14 +926,17 @@ impl TranscodeManager {
                 encoder: "copy",
                 grade: OutputGrade::Sdr,
                 vod: false,
-                control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+                control_lease_timeout_ms: GROWING_LEASE_TIMEOUT_MS,
             };
+            startup_stage = "growing.start_response";
             let incarnation = owner.assignment.binding().incarnation_id().to_string();
             let response = prepared
                 .start_response(&state, &facts, &incarnation, 1)
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
+            startup_stage = "growing.physical_fence";
             actual.physical_fence().await?;
+            startup_stage = "growing.deadline_or_retirement";
             if Instant::now() >= deadline
                 || owner
                     .state
@@ -777,6 +946,7 @@ impl TranscodeManager {
             {
                 return Err(SourceWorkerError::Deadline);
             }
+            startup_stage = "growing.activation_authority";
             let members = owner
                 .gate
                 .source_members
@@ -796,6 +966,7 @@ impl TranscodeManager {
             else {
                 return Err(SourceWorkerError::Unavailable);
             };
+            startup_stage = "growing.activation_write";
             let binding = owner.assignment.binding();
             let now = crate::fragment_index_cluster::unix_ms();
             let activation = MediaSessionActivation {
@@ -816,7 +987,7 @@ impl TranscodeManager {
                 publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: origin,
                 now_ms: now,
-                lease_expires_at_ms: now.saturating_add(60_000),
+                lease_expires_at_ms: now.saturating_add(super::SOURCE_SESSION_LEASE_MS),
                 expected_desired_revision: None,
             };
             owner
@@ -836,6 +1007,8 @@ impl TranscodeManager {
             if outcome.route.session_id != session_id || !actual.is_live() {
                 return Err(SourceWorkerError::Conflict);
             }
+            owner.gate.activated(&outcome.route);
+            startup_stage = "growing.publication_authority";
             let members = owner
                 .gate
                 .source_members
@@ -855,7 +1028,9 @@ impl TranscodeManager {
             else {
                 return Err(SourceWorkerError::Unavailable);
             };
+            startup_stage = "growing.published_physical_fence";
             actual.physical_fence().await?;
+            startup_stage = "growing.retirement_requested";
             if owner
                 .state
                 .lock()
@@ -864,6 +1039,7 @@ impl TranscodeManager {
             {
                 return Err(SourceWorkerError::Unavailable);
             }
+            startup_stage = "growing.publication_write";
             let route = self
                 .store
                 .complete_source_media_session_publication(&proof)
@@ -880,6 +1056,11 @@ impl TranscodeManager {
             Ok(response)
         }
         .await;
+        // Every growing start that does not publish ends here with its stage,
+        // once, exactly as the indexed owner's does.
+        if let Err(error) = &start {
+            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
+        }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
         if let (Ok(_), Some(backing)) = (&start, backing.as_ref()) {
@@ -932,10 +1113,25 @@ impl TranscodeManager {
                 tokio::select! {
                     ()=state.shutdown.cancelled()=>break,
                     ()=retirement=>{},
-                    ()=physical=>{},
+                    // A viewer waited at a held head: apply its re-anchor now.
+                    ()=physical=>{
+                        if backing.production.reanchor_pending() && backing.production.refresh_read_bank().await.is_err() {break;}
+                    },
                     _=renewal.tick()=>{
-                        if backing.activity_expired() || backing.production.refresh_read_bank().await.is_err() || backing.physical_fence().await.is_err(){break;}
-                        match owner.gate.current_owned(&owner.assignment).await {Ok(proof) if owner.gate.renew_with(&owner.assignment,&proof).await.is_ok()=>{},_=>{owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;break;}}
+                        #[cfg(test)]
+                        owner.gate.ticked();
+                        if backing.activity_expired() || backing.production.refresh_read_bank().await.is_err() {break;}
+                        // The lease is renewed only for an object proven
+                        // unchanged. One that could not be read just now is
+                        // retried at the next tick without renewing, so the
+                        // confirmed lease bounds how long it can pass.
+                        match owner.gate.tick_fence(backing.physical_fence().await) { super::TickFence::Renew => {}, super::TickFence::Skip => continue, super::TickFence::End => break }
+                        // Only a refusal that does not pass ends the owner; the
+                        // confirmed lease bounds how long transient ones may last.
+                        if owner.gate.renew_owned(&owner.assignment).await.is_err_and(|refusal| !refusal.is_transient()) {
+                            owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;
+                            break;
+                        }
                     },
                 }
             }
@@ -951,5 +1147,35 @@ impl TranscodeManager {
             preparations,
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    /// A copy that saw one relayed control exchange outlives the 60 s rolling
+    /// window it used to retire on, and keeps exactly the lease its Start and
+    /// control replies advertise; a later exchange extends it.
+    #[test]
+    fn growing_copy_keeps_the_lease_it_advertises_after_one_control_exchange() {
+        assert_eq!(
+            GROWING_LEASE_TIMEOUT_MS,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS
+        );
+        let start = Instant::now();
+        let activity = GrowingActivity::new(start);
+        let exchange = start + Duration::from_secs(5);
+        activity.note_at(exchange);
+        let lease = Duration::from_millis(u64::from(GROWING_LEASE_TIMEOUT_MS));
+        assert!(!activity.expired_at(exchange + Duration::from_secs(61)));
+        assert!(!activity.expired_at(exchange + lease - Duration::from_millis(1)));
+        assert!(activity.expired_at(exchange + lease));
+        // A later exchange extends it; an older reading never rewinds it.
+        let again = exchange + Duration::from_secs(250);
+        activity.note_at(again);
+        activity.note_at(exchange);
+        assert!(!activity.expired_at(exchange + lease));
+        assert!(activity.expired_at(again + lease));
     }
 }

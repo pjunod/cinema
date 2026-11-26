@@ -1122,6 +1122,94 @@ fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
     }
 }
 
+/// Regression (Countdown, file 1421, restarted at 18.493 s): Matroska stores
+/// no decode times, so FFmpeg synthesizes them after every input start and
+/// rounds each into its output's own time base. The MP4 track is 1/16000;
+/// a 1/1000 clock read 16016 ms where the MP4 wrote 256259 ticks, and no
+/// sample of the first fragment could be associated (`copy_clock_unknown`).
+/// The clock output, and only it, is retimed to the MP4 track's timescale.
+#[test]
+fn the_packet_clock_is_written_in_the_mp4_tracks_own_timescale() {
+    let probe = |time_base: &str| {
+        format!(
+            r#"{{"streams":[{{"codec_type":"audio","time_base":"1/48000"}},{{"codec_type":"video","time_base":"{time_base}"}},{{"codec_type":"video","time_base":"1/90000","disposition":{{"attached_pic":1}}}}]}}"#
+        )
+    };
+    for (time_base, timescale) in [
+        ("1/1000", Some(16000)),
+        ("1/90000", Some(90000)),
+        ("1/24000", Some(24000)),
+        ("1001/24000", Some(24000)),
+        ("1/25", Some(12800)),
+        ("0/1000", None),
+        ("1/0", None),
+    ] {
+        assert_eq!(
+            copy_mp4_video_timescale(Some(&probe(time_base))),
+            timescale,
+            "{time_base}"
+        );
+    }
+    // `-map 0:v:0` takes the first video stream, a cover picture included.
+    assert_eq!(
+        copy_mp4_video_timescale(Some(
+            r#"{"streams":[{"codec_type":"video","time_base":"1/90000","disposition":{"attached_pic":1}},{"codec_type":"video","time_base":"1/1000"}]}"#
+        )),
+        Some(90000)
+    );
+    assert_eq!(copy_mp4_video_timescale(None), None);
+    assert_eq!(copy_mp4_video_timescale(Some("{}")), None);
+
+    let mut file = hevc_dv();
+    file.hdr = None;
+    file.hdr_format = None;
+    for (codec, probe) in [("hevc", probe("1/1000")), ("h264", probe("1/1000"))] {
+        file.video_codec = Some(codec.into());
+        let video = CopyVideoOptions::from_probe(&file, Some(&probe), false, false);
+        assert_eq!(video.packet_clock_timescale(), Some(16000));
+        let args = copy_pipe_args_with_index_and_packet_clock(
+            &file,
+            18.493,
+            None,
+            false,
+            Pacing::unpaced(),
+            video,
+            None,
+            "pipe:6",
+            "pipe:7",
+        )
+        .expect("clocked recipe");
+        let measurement = args
+            .iter()
+            .position(|arg| arg == "pipe:6")
+            .expect("canonical");
+        assert!(
+            !args[..measurement].iter().any(|arg| arg.contains("setts")),
+            "the served and canonical MP4 outputs keep their bytes: {args:?}"
+        );
+        let clock = &args[measurement + 1..];
+        let filters = clock
+            .iter()
+            .rposition(|arg| arg == "-bsf:v")
+            .map(|at| clock[at + 1].as_str())
+            .expect("the clock carries a filter chain");
+        assert!(
+            filters.ends_with(",setts=time_base=1/16000:pts=PTS:dts=DTS")
+                || filters == "setts=time_base=1/16000:pts=PTS:dts=DTS",
+            "{filters}"
+        );
+        assert_eq!(clock.iter().filter(|arg| *arg == "-bsf:v").count(), 1);
+        // The fragment-index identity is the video args, which do not move.
+        assert!(!copy_video_args(&file, video)
+            .iter()
+            .any(|arg| arg.contains("setts")));
+        assert_eq!(
+            copy_video_args(&file, video),
+            copy_video_args(&file, video.with_packet_clock_timescale(None))
+        );
+    }
+}
+
 #[test]
 fn packet_clock_refuses_aliased_or_non_inherited_output_descriptors() {
     let file = hevc_dv();

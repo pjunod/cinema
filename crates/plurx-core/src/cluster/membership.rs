@@ -89,7 +89,7 @@ const JOIN_TOKEN_V2_PREFIX: &str = "plxjoin:v2";
 const JOIN_TOKEN_V2_AAD: &[u8] = b"plurx-cluster-join-v2";
 const JOIN_TOKEN_V2_VERSION: u32 = 2;
 const MEMBERSHIP_SCHEMA_VERSION: i64 = 1;
-const NODE_REACHABLE_WINDOW_MS: i64 = 30_000;
+const NODE_REACHABLE_WINDOW_MS: i64 = crate::cluster::timing::membership::NODE_REACHABLE_WINDOW_MS;
 /// How long a member may say nothing before a protocol change treats it as
 /// absent rather than as proven.
 ///
@@ -113,16 +113,19 @@ const MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL: &str =
      VALUES($1,$2,$3) ON CONFLICT(node_id,capability) \
      DO UPDATE SET last_seen_at=excluded.last_seen_at";
 
-const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 = 120_000;
-const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
-/// The vendored Raft configuration sends heartbeats every 500 ms and cannot
-/// elect a successor before 1,500 ms. Requiring an acknowledgement inside two
-/// heartbeats makes the old leader ineligible before a new term can exist.
-const ARTWORK_LEADER_QUORUM_FRESH_MS: u64 = 1_000;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 =
+    crate::cluster::timing::membership::PROTOCOL_CHANGE_ABSENCE_WINDOW_MS;
+const ARTWORK_AUTH_WINDOW_MS: i64 = crate::cluster::timing::proofs::ARTWORK_AUTH_WINDOW_MS;
+/// The one-second acknowledgement bound expires before the shared Raft
+/// election floor. It also precedes the previous release's 1,500 ms floor
+/// during rolling upgrades; it is not a new proof lease.
+const ARTWORK_LEADER_QUORUM_FRESH_MS: u64 =
+    crate::cluster::timing::membership::ARTWORK_LEADER_QUORUM_FRESH_MS;
+const HEARTBEAT_INTERVAL: Duration = crate::cluster::timing::membership::HEARTBEAT_INTERVAL;
 /// Collapse only duplicate/concurrent submissions. The ordinary ten-second
 /// cadence and thirty-second reachability contract remain unchanged.
-const HEARTBEAT_COALESCE_WINDOW: Duration = Duration::from_millis(250);
+const HEARTBEAT_COALESCE_WINDOW: Duration =
+    crate::cluster::timing::membership::HEARTBEAT_COALESCE_WINDOW;
 /// Refresh the live member's address projection without letting a process
 /// claim a tombstoned identity or a different Raft id.
 ///
@@ -142,36 +145,36 @@ const UPSERT_CLUSTER_NODE_HEARTBEAT_SQL: &str = "INSERT INTO cluster_nodes \
 /// treating silence as "cannot prove it". Long enough for a healthy node's
 /// poll plus a `stat` on a sleeping NAS; short enough that an operator gets an
 /// answer rather than a hung request.
-const PROBE_WAIT: Duration = Duration::from_secs(15);
-const PROBE_POLL: Duration = Duration::from_millis(500);
+const PROBE_WAIT: Duration = crate::cluster::timing::membership::PROBE_WAIT;
+const PROBE_POLL: Duration = crate::cluster::timing::membership::PROBE_POLL;
 /// A probe nobody answered stops being worth answering. This bounds how far
 /// back a node looks so an abandoned removal cannot leave work queued forever.
-const PROBE_REQUEST_TTL: i64 = 300;
+const PROBE_REQUEST_TTL: i64 = crate::cluster::timing::membership::PROBE_REQUEST_TTL;
 /// Matches the activity surface's notion of a transfer in progress: a lease
 /// touched this recently is a downloader that is still fetching.
-const TRANSFER_ACTIVE_SECONDS: i64 = 60;
+const TRANSFER_ACTIVE_SECONDS: i64 = crate::cluster::timing::membership::TRANSFER_ACTIVE_SECONDS;
 /// How many times a removal re-reads and resolves newly created offline work
 /// before it refuses instead. Each round costs at most one [`PROBE_WAIT`], so
 /// this bounds the operator's wait as well as the loop.
 const OFFLINE_RESOLVE_ROUNDS: u32 = 3;
 /// Bound the required odd-voter handoff. Survivor probes run in parallel, so
 /// one unavailable voter cannot multiply this deadline.
-const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
+const SURVIVOR_LEADER_WAIT: Duration = crate::cluster::timing::membership::SURVIVOR_LEADER_WAIT;
 /// The one bound on a stopping leader's handoff: the survivor wait plus the
 /// election trigger's own 1 s budget and one more 1 s survivor probe round.
 /// A stop never waits longer than this for leadership to move.
-const SHUTDOWN_HANDOFF_WAIT: Duration = SURVIVOR_LEADER_WAIT.saturating_add(Duration::from_secs(2));
+const SHUTDOWN_HANDOFF_WAIT: Duration = crate::cluster::timing::membership::SHUTDOWN_HANDOFF_WAIT;
 /// How long a handing-off leader may hold off its own proposals (Hiqlite
 /// patch 31), counted from when it starts to take the hold: taking it, the
 /// wait for a survivor to match its log, the trigger and the wait to follow
 /// the new leader all end by then, so writers on this node wait at most this
 /// long. Inside the handoff's one deadline.
-const PROPOSAL_HOLD_WAIT: Duration = Duration::from_secs(2);
+const PROPOSAL_HOLD_WAIT: Duration = crate::cluster::timing::membership::PROPOSAL_HOLD_WAIT;
 /// The share of [`PROPOSAL_HOLD_WAIT`] spent taking the hold. A proposal that
 /// does not finish in it means quorum trouble; the handoff then proceeds
 /// without the hold, and a slow acquisition still leaves the rest for the
 /// match, the trigger and the step-down.
-const PROPOSAL_HOLD_ACQUIRE: Duration = Duration::from_millis(500);
+const PROPOSAL_HOLD_ACQUIRE: Duration = crate::cluster::timing::membership::PROPOSAL_HOLD_ACQUIRE;
 /// A committed self-removal must return to the HTTP layer promptly so the
 /// daemon can drain. The durable pending-removal row is already authoritative
 /// if this best-effort final tombstone write does not finish in time.
@@ -193,7 +196,7 @@ const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
 /// protocol for process-local cache-only admin authorization. Unlike an
 /// activated Raft protocol this remains a rolling capability: consumers must
 /// stop using the cache whenever any committed member no longer proves it.
-const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v4";
+const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v5";
 #[cfg(test)]
 const LEGACY_CACHE_ADMIN_REVOCATION_V1_CAPABILITY: &str = "cache_admin_revocation_v1";
 #[cfg(test)]
@@ -289,7 +292,8 @@ const PROMOTION_TARGET_SQL: &str = "SELECT node.raft_id, node.role, node.last_se
 const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
 /// Re-probe durable voter storage at least once inside the readiness window.
 /// The fsync work runs on Tokio's blocking pool, never on an async worker.
-const STORAGE_DURABILITY_PROBE_INTERVAL: Duration = Duration::from_secs(20);
+const STORAGE_DURABILITY_PROBE_INTERVAL: Duration =
+    crate::cluster::timing::membership::STORAGE_DURABILITY_PROBE_INTERVAL;
 const STORAGE_DURABILITY_PROBE_MAX_AGE_MS: i64 = NODE_REACHABLE_WINDOW_MS;
 
 /// Whether this process must heartbeat the way a binary that predates the
@@ -804,6 +808,28 @@ const REQUIRE_CURRENT_CREDENTIAL_TOKEN_DELETE_SQL: &str =
      WHEN EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
        AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
      BEGIN SELECT RAISE(ABORT, 'credential mutation requires current binary'); END";
+const REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_auth_policy_insert_guard \
+     BEFORE INSERT ON settings \
+     WHEN NEW.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since') \
+       AND EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
+     BEGIN SELECT RAISE(ABORT, 'token policy mutation requires current binary'); END";
+const REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_auth_policy_update_guard \
+     BEFORE UPDATE OF key, value ON settings \
+     WHEN (NEW.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since') OR OLD.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since')) \
+       AND EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
+     BEGIN SELECT RAISE(ABORT, 'token policy mutation requires current binary'); END";
+const REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_auth_policy_delete_guard \
+     BEFORE DELETE ON settings \
+     WHEN OLD.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since') \
+       AND EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
+     BEGIN SELECT RAISE(ABORT, 'token policy mutation requires current binary'); END";
+
 // Once the v3 local-apply acknowledgement has landed, a binary rollback must
 // not make an older heartbeat proof current again. Ignoring only the retired
 // capability statements lets the rest of an older heartbeat commit; equality
@@ -1070,6 +1096,9 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     REQUIRE_CURRENT_CREDENTIAL_USER_DELETE_SQL,
     REQUIRE_CURRENT_CREDENTIAL_TOKEN_INSERT_SQL,
     REQUIRE_CURRENT_CREDENTIAL_TOKEN_DELETE_SQL,
+    REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL,
+    REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL,
+    REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL,
     RETIRE_CACHE_ADMIN_V1_INSERT_SQL,
     RETIRE_CACHE_ADMIN_V1_UPDATE_SQL,
     RETIRE_CACHE_ADMIN_V2_INSERT_SQL,
@@ -1100,7 +1129,7 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL,
 ];
 
-const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
+const ACTIVITY_AUTH_WINDOW_MS: i64 = crate::cluster::timing::proofs::ACTIVITY_AUTH_WINDOW_MS;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 /// A committed roster larger than this is not a bounded operations surface.
@@ -1163,8 +1192,10 @@ const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
 // Read proofs need their own short-lived cache: sharing the 30-second mutation
 // cache would either reject valid segment bursts or evict live mutation proofs.
 const MAX_INTERNAL_READ_REPLAYS_PER_PEER: usize = 6_144;
-const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
-const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
+const INTERNAL_READ_AUTH_WINDOW_MS: i64 =
+    crate::cluster::timing::proofs::INTERNAL_READ_AUTH_WINDOW_MS;
+const INTERNAL_READ_AUTHORITY_TTL: Duration =
+    crate::cluster::timing::proofs::INTERNAL_READ_AUTHORITY_TTL;
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
 const MAX_JOIN_SOCKET_ADDRESS_BYTES: usize = 512;
 const MAX_JOIN_HTTP_ORIGIN_BYTES: usize = 2_048;
@@ -1193,7 +1224,8 @@ pub fn prometheus_cluster_activity_authority() -> String {
 /// Keep cluster-wide ownership slightly longer than the target's local drain
 /// timer so a second claimant cannot win in the gap between replicated claim
 /// commit and local monotonic-fence installation.
-const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
+const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration =
+    crate::cluster::timing::membership::CLUSTER_OPERATION_LEASE_EXPIRY_GRACE;
 
 /// What a stopping node did about Raft leadership before its drain.
 ///
@@ -1324,8 +1356,16 @@ async fn bounded_shutdown_handoff(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerAuthAdmissionRefusal {
+    RateLimited,
+    ReplayCapacity,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
+    #[error("peer authentication admission refused: {0:?}")]
+    PeerAuthenticationAdmission(PeerAuthAdmissionRefusal),
     #[error("cluster clock cannot authorize new membership authority: {0:?}")]
     ClockUnbounded(ClockRefusal),
     #[error("cluster membership is unavailable while this node uses SQLite recovery")]
@@ -1527,6 +1567,12 @@ impl MembershipError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
+            Self::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::RateLimited) => {
+                "cluster_peer_auth_rate_limited"
+            }
+            Self::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::ReplayCapacity) => {
+                "cluster_peer_auth_replay_capacity"
+            }
             Self::ClockUnbounded(_) => "cluster_clock_unbounded",
             Self::Unavailable => "membership_unavailable",
             Self::InvalidToken => "join_token_invalid",
@@ -1953,6 +1999,7 @@ async fn bootstrap_purpose_admission_schema(
         local_raft_id,
         SharingMemberFloor::PurposeKeys,
         false,
+        FloorFreshness::AllMembers,
     )
     .await?
     else {
@@ -2722,7 +2769,7 @@ impl PassiveMembershipMetrics {
 /// applies first. The cost is at the long end: a caller with an eight-second
 /// or longer deadline that would have connected on the second retransmission,
 /// about three seconds in, now fails at two.
-const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const PEER_CONNECT_TIMEOUT: Duration = crate::cluster::timing::membership::PEER_CONNECT_TIMEOUT;
 
 /// How long an unused pooled connection is kept.
 ///
@@ -2732,7 +2779,7 @@ const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// request can be written into a socket the peer is closing and fail as
 /// unreachable on a healthy peer. reqwest's default of ninety seconds is
 /// longer than the server's close, so it is set here, with margin.
-const PEER_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const PEER_POOL_IDLE_TIMEOUT: Duration = crate::cluster::timing::membership::PEER_POOL_IDLE_TIMEOUT;
 
 /// The one pooled HTTP client for `PeerTransport` requests between this node
 /// and its peers. (The short-lived clients this module builds for the Hiqlite
@@ -3384,20 +3431,52 @@ pub fn sharing_member_guard_predicate(
 
 // A read observes the heartbeat timestamps in its own consistent snapshot and
 // rejects future timestamps against the clock sampled after that read finishes.
-// Mutations retain the exact caller-bound upper timestamp in their SQL guard.
+// A mutation binds the clock it sampled before its reads and its Raft
+// proposal, so a member heartbeat stamped after that sample can commit first.
+// That heartbeat is current, not future-dated: the SQL guard admits it for as
+// long as the write may still use its observation
+// (`SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS`), and refuses a clock further ahead.
 fn sharing_member_guard_with_freshness(
     required: SharingMemberFloor,
     members_parameter: usize,
     cutoff_parameter: usize,
     upper_parameter: Option<usize>,
 ) -> String {
+    sharing_member_guard_sql(
+        required,
+        members_parameter,
+        cutoff_parameter,
+        upper_parameter,
+        None,
+    )
+}
+
+/// `fresh_parameter`, when present, binds a JSON array of Raft ids and limits
+/// the heartbeat-freshness term to those members. Only the serving-read floor
+/// passes one (the applied membership's voters plus the serving member). Every write,
+/// admission and transition guard passes `None` and keeps the all-member rule.
+fn sharing_member_guard_sql(
+    required: SharingMemberFloor,
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    upper_parameter: Option<usize>,
+    fresh_parameter: Option<usize>,
+) -> String {
     let committed = format!("${members_parameter}");
     let cutoff = format!("${cutoff_parameter}");
     let stale = match upper_parameter {
-        Some(parameter) => {
-            format!("present.last_seen_at < {cutoff} OR present.last_seen_at > ${parameter}")
-        }
+        Some(parameter) => format!(
+            "present.last_seen_at < {cutoff} \
+             OR present.last_seen_at > ${parameter} + {SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS}"
+        ),
         None => format!("present.last_seen_at < {cutoff}"),
+    };
+    let stale = match fresh_parameter {
+        Some(parameter) => format!(
+            "({stale}) AND present.raft_id IN \
+             (SELECT CAST(scope.value AS INTEGER) FROM json_each(${parameter}) AS scope)"
+        ),
+        None => stale,
     };
     format!(
         "EXISTS (SELECT 1 FROM json_each({committed})) \
@@ -3464,20 +3543,71 @@ pub async fn sharing_member_floor_ready(
     .await
 }
 
-/// The three public observations above, on the manager's counted client.
+/// Quorum observation of the serving-read floor: what a Source may consult
+/// before it answers an authenticated catalogue, scope or content read from
+/// state it already holds. It differs from [`sharing_member_floor_ready`] in
+/// one term only. Heartbeat freshness is required of the Raft voters and
+/// of the serving member, not of every registered learner.
+///
+/// The all-member freshness rule exists so that a node that is down cannot
+/// come back on a rolled-back binary into a cluster that has narrowed onto a
+/// protocol (see `no_absent_node_predicate`). That protects replicated
+/// writes and transitions, and those keep it: every admission, custody and
+/// transition guard still embeds the strict predicate. A read narrows nothing.
+/// An offline learner serves nothing, holds no quorum vote, and writes nothing
+/// until it heartbeats again. When it does, it is in scope again. Capability
+/// proofs, the committed roster, joins and removals in flight, a known leader,
+/// and a stable membership log remain required of every member exactly as
+/// before. A lost quorum still fails the consistent read and refuses.
+pub async fn sharing_member_serving_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    member_serving_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        required,
+    )
+    .await
+}
+
+async fn member_serving_floor_ready(
+    client: &CountedClient,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    Ok(sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        false,
+        FloorFreshness::VotersAndServingMember,
+    )
+    .await?
+    .is_some())
+}
+
+/// The strict public observations above (every member fresh), on the
+/// manager's counted client.
 async fn member_floor_ready(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
-    Ok(
-        sharing_member_floor_observation(client, local_raft_id, required, false)
-            .await?
-            .is_some(),
+    Ok(sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        false,
+        FloorFreshness::AllMembers,
     )
+    .await?
+    .is_some())
 }
 
-const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
+const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 =
+    crate::cluster::timing::membership::SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS;
 
 /// What an advisory floor answer was read under. A change in the caller's
 /// serving-loss generation, the applied membership log or the known leader
@@ -3596,7 +3726,8 @@ impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
 }
 
 /// One floor read on its own task never holds the advisory longer than this.
-const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration = Duration::from_secs(1);
+const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration =
+    crate::cluster::timing::membership::SHARING_FLOOR_ADVISORY_READ_BOUND;
 
 async fn floor_advisory_key(
     client: &CountedClient,
@@ -3797,12 +3928,30 @@ fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
     ))
 }
 
+/// Which members the heartbeat-freshness term covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloorFreshness {
+    /// Every non-removed member: the rule for writes, admission, custody and
+    /// protocol transitions.
+    AllMembers,
+    /// The voters of the applied membership and the serving member: serving
+    /// reads only. The oldest/newest heartbeat bounds are narrowed with it, so
+    /// a learner's future-dated heartbeat (clock skew) no longer refuses a read.
+    VotersAndServingMember,
+}
+
 async fn sharing_member_floor_observation(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
     require_transition_absence: bool,
+    freshness: FloorFreshness,
 ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    // A narrowed freshness scope is a read policy. Anything that will feed a
+    // transition or admission write must observe every member.
+    if require_transition_absence && freshness != FloorFreshness::AllMembers {
+        return Err(MembershipError::Incompatible);
+    }
     let before = client.metrics_db().await?;
     let members = before
         .membership_config
@@ -3828,7 +3977,27 @@ async fn sharing_member_floor_observation(
     let members_json = bounded_committed_raft_ids_json(&members)?;
     let now = unix_ms()?;
     let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-    let mut guard = sharing_member_guard_with_freshness(required, 1, 2, None);
+    // Binding $3 for the serving-read scope: the applied membership's voters plus the
+    // serving member. Raft's own voter set decides, not the SQL `role` column,
+    // which a node that joined as a voter leaves NULL.
+    let fresh_json = match freshness {
+        FloorFreshness::AllMembers => None,
+        FloorFreshness::VotersAndServingMember => {
+            let mut scope = before
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>();
+            scope.insert(local_raft_id);
+            Some(bounded_committed_raft_ids_json(&scope)?)
+        }
+    };
+    let fresh_parameter = fresh_json.as_ref().map(|_| 3);
+    let fresh_rows = if fresh_parameter.is_some() {
+        " AND node.raft_id IN (SELECT CAST(scope.value AS INTEGER) FROM json_each($3) AS scope)"
+    } else {
+        ""
+    };
+    let mut guard = sharing_member_guard_sql(required, 1, 2, None, fresh_parameter);
     let generation_projection = if require_transition_absence {
         let present = client.query_consistent_map::<CountRow,_>(
             "sharing_member_floor_observation",
@@ -3863,7 +4032,11 @@ async fn sharing_member_floor_observation(
             required.capabilities().iter().map(|capability| capability_ready_predicate(capability)).collect::<Vec<_>>().join(" AND "),
             no_join_in_flight_predicate().to_owned(),
             no_removal_in_flight_predicates(),
-            "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2))".to_owned(),
+            if fresh_parameter.is_some() {
+                "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2) AND present.raft_id IN (SELECT CAST(scope.value AS INTEGER) FROM json_each($3) AS scope))".to_owned()
+            } else {
+                "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2))".to_owned()
+            },
             if require_transition_absence { sharing_member_transition_absence_predicate().to_owned() } else { "1".to_owned() },
             if require_transition_absence { sharing_membership_generation_shape_predicate() } else { "1".to_owned() },
             "EXISTS(SELECT 1 FROM json_each($1)) AND NOT EXISTS(SELECT 1 FROM json_each($1) committed WHERE NOT EXISTS(SELECT 1 FROM cluster_nodes member WHERE member.raft_id=CAST(committed.value AS INTEGER) AND member.removed_at IS NULL))".to_owned(),
@@ -3882,10 +4055,13 @@ async fn sharing_member_floor_observation(
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
                  MIN(node.last_seen_at) AS oldest_heartbeat, MAX(node.last_seen_at) AS newest_heartbeat, {generation_projection} AS generation{diagnostic_projection} \
-                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
+                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL{fresh_rows}",
                 guard,
             ),
-            params!(members_json.as_str(), cutoff),
+            match fresh_json.as_deref() {
+                Some(scope) => params!(members_json.as_str(), cutoff, scope),
+                None => params!(members_json.as_str(), cutoff),
+            },
         )
         .await?;
     let after = client.metrics_db().await?;
@@ -3975,6 +4151,7 @@ async fn purpose_key_member_observation(
         local_raft_id,
         SharingMemberFloor::PurposeKeys,
         true,
+        FloorFreshness::AllMembers,
     )
     .await?
     else {
@@ -4043,8 +4220,14 @@ async fn source_member_observation(
     } else {
         SharingMemberFloor::PrincipalAndCatalogue
     };
-    let Some(mut observation) =
-        sharing_member_floor_observation(client, local_raft_id, required, true).await?
+    let Some(mut observation) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        true,
+        FloorFreshness::AllMembers,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -4893,8 +5076,10 @@ impl From<&mut Row<'_>> for CacheAdminHolderRow {
     }
 }
 
-const CLUSTER_OPERATION_RETRY_INITIAL: Duration = Duration::from_millis(50);
-const CLUSTER_OPERATION_RETRY_MAX: Duration = Duration::from_secs(2);
+const CLUSTER_OPERATION_RETRY_INITIAL: Duration =
+    crate::cluster::timing::membership::CLUSTER_OPERATION_RETRY_INITIAL;
+const CLUSTER_OPERATION_RETRY_MAX: Duration =
+    crate::cluster::timing::membership::CLUSTER_OPERATION_RETRY_MAX;
 
 fn next_cluster_operation_retry_delay(current: Duration) -> Duration {
     current.saturating_mul(2).min(CLUSTER_OPERATION_RETRY_MAX)
@@ -5329,9 +5514,79 @@ struct InternalReadAdmission {
     checks: u16,
 }
 
-struct InternalReadAuthority {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PeerAuthorityStamp {
+    membership: hiqlite::LocalDbMembershipSnapshot,
+    image_generation: u64,
+    revisions: [u64; 3],
+}
+
+struct PeerAuthorityLease {
+    stamp: PeerAuthorityStamp,
     expires_at: Instant,
+    reachable_through_ms: i64,
+}
+
+impl PeerAuthorityLease {
+    fn admits(&self, stamp: &PeerAuthorityStamp, now: Instant, wall_ms: i64) -> bool {
+        stamp.membership.running
+            && stamp.membership.committed
+            && stamp.image_generation.is_multiple_of(2)
+            && self.stamp == *stamp
+            && self.expires_at > now
+            && wall_ms <= self.reachable_through_ms
+    }
+}
+
+struct InternalReadAuthority {
+    member: Option<PeerAuthorityLease>,
+    voter: Option<PeerAuthorityLease>,
     refresh: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl InternalReadAuthority {
+    fn lease(&self, role: PeerAuthorityRole) -> Option<&PeerAuthorityLease> {
+        match role {
+            PeerAuthorityRole::CommittedMember => self.member.as_ref(),
+            PeerAuthorityRole::CommittedVoter => self.voter.as_ref(),
+        }
+    }
+    fn publish(&mut self, role: PeerAuthorityRole, lease: PeerAuthorityLease) {
+        match role {
+            PeerAuthorityRole::CommittedMember => self.member = Some(lease),
+            PeerAuthorityRole::CommittedVoter => self.voter = Some(lease),
+        }
+    }
+}
+
+fn peer_authority_stamp(inner: &ReplicatedMembership) -> Option<PeerAuthorityStamp> {
+    let membership = inner.local_metrics.membership_snapshot();
+    if !membership.running
+        || !membership.committed
+        || !membership.members.contains(&membership.node_id)
+    {
+        return None;
+    }
+    let mark = inner.client.local_applied_mark()?;
+    let image_generation = mark.generation();
+    if !image_generation.is_multiple_of(2) {
+        return None;
+    }
+    let applied_index = mark.applied_index();
+    let revisions = [
+        "cluster_nodes",
+        "cluster_node_removals",
+        "cluster_node_activity_keys",
+    ]
+    .map(|table| {
+        mark.slot(table)
+            .map_or(applied_index, |slot| mark.revision(slot))
+    });
+    (mark.generation() == image_generation).then_some(PeerAuthorityStamp {
+        membership,
+        image_generation,
+        revisions,
+    })
 }
 
 #[derive(Default)]
@@ -5340,20 +5595,26 @@ struct InternalAuthReplayWindow {
 }
 
 impl InternalAuthReplayWindow {
+    #[cfg(test)]
     fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        self.admit_proof(nonce, now).unwrap_or(false)
+    }
+
+    fn admit_proof(&mut self, nonce: &str, now: Instant) -> Result<bool, PeerAuthAdmissionRefusal> {
         while self.accepted.front().is_some_and(|(_, accepted_at)| {
             now.saturating_duration_since(*accepted_at)
                 > Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64)
         }) {
             self.accepted.pop_front();
         }
-        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
-            || self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER
-        {
-            return false;
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce) {
+            return Ok(false);
+        }
+        if self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER {
+            return Err(PeerAuthAdmissionRefusal::ReplayCapacity);
         }
         self.accepted.push_back((nonce.to_owned(), now));
-        true
+        Ok(true)
     }
 }
 
@@ -5363,20 +5624,26 @@ struct InternalReadReplayWindow {
 }
 
 impl InternalReadReplayWindow {
+    #[cfg(test)]
     fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        self.admit_proof(nonce, now).unwrap_or(false)
+    }
+
+    fn admit_proof(&mut self, nonce: &str, now: Instant) -> Result<bool, PeerAuthAdmissionRefusal> {
         while self.accepted.front().is_some_and(|(_, accepted_at)| {
             now.saturating_duration_since(*accepted_at)
                 > Duration::from_millis(INTERNAL_READ_AUTH_WINDOW_MS as u64)
         }) {
             self.accepted.pop_front();
         }
-        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
-            || self.accepted.len() >= MAX_INTERNAL_READ_REPLAYS_PER_PEER
-        {
-            return false;
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce) {
+            return Ok(false);
+        }
+        if self.accepted.len() >= MAX_INTERNAL_READ_REPLAYS_PER_PEER {
+            return Err(PeerAuthAdmissionRefusal::ReplayCapacity);
         }
         self.accepted.push_back((nonce.to_owned(), now));
-        true
+        Ok(true)
     }
 }
 
@@ -9723,12 +9990,22 @@ impl MembershipManager {
         if !self
             .activity_signature_is_valid(&auth.node_id, &message, &signature)
             .await?
-            || !self.admit_activity_authority_check(&auth.node_id)?
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedVoter)
-            .await
+        if !self.admit_activity_authority_check(&auth.node_id)? {
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
+        }
+        let authorized = self
+            .cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedVoter,
+                Some((auth.timestamp_ms, ACTIVITY_AUTH_WINDOW_MS as u64)),
+            )
+            .await?;
+        Ok(authorized && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     /// Sign an exact internal peer HTTP request with this node's durable key.
@@ -9791,7 +10068,9 @@ impl MembershipManager {
         // semaphore: cached-key verification completes in one executor poll
         // and would otherwise release a permit before peers can contend.
         if !admit_internal_preverification(&inner.internal_preverify_admission)? {
-            return Ok(false);
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let Some(message) = internal_peer_auth_message(
             &auth.node_id,
@@ -9819,23 +10098,32 @@ impl MembershipManager {
         // window so a captured proof can authorize at most one request, and
         // reject rather than evict while the bounded cache is full. Forged
         // proofs never reach this cache.
-        if !self.admit_internal_replay(&auth.node_id, &auth.nonce)?
-            || !self.admit_internal_authority_check(&auth.node_id)?
-        {
+        if !self.admit_internal_replay(&auth.node_id, &auth.nonce)? {
             return Ok(false);
         }
+        if !self.admit_internal_authority_check(&auth.node_id)? {
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
+        }
         let clock_request = path == "/_internal/v1/clock";
-        let authorized = self
-            .verify_live_peer_authority_counted(
+        let authorized = if clock_request {
+            self.verify_live_peer_authority_counted(
                 &auth.node_id,
                 now,
                 PeerAuthorityRole::CommittedMember,
-                clock_request,
+                true,
             )
-            .await?;
-        Ok(authorized
-            && (!clock_request
-                || unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64))
+            .await?
+        } else {
+            self.cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedMember,
+                Some((auth.timestamp_ms, ACTIVITY_AUTH_WINDOW_MS as u64)),
+            )
+            .await?
+        };
+        Ok(authorized && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     /// Authenticate an exact internal mutation whose caller and receiver must
@@ -9855,12 +10143,14 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(
-            &auth.node_id,
-            unix_ms()?,
-            PeerAuthorityRole::CommittedVoter,
-        )
-        .await
+        let authorized = self
+            .cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedVoter,
+                Some((auth.timestamp_ms, ACTIVITY_AUTH_WINDOW_MS as u64)),
+            )
+            .await?;
+        Ok(authorized && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     /// Sign a response to one exact internal request with this node's durable
@@ -9981,7 +10271,7 @@ impl MembershipManager {
             self.verify_committed_clock_peer_authority(source_node_id, false)
                 .await
         } else {
-            self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
+            self.cached_live_peer_authority(source_node_id, role, None)
                 .await
         }
     }
@@ -10025,7 +10315,9 @@ impl MembershipManager {
             })?
             .admit(Instant::now())
         {
-            return Ok(false);
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let Some(message) = internal_peer_auth_message(
             &auth.node_id,
@@ -10054,28 +10346,55 @@ impl MembershipManager {
         if unix_ms()?.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
             return Ok(false);
         }
-        let observed = Instant::now();
+        let authorized = self
+            .cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedMember,
+                Some((auth.timestamp_ms, INTERNAL_READ_AUTH_WINDOW_MS as u64)),
+            )
+            .await?;
+        Ok(authorized
+            && unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64)
+    }
+
+    async fn cached_live_peer_authority(
+        &self,
+        node_id: &str,
+        role: PeerAuthorityRole,
+        request_freshness: Option<(i64, u64)>,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if request_freshness.is_some_and(|(timestamp, window)| now.abs_diff(timestamp) > window) {
+            return Ok(false);
+        }
+        let Some(stamp) = peer_authority_stamp(inner) else {
+            return self
+                .verify_live_peer_authority(node_id, unix_ms()?, role)
+                .await;
+        };
         let refresh = {
             let mut authority = inner.internal_read_authority.lock().await;
-            if let Some(entry) = authority.get(&auth.node_id) {
-                if entry.expires_at > observed {
-                    return Ok(unix_ms()?.abs_diff(auth.timestamp_ms)
-                        <= INTERNAL_READ_AUTH_WINDOW_MS as u64);
+            if let Some(entry) = authority.get(node_id) {
+                let wall_now = unix_ms()?;
+                if entry
+                    .lease(role)
+                    .is_some_and(|lease| lease.admits(&stamp, Instant::now(), wall_now))
+                    && peer_authority_stamp(inner).as_ref() == Some(&stamp)
+                {
+                    return Ok(true);
                 }
                 Arc::clone(&entry.refresh)
             } else {
-                // Only senders with a verified cached signing key reach this
-                // map. Keep expired entries as their per-sender single-flight
-                // gates; membership/key eviction removes them, so the map has
-                // the same hard peer bound without a global slow-query lock.
                 if authority.len() >= MAX_ACTIVITY_PEERS {
                     return Ok(false);
                 }
                 let refresh = Arc::new(tokio::sync::Mutex::new(()));
                 authority.insert(
-                    auth.node_id.clone(),
+                    node_id.to_owned(),
                     InternalReadAuthority {
-                        expires_at: observed,
+                        member: None,
+                        voter: None,
                         refresh: Arc::clone(&refresh),
                     },
                 );
@@ -10083,44 +10402,50 @@ impl MembershipManager {
             }
         };
         let _refresh = refresh.lock().await;
-        // Queueing behind this sender's single-flight consumes both the proof
-        // window and heartbeat freshness. Re-sample wall time after the wait;
-        // never let the timestamp captured before signature verification
-        // authorize a later consensus read or cached-authority hit.
+        // This sender alone waits for its read. Re-observe both clocks and
+        // source after queueing; another sender never shares this mutex.
         let authority_now = unix_ms()?;
-        if authority_now.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
+        if request_freshness
+            .is_some_and(|(timestamp, window)| authority_now.abs_diff(timestamp) > window)
+        {
             return Ok(false);
         }
+        let Some(stamp) = peer_authority_stamp(inner) else {
+            return self
+                .verify_live_peer_authority(node_id, authority_now, role)
+                .await;
+        };
         {
-            // A waiter for this sender may find that the task ahead of it
-            // already refreshed authority. Re-check without coupling any
-            // other sender to the consistent read below.
             let authority = inner.internal_read_authority.lock().await;
             if authority
-                .get(&auth.node_id)
-                .is_some_and(|entry| entry.expires_at > Instant::now())
+                .get(node_id)
+                .and_then(|entry| entry.lease(role))
+                .is_some_and(|lease| lease.admits(&stamp, Instant::now(), authority_now))
+                && peer_authority_stamp(inner).as_ref() == Some(&stamp)
             {
-                return Ok(
-                    unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64
-                );
+                return Ok(true);
             }
         }
-        let live = self
-            .verify_live_peer_authority(
-                &auth.node_id,
-                authority_now,
-                PeerAuthorityRole::CommittedMember,
-            )
+        let observed = Instant::now();
+        let proof = self
+            .read_live_peer_authority(node_id, authority_now, role)
             .await?;
-        let proof_still_fresh =
-            unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64;
-        if live && proof_still_fresh {
-            let mut authority = inner.internal_read_authority.lock().await;
-            if let Some(entry) = authority.get_mut(&auth.node_id) {
-                entry.expires_at = Instant::now() + INTERNAL_READ_AUTHORITY_TTL;
+        if let Some(reachable_through_ms) = proof {
+            if peer_authority_stamp(inner).as_ref() == Some(&stamp) {
+                let mut authority = inner.internal_read_authority.lock().await;
+                if let Some(entry) = authority.get_mut(node_id) {
+                    entry.publish(
+                        role,
+                        PeerAuthorityLease {
+                            stamp,
+                            expires_at: observed + INTERNAL_READ_AUTHORITY_TTL,
+                            reachable_through_ms,
+                        },
+                    );
+                }
             }
         }
-        Ok(live && proof_still_fresh)
+        Ok(proof.is_some())
     }
 
     async fn activity_signature_is_valid(
@@ -10144,7 +10469,9 @@ impl MembershipManager {
                 .is_ok());
         }
         if !self.admit_activity_key_lookup()? {
-            return Ok(false);
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let rows = inner
             .client
@@ -10272,10 +10599,11 @@ impl MembershipManager {
         let mut replays = inner.internal_auth_replays.lock().map_err(|_| {
             MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
         })?;
-        Ok(replays
+        replays
             .entry(node_id.to_owned())
             .or_default()
-            .admit(nonce, now))
+            .admit_proof(nonce, now)
+            .map_err(MembershipError::PeerAuthenticationAdmission)
     }
 
     fn admit_internal_read_replay(
@@ -10288,10 +10616,11 @@ impl MembershipManager {
         let mut replays = inner.internal_read_replays.lock().map_err(|_| {
             MembershipError::Internal("internal read replay lock was poisoned".to_owned())
         })?;
-        Ok(replays
+        replays
             .entry(node_id.to_owned())
             .or_default()
-            .admit(nonce, now))
+            .admit_proof(nonce, now)
+            .map_err(MembershipError::PeerAuthenticationAdmission)
     }
 
     /// Confirm both ends of an internal proof against committed membership.
@@ -10329,6 +10658,18 @@ impl MembershipManager {
                 .verify_committed_clock_peer_authority(node_id, true)
                 .await;
         }
+        Ok(self
+            .read_live_peer_authority(node_id, now, role)
+            .await?
+            .is_some())
+    }
+
+    async fn read_live_peer_authority(
+        &self,
+        node_id: &str,
+        now: i64,
+        role: PeerAuthorityRole,
+    ) -> Result<Option<i64>, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
@@ -10340,13 +10681,13 @@ impl MembershipManager {
             )
         };
         if !admits(inner.identity.raft_id) {
-            return Ok(false);
+            return Ok(None);
         }
         let reachable_after = reachable_after(now);
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
-                "verify_live_peer_authority_counted",
+                "read_live_peer_authority",
                 "SELECT node.raft_id, node.last_seen_at \
                  FROM cluster_nodes node \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
@@ -10357,9 +10698,14 @@ impl MembershipManager {
             )
             .await?;
         let verified_reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
-        Ok(rows.len() == 1
+        Ok((rows.len() == 1
             && rows[0].last_seen_at >= verified_reachable_after
             && admits(rows[0].raft_id))
+        .then(|| {
+            rows[0]
+                .last_seen_at
+                .saturating_add(NODE_REACHABLE_WINDOW_MS)
+        }))
     }
 
     /// Clock exchanges prove applied membership, not normal serving liveness.
@@ -12273,6 +12619,10 @@ impl MembershipManager {
     /// its serving fence is ready, so a published outage discards the answer
     /// at once; `None` (not ready, or a loss still pending) reads fresh and
     /// keeps nothing.
+    ///
+    /// This is the serving-read floor (`sharing_member_serving_floor_ready`):
+    /// a registered learner whose heartbeat went stale does not refuse it.
+    /// No write may admit on this answer. Writes embed the strict guard.
     pub async fn sharing_member_floor_advisory(
         &self,
         required: SharingMemberFloor,
@@ -12280,7 +12630,8 @@ impl MembershipManager {
     ) -> Result<bool, MembershipError> {
         let inner = Arc::clone(self.inner.as_ref().ok_or(MembershipError::Unavailable)?);
         let Some(epoch) = epoch else {
-            return member_floor_ready(&inner.client, inner.identity.raft_id, required).await;
+            return member_serving_floor_ready(&inner.client, inner.identity.raft_id, required)
+                .await;
         };
         let advisory = Arc::clone(&inner.floor_advisories[required.index()]);
         let keyed = Arc::clone(&inner);
@@ -12294,7 +12645,7 @@ impl MembershipManager {
                 async move {
                     tokio::time::timeout(
                         SHARING_FLOOR_ADVISORY_READ_BOUND,
-                        member_floor_ready(&inner.client, inner.identity.raft_id, required),
+                        member_serving_floor_ready(&inner.client, inner.identity.raft_id, required),
                     )
                     .await
                     .map_err(|_| MembershipError::Unavailable)?
@@ -12316,6 +12667,7 @@ impl MembershipManager {
             inner.identity.raft_id,
             SharingMemberFloor::IngressCustody,
             true,
+            FloorFreshness::AllMembers,
         )
         .await?
         .map(|members| IngressCustodyMembers { members }))
@@ -13379,8 +13731,16 @@ impl MembershipManager {
     /// the asking node cannot reach into a peer's filesystem and a probe is
     /// only useful if somebody is listening when it is asked.
     pub async fn answer_offline_source_probes(&self) -> Result<u64, MembershipError> {
+        self.answer_offline_source_probe_pass()
+            .await
+            .map(|(answered, _)| answered)
+    }
+
+    /// The bool names an empty replica hint, not merely zero successful
+    /// answers: filesystem failures still need the original retry cadence.
+    async fn answer_offline_source_probe_pass(&self) -> Result<(u64, bool), MembershipError> {
         let Some(inner) = self.inner.as_ref() else {
-            return Ok(0);
+            return Ok((0, true));
         };
         let now = unix_seconds()?;
         // An idle pass is this replica's word that nothing is addressed to
@@ -13394,7 +13754,7 @@ impl MembershipManager {
             .local_pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
             .await;
         if !probe_hint_owes_authority(&hint) {
-            return Ok(0);
+            return Ok((0, true));
         }
         let pending = inner
             .store
@@ -13421,7 +13781,7 @@ impl MembershipManager {
                 answered += 1;
             }
         }
-        Ok(answered)
+        Ok((answered, false))
     }
 
     /// Poll for source probes far more often than the heartbeat ticks.
@@ -13436,9 +13796,18 @@ impl MembershipManager {
         }
         loop {
             tokio::time::sleep(PROBE_POLL).await;
-            match self.answer_offline_source_probes().await {
-                Ok(0) => {}
-                Ok(answered) => {
+            let mark = self
+                .inner
+                .as_ref()
+                .and_then(|inner| inner.client.local_applied_mark());
+            let watch = crate::store::TableWatch::from_applied_mark(
+                mark.as_ref(),
+                &["offline_source_probes", "offline_packages"],
+            );
+            match self.answer_offline_source_probe_pass().await {
+                Ok((_, true)) if watch.unchanged() => watch.changed().await,
+                Ok((0, _)) => {}
+                Ok((answered, _)) => {
                     tracing::info!(
                         answered,
                         "answered offline source probes for a node removal"

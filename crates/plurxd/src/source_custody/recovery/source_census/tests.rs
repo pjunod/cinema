@@ -5,8 +5,6 @@ use std::os::unix::fs::PermissionsExt;
 const KERNEL: &str = "linux:source-census-test";
 /// The same machine's kernel after a reboot.
 const REBOOTED: &str = "linux:source-census-rebooted";
-/// A network superblock the daemon mounts besides the census's.
-const STORAGE: u64 = 66;
 
 struct Dead {
     _root: tempfile::TempDir,
@@ -107,6 +105,11 @@ async fn dead_owner() -> Dead {
 }
 
 impl Dead {
+    /// A second storage device that cannot equal the fixture file's device.
+    fn secondary_storage_device(&self) -> u64 {
+        self.source.dev() ^ 1
+    }
+
     fn held(&self) -> i64 {
         rusqlite::Connection::open(&self.database)
             .expect("fixture connection")
@@ -174,7 +177,8 @@ impl Dead {
                 process_started_ms,
                 now_ms: self.lease + 5_000,
                 namespace_init,
-                storage_devices: namespace_init.map(|_| vec![STORAGE, self.source.dev()]),
+                storage_devices: namespace_init
+                    .map(|_| vec![self.secondary_storage_device(), self.source.dev()]),
             },
             proof,
         )
@@ -314,7 +318,7 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
                 foreign_storage_holders: foreign,
                 foreign_media_tools: 0,
                 unreadable: 0,
-                storage_devices: vec![STORAGE, dead.source.dev()],
+                storage_devices: vec![dead.secondary_storage_device(), dead.source.dev()],
             });
         }
         proof
@@ -412,7 +416,7 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
                 process_started_ms: started,
                 now_ms: dead.lease + 5_000,
                 namespace_init: Some(NAMESPACE),
-                storage_devices: Some(vec![STORAGE]),
+                storage_devices: Some(vec![dead.secondary_storage_device()]),
             },
             &with(NAMESPACE, true, 0, 0),
         )
@@ -539,7 +543,7 @@ async fn a_census_from_a_later_boot_needs_the_owners_job_row() {
             foreign_storage_holders: 0,
             foreign_media_tools: 0,
             unreadable: 0,
-            storage_devices: vec![STORAGE, dead.source.dev()],
+            storage_devices: vec![dead.secondary_storage_device(), dead.source.dev()],
         });
     }
     let error = dead

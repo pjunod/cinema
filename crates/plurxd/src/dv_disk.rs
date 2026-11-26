@@ -4939,7 +4939,9 @@ pub async fn publish_verified(
             Some(&current_source.local.object_version()),
         )
         .await?;
-        if loss.is_cancelled() || !fence.unchanged() {
+        // The lease is checked again after the awaited fence check: the
+        // check can wait for a media slot, and ownership may move meanwhile.
+        if loss.is_cancelled() || !fence.unchanged().await || loss.is_cancelled() {
             return Err("source changed before publication".to_owned());
         }
         if !replacement_exists {
@@ -4972,7 +4974,9 @@ pub async fn publish_verified(
             .await?;
             context.rebaseline_replacement(guard_local).await?;
         }
-        if loss.is_cancelled() || !fence.unchanged() {
+        // The lease is checked again after the awaited fence check: the
+        // check can wait for a media slot, and ownership may move meanwhile.
+        if loss.is_cancelled() || !fence.unchanged().await || loss.is_cancelled() {
             return Err("source changed while the replacement was made durable".to_owned());
         }
         let Some(staged_local) = rename_expected_noreplace_between(

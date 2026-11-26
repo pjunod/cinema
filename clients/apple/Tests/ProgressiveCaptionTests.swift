@@ -7,12 +7,15 @@ import XCTest
 /// The renderer boundary owns the exact items handed to it, without asking
 /// AVFoundation to load fake network playlists or trigger transport recovery.
 private final class CaptionHandoffItem: AVPlayerItem {
+    var time = CMTime.zero
     override var status: AVPlayerItem.Status { .readyToPlay }
-    override func currentTime() -> CMTime { .zero }
+    override func currentTime() -> CMTime { time }
 }
 private final class CaptionHandoffPlayer: AVPlayer {
     private var attached: AVPlayerItem?
     private var observedRate: Float = 0
+    var simulatedExternalPlayback = false
+    override var isExternalPlaybackActive: Bool { simulatedExternalPlayback }
     override var currentItem: AVPlayerItem? { attached }
     override func replaceCurrentItem(with item: AVPlayerItem?) { attached = item }
     override var rate: Float { get { observedRate } set { observedRate = newValue } }
@@ -758,6 +761,122 @@ final class ProgressiveCaptionTests: XCTestCase {
     }
     func testQueuedRemovalAndNewerOffCannotAdoptOldCaptionIntent() async throws {
         for outcome in ["queued","queued-failure","newer-off"] { for generate in [true,false] { try await burnHandoff(outcome,generate:generate) } }
+    }
+
+    private func switchFromGeneratedCaptions(
+        to index: Int, externalPlayback: Bool = false, refusedWith notice: String? = nil
+    ) async throws {
+        fixture.heartbeatIntervalMs = 1
+        fixture.pollMinMs = 250
+        let decoder = JSONDecoder()
+        let decision = try decoder.decode(Decision.self, from: Data("""
+        {"fileId":7,"method":"remux","playUrl":"/not-fetched","deliveredDynamicRange":"hdr10",
+         "source":{"height":1080,"durationMs":120000},
+         "audio":[{"index":2,"codec":"aac","default":true}],
+         "subtitles":[
+           {"index":0,"codec":"ass","default":false,"forced":false,"text":true,"native":false},
+           {"index":1,"codec":"hdmv_pgs_subtitle","default":false,"forced":false,"text":false,"native":false,"overlay":"pgs-v1"},
+           {"index":2,"codec":"subrip","default":false,"forced":false,"text":true,"native":true}
+         ],"ladder":[]}
+        """.utf8))
+        let session = try decoder.decode(HlsStart.self, from: Data("""
+        {"sessionId":"hdr","playlistUrl":"/hls/hdr/index.m3u8","mediaOriginMs":0,
+         "durationMs":120000,"vod":true,"deliveredDynamicRange":"hdr10"}
+        """.utf8))
+        let player = CaptionHandoffPlayer()
+        let caps = Caps.snapshot().document
+        var sessionStarts = 0
+        var nativeSelections: [Int?] = []
+        let controller = PlayerController(
+            player: player, makePlayerItem: { _ in CaptionHandoffItem(asset: AVMutableComposition()) },
+            requestPlaybackDecision: { _, _, _, _ in (decision, caps) },
+            mediaSelectionPreparation: .init(native: { selection, _, _ in
+                .init(hasSubtitleOptions: true, apply: { nativeSelections.append(selection); return true })
+            }, audio: { _, _ in nil }),
+            itemPreparation: .init(ready: { _, _ in }, seek: { _, _ in true }),
+            releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in },
+            requestHlsSession: { _, _, _ in sessionStarts += 1; return session },
+            requestHlsStatus: { _, id in PlaybackSessionStatus(id: id) }
+        )
+        let captions = controller.progressiveCaptions
+        captionOwners.append(captions)
+        textOwners.append(controller.subtitleTextTranslation)
+        defer {
+            // Fixture time only drives the caption window. A zero position
+            // keeps stop's detached progress report off the test transport.
+            (player.currentItem as? CaptionHandoffItem)?.time = .zero
+            controller.stop()
+        }
+        let playbackTransport = try XCTUnwrap(transport)
+        let model = AppModel(startServices: false, makeAPI: { _ in
+            PlurxAPI(origin: "https://captions.test", testTransport: playbackTransport)
+        })
+        controller.start(
+            model: model, itemId: 7, fileId: 7, startMs: 0, durationMs: 120000, title: "HDR fixture",
+            selection: PrePlaySelection(audioIndex: 2, subtitleIndex: PrePlaySelection.subtitleOff)
+        )
+        try await eventually { player.currentItem != nil && !controller.isChangingStream && captions.options != nil }
+        let incumbent = try XCTUnwrap(player.currentItem as? CaptionHandoffItem)
+        incumbent.time = CMTime(seconds: 65, preferredTimescale: 1000)
+        captions.spokenLanguage = "en"
+        controller.selectProgressiveCaptions(.transcribe)
+        try await eventually { captions.window?.cues.count == 1 }
+        let window = try XCTUnwrap(captions.window)
+        let cue = try XCTUnwrap(window.cues.first)
+        let interval = try XCTUnwrap(CaptionRenderWindow.itemInterval(cue, baseMs: window.baseMs, offsetMs: window.offsetMs))
+        XCTAssertTrue(interval.contains(65000))
+        XCTAssertTrue(controller.progressiveCaptionOutputSelected)
+        XCTAssertFalse(player.allowsExternalPlayback)
+        XCTAssertEqual(controller.deliveredRange, "hdr10")
+
+        func demandRequests(_ method: String) -> [URLRequest] {
+            fixture.captured.filter { $0.httpMethod == method && $0.url?.path.hasSuffix("/demands/" + fixture.demand) == true }
+        }
+        let selectionCount = nativeSelections.count
+        let heartbeatCount = demandRequests("PUT").count
+        player.simulatedExternalPlayback = externalPlayback
+        controller.selectSubtitle(index)
+        if let notice {
+            XCTAssertEqual(controller.surface.surface.detail, notice)
+            XCTAssertNil(controller.selectedSubtitle)
+            XCTAssertTrue(controller.progressiveCaptionOutputSelected)
+            XCTAssertTrue(captions.selected)
+            XCTAssertEqual(captions.window?.cues, window.cues)
+            XCTAssertFalse(player.allowsExternalPlayback)
+            XCTAssertTrue(player.currentItem === incumbent)
+            XCTAssertEqual(controller.deliveredRange, "hdr10")
+            XCTAssertEqual(nativeSelections.count, selectionCount)
+            try await eventually { demandRequests("PUT").count > heartbeatCount }
+            XCTAssertTrue(demandRequests("DELETE").isEmpty)
+            controller.selectSubtitle(nil)
+        }
+
+        let replacement: Int? = notice == nil ? index : nil
+        try await eventually { nativeSelections.count == selectionCount + 1 && demandRequests("DELETE").count == 1 }
+        XCTAssertEqual(nativeSelections.last, .some(replacement))
+        XCTAssertEqual(controller.selectedSubtitle, replacement)
+        XCTAssertFalse(controller.progressiveCaptionOutputSelected)
+        XCTAssertNil(captions.window)
+        XCTAssertTrue(player.allowsExternalPlayback)
+        XCTAssertTrue(player.currentItem === incumbent)
+        XCTAssertEqual(controller.deliveredRange, "hdr10")
+        XCTAssertEqual(sessionStarts, 1)
+        await captions.retireAndDrain()
+        XCTAssertEqual(demandRequests("DELETE").count, 1)
+    }
+
+    func testRefusedHDRSubtitlePreservesGeneratedCaptionsUntilOff() async throws {
+        try await switchFromGeneratedCaptions(to: 0, refusedWith: PlayerController.hdrSubtitleNotice)
+    }
+
+    func testRefusedExternalOverlayPreservesGeneratedCaptionsUntilOff() async throws {
+        try await switchFromGeneratedCaptions(
+            to: 1, externalPlayback: true, refusedWith: PlayerController.pgsOverlayExternalPlaybackNotice
+        )
+    }
+
+    func testSupportedNativeSubtitleReplacesGeneratedCaptionsInPlace() async throws {
+        try await switchFromGeneratedCaptions(to: 2)
     }
 
     func testStopAccessRetirementKeepsAuthenticationStatus() async throws {

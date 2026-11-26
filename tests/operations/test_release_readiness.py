@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -19,20 +20,12 @@ loader.exec_module(readiness)
 
 
 class ReleaseReadinessCase(unittest.TestCase):
-    def test_both_release_paths_use_candidate_runtime_after_checkout(self):
+    def test_the_runner_builds_the_ci_and_runtime_media_stages(self):
+        # The weekly tag no longer runs this helper: it reads the release's
+        # existing gate (tests/operations/test_release_cut.py). The nightly
+        # sweeps still run it, on the shipped media stages.
         workflow = (ROOT / ".github/workflows/release-readiness.yml").read_text()
-        check = workflow.split("\n  release-check:\n", 1)[1].split("\n  tag:\n", 1)[0]
-        self.assertNotIn("ffmpeg-6", check)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]", check)
-        saved = check.index('cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"')
-        checkout = check.index('git checkout -q --detach "$RELEASE_SHA"')
-        self.assertLess(saved, checkout)
-        for command in ("make release-check", "scripts/validate run --profile ci --all --strict"):
-            invocation = f'python3 "$RUNNER_TEMP/release-readiness" {command}'
-            self.assertIn(invocation, check)
-            self.assertLess(checkout, check.index(invocation))
-        self.assertIn("lane: release-readiness", check)
-        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", check)
+        self.assertNotIn('release-readiness"', workflow)
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertIn("FROM runtime-assets AS ci", dockerfile)
         self.assertIn("FROM runtime-assets AS runtime", dockerfile)
@@ -170,6 +163,31 @@ class ReleaseReadinessCase(unittest.TestCase):
             self.assertIn('exec setpriv --reuid "$READINESS_UID"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffmpeg)")" = "$PLURX_FFMPEG"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffprobe)")" = "$PLURX_FFPROBE"', readiness.BOOTSTRAP)
+
+    def test_the_release_gate_container_holds_a_plurxd_test_build_without_swap(self):
+        """The plurxd test build peaks near 15.3 GiB; 16 GiB killed it (run 9325)."""
+        self.assertEqual(readiness.MEMORY_GB, (8, 18))
+        with self.assertRaisesRegex(ValueError, "8 or 18 GiB"):
+            readiness.container_command("sha256:" + "a" * 64, ["true"], "test-release", memory_gb=16)
+        signature_default = inspect.signature(readiness.container_command).parameters["memory_gb"].default
+        self.assertEqual(signature_default, 18)
+        with patch.object(readiness, "build_image", return_value="sha256:" + "a" * 64), \
+                patch.object(readiness, "container_command", return_value=["docker", "run"]) as command, \
+                patch.object(readiness.signal, "signal"), \
+                patch.object(readiness, "run_owned", return_value=0), \
+                patch.object(readiness.subprocess, "run"):
+            self.assertEqual(readiness.main(["make", "release-check"]), 0)
+        self.assertEqual(command.call_args.kwargs["memory_gb"], 18, "the command-line default")
+        self.assertIn("RUST_MIN_STACK", readiness.FORWARD_ENV, "ci.yml:check's 8 MiB test threads")
+
+    def test_the_dropped_uid_has_an_account_whose_home_is_home_before_any_drop(self):
+        """Path.home() with HOME cleared reads the passwd entry; the image has none for the uid."""
+        bootstrap = readiness.BOOTSTRAP
+        register = bootstrap.index('useradd --uid "$READINESS_UID" --gid "$READINESS_GID" --home-dir "$HOME"')
+        verify = bootstrap.index('test "$(getent passwd "$READINESS_UID" | cut -d: -f6)" = "$HOME"')
+        self.assertLess(bootstrap.index('if ! getent passwd "$READINESS_UID"'), register)
+        self.assertLess(register, verify)
+        self.assertLess(verify, bootstrap.index("setpriv --reuid"), "no command runs as the uid before it has a home")
 
     def test_nightly_options_reach_container_without_consuming_command_flags(self):
         with patch.object(readiness, "build_image", return_value="sha256:" + "a" * 64), \

@@ -1,6 +1,5 @@
 # Let a server verdict reach the player it is about
 
-Build: 96
 Issue: #708
 
 The control reporter was built without its `onExchange` handler, so the

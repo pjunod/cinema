@@ -3,13 +3,62 @@
 **Status:** open: 0.5.0 frontend source, package and system-renderer interfaces
 qualified; merge, coordinated installation and physical acceptance pending.
 The 0.4.0 installation and owner acceptance below remain earlier evidence. ·
-**Updated:** 2026-11-09 · **Written:** 2026-10-28
+**Updated:** 2026-11-21 · **Written:** 2026-10-28
 
 Companion to [the Linux player plan](LINUX-PLAYER-PLAN.md) (the playback/render
 contract) and [the launcher README](../../clients/linux-player/README.md)
 (controls and package commands). This ledger separates source evidence,
 package qualification, installation and physical acceptance. It does not
 qualify a different Dolby Vision processor or change the display stack.
+
+## Quality pills (unreleased source)
+
+**Owner:** Claude (Opus 5.5). **State:** source and overlay/launcher unit
+tests; package qualification and physical acceptance pending.
+
+Cinema draws the web player's fact badges (`playerFactBadges`) beside the
+title, so a viewer can confirm Dolby Vision, its profile and enhancements
+without opening Playback info. The launcher (`plurx_player/badges.py`)
+publishes `user-data/cinema-video`: the decision's source grade, the HLS
+session's server-computed enhancement (a processed delivery only while its
+generation-matched effective-processing report holds) and the private build's
+renderer line. The overlay reads the picture itself from mpv: resolution from
+decoded `video-params`, delivered range from its colour matrix and transfer,
+delivered profile from the selected track. RPU and DYN are claimed while mpv
+renders Dolby Vision, unless the private build said the frame had no RPU (RPU
+not on a Profile 7 → 8.1 delivery). For the native Dolby renderer, EL follows
+the level `enhancement-layer-composed` in mpv's `native-dovi-target-state`
+(rog_hdr_dv `mpv-fel-system-dv` patch 0011): lit while the frame covering the
+presented instant was mapped with the enhancement layer composed in; off when
+that frame maps without it, after a failed or blank render, and after a
+frame-queue reset until a composed frame is presented again. mpv errs toward
+off next to a frame it read without mapping. The overlay
+takes the property from its own notification and redraws, so the pill does
+not depend on catching the renderer's one-time success line. It never reads
+the property while drawing: mpv answers such a read on its video-output
+thread, about a frame later. Cinema redraws on every frame, so those reads
+kept its event queue from draining, and mpv runs the hide timer only when it
+does; the controls then stayed on screen. An mpv without
+the field, or a non-native renderer, keeps the earlier inference: a Profile 7
+track whose source has an enhancement layer, with a renderer line present. FEL stays the server's claim, because no fact distinguishes a full
+from a minimal layer on this path. A carried route's server pills hold only
+while mpv renders Dolby Vision; a processed route's hold while its report does.
+No colour, decoder or renderer option changes.
+
+Open: a renderer line (or source fact) naming the layer type and that it was
+composed would let this player claim FEL itself.
+
+Packaged as 0.5.3 (the merged source was still versioned 0.5.2, which the
+installed 0.5.2-1 package does not contain); installed on the owner's Linux
+laptop for physical acceptance.
+
+The EL composition level and the AF_UNIX socket-path fix merged under 0.5.3,
+which the installed 0.5.3-1 package predates, so they are packaged as 0.5.4.
+The level needs mpv `+rogdv5.7` (patch 0011); with `+rogdv5.6` the pill keeps
+the earlier inference.
+
+0.5.4 read that level on every render, which kept Cinema's controls on screen
+during Dolby Vision playback; 0.5.5 takes it from the property's notification.
 
 ## Session control sequence repair (0.5.1)
 
@@ -71,8 +120,9 @@ renderer’s exact successful physical-target message from `vo/gpu-next` at
 Info level. Its finite physical peak overrides the signal-envelope property;
 the label is `shared native Dolby renderer`, without inventing a CM version.
 Facts reset on each load/start-file and authoritative target-state changes.
-The read-only `native-dovi-target-state` property reports eligibility and render
-generation; a success must match its active current generation. One read on a
+The read-only `native-dovi-target-state` property reports eligibility, render
+generation and, from patch 0011, the enhancement-layer composition level that
+Cinema's EL pill reads; a success must match its active current generation. One read on a
 success or state notification prevents stale compositor/lease facts without
 polling. Eligibility alone does not establish an active grade. A new
 file with no new success stays unknown; a compiled marker alone never proves

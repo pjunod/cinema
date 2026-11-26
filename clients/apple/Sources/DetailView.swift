@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(tvOS)
+import UIKit
+#endif
 
 struct ItemMetadataBadge: Equatable, Identifiable {
     enum Kind: String, Equatable {
@@ -232,6 +235,111 @@ private struct IOSWebMediaGlyph: View {
         points.dropFirst().forEach { path.addLine(to: $0) }
         path.closeSubpath()
         return path
+    }
+}
+#endif
+
+/// How the version plays on each of the account's devices, as the server
+/// judged it. A fallback or a dropped enhancement layer carries the warning
+/// mark, so it is seen rather than hidden.
+struct PlaysOnList: View {
+    let file: MediaFile
+
+    var body: some View {
+        if let rows = file.playsOn, !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Plays on").font(.caption).foregroundStyle(Palette.muted)
+                ForEach(rows) { row in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(row.deviceName).font(.callout)
+                        Spacer(minLength: 12)
+                        if row.isCaution {
+                            Label(row.label, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(Palette.muted)
+                        } else {
+                            Text(row.label).font(.callout)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: EpisodeMediaInfoMetrics.maximumWidth, alignment: .leading)
+        }
+    }
+}
+
+/// The versions of a title as rows on the page rather than a menu: an iOS
+/// menu shows only the first line of a row, truncated after three lines, so
+/// each version's Dolby Vision line from the server was never seen there.
+struct VersionChoiceList: View {
+    struct Row: Identifiable, Equatable {
+        let id: Int
+        let title: String
+        let detail: String?
+        let selected: Bool
+    }
+
+    let files: [MediaFile]
+    let selectedID: Int
+    let choose: (Int) -> Void
+
+    static func rows(_ files: [MediaFile], selectedID: Int) -> [Row] {
+        files.map { Row(id: $0.id, title: $0.filename ?? "Version \($0.id)", detail: $0.dvFacts, selected: $0.id == selectedID) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Version").font(.caption).foregroundStyle(Palette.muted).accessibilityAddTraits(.isHeader)
+            ForEach(Self.rows(files, selectedID: selectedID)) { row in
+                Button { choose(row.id) } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: row.selected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(row.selected ? Palette.accent : Palette.muted)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.title).font(.callout).fixedSize(horizontal: false, vertical: true)
+                            if let detail = row.detail {
+                                Text(detail).font(.caption).foregroundStyle(Palette.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .accessibilityElement(children: .combine)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(row.selected ? .isSelected : [])
+            }
+        }
+    }
+}
+
+#if os(tvOS)
+/// The selected version's Dolby Vision line and how it plays on each device,
+/// in the quiet style of the cost notice above it: the tvOS hero has no media
+/// section, so this is where the facts the iOS Media section shows live.
+struct TVVersionDolbyVision: View {
+    let file: MediaFile
+
+    var body: some View {
+        let rows = file.playsOn ?? []
+        if file.dvFacts != nil || !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                if let facts = file.dvFacts {
+                    Text("Dolby Vision · \(facts)").lineLimit(2)
+                }
+                ForEach(rows) { row in
+                    if row.isCaution {
+                        Label("\(row.deviceName) · \(row.label)", systemImage: "exclamationmark.triangle.fill").lineLimit(1)
+                    } else {
+                        Text("\(row.deviceName) · \(row.label)").lineLimit(1)
+                    }
+                }
+            }
+            .font(.system(size: 22, weight: .medium))
+            .foregroundStyle(Palette.muted)
+            .frame(maxWidth: 1500, alignment: .leading)
+        }
     }
 }
 #endif
@@ -662,6 +770,7 @@ struct DetailView: View {
 
     #if os(tvOS)
     private enum TVDetailFocus: Hashable { case primaryAction }
+
     #endif
 
     @EnvironmentObject var model: AppModel
@@ -706,6 +815,9 @@ struct DetailView: View {
     #endif
     #if os(tvOS)
     @FocusState private var tvFocusedAction: TVDetailFocus?
+    @State private var tvDetailAuthorizationGeneration: UInt64?
+    @State private var tvFullscreenTarget: PresentationTarget?
+    @Environment(\.scenePhase) private var tvScenePhase
     /// Set once, the first time this item's detail lands. See the `.task`.
     @State private var hasClaimedTVFocus = false
     #endif
@@ -781,7 +893,13 @@ struct DetailView: View {
         #endif
         .task(id: itemId) {
             do {
+                #if os(tvOS)
+                let authorizationGeneration = Session.shared.playbackAuthorization.generation
+                #endif
                 let loaded = try await model.itemDetail(itemId)
+                #if os(tvOS)
+                tvDetailAuthorizationGeneration = authorizationGeneration
+                #endif
                 detail = loaded
                 loadError = nil
                 if loaded.item.kind == "movie" || loaded.item.kind == "show" {
@@ -994,7 +1112,7 @@ struct DetailView: View {
         let source = RemoteOwnedChoiceSource(token: UUID(), epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature)
         remoteChoiceSource = source
         remoteChoices = choices.map { choice in
-            RemoteChoice(id: choice.id, label: choice.label, selected: choice.selected) {
+            RemoteChoice(id: choice.id, label: choice.label, selected: choice.selected, detail: choice.detail) {
                 guard remoteNavigation.activeScope == "item:\(itemId):preplay",
                       source.accepts(token: remoteChoiceSource?.token, epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature) else { return }
                 choice.choose()
@@ -1035,7 +1153,7 @@ struct DetailView: View {
     }
     private func openPreplayVersions(_ detail: ItemDetail, opener: String = "detail:version") {
         showPreplayChoices(title: "Version", opener: opener, choices: (detail.files ?? []).map { file in
-            RemoteChoice(id: String(file.id), label: file.filename ?? "Version \(file.id)", selected: selectedMediaFileID == file.id) { selectedMediaFileID = file.id }
+            RemoteChoice(id: String(file.id), label: file.filename ?? "Version \(file.id)", selected: selectedMediaFileID == file.id, detail: file.dvFacts) { selectedMediaFileID = file.id }
         })
     }
 
@@ -1219,13 +1337,12 @@ struct DetailView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Media").font(.headline)
                         if files.count > 1 {
-                            Picker("Version", selection: Binding(get: { file.id }, set: { selectedMediaFileID = $0 })) {
-                                ForEach(files) { version in Text(version.filename ?? "Version \(version.id)").tag(version.id) }
-                            }
+                            VersionChoiceList(files: files, selectedID: file.id) { selectedMediaFileID = $0 }
                         }
                         ForEach(Self.episodeMediaInfoRows(file).filter { $0.label != "Audio" && $0.label != "File" }) { row in
                             VStack(alignment: .leading, spacing: 4) { Text(row.label).font(.caption).foregroundStyle(Palette.muted); Text(row.value).font(.callout) }
                         }
+                        PlaysOnList(file: file)
                         CalmTrackList(file: file, selection: trackSelectionBinding(for: file), isSubtitle: false).id("audio-\(file.id)")
                         CalmTrackList(file: file, selection: trackSelectionBinding(for: file), isSubtitle: true).id("subtitles-\(file.id)")
                         TrackChoiceCostNotice(file: file, selection: trackSelection(for: file))
@@ -1576,6 +1693,11 @@ struct DetailView: View {
         let canResume = resumeMs > 3000 && !nearlyDone
         let file = (detail.files ?? []).first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
 
+        let preparation = tvStartupPreparation(
+            item: item, file: file, durationMs: durationMs ?? 0,
+            resumeMs: resumeMs, canResume: canResume
+        )
+
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
                 tvPlayableBackground(item)
@@ -1631,6 +1753,8 @@ struct DetailView: View {
                     if let file, item.isPlayable, !item.isBook {
                         tvCostNotice(file)
                             .padding(.top, 14)
+                        TVVersionDolbyVision(file: file)
+                            .padding(.top, 14)
                     }
 
                     if let actionError {
@@ -1669,6 +1793,40 @@ struct DetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 30)
+        .background {
+            if model.displayAwareAuto, tvScenePhase == .active {
+                TVFullscreenTargetProbe { target in
+                    if tvFullscreenTarget != target { tvFullscreenTarget = target }
+                }
+            }
+        }
+        .task(id: preparation) {
+            await preparation?.run(using: model)
+        }
+    }
+
+    private func tvStartupPreparation(
+        item: Item, file: MediaFile?, durationMs: Int, resumeMs: Int, canResume: Bool
+    ) -> TVStartupPreparation? {
+        let authorization = Session.shared.playbackAuthorization
+        let quality = model.playbackQuality
+        let target = model.displayAwareAuto ? tvFullscreenTarget : nil
+        guard play == nil, tvScenePhase == .active, model.phase == .ready, authorization.token != nil,
+              !model.displayAwareAuto || target != nil,
+              authorization.generation == tvDetailAuthorizationGeneration,
+              item.id == itemId, item.isPlayable, !item.isAudiobook, !item.isOffloaded,
+              let file, file.id > 0, file.available == true, file.videoCodec != nil,
+              quality.rungHeight == nil else { return nil }
+        let context = primaryPlayContext(
+            item: item, file: file, durationMs: durationMs,
+            resumeMs: resumeMs, canResume: canResume
+        )
+        return TVStartupPreparation(
+            itemId: context.itemId, fileId: context.fileId, startMs: context.startMs,
+            selection: context.selection, quality: quality, authorizationGeneration: authorization.generation,
+            presentationTarget: target, routeV1: model.displayAwareAuto && model.displayAwareAutoProtocol == "route-v1",
+            deviceSubtitlesOff: model.subLang == "off", subtitleReadiness: model.subtitleReadiness
+        )
     }
 
     /// A thin accent bar and the time still to watch, quiet beneath the copy.
@@ -2290,6 +2448,9 @@ struct DetailView: View {
         }
         if !video.isEmpty {
             rows.append(EpisodeMediaInfoRow(label: "Video", value: video.joined(separator: " · ")))
+        }
+        if let facts = nonempty(file.dvFacts) {
+            rows.append(EpisodeMediaInfoRow(label: "Dolby Vision", value: facts))
         }
 
         let audio = (file.audioStreams ?? []).compactMap(audioDescription(_:))

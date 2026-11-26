@@ -93,12 +93,12 @@ class ManualQualificationBindingCase(unittest.TestCase):
             env = dict(environment, PLURX_QUALIFICATION_RESULTS=json.dumps(results))
             live = dict(binding, base_sha="d" * 40)
             with patch.dict(os.environ, env, clear=True), \
-                 patch.object(q, "resolve_manual_binding", return_value=live), \
+                 patch.object(q, "_resolve_manual_binding_and_pull", return_value=(live, pr)), \
                  redirect_stderr(io.StringIO()):
                 self.assertEqual(q.main(["--output", str(output)]), 1)
             self.assertFalse(output.exists())
             with patch.dict(os.environ, env, clear=True), \
-                 patch.object(q, "resolve_manual_binding", return_value=binding), \
+                 patch.object(q, "_resolve_manual_binding_and_pull", return_value=(binding, pr)), \
                  patch.object(q, "git_object", side_effect=[head, "c" * 40]), \
                  redirect_stdout(io.StringIO()):
                 self.assertEqual(q.main(["--output", str(output)]), 0)
@@ -106,14 +106,14 @@ class ManualQualificationBindingCase(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("--bind-manual", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
-        self.assertIn('VALIDATION_BASE="$BOUND_BASE_SHA"', workflow)
-        self.assertIn('test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"', workflow)
+        # The mobile job used to compare stored build counters against the bound
+        # base; build numbers are derived now (scripts/build-number), so no job
+        # reads that base for them any more.
+        self.assertNotIn("PLURX_VALIDATION_MERGE_TARGET", workflow)
         self.assertNotIn("needs.windows_compile", workflow)
-        publish = workflow.split("  publish:\n", 1)[1].split("  publish_main:\n", 1)[0]
-        self.assertIn("startsWith(github.ref, 'refs/tags/v')", publish)
-        for field in ("promotion_pr", "promotion_head_sha", "promotion_base_sha"):
-            self.assertIn(f"inputs.{field} == ''", publish)
-        self.assertIn("needs.scope.outputs.qualification != 'true'", publish)
+        # A release tag publishes through release-tag.yml, never this sweep.
+        self.assertNotIn("\n  publish:\n", workflow)
+        self.assertNotIn("tags:", workflow.split("\njobs:", 1)[0])
         publish_main = workflow.split("  publish_main:\n", 1)[1].split("  pr_gate:\n", 1)[0]
         self.assertIn("inputs.promotion_pr == ''", publish_main)
         self.assertIn("needs.scope.outputs.qualification != 'true'", publish_main)

@@ -175,7 +175,7 @@ async fn measured_landing(
     seek: f64,
     timescale: u32,
     dir: &Path,
-) -> crate::vodgen::LandingTime {
+) -> (u64, u64) {
     let mut times = Vec::new();
     for (label, at) in [("origin", None), ("landing", Some(seek))] {
         let mut args = vec!["-copyts".into()];
@@ -223,10 +223,7 @@ async fn measured_landing(
         "measured seek landed before the source origin"
     );
     let ticks = |seconds: f64| (seconds.max(0.0) * f64::from(timescale)).round() as u64;
-    crate::vodgen::LandingTime {
-        ticks: ticks(seconds),
-        frame_ticks: ticks(frame).max(1),
-    }
+    (ticks(seconds), ticks(frame).max(1))
 }
 
 fn split(feed: &[u8]) -> (Init, Vec<Fragment>) {
@@ -812,7 +809,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
     } else {
         seek_seconds
     };
-    let measured = measured_landing(
+    let (measured_ticks, measured_frame_ticks) = measured_landing(
         &ffmpeg,
         &source,
         stream,
@@ -837,7 +834,13 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         &plan,
         policy,
         Arc::clone(&table),
-        (target.index, Some(measured)),
+        (
+            target.index,
+            Some(crate::vodgen::LandingTime::from_ticks(
+                measured_ticks,
+                measured_frame_ticks,
+            )),
+        ),
         &dir.join("seek"),
     )
     .await;
@@ -892,7 +895,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         "candidate_sha": candidate, "helper_path": helper, "helper_sha256": key.helper_identity,
         "ffmpeg_path": ffmpeg, "ffprobe_path": ffprobe, "curve_digest": table.digest(), "source_origin": index.dv_refit_origin,
         "seek_seconds": seek_seconds, "seek_entry": target.index,
-        "measured_landing_ticks": measured.ticks, "measured_frame_ticks": measured.frame_ticks, "frames": full.len(),
+        "measured_landing_ticks": measured_ticks, "measured_frame_ticks": measured_frame_ticks, "frames": full.len(),
         "fitted_frames": fitted_count, "seek_frames": seek_frames,
         "served_init_sha256": hex::encode(Sha256::digest(&served.bytes)),
         "patch_readback_origin": "first fitted RPU parsed from whole/seg*.m4s actual publisher output"});

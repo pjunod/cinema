@@ -1,6 +1,5 @@
 # The prepared quality handoff, on iPhone, iPad and Apple TV
 
-Build: 119
 Issue: #912
 
 Apple declares `prepare_replacement`, so the server now tells this client

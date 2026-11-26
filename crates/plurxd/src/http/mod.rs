@@ -11,6 +11,7 @@ pub(crate) mod annotations;
 mod auth;
 pub(crate) mod background_jobs;
 pub(crate) mod curation;
+pub(crate) mod playback_devices;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
@@ -395,6 +396,8 @@ fn http_route_group(path: &str) -> usize {
         // attributed here rather than opening a group of their own.
         | "/api/v1/me/devices"
         | "/api/v1/me/devices/{prefix}"
+        // The same sign-ins, with the capabilities each last reported.
+        | "/api/v1/playback/devices"
         | "/api/v1/users/{id}/devices"
         | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"
@@ -551,6 +554,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
         | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
@@ -590,6 +594,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/hls/continuous-sessions"
         | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/files/{id}/hls/prepare-startup"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
         | "/api/v1/offline/packages/{id}/complete"
@@ -748,6 +753,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
+        | internal_activity::SOURCE_STOP_PATH
         | activity_starts::PEER_PATH
         | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
@@ -1957,6 +1963,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/logout", post(auth::logout))
         .route("/me/devices", get(users::list_my_devices))
+        .route("/playback/devices", get(playback_devices::list))
         .route("/me/devices/{prefix}", delete(users::revoke_my_device))
         .route("/users/{id}/devices", get(users::list_user_devices))
         .route(
@@ -2324,6 +2331,14 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
+            "/files/{id}/hls/prepare-startup",
+            post(hls::prepare_startup).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/startup-decision",
+            post(stream::startup_decision_post).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/files/{id}/hls/continuous-candidates",
             post(hls::continuous_candidates).layer(DefaultBodyLimit::max(64 * 1024)),
         )
@@ -2500,6 +2515,10 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            internal_activity::SOURCE_STOP_PATH,
+            post(internal_activity::stop_source_processed).layer(DefaultBodyLimit::max(256)),
+        )
         .route(
             activity_starts::PEER_PATH,
             post(activity_starts::peer).layer(DefaultBodyLimit::max(1_024)),
@@ -2719,6 +2738,9 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             desktop_http_admission_gate,
         ))
+        .layer(axum::middleware::from_fn(
+            crate::cluster::calls::auth_refusal_response,
+        ))
         .layer(axum::middleware::from_fn(http_request_metrics))
         // Outermost: every layer inside reads the id back out of the request
         // headers, so this one has to have written it first.
@@ -2768,6 +2790,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2776,6 +2799,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -2899,6 +2925,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2909,6 +2936,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`

@@ -21,6 +21,7 @@ INPUTS = (
     'nut_timing.h',
     'refit_compose.h',
     'refit_mode.h',
+    'refit_topleft.h',
     'rgb48.h',
     'scan_title.c',
     'segment_decode_render.c',
@@ -43,22 +44,27 @@ def source_identity(source):
     return digest.hexdigest()
 
 
-def build(source, root):
+def build(source, root, darwin=False):
+    libraries = (sorted((root / "lib").glob("*.dylib")) if darwin
+                 else [root / "lib/libplacebo.so.387"])
+    if darwin and not 1 <= len(libraries) <= 32:
+        raise ValueError("Darwin bundle must contain between 1 and 32 dylibs")
     abi = json.loads((root / "sources/abi.json").read_text())
     if abi.get("libplacebo") != 387 or any(abi.get(name, 0) <= 0 for name in ("avcodec", "avformat", "avutil")):
         raise ValueError("unsupported installed helper ABI")
     manifest = {"schema": 1, "graph": GRAPH, "abi": abi,
         "tools": {name: {"path": "bin/" + filename, "sha256": sha(root / "bin" / filename)}
                   for name, filename in (("renderer", "segment_decode_render"), ("muxer", "mux_rgb"), ("author", "author_p81"), ("scanner", "scan_title"))},
-        "libraries": [{"path": "lib/libplacebo.so.387", "sha256": sha(root / "lib/libplacebo.so.387")}],
+        "libraries": [{"path": path.relative_to(root).as_posix(), "sha256": sha(path)}
+                      for path in libraries],
         "parser_sha256": sha(root / "sources/libdovi.a"),
         "source_sha256": source_identity(source),
-        "environment": {"LD_LIBRARY_PATH": "lib"}}
+        "environment": {} if darwin else {"LD_LIBRARY_PATH": "lib"}}
     (root / "build-identity.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    verify(source, root)
+    verify(source, root, darwin)
 
 
-def verify(source, root):
+def verify(source, root, darwin=False):
     manifest = json.loads((root / "build-identity.json").read_text())
     assert set(manifest) == {"schema", "graph", "abi", "tools", "libraries", "parser_sha256", "source_sha256", "environment"}
     assert manifest["schema"] == 1 and manifest["graph"] == GRAPH
@@ -66,7 +72,14 @@ def verify(source, root):
     assert manifest["abi"].get("libplacebo") == 387
     assert all(type(manifest["abi"].get(name)) is int and manifest["abi"][name] > 0
                for name in ("avcodec", "avformat", "avutil"))
-    assert manifest["environment"] == {"LD_LIBRARY_PATH": "lib"}, "leave Vulkan device discovery untouched"
+    if darwin:
+        assert manifest["environment"] == {}, "Darwin loads its signed bundle-relative dylibs"
+        libraries = [artifact["path"] for artifact in manifest["libraries"]]
+        assert 1 <= len(libraries) <= 32
+        assert libraries == sorted(path.relative_to(root).as_posix()
+                                   for path in (root / "lib").glob("*.dylib"))
+    else:
+        assert manifest["environment"] == {"LD_LIBRARY_PATH": "lib"}, "leave Vulkan device discovery untouched"
     assert source_identity(source) == manifest["source_sha256"]
     assert sha(root / "sources/libdovi.a") == manifest["parser_sha256"]
     for artifact in [*manifest["tools"].values(), *manifest["libraries"]]:
@@ -80,6 +93,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("root", type=Path, nargs="?")
+    parser.add_argument("--darwin", action="store_true", help="write or verify a Darwin manifest")
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--identity", action="store_true", help="print the source identity of SOURCE and exit")
     args = parser.parse_args()
@@ -88,4 +102,4 @@ if __name__ == "__main__":
     elif args.root is None:
         parser.error("ROOT is required unless --identity is given")
     else:
-        (verify if args.verify else build)(args.source, args.root)
+        (verify if args.verify else build)(args.source, args.root, args.darwin)
