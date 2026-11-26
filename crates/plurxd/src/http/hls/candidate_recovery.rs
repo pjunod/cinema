@@ -457,15 +457,24 @@ pub(crate) enum RecoveryUnavailable {
     RecipeMismatch,
     /// The route's response does not decode or does not match its recipe.
     ResponseMismatch,
-    /// The response has no single identity-matching selected candidate.
+    /// The response lists no single selected candidate within its bound.
     CandidateMismatch,
+    /// The selected candidate's id is not the one its recipe digest names.
+    CandidateIdentity,
     /// The network identity carries no credential generation.
     NoCredentialGeneration,
     /// The source could not be opened or stat'ed for its fence.
     SourceFenceOpen,
     /// The source changed while it was fenced.
     SourceChanged,
-    /// The route moved (or could not be re-read) after the source fence.
+    /// The store answered the route re-read after the source fence with an
+    /// error.
+    RouteRereadStoreError,
+    /// The playback had no route at the re-read after the source fence.
+    RouteRereadMissing,
+    /// The route re-read after the source fence no longer matches the bound
+    /// route (another incarnation, owner, epoch or recipe, or no longer
+    /// active).
     RouteMoved,
     /// The bound scope is not a valid recovery scope.
     ScopeInvalid,
@@ -474,7 +483,7 @@ pub(crate) enum RecoveryUnavailable {
 }
 
 impl RecoveryUnavailable {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 25] = [
         Self::DeadlineRouteRead,
         Self::DeadlineSourceIdentity,
         Self::DeadlineRouteReread,
@@ -491,13 +500,48 @@ impl RecoveryUnavailable {
         Self::RecipeMismatch,
         Self::ResponseMismatch,
         Self::CandidateMismatch,
+        Self::CandidateIdentity,
         Self::NoCredentialGeneration,
         Self::SourceFenceOpen,
         Self::SourceChanged,
+        Self::RouteRereadStoreError,
+        Self::RouteRereadMissing,
         Self::RouteMoved,
         Self::ScopeInvalid,
         Self::MemoryStoreError,
     ];
+
+    /// This reason's position in [`Self::ALL`]. Exhaustive, so a new variant
+    /// does not compile until it has a slot (a test pins `ALL[index] == self`).
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::DeadlineRouteRead => 0,
+            Self::DeadlineSourceIdentity => 1,
+            Self::DeadlineRouteReread => 2,
+            Self::DeadlineMemoryRead => 3,
+            Self::NoNetworkUser => 4,
+            Self::RouteStoreError => 5,
+            Self::NoRoute => 6,
+            Self::RouteOwnedElsewhere => 7,
+            Self::RouteNotActive => 8,
+            Self::RoutePublishing => 9,
+            Self::RouteLeaseExpired => 10,
+            Self::RouteOtherSession => 11,
+            Self::RouteOversized => 12,
+            Self::RecipeMismatch => 13,
+            Self::ResponseMismatch => 14,
+            Self::CandidateMismatch => 15,
+            Self::CandidateIdentity => 16,
+            Self::NoCredentialGeneration => 17,
+            Self::SourceFenceOpen => 18,
+            Self::SourceChanged => 19,
+            Self::RouteRereadStoreError => 20,
+            Self::RouteRereadMissing => 21,
+            Self::RouteMoved => 22,
+            Self::ScopeInvalid => 23,
+            Self::MemoryStoreError => 24,
+        }
+    }
 
     /// The metric label and the reason's name in a refusal.
     pub(crate) const fn label(self) -> &'static str {
@@ -518,9 +562,12 @@ impl RecoveryUnavailable {
             Self::RecipeMismatch => "recipe_mismatch",
             Self::ResponseMismatch => "response_mismatch",
             Self::CandidateMismatch => "candidate_mismatch",
+            Self::CandidateIdentity => "candidate_identity",
             Self::NoCredentialGeneration => "no_credential_generation",
             Self::SourceFenceOpen => "source_fence_open",
             Self::SourceChanged => "source_changed",
+            Self::RouteRereadStoreError => "route_reread_store_error",
+            Self::RouteRereadMissing => "route_reread_missing",
             Self::RouteMoved => "route_moved",
             Self::ScopeInvalid => "scope_invalid",
             Self::MemoryStoreError => "memory_store_error",
@@ -557,16 +604,16 @@ impl From<super::link_receipts::SourceIdentityMiss> for RecoveryUnavailable {
 pub(super) struct RecoveryReadStage(std::sync::atomic::AtomicU8);
 
 impl RecoveryReadStage {
-    const ROUTE: u8 = 0;
-    const SOURCE: u8 = 1;
-    const REREAD: u8 = 2;
-    const MEMORY: u8 = 3;
+    pub(super) const ROUTE: u8 = 0;
+    pub(super) const SOURCE: u8 = 1;
+    pub(super) const REREAD: u8 = 2;
+    pub(super) const MEMORY: u8 = 3;
 
-    fn enter(&self, stage: u8) {
+    pub(super) fn enter(&self, stage: u8) {
         self.0.store(stage, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn deadline(&self) -> RecoveryUnavailable {
+    pub(super) fn deadline(&self) -> RecoveryUnavailable {
         match self.0.load(std::sync::atomic::Ordering::Relaxed) {
             Self::SOURCE => RecoveryUnavailable::DeadlineSourceIdentity,
             Self::REREAD => RecoveryUnavailable::DeadlineRouteReread,
@@ -628,16 +675,12 @@ pub(crate) async fn processed_candidate_recovery_evidence(
                 && !memory.rejected_recipes.contains(&candidate.recipe_digest),
         )
     };
-    let evidence = match tokio::time::timeout_at(deadline, read).await {
+    match tokio::time::timeout_at(deadline, read).await {
         Ok(Ok(true)) => ProcessedRecoveryEvidence::Admissible,
         Ok(Ok(false)) => ProcessedRecoveryEvidence::Rejected,
         Ok(Err(reason)) => ProcessedRecoveryEvidence::Unavailable(reason),
         Err(_) => ProcessedRecoveryEvidence::Unavailable(stage.deadline()),
-    };
-    if let ProcessedRecoveryEvidence::Unavailable(reason) = evidence {
-        crate::playback_control::record_processed_recovery_unavailable(reason);
     }
-    evidence
 }
 
 /// A Decision has no playback identity in its public intent. Only its exact
@@ -800,8 +843,11 @@ async fn bind_incumbent(
         .into_iter()
         .filter(|candidate| candidate.id == id);
     let candidate = matches.next().ok_or(Miss::CandidateMismatch)?;
-    if matches.next().is_some() || !candidate.identity_matches() {
+    if matches.next().is_some() {
         return Err(Miss::CandidateMismatch);
+    }
+    if !candidate.identity_matches() {
+        return Err(Miss::CandidateIdentity);
     }
     stage.enter(RecoveryReadStage::SOURCE);
     let source = super::link_receipts::SourceLinkIdentity::for_request_classified(network, file)
@@ -814,9 +860,8 @@ async fn bind_incumbent(
         .store
         .media_session_route_for_playback(&principal, playback)
         .await
-        .ok()
-        .flatten()
-        .ok_or(Miss::RouteMoved)?;
+        .map_err(|_| Miss::RouteRereadStoreError)?
+        .ok_or(Miss::RouteRereadMissing)?;
     if current.incarnation_id != route.incarnation_id
         || current.session_id != route.session_id
         || current.owner_node_id != route.owner_node_id

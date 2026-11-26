@@ -485,21 +485,64 @@ fn an_unreadable_recovery_memory_names_the_read_that_missed() {
 }
 
 #[test]
-fn each_unavailable_recovery_reason_is_counted_and_exported() {
-    use crate::http::hls::candidate_recovery::RecoveryUnavailable;
-    let reason = RecoveryUnavailable::SourceFenceOpen;
-    let before = crate::playback_control::processed_recovery_unavailable_count(reason);
-    crate::playback_control::record_processed_recovery_unavailable(reason);
-    assert_eq!(
-        crate::playback_control::processed_recovery_unavailable_count(reason),
-        before + 1
-    );
+fn each_unavailable_recovery_reason_is_counted_by_stage_and_exported() {
+    use super::{recovery_admission, AdmissionStage};
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    use crate::playback_control::processed_recovery_unavailable_count as count;
+    // Every reason has the slot its exhaustive index names.
+    for (index, reason) in RecoveryUnavailable::ALL.iter().enumerate() {
+        assert_eq!(reason.index(), index, "{}", reason.label());
+    }
+    // The admission records the reason under its own stage; only the
+    // after-trial read is a refusal. Counters are process-global, so other
+    // tests may add to them concurrently: only a lower bound is exact.
+    let reason = RecoveryUnavailable::RouteRereadMissing;
+    let (before, after) = (count(reason, false), count(reason, true));
+    let _ = recovery_admission(Evidence::Unavailable(reason), AdmissionStage::BeforeTrial);
+    assert!(count(reason, false) > before);
+    let _ = recovery_admission(Evidence::Unavailable(reason), AdmissionStage::AfterTrial);
+    assert!(count(reason, true) > after);
     let metrics = crate::playback_control::prometheus();
-    for reason in RecoveryUnavailable::ALL {
-        let series = format!(
-            "plurx_playback_preparation_processed_recovery_unavailable_total{{reason=\"{}\"}}",
-            reason.label()
-        );
-        assert!(metrics.contains(&series), "missing {series}");
+    for stage in ["before_trial", "after_trial"] {
+        for reason in RecoveryUnavailable::ALL {
+            let series = format!(
+                "plurx_playback_preparation_processed_recovery_unavailable_total{{stage=\"{stage}\",reason=\"{}\"}}",
+                reason.label()
+            );
+            assert!(metrics.contains(&series), "missing {series}");
+        }
+    }
+}
+
+#[test]
+fn a_recovery_deadline_names_the_read_it_was_waiting_on() {
+    use crate::http::hls::candidate_recovery::{RecoveryReadStage, RecoveryUnavailable};
+    let stage = RecoveryReadStage::default();
+    // Nothing entered yet is the first read: the route.
+    assert_eq!(stage.deadline(), RecoveryUnavailable::DeadlineRouteRead);
+    for (entered, named) in [
+        (
+            RecoveryReadStage::SOURCE,
+            RecoveryUnavailable::DeadlineSourceIdentity,
+        ),
+        (
+            RecoveryReadStage::REREAD,
+            RecoveryUnavailable::DeadlineRouteReread,
+        ),
+        (
+            RecoveryReadStage::MEMORY,
+            RecoveryUnavailable::DeadlineMemoryRead,
+        ),
+        // The second bind enters the route read again, so a memory stage
+        // left from the first bind never labels it.
+        (
+            RecoveryReadStage::ROUTE,
+            RecoveryUnavailable::DeadlineRouteRead,
+        ),
+    ] {
+        stage.enter(entered);
+        assert_eq!(stage.deadline(), named);
     }
 }
