@@ -648,6 +648,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/server/node"
         | crate::discovery::PATH
         | "/api/v1/settings"
+        | "/api/v1/settings/transcode-capacity"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
         | "/api/v1/subtitle-translation/models"
