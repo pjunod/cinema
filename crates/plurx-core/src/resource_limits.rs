@@ -395,12 +395,6 @@ fn member_present(document: &str, id: u32) -> bool {
     found
 }
 
-/// The TRUE cgroup2 root only: a namespace or subtree root is never this.
-#[cfg(target_os = "linux")]
-fn verified_unified_root(root: &std::path::Path, leaf: &std::path::Path) -> Option<UnifiedRoot> {
-    verified_cgroup_root(root, leaf).filter(|native| native.boundary == RootBoundary::True)
-}
-
 /// The cgroup2 root this process can see. Where the kernel's root-only
 /// marker is absent the mount's '/' is a visible root: a cgroup namespace's
 /// own root, or the true root of a kernel without isolated partitions.
@@ -877,8 +871,8 @@ mod tests {
     fn ordinary_directory_or_missing_kernel_root_marker_is_not_cgroup_root_proof() {
         let directory = tempfile::tempdir().expect("owned capacity fixture directory");
         assert!(
-            verified_unified_root(directory.path(), directory.path()).is_none(),
-            "a pathname or absent controller files cannot manufacture kernel root identity"
+            verified_cgroup_root(directory.path(), directory.path()).is_none(),
+            "a pathname or absent controller files cannot manufacture any cgroup root identity"
         );
     }
 
@@ -1065,7 +1059,8 @@ mod tests {
             "fixture requires an actual non-root container cgroup, not a true-root member"
         );
         assert!(
-            verified_unified_root(&leaf, &leaf).is_none(),
+            verified_cgroup_root(&leaf, &leaf)
+                .is_none_or(|native| native.boundary != RootBoundary::True),
             "a real cgroup2 subtree/private namespace root is not global-root proof"
         );
     }
