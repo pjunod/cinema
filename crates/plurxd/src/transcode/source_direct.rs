@@ -762,9 +762,9 @@ impl TranscodeManager {
             let epoch = runtime
                 .refresh_admission_capacity(deadline)
                 .await
-                .map_err(|_error| {
-                    #[cfg(test)]
-                    eprintln!("original Source direct capacity refresh refused: {_error:?}");
+                .map_err(|error| {
+                    tracing::debug!(target: "plurxd::transcode", ?error,
+                        "Source direct capacity refresh refused");
                     SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
                 })?;
             let application_owner_bytes =
@@ -839,7 +839,6 @@ impl TranscodeManager {
             // The opaque constructor can fail after R. From this boundary
             // generic failure retains uncertainty instead of claiming no R.
             let restart_admission = SourceRestartAdmission::new(restart_admission);
-            #[cfg(test)]
             let media_id_layout = (media_file_id.len(), media_file_id.capacity());
             let result = runtime.prepare_direct_source(
                 DirectSourceRequest {
@@ -871,8 +870,9 @@ impl TranscodeManager {
             let (admitted, application_lease) = match result {
                 Ok(admitted) => admitted,
                 Err(error) => {
-                    #[cfg(test)]
-                    eprintln!("original Source direct constructor refused: {error:?}; media_id_len={}, media_id_capacity={}, demanded_memory={memory}", media_id_layout.0, media_id_layout.1);
+                    tracing::debug!(target: "plurxd::transcode", ?error,
+                        media_id_len = media_id_layout.0, media_id_capacity = media_id_layout.1,
+                        demanded_memory = memory, "Source direct constructor refused");
                     // Only the exact typed pre-reservation tag authorizes this
                     // release. Generic constructor errors may already own R.
                     if error.definitely_before_reservation() {
