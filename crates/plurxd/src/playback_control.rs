@@ -9067,8 +9067,6 @@ struct OwnedLocalControlRequest {
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparationRequirement {
     pub(crate) needed: bool,
-    #[cfg(all(test, feature = "cluster-integration-tests"))]
-    pub(crate) control_peak: usize,
 }
 
 enum RollingControlCommand {
@@ -14062,6 +14060,15 @@ impl RollingControlHandle {
             .map(|budget| budget.reserve(bytes))
             .transpose()
             .map_err(|_| ControlStateError::Unavailable)
+    }
+
+    /// The selected role's client-state high-water mark: every charge its
+    /// actor, inputs and replies actually filed, at their most simultaneous.
+    #[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+    pub(crate) fn selected_client_peak_bytes(&self) -> Option<usize> {
+        self.reply_budget
+            .as_ref()
+            .map(|budget| budget.client_peak_bytes())
     }
 
     async fn request_allocated_control<R>(

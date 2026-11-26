@@ -298,13 +298,80 @@ async fn selected_end_without_preparation(
         .await
 }
 
-#[tokio::test]
-async fn selected_end_uses_measured_original_partition_without_preparation_context() {
-    use crate::playback_control::{ControlDisposition, RollingTerminalCause};
-    use plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot;
+/// The selected role's mandatory End peak, as the role's own client budget
+/// recorded it: a fresh actor, the selected End and nothing else, so neither
+/// a probe nor a filler can raise the high-water mark.
+async fn measured_selected_end_peak() -> usize {
+    use crate::playback_control::ControlDisposition;
     let fixture = original_actor_fixture().await;
     let request = selected_end_request();
     let deadline = crate::media_sessions::unix_ms() + 4_000;
+    let outcome = selected_end_without_preparation(&fixture.control, &request, deadline)
+        .await
+        .expect("an unfilled role accepts its End");
+    assert_eq!(outcome.disposition, ControlDisposition::Accepted);
+    let peak = fixture
+        .control
+        .selected_client_peak_bytes()
+        .expect("selected role budget");
+    drop(outcome);
+    fixture.close().await;
+    peak
+}
+
+/// Fill the SAME original role so `charge` bytes of it are held by a filler
+/// slot; the filler is an ordinary client reservation, no grant factory.
+fn fill_selected_role(
+    fixture: &OriginalActorFixture,
+    charge: usize,
+) -> crate::playback_control::ActorPayloadAllocation {
+    use plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot;
+    let payload = charge
+        .checked_sub(FiniteClientSlot::required_bytes(0).expect("actual slot header"))
+        .expect("nonempty filler reservation");
+    fixture
+        .control
+        .reserve_selected_payload(payload)
+        .expect("real original partition filler")
+        .expect("selected original role")
+}
+
+#[tokio::test]
+async fn selected_end_uses_measured_original_partition_without_preparation_context() {
+    use crate::playback_control::{ControlDisposition, ControlStateError, RollingTerminalCause};
+    let peak = measured_selected_end_peak().await;
+
+    // One byte more than the measured peak leaves the End without room: it
+    // refuses before adoption and the actor is unchanged.
+    let fixture = original_actor_fixture().await;
+    let request = selected_end_request();
+    let deadline = crate::media_sessions::unix_ms() + 4_000;
+    let short = fixture
+        .client_limit
+        .checked_sub(peak)
+        .and_then(|headroom| headroom.checked_add(1))
+        .expect("measured peak fits original role");
+    let fill = fill_selected_role(&fixture, short);
+    assert!(
+        matches!(
+            selected_end_without_preparation(&fixture.control, &request, deadline).await,
+            Err(ControlStateError::Unavailable)
+        ),
+        "an End one byte past its measured peak must refuse"
+    );
+    let snapshot = fixture
+        .control
+        .snapshot()
+        .await
+        .expect("original actor after the refusal");
+    assert_eq!(snapshot.accepted_demand_sequence, None);
+    assert!(!snapshot.retired, "the refusal retired the actor");
+    drop(snapshot);
+    drop(fill);
+    fixture.close().await;
+
+    // Exactly the measured peak: the End fits with no preparation context.
+    let fixture = original_actor_fixture().await;
     let projection = fixture
         .control
         .preparation_requirement_before(
@@ -332,20 +399,13 @@ async fn selected_end_uses_measured_original_partition_without_preparation_conte
         "actual-never-entered-End-fixture"
     );
     drop(snapshot);
-    // Leave exactly the production layout's mandatory actor/input peak. The
-    // filler is charged to this SAME original role; no arbitrary headroom or
-    // grant factory. Any extra preparation context charge exceeds this peak.
-    let fill_charge = fixture
-        .client_limit
-        .checked_sub(projection.control_peak)
-        .expect("mandatory real peak fits original role");
-    let fill_payload = fill_charge
-        .checked_sub(FiniteClientSlot::required_bytes(0).expect("actual slot header"))
-        .expect("nonempty filler reservation");
-    let fill = fixture
-        .control
-        .reserve_selected_payload(fill_payload)
-        .expect("real original partition filler");
+    let fill = fill_selected_role(
+        &fixture,
+        fixture
+            .client_limit
+            .checked_sub(peak)
+            .expect("measured peak fits original role"),
+    );
     let outcome = selected_end_without_preparation(&fixture.control, &request, deadline)
         .await
         .expect("End must fit its measured real peak");

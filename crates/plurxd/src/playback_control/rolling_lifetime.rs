@@ -64,6 +64,11 @@ impl ActorReplyBudget {
             slot: self.client.reserve(bytes).map_err(|_| ())?,
         })
     }
+    /// The most client-state bytes this actor's role has held at once.
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn client_peak_bytes(&self) -> usize {
+        self.client.peak_bytes()
+    }
 }
 
 /// Original admitted partition and the reservation made BEFORE constructing

@@ -23,6 +23,9 @@ struct BudgetState {
     client_live: bool,
     client_limit: usize,
     client_used: usize,
+    /// Highest `client_used` this budget has held. Observation only: it is
+    /// raised where `client_used` grows and never grants or refuses a charge.
+    client_peak: usize,
     client_slots: usize,
 }
 
@@ -80,6 +83,7 @@ impl ResponseBudget {
                 client_live: false,
                 client_limit: 0,
                 client_used: 0,
+                client_peak: 0,
                 client_slots: 0,
             }),
         }))
@@ -310,6 +314,17 @@ impl FiniteClientStateLease {
         self.limit
     }
 
+    /// The most client-state bytes this partition has held at once, slot
+    /// charges included. It never falls on release and starts at zero; it is
+    /// what the partition's owners actually charged, not a bound or a credit.
+    pub fn peak_bytes(&self) -> usize {
+        self.budget
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .client_peak
+    }
+
     pub fn reserve(&self, payload_bytes: usize) -> io::Result<Arc<FiniteClientSlot>> {
         self.budget
             .reserve_client_slot(payload_bytes, ClientReservationSource::Lease(self.limit))
@@ -357,6 +372,7 @@ impl ResponseBudget {
             ));
         }
         state.client_used = used;
+        state.client_peak = state.client_peak.max(used);
         state.client_slots = slots;
         drop(state);
         Ok(Arc::new(FiniteClientSlot {
@@ -679,6 +695,48 @@ mod tests {
         budget.begin_close_if_empty().unwrap();
         assert!(budget.closed_and_empty());
     }
+    #[test]
+    fn client_peak_rises_with_reservations_and_never_falls_on_release() {
+        let response_limit = BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64;
+        let charge = FiniteClientSlot::required_bytes(64).unwrap();
+        let client_limit = 2 * charge;
+        let budget = ResponseBudget::with_metadata(response_limit, 128 + client_limit).unwrap();
+        let (metadata, clients) = budget
+            .reserve_metadata_partitions(128, client_limit)
+            .unwrap();
+        assert_eq!(
+            clients.peak_bytes(),
+            0,
+            "a fresh partition has held nothing"
+        );
+        let first = clients.reserve(64).unwrap();
+        assert_eq!(clients.peak_bytes(), charge);
+        let second = first.reserve_related(64).unwrap();
+        assert_eq!(
+            clients.peak_bytes(),
+            2 * charge,
+            "related slots raise it too"
+        );
+        assert!(clients.reserve(1).is_err());
+        assert_eq!(
+            clients.peak_bytes(),
+            2 * charge,
+            "a refusal charges nothing"
+        );
+        drop(second);
+        drop(first);
+        assert_eq!(
+            clients.peak_bytes(),
+            2 * charge,
+            "release does not lower it"
+        );
+        let smaller = clients.reserve(8).unwrap();
+        assert_eq!(clients.peak_bytes(), 2 * charge);
+        drop((smaller, clients, metadata));
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
+    }
+
     #[test]
     fn client_partition_refusal_is_atomic_and_does_not_spend_response_credit() {
         let response_limit = BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64;

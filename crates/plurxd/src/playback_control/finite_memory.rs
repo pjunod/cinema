@@ -1173,38 +1173,8 @@ impl RollingControlActor {
                     .ok_or(ControlStateError::Unavailable)?,
             )
             .map_err(|_| ControlStateError::Unavailable)?;
-        #[cfg(all(test, feature = "cluster-integration-tests"))]
-        let control_peak = {
-            use plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot;
-            let layout = self
-                .finite_actor_layout(request, &plan)
-                .map_err(|_| ControlStateError::Unavailable)?;
-            let payloads = [
-                ControlState::initial_finite_heap_bytes(),
-                request
-                    .snapshot
-                    .requested_heap_bytes()
-                    .and_then(|n| n.checked_mul(2)),
-                Some(std::mem::size_of::<OwnedLocalControlRequest>())
-                    .and_then(|n| add(n, request.generation.len()))
-                    .and_then(|n| add(n, request.client_instance_id.capacity()))
-                    .and_then(|n| add(n, request.snapshot.requested_heap_bytes()?)),
-                self.finite_control_transient_bound(request),
-                Some(layout.state_bytes),
-                Some(layout.reply_bytes),
-                Some(layout.consumer_bytes),
-            ];
-            payloads
-                .into_iter()
-                .try_fold(0usize, |total, bytes| {
-                    add(total, FiniteClientSlot::required_bytes(bytes?)?)
-                })
-                .ok_or(ControlStateError::Unavailable)?
-        };
         Ok(PreparationRequirement {
             needed: plan.directive.is_some(),
-            #[cfg(all(test, feature = "cluster-integration-tests"))]
-            control_peak,
         })
     }
 
