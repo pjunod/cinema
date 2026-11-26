@@ -15191,6 +15191,38 @@ pub(crate) fn record_processed_upgrade(outcome: &'static str) {
     PROCESSED_UPGRADES[index].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Why a processed upgrade's recovery-memory read was unavailable, by
+/// [`RecoveryUnavailable::label`], in [`RecoveryUnavailable::ALL`] order.
+///
+/// [`RecoveryUnavailable::label`]: crate::http::hls::candidate_recovery::RecoveryUnavailable::label
+/// [`RecoveryUnavailable::ALL`]: crate::http::hls::candidate_recovery::RecoveryUnavailable::ALL
+static PROCESSED_RECOVERY_UNAVAILABLE: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
+
+pub(crate) fn record_processed_recovery_unavailable(
+    reason: crate::http::hls::candidate_recovery::RecoveryUnavailable,
+) {
+    use crate::http::hls::candidate_recovery::RecoveryUnavailable;
+    if let Some(index) = RecoveryUnavailable::ALL
+        .iter()
+        .position(|known| *known == reason)
+    {
+        PROCESSED_RECOVERY_UNAVAILABLE[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn processed_recovery_unavailable_count(
+    reason: crate::http::hls::candidate_recovery::RecoveryUnavailable,
+) -> u64 {
+    use crate::http::hls::candidate_recovery::RecoveryUnavailable;
+    RecoveryUnavailable::ALL
+        .iter()
+        .position(|known| *known == reason)
+        .map_or(0, |index| {
+            PROCESSED_RECOVERY_UNAVAILABLE[index].load(Ordering::Relaxed)
+        })
+}
+
 pub(crate) fn processed_upgrade_count(outcome: &str) -> u64 {
     PROCESSED_UPGRADE_OUTCOMES
         .iter()
@@ -15736,6 +15768,20 @@ pub(crate) fn prometheus() -> String {
         output.push_str(&format!(
             "plurx_playback_preparation_processed_upgrades_total{{outcome=\"{outcome}\"}} {}\n",
             PROCESSED_UPGRADES[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_processed_recovery_unavailable_total Processed upgrade recovery-memory reads that could not answer, by reason.\n\
+         # TYPE plurx_playback_preparation_processed_recovery_unavailable_total counter\n",
+    );
+    for (index, reason) in crate::http::hls::candidate_recovery::RecoveryUnavailable::ALL
+        .iter()
+        .enumerate()
+    {
+        output.push_str(&format!(
+            "plurx_playback_preparation_processed_recovery_unavailable_total{{reason=\"{}\"}} {}\n",
+            reason.label(),
+            PROCESSED_RECOVERY_UNAVAILABLE[index].load(Ordering::Relaxed)
         ));
     }
     output.push_str(

@@ -6093,6 +6093,16 @@ lacks the create's catalog scope.
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
 `admission_refused`, `not_applicable`, `qualification_pending`, `displaced`,
 `cancelled`).
+`plurx_playback_preparation_processed_recovery_unavailable_total{reason}`
+counts the reads of a playback's recovery memory, for a processed recipe, that
+could not answer. `reason` names the read and the exit: `deadline_route_read`,
+`deadline_source_identity`, `deadline_route_reread` and `deadline_memory_read`
+are the deadline passing during that read. The others are an answer that could
+not bind the incumbent: `route_*`, `no_route`, `recipe_mismatch`,
+`response_mismatch`, `candidate_mismatch`, `no_network_user`,
+`no_credential_generation`, `source_fence_open`, `source_changed`,
+`scope_invalid`, `memory_store_error`. An `admission_refused` upgrade after
+its trial carries the same label in its `processing_skip` reason.
 `plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
 prepared switches the clients reported at their seam (`committed`, `refused`,
 `switched_without_a_frame`) and

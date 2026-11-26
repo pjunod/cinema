@@ -1234,11 +1234,20 @@ pub(in crate::http) fn recovery_admission(
         (Evidence::Rejected, _) => {
             Err("this playback's recovery evidence rejects the processed recipe".into())
         }
-        (Evidence::Unavailable, AdmissionStage::BeforeTrial) => Ok(Admission::Unproven),
-        (Evidence::Unavailable, AdmissionStage::AfterTrial) => Err(
-            "this playback's recovery evidence for the processed recipe could not be read before its deadline"
-                .into(),
-        ),
+        (Evidence::Unavailable(_), AdmissionStage::BeforeTrial) => Ok(Admission::Unproven),
+        (Evidence::Unavailable(reason), AdmissionStage::AfterTrial) => {
+            Err(if reason.is_deadline() {
+                format!(
+                "this playback's recovery evidence for the processed recipe could not be read before its deadline ({})",
+                reason.label()
+            )
+            } else {
+                format!(
+                "this playback's recovery evidence for the processed recipe could not be read ({})",
+                reason.label()
+            )
+            })
+        }
     }
 }
 

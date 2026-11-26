@@ -360,12 +360,18 @@ fn an_unproven_pre_trial_admission_never_skips_the_check_after_the_trial() {
 #[test]
 fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() {
     use super::{recovery_admission, Admission, AdmissionStage};
-    use crate::http::hls::candidate_recovery::ProcessedRecoveryEvidence as Evidence;
-    assert_eq!(
-        recovery_admission(Evidence::Unavailable, AdmissionStage::BeforeTrial),
-        Ok(Admission::Unproven)
-    );
-    assert!(recovery_admission(Evidence::Unavailable, AdmissionStage::AfterTrial).is_err());
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    for reason in RecoveryUnavailable::ALL {
+        assert_eq!(
+            recovery_admission(Evidence::Unavailable(reason), AdmissionStage::BeforeTrial),
+            Ok(Admission::Unproven)
+        );
+        assert!(
+            recovery_admission(Evidence::Unavailable(reason), AdmissionStage::AfterTrial).is_err()
+        );
+    }
     assert!(recovery_admission(Evidence::Rejected, AdmissionStage::BeforeTrial).is_err());
     assert!(recovery_admission(Evidence::Rejected, AdmissionStage::AfterTrial).is_err());
     assert_eq!(
@@ -427,4 +433,73 @@ fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
     run.wait_again(intent);
     drop(run);
     assert!(!is_waiting(&session) && !is_running(&session));
+}
+
+#[test]
+fn an_unreadable_recovery_memory_names_the_read_that_missed() {
+    use super::{recovery_admission, AdmissionStage};
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    // A deadline names the read it cut, and keeps the deadline wording.
+    let Err(deadline) = recovery_admission(
+        Evidence::Unavailable(RecoveryUnavailable::DeadlineSourceIdentity),
+        AdmissionStage::AfterTrial,
+    ) else {
+        panic!("a deadline read refuses after the trial");
+    };
+    assert!(deadline.contains("before its deadline"), "{deadline}");
+    assert!(
+        deadline.ends_with("(deadline_source_identity)"),
+        "{deadline}"
+    );
+    // An answered miss is not called a deadline.
+    let Err(answered) = recovery_admission(
+        Evidence::Unavailable(RecoveryUnavailable::RouteLeaseExpired),
+        AdmissionStage::AfterTrial,
+    ) else {
+        panic!("an answered miss refuses after the trial");
+    };
+    assert!(!answered.contains("deadline"), "{answered}");
+    assert!(answered.ends_with("(route_lease_expired)"), "{answered}");
+    // Every reason has its own label, and only the four deadline reads are
+    // deadlines.
+    let labels: std::collections::BTreeSet<_> = RecoveryUnavailable::ALL
+        .iter()
+        .map(|reason| reason.label())
+        .collect();
+    assert_eq!(labels.len(), RecoveryUnavailable::ALL.len());
+    assert_eq!(
+        RecoveryUnavailable::ALL
+            .iter()
+            .filter(|reason| reason.is_deadline())
+            .count(),
+        4
+    );
+    for reason in RecoveryUnavailable::ALL {
+        assert_eq!(
+            reason.is_deadline(),
+            reason.label().starts_with("deadline_")
+        );
+    }
+}
+
+#[test]
+fn each_unavailable_recovery_reason_is_counted_and_exported() {
+    use crate::http::hls::candidate_recovery::RecoveryUnavailable;
+    let reason = RecoveryUnavailable::SourceFenceOpen;
+    let before = crate::playback_control::processed_recovery_unavailable_count(reason);
+    crate::playback_control::record_processed_recovery_unavailable(reason);
+    assert_eq!(
+        crate::playback_control::processed_recovery_unavailable_count(reason),
+        before + 1
+    );
+    let metrics = crate::playback_control::prometheus();
+    for reason in RecoveryUnavailable::ALL {
+        let series = format!(
+            "plurx_playback_preparation_processed_recovery_unavailable_total{{reason=\"{}\"}}",
+            reason.label()
+        );
+        assert!(metrics.contains(&series), "missing {series}");
+    }
 }
