@@ -132,9 +132,13 @@ def _processed(enhancement, report):
              else "L1 only; creative trims are not applied")
     fel = report["fel_contributed"]
     sdr = "SDR " if report.get("sdr_processed") is True else ""
+    # A minimal layer (MEL) has no detail to miss: the server's row says MEL.
+    mel_row = next((d for d in enhancement["details"] if d["badge"] == "FEL"), None) \
+        if enhancement.get("el_kind") == "mel" else None
     current = [
-        {"badge": "FEL", "active": fel, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"
-            if fel else "FEL: no enhancement-layer detail in this window"},
+        {"badge": "FEL", "active": True, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"}
+        if fel else dict(mel_row, active=False) if mel_row
+        else {"badge": "FEL", "active": False, "text": "FEL: no enhancement-layer detail in this window"},
         {"badge": "RPU", "active": bool(rpu), "text": f"RPU: {', '.join(rpu)} applied by the server"
             if rpu else "RPU: no reshaping or colour conversion applied in this window"},
         {"badge": "DYN", "active": target is not None,
@@ -162,10 +166,13 @@ def server_enhancement(session):
         details = [dict(d, text=f"{d['badge']}: not used for this play — {reason}")
                    if not d["active"] and d["badge"] in ("FEL", "RPU") and d["text"].startswith(f"{d['badge']}: not used")
                    else d for d in details]
-    enhancement = {"active": [b for b in ENHANCEMENTS if b in raw["active"]], "details": details, "processed": None}
+    # Full or minimal, as the server's complete-title scan classified the layer.
+    el_kind = raw.get("el_kind") if raw.get("el_kind") in ("fel", "mel") else None
+    enhancement = {"active": [b for b in ENHANCEMENTS if b in raw["active"]], "details": details,
+                   "processed": None, "el_kind": el_kind}
     report, kind = current_report(session)
     if kind == "p81":
-        return {"active": ["FEL"], "processed": "P81", "details": [
+        return {"active": ["FEL"], "processed": "P81", "el_kind": el_kind, "details": [
             {"badge": "FEL", "active": True,
              "text": "FEL: full enhancement layer reconstructed into the Dolby Vision Profile 8.1 picture"}]
             + [d for d in details if d["badge"] not in ENHANCEMENTS]}
@@ -173,7 +180,8 @@ def server_enhancement(session):
         return enhancement
     if report is None:
         return None
-    return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E")
+    return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E",
+                el_kind=el_kind)
 
 
 def _row_text(value):

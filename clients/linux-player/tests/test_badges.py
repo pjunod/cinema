@@ -41,6 +41,26 @@ class ServerEnhancement(unittest.TestCase):
         self.assertIsNone(server_enhancement({"enhancement": {"active": "DYN"}}))
         self.assertIsNone(server_enhancement(None))
 
+    MEL_ROW = {"badge": "FEL", "active": False, "text":
+               "MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU"}
+
+    def test_mel_title_keeps_the_servers_mel_row_on_a_processed_route(self):
+        # A Profile 7 MEL title: the server names the layer MEL and the
+        # report proves no full layer, so the row must not read as missing FEL.
+        enhancement = dict(self.NATIVE, el_kind="mel", requires_effective_processing=True,
+                           details=[self.MEL_ROW] + self.NATIVE["details"][1:])
+        report = {"generation": GENERATION, "hdr10_enhanced": True, "fel_contributed": False,
+                  "applied_operations": ["PolynomialReshape", {"DisplayTargetMapping": {"nits": 1000}}]}
+        shown = server_enhancement(self.session(report, enhancement=enhancement))
+        self.assertEqual((shown["active"], shown["el_kind"]), (["RPU", "DYN"], "mel"))
+        self.assertEqual(shown["details"][0], self.MEL_ROW)
+        native = server_enhancement({"enhancement": dict(enhancement, requires_effective_processing=False)})
+        self.assertEqual((native["el_kind"], native["details"][0]), ("mel", self.MEL_ROW))
+        # A proven full layer still wins, and an unknown kind is not passed on.
+        shown = server_enhancement(self.session(dict(report, fel_contributed=True), enhancement=enhancement))
+        self.assertTrue(shown["details"][0]["text"].startswith("FEL: full enhancement layer"))
+        self.assertIsNone(server_enhancement({"enhancement": dict(self.NATIVE, el_kind="xel")})["el_kind"])
+
     def session(self, report, delivered="hdr10", **extra):
         return dict({"enhancement": dict(self.NATIVE, requires_effective_processing=True),
                      "control": {"generation": GENERATION}, "delivered_dynamic_range": delivered,

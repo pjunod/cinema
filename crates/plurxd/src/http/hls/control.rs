@@ -2368,7 +2368,7 @@ pub(crate) async fn prepared_successor_enhancement(
     file_id: i64,
     delivered_range: Option<&str>,
     delivered_dolby_vision_profile: Option<u8>,
-    levels: Option<&plurx_core::scan::dv_levels::DvTitleLevels>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     let (facts, _owner) = transcode
         .prepared_hls_facts(session_id, incarnation_id)
@@ -2387,7 +2387,7 @@ pub(crate) async fn prepared_successor_enhancement(
     if range != delivered_range || delivered_profile != delivered_dolby_vision_profile {
         return None;
     }
-    super::create::session_enhancement_with_levels(
+    super::create::session_enhancement_with_title(
         Some(&facts.file),
         &kind,
         grade,
@@ -2396,7 +2396,7 @@ pub(crate) async fn prepared_successor_enhancement(
         None,
         None,
         None,
-        levels,
+        title,
     )
 }
 
@@ -2536,14 +2536,14 @@ async fn staged_successor_action(
         );
         return Err(());
     }
-    let successor_levels = state
+    let successor_probe = state
         .store
         .get_file_probe_json(recipe.request.file_id)
         .await
         .ok()
         .flatten();
-    let successor_levels =
-        plurx_core::scan::dv_levels::title_levels_from_probe(successor_levels.as_deref());
+    let successor_title =
+        plurx_core::playback::enhancement::TitleScanFacts::from_probe(successor_probe.as_deref());
     let enhancement = prepared_successor_enhancement(
         &state.transcode,
         &successor.session_id,
@@ -2551,7 +2551,7 @@ async fn staged_successor_action(
         recipe.request.file_id,
         start.delivered_dynamic_range.as_deref(),
         start.delivered_dolby_vision_profile,
-        successor_levels.as_ref(),
+        Some(&successor_title),
     )
     .await;
     let prepared = crate::playback_control::PreparedSuccessorAction {

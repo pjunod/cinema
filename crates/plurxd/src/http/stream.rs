@@ -627,7 +627,7 @@ fn direct_enhancement(
     file: &MediaFile,
     decision: &Decision,
     delivery: &DeliveryPlan,
-    levels: Option<&plurx_core::scan::dv_levels::DvTitleLevels>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
     let profile = file
@@ -648,11 +648,12 @@ fn direct_enhancement(
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
         source_profile: Some(profile),
         source_el_present: file.dolby_vision.el_present,
+        el_kind: title.and_then(|title| title.el_kind),
         route: EnhancementRoute::NativeDolbyVision,
         hdr_processing_enabled: None,
         fel_reencode_enabled: None,
         decline_reason: None,
-        levels,
+        levels: title.and_then(|title| title.levels.as_ref()),
     })
 }
 
@@ -2996,7 +2997,11 @@ async fn decision_for_file(
             &file,
             &decision,
             &delivery,
-            plurx_core::scan::dv_levels::title_levels_from_probe(probe_json.as_deref()).as_ref(),
+            Some(
+                &plurx_core::playback::enhancement::TitleScanFacts::from_probe(
+                    probe_json.as_deref(),
+                ),
+            ),
         ),
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
