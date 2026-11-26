@@ -880,7 +880,8 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: ["https", "sourceRecovery"] },
+    // Resource limits (saved capacity choices) come only from /settings.
+    system: { required: ["sys"], secondary: ["https", "sourceRecovery", "settings"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["settings", "sharingStatus", "sharingImports", "sharingExports"], secondary: ["developerReadiness"] },
     integrations: { required: ["settings", "trakt"], secondary: ["developerReadiness"] },
@@ -1708,7 +1709,9 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:["/system/https","/developer/source-recovery"]},
+    // The Resource limits card paints from the saved capacity choices, which only
+    // /settings carries; it fills its own mount, so the System page never waits for it.
+    system:{required:["/system"],secondary:["/system/https","/developer/source-recovery","/settings"]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
