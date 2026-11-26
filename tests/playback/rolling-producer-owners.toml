@@ -261,7 +261,11 @@ replacement = "typed producer facts entering the actor; only prepublication and 
 
 [[symbols]]
 id = "supervisor-registration"
-pattern = "AttemptChild::new(?:_with_(?:source_)?job)?\\("
+pattern = "AttemptChild::new(?:_with_(?:source_)?job|_with_pauses)?\\("
+# `new_with_pauses` is the test constructor that returns its supervisor's pause handle; the
+# child no longer stores a test-only hooks copy. Same supervisor, so it is counted here.
+# chunk_06.rs 1 -> 2: watchdog_session_with_publication_and_pauses builds its fixture child
+# through new_with_pauses so three retirement races keep the reap pause handle.
 also_in = ["crates/plurxd/src/transcode"]
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
@@ -298,7 +302,7 @@ replacement = "retained as the sole OS-child supervisor, registered before publi
 "crates/plurxd/src/transcode/tests/chunk_02.rs" = 12
 "crates/plurxd/src/transcode/tests/chunk_04.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_05.rs" = 3
-"crates/plurxd/src/transcode/tests/chunk_06.rs" = 1
+"crates/plurxd/src/transcode/tests/chunk_06.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_07.rs" = 1
 
 [[symbols]]
@@ -743,6 +747,9 @@ replacement = "every new sleep requires classification; actor-managed producer v
 # Preparing-bootstrap regression (mode 64, source_preparing_bootstrap_outlives_the_retained_ingress_observation):
 # +1 test-only 100 ms poll inside a 30 s timeout waiting for the retained ingress
 # observation to age out (+2 namespaced-time-constructor). It decides nothing; no production timer.
+# attempt_settlement.rs 0 -> 1: process_terminal_is_early_but_task_settlement_joins_the_reader polls the
+# root's terminal latch (try_wait) at 10 ms inside its 5 s bound; the supervisor stays joined to the held
+# diagnostic reader, and the test-only terminal Notify on AttemptChild was removed.
 [symbols.occurrences]
 "crates/plurxd/src/transcode/adaptive_attempts.rs" = 7
 "crates/plurxd/src/transcode/local_direct.rs" = 1
@@ -761,6 +768,7 @@ replacement = "every new sleep requires classification; actor-managed producer v
 "crates/plurxd/src/transcode/source_preparation.rs" = 2
 "crates/plurxd/src/transcode/source_preparation/fixed_tests.rs" = 4
 "crates/plurxd/src/transcode/test_support.rs" = 2
+"crates/plurxd/src/transcode/tests/attempt_settlement.rs" = 1
 "crates/plurxd/src/transcode/tests/chunk_01.rs" = 9
 "crates/plurxd/src/transcode/tests/chunk_02.rs" = 1
 "crates/plurxd/src/transcode/tests/chunk_03.rs" = 2
@@ -4915,6 +4923,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # vod/finite_software.rs for the trial observer's new adoption deadline
 # (`adopt_by`), awaited beside the existing stop deadline in the same select.
 # It owns no task, timer task or process.
+# attempt_settlement.rs 8 -> 9: the same 10 ms terminal-latch poll interval.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 17
 "crates/plurx-core/src/process/bounded/pause.rs" = 18
@@ -5206,7 +5215,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/transcode/source_status.rs" = 1
 "crates/plurxd/src/transcode/source_subtitles.rs" = 3
 "crates/plurxd/src/transcode/test_support.rs" = 5
-"crates/plurxd/src/transcode/tests/attempt_settlement.rs" = 8
+"crates/plurxd/src/transcode/tests/attempt_settlement.rs" = 9
 "crates/plurxd/src/transcode/tests/chunk_01.rs" = 18
 "crates/plurxd/src/transcode/tests/chunk_02.rs" = 9
 "crates/plurxd/src/transcode/tests/chunk_03.rs" = 3
@@ -8682,6 +8691,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # DV window runs (#1862): +5 `run.kill().await` calls on WindowRun, the run
 # owner whose kill cancels the helper's existing stage owner and waits for its
 # reap and the run's source/lane/reservation settlement. No new process launch.
+# attempt_settlement.rs 1 -> 2: that poll reads the production terminal observer `try_wait`.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 7
 "crates/plurx-core/src/process/bounded/pause.rs" = 2
@@ -8764,7 +8774,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 "crates/plurxd/src/transcode/rolling/session.rs" = 4
 "crates/plurxd/src/transcode/source_preparation.rs" = 4
 "crates/plurxd/src/transcode/source_resource.rs" = 1
-"crates/plurxd/src/transcode/tests/attempt_settlement.rs" = 1
+"crates/plurxd/src/transcode/tests/attempt_settlement.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_01.rs" = 11
 "crates/plurxd/src/transcode/tests/chunk_02.rs" = 13
 "crates/plurxd/src/transcode/tests/chunk_04.rs" = 2
@@ -9430,7 +9440,11 @@ pattern = "kill_on_drop\\s*\\("
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
-pattern = "AttemptChild::new(?:_with_(?:source_)?job)?\\s*\\("
+pattern = "AttemptChild::new(?:_with_(?:source_)?job|_with_pauses)?\\s*\\("
+# `new_with_pauses` is the test constructor that returns its supervisor's pause handle; the
+# child no longer stores a test-only hooks copy. Same supervisor, so it is counted here.
+# chunk_06.rs 1 -> 2: watchdog_session_with_publication_and_pauses builds its fixture child
+# through new_with_pauses so three retirement races keep the reap pause handle.
 # 20 -> 22 with M5c3; the module-wide twin of `supervisor-registration`, and
 # the same two test-only predecessor children.
 # The Windows constructor variant is included because it is the same exact
@@ -9446,7 +9460,7 @@ pattern = "AttemptChild::new(?:_with_(?:source_)?job)?\\s*\\("
 "crates/plurxd/src/transcode/tests/chunk_02.rs" = 12
 "crates/plurxd/src/transcode/tests/chunk_04.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_05.rs" = 3
-"crates/plurxd/src/transcode/tests/chunk_06.rs" = 1
+"crates/plurxd/src/transcode/tests/chunk_06.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_07.rs" = 1
 
 [[module_structures]]

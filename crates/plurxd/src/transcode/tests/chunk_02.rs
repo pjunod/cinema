@@ -2458,14 +2458,11 @@ async fn actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses()
         .begin_producer_attempt()
         .await
         .expect("producer attempt");
-    let child = Arc::new(AttemptChild::new(
-        attempt,
-        long_running_child(),
-        control.clone(),
-        None,
-    ));
+    let (child, pauses) =
+        AttemptChild::new_with_pauses(attempt, long_running_child(), control.clone(), None);
+    let child = Arc::new(child);
     let pause = SupervisorPause::new("after-flow-reservation");
-    child.pause_signal_after_flow_reservation(Arc::clone(&pause));
+    pauses.pause_signal_after_flow_reservation(Arc::clone(&pause));
     let signal = {
         let child = Arc::clone(&child);
         tokio::spawn(async move {
@@ -2524,14 +2521,11 @@ async fn producer_signal_and_retirement_share_one_authorization_linearization() 
         .begin_producer_attempt()
         .await
         .expect("producer attempt");
-    let child = Arc::new(AttemptChild::new(
-        attempt,
-        long_running_child(),
-        control.clone(),
-        None,
-    ));
+    let (child, pauses) =
+        AttemptChild::new_with_pauses(attempt, long_running_child(), control.clone(), None);
+    let child = Arc::new(child);
     let pause = SupervisorPause::new("after-signal-authorization");
-    child.pause_signal_after_authorization(Arc::clone(&pause));
+    pauses.pause_signal_after_authorization(Arc::clone(&pause));
     let signal = {
         let child = Arc::clone(&child);
         tokio::spawn(async move {
@@ -2722,7 +2716,8 @@ async fn attempt_child_shipped_shape() {
     child
         .request_termination()
         .expect("termination request reaches the supervisor");
-    tokio::time::timeout(Duration::from_secs(5), child.wait_for_terminal())
+    // Join the supervisor, as retirement does since its join owns the reap.
+    tokio::time::timeout(Duration::from_secs(5), child.wait_for_settlement())
         .await
         .expect("the supervisor passes the before-reap point and publishes the reap")
         .expect("terminal wait result");

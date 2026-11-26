@@ -453,6 +453,20 @@ pub(super) struct AttemptChildPauses {
 
 #[cfg(test)]
 impl AttemptChildPauses {
+    pub(super) fn pause_signal_after_authorization(&self, pause: Arc<SupervisorPause>) {
+        Self::install(&self.signal_after_authorization, pause);
+    }
+
+    pub(super) fn pause_signal_after_flow_reservation(&self, pause: Arc<SupervisorPause>) {
+        Self::install(&self.signal_after_flow_reservation, pause);
+    }
+
+    /// Pause the supervisor after exact-attempt termination has been
+    /// requested but before it can observe and publish the terminal wait.
+    pub(super) fn pause_terminate_before_reap(&self, pause: Arc<LifecycleTestPause>) {
+        Self::install(&self.terminate_before_reap, pause);
+    }
+
     fn take<T>(slot: &std::sync::Mutex<Option<T>>) -> Option<T> {
         slot.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -500,18 +514,12 @@ pub(super) struct AttemptChild {
     /// scoped to one attempt: a successor gets its own counters, and a
     /// predecessor's fault must not follow the attempt that replaced it.
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
-    #[cfg(test)]
-    terminal_notify: Arc<tokio::sync::Notify>,
     /// Actual supervisor ownership is separate from its early process latch.
     /// Cleanup must join this task, including its diagnostic drain and job
     /// lifetime, before dropping the slot or returning legacy admission.
     supervisor: tokio::sync::Mutex<AttemptSupervisorJoin>,
     join_runtime: tokio::runtime::Handle,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
-    /// The supervisor's pause points; see [`AttemptChildHooks`]. The supervisor
-    /// task runs through a clone of this one.
-    #[cfg(test)]
-    hooks: Arc<dyn AttemptChildHooks>,
     pub(super) source_observer: Option<crate::source_custody::SourceObserver>,
 }
 
@@ -575,10 +583,22 @@ impl AttemptChild {
     #[cfg(test)]
     pub(super) fn new(
         producer_attempt: u64,
-        mut child: Child,
+        child: Child,
         control: crate::playback_control::RollingControlHandle,
         diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
     ) -> Self {
+        Self::new_with_pauses(producer_attempt, child, control, diagnostics).0
+    }
+
+    /// [`Self::new`], returning the pause points its supervisor runs through.
+    /// A race test keeps this handle; the child stores no test-only copy.
+    #[cfg(test)]
+    pub(super) fn new_with_pauses(
+        producer_attempt: u64,
+        mut child: Child,
+        control: crate::playback_control::RollingControlHandle,
+        diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
+    ) -> (Self, Arc<AttemptChildPauses>) {
         let child_job = match crate::process_control::ChildJob::attach(&child) {
             Ok(job) => Some(job),
             Err(error) => {
@@ -590,15 +610,17 @@ impl AttemptChild {
                 None
             }
         };
-        Self::new_with_hooks(
+        let pauses = Arc::new(AttemptChildPauses::default());
+        let child = Self::new_with_hooks(
             producer_attempt,
             child,
             child_job,
             control,
             diagnostics,
-            Arc::new(AttemptChildPauses::default()),
+            Arc::clone(&pauses) as Arc<dyn AttemptChildHooks>,
             None,
-        )
+        );
+        (child, pauses)
     }
 
     #[cfg(test)]
@@ -655,10 +677,8 @@ impl AttemptChild {
         let supervisor_diagnostics = std::sync::Mutex::new(diagnostics);
         let supervisor_control = control.clone();
         let terminal = Arc::new(std::sync::Mutex::new(None));
-        let terminal_notify = Arc::new(tokio::sync::Notify::new());
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let supervisor_terminal = Arc::clone(&terminal);
-        let supervisor_terminal_notify = Arc::clone(&terminal_notify);
         let source_observer = custody.as_ref().map(|custody| custody.observer());
         let supervisor_hooks = Arc::clone(&hooks);
         let supervisor = tokio::spawn(async move {
@@ -795,8 +815,6 @@ impl AttemptChild {
             *supervisor_terminal
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal.clone());
-            supervisor_terminal_notify.notify_waiters();
-            supervisor_terminal_notify.notify_one();
             for reply in terminate_replies {
                 let _ = reply.send(terminal.wait_result());
             }
@@ -825,14 +843,10 @@ impl AttemptChild {
             producer_attempt,
             pid,
             terminal,
-            #[cfg(test)]
-            terminal_notify,
             supervisor: tokio::sync::Mutex::new(AttemptSupervisorJoin::Running(supervisor)),
             join_runtime: tokio::runtime::Handle::current(),
             commands,
             source_observer,
-            #[cfg(test)]
-            hooks,
         }
     }
 
@@ -923,32 +937,6 @@ impl AttemptChild {
             .flatten()
     }
 
-    /// The pauses [`AttemptChild::new`] installed on this child.
-    #[cfg(test)]
-    fn pauses(&self) -> &AttemptChildPauses {
-        let hooks: &dyn std::any::Any = &*self.hooks;
-        hooks
-            .downcast_ref()
-            .expect("AttemptChild::new installs AttemptChildPauses")
-    }
-
-    #[cfg(test)]
-    pub(super) fn pause_signal_after_authorization(&self, pause: Arc<SupervisorPause>) {
-        AttemptChildPauses::install(&self.pauses().signal_after_authorization, pause);
-    }
-
-    #[cfg(test)]
-    pub(super) fn pause_signal_after_flow_reservation(&self, pause: Arc<SupervisorPause>) {
-        AttemptChildPauses::install(&self.pauses().signal_after_flow_reservation, pause);
-    }
-
-    /// Pause the supervisor after exact-attempt termination has been
-    /// requested but before it can observe and publish the terminal wait.
-    #[cfg(test)]
-    pub(super) fn pause_terminate_before_reap(&self, pause: Arc<LifecycleTestPause>) {
-        AttemptChildPauses::install(&self.pauses().terminate_before_reap, pause);
-    }
-
     pub(super) async fn signal(
         &self,
         signal: crate::process_control::ProcessSignal,
@@ -1023,22 +1011,6 @@ impl AttemptChild {
             return self.terminal_result_or_broken_pipe("producer exited before terminate request");
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) async fn wait_for_terminal(&self) -> std::io::Result<()> {
-        loop {
-            let notified = self.terminal_notify.notified();
-            if let Some(terminal) = self
-                .terminal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-            {
-                return terminal.wait_result();
-            }
-            notified.await;
-        }
     }
 
     /// Join the actual supervisor, not just its earlier process-exit notice.

@@ -511,14 +511,32 @@
         cached: bool,
         actor_managed_prepublication: bool,
     ) -> Arc<Session> {
-        watchdog_session_with_control(
+        watchdog_session_with_publication_and_pauses(dir, child, cached, actor_managed_prepublication)
+            .0
+    }
+
+    /// [`watchdog_session_with_publication`], returning the pause points its
+    /// child's supervisor runs through (none without a child).
+    fn watchdog_session_with_publication_and_pauses(
+        dir: &std::path::Path,
+        child: Option<Child>,
+        cached: bool,
+        actor_managed_prepublication: bool,
+    ) -> (Arc<Session>, Option<Arc<AttemptChildPauses>>) {
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("test-start");
+        let (child, pauses) = child
+            .map(|child| AttemptChild::new_with_pauses(0, child, control.clone(), None))
+            .unzip();
+        let mut raw = watchdog_raw_session(
             dir,
-            child,
+            None,
             cached,
             actor_managed_prepublication,
-            crate::playback_control::RollingControlHandle::spawn_for_test("test-start"),
+            control,
             0,
-        )
+        );
+        raw.child = Mutex::new(child);
+        (Arc::new(raw), pauses)
     }
 
     fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
@@ -665,19 +683,18 @@
             .expect("seed published segment");
 
         let admissions = Admissions::new();
-        let session =
-            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        let (session, pauses) = watchdog_session_with_publication_and_pauses(
+            &scratch,
+            Some(long_running_child()),
+            false,
+            true,
+        );
+        let pauses = pauses.expect("attempt child pauses");
         session.actor_prepublication_producer.store(false, Release);
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        session
-            .child
-            .lock()
-            .await
-            .as_ref()
-            .expect("attempt child")
-            .pause_terminate_before_reap(Arc::clone(&reap_pause));
+        pauses.pause_terminate_before_reap(Arc::clone(&reap_pause));
 
         let settlement = spawn_published_failure_cleanup_owner(
             &session,
@@ -1534,18 +1551,17 @@
             Pipeline::Cpu,
         );
         let admissions = Admissions::new();
-        let session =
-            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        let (session, pauses) = watchdog_session_with_publication_and_pauses(
+            &scratch,
+            Some(long_running_child()),
+            false,
+            true,
+        );
+        let pauses = pauses.expect("attempt child pauses");
         reserve_test_admissions(&session, &admissions);
         let owner_pause = session.test_hooks().first_media_owner_claim.arm("first_media_owner_claim");
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        session
-            .child
-            .lock()
-            .await
-            .as_ref()
-            .expect("attempt child")
-            .pause_terminate_before_reap(Arc::clone(&reap_pause));
+        pauses.pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()
@@ -1606,17 +1622,16 @@
             Pipeline::Cpu,
         );
         let admissions = Admissions::new();
-        let session =
-            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        let (session, pauses) = watchdog_session_with_publication_and_pauses(
+            &scratch,
+            Some(long_running_child()),
+            false,
+            true,
+        );
+        let pauses = pauses.expect("attempt child pauses");
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        session
-            .child
-            .lock()
-            .await
-            .as_ref()
-            .expect("attempt child")
-            .pause_terminate_before_reap(Arc::clone(&reap_pause));
+        pauses.pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()

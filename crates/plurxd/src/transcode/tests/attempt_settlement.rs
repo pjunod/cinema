@@ -39,16 +39,25 @@ async fn session_with_pending_drain(
         Some(reader),
         Some(progress),
     );
-    let child = AttemptChild::new(
+    let mut child = AttemptChild::new(
         0,
         successful_child(),
         session.control.clone(),
         Some(diagnostics),
     );
-    tokio::time::timeout(Duration::from_secs(5), child.wait_for_terminal())
-        .await
-        .expect("root exits independently of diagnostic reader")
-        .expect("actual root wait");
+    // The supervisor stays joined to the held diagnostic reader, so observe
+    // the root's exit the way retirement does: through its terminal latch.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = child.try_wait().transpose() {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("root exits independently of diagnostic reader")
+    .expect("actual root wait");
     assert!(!closed.load(SeqCst));
     *session.child.get_mut() = Some(child);
     (Arc::new(session), release, closed)
