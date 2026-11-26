@@ -638,7 +638,7 @@ async fn measure_new_title(
                 let capture = CapturePlan { layout: source.layout, frames: &frames };
                 let planes = m7_comparison::prepare_planes(
                     context, &title, capture, &scratch, reserve_bytes,
-                ).await.map_err(string)?;
+                ).await.map_err(comparison_error)?;
                 for frame in &planes.frames {
                     if active_area(&frame.source_rpu, source.layout.raster).map_err(string)?
                         != source.layout.roi
@@ -1133,12 +1133,12 @@ async fn calibrate(
     fitted: &FittedPublication,
     scratch: &TempDir,
     scratch_bytes: u64,
-) -> Result<CalibrationEvidence, String> {
+) -> Result<CalibrationEvidence, EvaluationError> {
     let plan = CapturePlan { layout, frames };
     let capture =
         m7_comparison::capture_source_lattice(context, title, plan, scratch, scratch_bytes)
             .await
-            .map_err(string)?;
+            .map_err(comparison_error)?;
     let frames = frames.to_vec();
     let table = Arc::clone(fitted.table());
     let cancel = context.cancel.clone();
@@ -1239,6 +1239,7 @@ async fn calibrate(
     })
     .await
     .map_err(string)?
+    .map_err(EvaluationError::Deferred)
 }
 
 fn frozen_margin(evidence: &[CalibrationEvidence]) -> Result<FrozenMargin, String> {
@@ -1428,6 +1429,31 @@ mod tests {
             FrameProjectionError::Transient("deadline".into()).into_evaluation(),
             EvaluationError::Deferred(_)
         ));
+    }
+
+    /// Eclipse's FEL uses MMR chroma reshaping, which the frozen model does
+    /// not compose. The sample helper refuses it during calibration, before
+    /// any comparison; that refusal must settle the title, not requeue copies.
+    #[test]
+    fn a_sample_helper_content_refusal_settles_and_other_comparison_errors_defer() {
+        let refused = m7_comparison::Error::Content(
+            "Segment refused: M7 FEL requires identity mapping and calibrated linear NLQ".into(),
+        );
+        assert!(matches!(
+            comparison_error(refused),
+            EvaluationError::Unsupported(message) if message.contains("identity mapping")
+        ));
+        for error in [
+            m7_comparison::Error::Busy("scratch".into()),
+            m7_comparison::Error::Cancelled,
+            m7_comparison::Error::Authority("census"),
+            m7_comparison::Error::Execution("renderer".into()),
+        ] {
+            assert!(matches!(
+                comparison_error(error),
+                EvaluationError::Deferred(_)
+            ));
+        }
     }
 
     #[test]
