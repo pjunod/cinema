@@ -1578,13 +1578,16 @@ async fn segment_local_answer(
         .unwrap_or((StatusCode::OK, 0, opened.len.saturating_sub(1)));
     let publication_deadline = response_publication_deadline_before(request_deadline);
     let opened_len = end.saturating_sub(start).saturating_add(1);
+    // Opening the range must finish inside the publication window; reads
+    // behind the client run for the body's own lifetime, as for VOD.
+    let body_deadline_std = Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
     let reader = match tokio::time::timeout_at(
         tokio::time::Instant::from_std(publication_deadline),
         opened.file.into_range_stream(
             start,
             end.saturating_add(1),
             MEDIA_BODY_READ_BUFFER,
-            publication_deadline,
+            body_deadline_std,
         ),
     )
     .await
@@ -1661,7 +1664,7 @@ async fn segment_local_answer(
     authorization.pin_scratch_object(total_len);
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
-    let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+    let body_deadline = tokio::time::Instant::from_std(body_deadline_std);
     let (sender, receiver) = tokio::sync::mpsc::channel(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
     let terminal = StreamedBodyTerminal::new();
     let pump_terminal = terminal.clone();

@@ -1124,10 +1124,14 @@ pattern = "RESPONSE_PUBLICATION_LIFECYCLE_BUDGET"
 # 5 -> 6: `an_mpegts_session_keeps_its_static_codec_string` is a unit test that
 # calls `exact_hls_context_at` with that same budget as its deadline, so the
 # sixth site is the test reading the constant, not a new owner or producer.
+# 6 -> 7: `a_slow_client_receives_a_whole_rolling_segment_after_its_publication_window`
+# advances the clock past this budget to prove a rolling body's storage reads
+# run for the body lifetime instead; a test reading the constant, no owner.
 [module_symbols.occurrences]
 "crates/plurxd/src/http/hls.rs" = 1
 "crates/plurxd/src/http/hls/context.rs" = 1
 "crates/plurxd/src/http/hls/response.rs" = 3
+"crates/plurxd/src/http/hls/tests/chunk_05.rs" = 1
 "crates/plurxd/src/http/hls/tests/chunk_06.rs" = 1
 
 [[module_symbols]]
