@@ -25,6 +25,9 @@ pub mod serving {
     pub const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
     pub const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
     pub const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
+    /// How long a replication status read waits for the local state machine
+    /// to apply entries its Raft log already holds before calling it behind.
+    pub const LOCAL_APPLY_SETTLE: Duration = Duration::from_millis(500);
     pub const SERVING_FENCE_POLL: Duration = Duration::from_millis(25);
     pub const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(5);
 }
@@ -428,6 +431,11 @@ mod tests {
             membership::PROPOSAL_HOLD_WAIT,
             membership::SHUTDOWN_HANDOFF_WAIT,
             "the local proposal hold is inside the shutdown deadline",
+        );
+        shorter(
+            serving::LOCAL_APPLY_SETTLE + operations::PEER_STATUS_TIMEOUT,
+            operations::AGGREGATE_TIMEOUT,
+            "a settled topology read must leave the aggregate time for its peer probes",
         );
         shorter(
             jobs::JOB_LEASE_HEARTBEAT
