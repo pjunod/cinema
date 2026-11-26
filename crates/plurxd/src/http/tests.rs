@@ -1331,8 +1331,10 @@ async fn production_logout_fence_outlives_the_short_deadline() {
     );
 }
 
-#[test]
-fn route_deadline_inventory_is_total() {
+// AppState owns the DVR capture driver it spawns, so it is built inside
+// a runtime, as the daemon builds it.
+#[tokio::test]
+async fn route_deadline_inventory_is_total() {
     // axum does not expose a stable route-list API. Keep registrations
     // total by construction instead: every `.route` and `.nest` in
     // `router()` must be inside exactly one named group. The two aggregate

@@ -900,8 +900,10 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
     ));
 }
 
-#[test]
-fn a_fresh_title_waits_only_for_a_local_index_pass() {
+// AppState owns the DVR capture driver it spawns, so it is built inside
+// a runtime, as the daemon builds it.
+#[tokio::test]
+async fn a_fresh_title_waits_only_for_a_local_index_pass() {
     let dir = crate::test_tempdir().expect("scratch");
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
     let state = AppState::new(
