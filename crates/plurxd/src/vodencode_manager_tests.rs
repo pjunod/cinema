@@ -1570,12 +1570,18 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         )
         .await
         .expect("attested source metadata");
+    let runtime = crate::test_runtime::for_finite_serving().await;
     let manager = TranscodeManager::new(
-        store,
+        Arc::clone(&store),
         base.path().join("manager"),
         EncoderCaps::default(),
         Pipeline::Cpu,
-    );
+    )
+    .with_copy_test_vod(crate::vodserve::VodServe::new_with_runtime(
+        base.path().join("manager").join("renditions"),
+        store,
+        runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
+    ));
     let req = SessionRequest {
         dv_processing_destination: None,
         retain_output: None,
@@ -1801,12 +1807,19 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             )
             .await
             .expect("stored catalog probe");
+        let runtime = crate::test_runtime::for_finite_serving().await;
+        let work = base.path().join(if admitted { "admit" } else { "refuse" });
         let manager = TranscodeManager::new(
-            store,
-            base.path().join(if admitted { "admit" } else { "refuse" }),
+            Arc::clone(&store),
+            work.clone(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        )
+        .with_copy_test_vod(crate::vodserve::VodServe::new_with_runtime(
+            work.join("renditions"),
+            store,
+            runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
+        ));
         let request = SessionRequest {
             dv_processing_destination: None,
             retain_output: None,
@@ -2738,16 +2751,24 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     )
     .await
     .expect("bound FFprobe identity");
+    let runtime = crate::test_runtime::for_finite_serving().await;
+    // `with_cache`'s layout, holding the runtime the daemon's manager holds.
     let manager = TranscodeManager::new(
         store,
         base.path().join("manager"),
         EncoderCaps::default(),
         Pipeline::Cpu,
     )
-    .with_cache(
+    .with_cache_layout(
         base.path().join("cache"),
+        base.path().join("runtime"),
+        base.path().join("subs"),
+        base.path().join("renditions"),
         "test-ffmpeg".into(),
         "test-node".into(),
+        None,
+        None,
+        runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
     )
     .with_decode_probe(Some(decode_probe));
     let mut request = SessionRequest {

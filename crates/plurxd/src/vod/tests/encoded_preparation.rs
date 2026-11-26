@@ -32,7 +32,7 @@ async fn encoded_preparation_consumer(with_live_pressure: bool) {
     store.put_setting(plurx_core::store::keys::CACHE_MAX_GB, "1").await.expect("retention cap");
     let vod_base = base.path().join("vod");
     std::fs::create_dir(&vod_base).expect("owned VOD namespace");
-    let serve = local_serve(vod_base, Arc::clone(&store));
+    let (serve, _serve_runtime) = local_serve_with_runtime(vod_base, Arc::clone(&store)).await;
     let manager = crate::transcode::TranscodeManager::new(Arc::clone(&store), base.path().join("work"),
         plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu)
         .with_cache(base.path().join("cache"), "encoded-test".into(), "test-local".into())
@@ -189,7 +189,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
         .expect("frozen off choice");
     let vod_base = base.path().join("vod");
     std::fs::create_dir(&vod_base).expect("owned VOD namespace");
-    let serve = local_serve(vod_base, Arc::clone(&store));
+    let (serve, _serve_runtime) = local_serve_with_runtime(vod_base, Arc::clone(&store)).await;
     let decode_probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
         &crate::ffmpeg::bound_ffprobe_bin(),
     )

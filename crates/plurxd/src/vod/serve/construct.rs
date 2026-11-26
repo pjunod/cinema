@@ -181,6 +181,30 @@ impl VodServe {
         Self::new_configured(base, runtime_cache, store, None, None, None, None, None)
     }
 
+    /// [`Self::new`] holding the node resource runtime, as the daemon's
+    /// standalone `VodServe` does; finite VOD builds renditions through it.
+    #[cfg(test)]
+    pub(crate) fn new_with_runtime(
+        base: PathBuf,
+        store: Arc<dyn Store>,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
+    ) -> Arc<VodServe> {
+        let runtime_cache = base
+            .parent()
+            .unwrap_or(base.as_path())
+            .join(".runtime-cache");
+        Self::new_configured(
+            base,
+            runtime_cache,
+            store,
+            None,
+            None,
+            None,
+            None,
+            resource_runtime,
+        )
+    }
+
     /// Publish a producer-less VOD attachment for HTTP response-finalization
     /// tests. The fixture uses the real session/reader/incarnation machinery;
     /// only materialization and the producer driver are bypassed.

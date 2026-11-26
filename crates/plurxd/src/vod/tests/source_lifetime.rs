@@ -172,7 +172,7 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
     for cancel_waiter in [false, true] {
         let base = crate::test_tempdir().expect("actual generation fixture");
         let (file, encoding) = encoded_fixture(base.path()).await;
-        let serve = bare_serve(&base.path().join("renditions"));
+        let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
         let mut rendition = serve
             .shared
             .build_rendition(
@@ -280,7 +280,7 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
 async fn source_deferred_rendition_preparation_creates_no_visible_demand_or_child() {
     let base = crate::test_tempdir().expect("deferred fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
-    let serve = bare_serve(&base.path().join("renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
     let req = request("deferred-viewer", 0.0);
     // This physical preparation fixture has no Source principal or binding.
     // Resolve the ordinary deferred recipe; never invent Source admission.

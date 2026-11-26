@@ -343,7 +343,7 @@ async fn ordinary_auto_vod_start_registers_live_wait_over_background() {
     use crate::admission::{Priority, TranscodeResourceEstimate};
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("ordinary Auto admission");
-    let serve = bare_serve(base.path());
+    let (serve, _serve_runtime) = bare_serve_with_runtime(base.path()).await;
     let (file, mut encoding) = encoded_fixture(base.path()).await;
     // This is the fresh encoding marker prepare_vod_encoding derives from
     // automatic + candidate_context. It describes possible Auto trials, not
@@ -438,7 +438,7 @@ async fn explicit_vod_attachment_priority_isolated_from_cached_auto_recipe() {
         } else {
             "cached-live"
         });
-        let serve = bare_serve(&cache);
+        let (serve, _serve_runtime) = bare_serve_with_runtime(&cache).await;
         let mut encoding = source
             .clone_with_admissions_for_test(crate::admission::Admissions::new())
             .await;
@@ -907,10 +907,10 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .await
         .expect("bounded audio policy");
     let schedule_store = Arc::new(SqliteStore::open_in_memory().expect("schedule store"));
-    let serve = local_serve(
+    let (serve, _serve_runtime) = local_serve_with_runtime(
         base.path().join("shared-audio-cache"),
         schedule_store.clone(),
-    );
+    ).await;
     let (cached_init, first, second) = encoded_pair(&serve, &file, &encoding, 0).await;
     let soundtrack = serve
         .shared
@@ -1843,7 +1843,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
         .candidate_recipe = Some(candidate);
     let file_id = file.id;
     let plan_digest = encoding.plan.plan_digest();
-    let serve = bare_serve(&base.path().join("renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
     let rendition = serve
         .shared
         .build_rendition(
@@ -2189,7 +2189,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     );
     mutable.grid = plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid");
     let cache = base.path().join("renditions");
-    let old = bare_serve(&cache);
+    let (old, _old_runtime) = bare_serve_with_runtime(&cache).await;
     let mut req = request("source-replacement", 0.0);
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
@@ -2244,7 +2244,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect("replacement file")
         .set_times(std::fs::FileTimes::new().set_modified(modified))
         .expect("preserve exact old mtime");
-    let new = bare_serve(&cache);
+    let (new, _new_runtime) = bare_serve_with_runtime(&cache).await;
     let refused = new
         .try_create(
             VodRecipeRequest {
@@ -2461,7 +2461,7 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
         .await
         .expect("exact pool");
     let permit = encoding.try_permit().await.expect("one complete admission");
-    let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
+    let (serve, _serve_runtime) = local_serve_with_runtime(base.path().join("vod"), Arc::clone(&encoding.store)).await;
     let mut req = request("prepared-root", 0.0);
     req.kind = SessionKind::Transcode {
         height: encoding.options.target_height,
@@ -2972,7 +2972,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
         .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
         .await
         .expect("one recipe exactly fills the pool");
-    let serve = bare_serve(&base.path().join("renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
     let plan = encoding.grid.plan(96_000, 428_000);
     let rendition = serve
         .shared
@@ -3135,7 +3135,7 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
         .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
         .await
         .expect("one recipe exactly fills the pool");
-    let serve = bare_serve(&base.path().join("renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
     let plan = encoding.grid.plan(96_000, 0);
     let rendition = serve
         .shared
@@ -3262,7 +3262,7 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
         .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
         .await
         .expect("one recipe exactly fills the pool");
-    let serve = bare_serve(&base.path().join("renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
     let plan = encoding.grid.plan(96_000, 0);
     let rendition = serve
         .shared
@@ -4029,7 +4029,7 @@ async fn assert_encoded_restarts(
     Arc::get_mut(&mut encoding)
         .expect("new frozen fixture recipe")
         .subtitle_digest = digest;
-    let serve = bare_serve(&base.join("renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.join("renditions")).await;
     let mut init = None;
     let mut key = None;
     for (ordinal, target) in [0.0, 90.09, 3.0].into_iter().enumerate() {
@@ -4874,7 +4874,7 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
         .await
         .expect("family capacity");
     let store = Arc::new(SqliteStore::open_in_memory().expect("session store"));
-    let serve = local_serve(base.path().join("deferred-cache"), store.clone());
+    let (serve, _serve_runtime) = local_serve_with_runtime(base.path().join("deferred-cache"), store.clone()).await;
     let parent = uuid::Uuid::new_v4().to_string();
     let generation = uuid::Uuid::new_v4().to_string();
     let primary_id = plurx_core::playback::candidate::CandidateId([7; 16]);

@@ -1195,6 +1195,58 @@ impl AppState {
         system: SystemInfo,
         logs: Arc<LogBuffer>,
     ) -> Self {
+        Self::new_unhooked_with_runtime(
+            server_name,
+            store,
+            dirs,
+            node_id,
+            encoder_caps,
+            system,
+            logs,
+            None,
+        )
+    }
+
+    /// [`AppState::new`] holding the node resource runtime the daemon builds
+    /// its state with; finite VOD and direct play on Linux run through it.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_runtime(
+        server_name: String,
+        store: Arc<dyn Store>,
+        dirs: Dirs,
+        node_id: String,
+        encoder_caps: EncoderCaps,
+        system: SystemInfo,
+        logs: Arc<LogBuffer>,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
+    ) -> Self {
+        let state = Self::new_unhooked_with_runtime(
+            server_name,
+            store,
+            dirs,
+            node_id,
+            encoder_caps,
+            system,
+            logs,
+            resource_runtime,
+        );
+        crate::http::hls::prime_prepared_successors(&state, false);
+        state
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn new_unhooked_with_runtime(
+        server_name: String,
+        store: Arc<dyn Store>,
+        dirs: Dirs,
+        node_id: String,
+        encoder_caps: EncoderCaps,
+        system: SystemInfo,
+        logs: Arc<LogBuffer>,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
+    ) -> Self {
         let catalogue = CatalogueReader::authority(Arc::clone(&store));
         let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
         Self::new_configured(
@@ -1230,7 +1282,7 @@ impl AppState {
                 cluster: Arc::new(LogBuffer::default()),
                 sharing: Arc::new(LogBuffer::new(64)),
             },
-            None,
+            resource_runtime,
         )
     }
 

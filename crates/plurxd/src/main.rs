@@ -20,6 +20,8 @@ use plurx_core as observer_core;
 #[allow(dead_code)]
 #[path = "../../plurx-core/tests/fixtures/startup_observer.rs"]
 mod sharing_fixture_clock;
+#[cfg(test)]
+mod test_runtime;
 
 mod artifact_integrity;
 mod background_jobs;

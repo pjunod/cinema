@@ -2987,7 +2987,7 @@ async fn a_rolling_live_start_also_releases_a_stopped_encoder() {
 async fn rendition_shipped_shape() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("base");
-    let serve = bare_serve(base.path());
+    let (serve, _serve_runtime) = bare_serve_with_runtime(base.path()).await;
     let (file, encoding) = encoded_fixture(base.path()).await;
     let contender = encoding
         .clone_with_admissions_for_test(encoding.admissions.clone())

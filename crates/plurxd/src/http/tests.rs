@@ -13134,6 +13134,27 @@ fn test_state() -> (Router, AppState) {
     test_state_with_system(Default::default())
 }
 
+/// [`test_state`] holding a real node resource runtime, for a test whose
+/// route serves finite VOD; keep the returned fixture alive with the state.
+async fn test_state_with_runtime() -> (Router, AppState, Option<crate::test_runtime::RealRuntime>) {
+    let runtime = crate::test_runtime::for_finite_serving().await;
+    let store = SqliteStore::open_in_memory().expect("store");
+    let base = crate::test_temp_path(format!("plurx-it-{}", uuid::Uuid::new_v4()));
+    let state = AppState::new_with_runtime(
+        "test".into(),
+        Arc::new(store),
+        test_dirs(&base),
+        "test-node".into(),
+        Default::default(),
+        Default::default(),
+        Arc::new(crate::logbuf::LogBuffer::new(64)),
+        runtime
+            .as_ref()
+            .map(crate::test_runtime::RealRuntime::handle),
+    );
+    (router(state.clone()), state, runtime)
+}
+
 fn test_state_with_dv_disk_tools() -> (Router, AppState) {
     let store = SqliteStore::open_in_memory().expect("store");
     let base = crate::test_temp_path(format!("plurx-dv-api-{}", uuid::Uuid::new_v4()));
@@ -16551,7 +16572,7 @@ async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_p
 #[tokio::test]
 async fn the_ladder_is_advertised_and_stray_heights_snap() {
     crate::transcode::require_ffmpeg();
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     // Encoded VOD must satisfy both requests without the retained engine.
@@ -19697,7 +19718,7 @@ async fn vod_switched_off_is_served_by_the_retained_engine_unless_recovery_is_of
 #[tokio::test]
 async fn every_delivery_method_is_listed_under_its_own_name() {
     crate::transcode::require_ffmpeg();
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     // Every HLS row must come from immutable VOD, never live recovery.
@@ -20349,7 +20370,7 @@ async fn stream_delivery_paths() {
 #[tokio::test]
 async fn hls_http_endpoints() {
     crate::transcode::require_ffmpeg();
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     // Every compatibility shape in this test must stay on immutable VOD.

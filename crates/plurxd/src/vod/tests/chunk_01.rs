@@ -611,6 +611,29 @@ fn local_serve(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
     VodServe::new_cluster(base, store, "test-local".into(), cache, None, None)
 }
 
+/// [`local_serve`] owning the node resource runtime a production `VodServe`
+/// is built with. Finite VOD on Linux builds every rendition through it; keep
+/// the returned fixture alive for as long as the serve is used.
+async fn local_serve_with_runtime(
+    base: PathBuf,
+    store: Arc<dyn Store>,
+) -> (Arc<VodServe>, Option<crate::test_runtime::RealRuntime>) {
+    let runtime = crate::test_runtime::for_finite_serving().await;
+    let cache = base.join("cluster-index");
+    let runtime_cache = cache.parent().unwrap_or(cache.as_path()).to_owned();
+    let serve = VodServe::new_cluster_with_runtime(
+        base,
+        runtime_cache,
+        store,
+        "test-local".into(),
+        cache,
+        None,
+        None,
+        runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
+    );
+    (serve, runtime)
+}
+
 #[tokio::test]
 async fn hevc_vod_checks_proof_before_reusing_a_cached_rendition() {
     let file = fixture_file();
@@ -686,6 +709,14 @@ async fn serve_on_file(base: &Path, file: MediaFile) -> (Arc<VodServe>, MediaFil
 pub(super) fn bare_serve(base: &Path) -> Arc<VodServe> {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
     local_serve(base.to_path_buf(), store)
+}
+
+/// [`bare_serve`] with its node resource runtime; see [`local_serve_with_runtime`].
+pub(super) async fn bare_serve_with_runtime(
+    base: &Path,
+) -> (Arc<VodServe>, Option<crate::test_runtime::RealRuntime>) {
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    local_serve_with_runtime(base.to_path_buf(), store).await
 }
 
 async fn activate_control_route(store: &SqliteStore, session_id: &str, generation: &str) {
