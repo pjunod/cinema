@@ -856,7 +856,7 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
 }
 
 fn check_source(source: &SourceFence) -> Result<(), String> {
-    source.drift().map_or(Ok(()), |reason| {
+    source.drift_in_place().map_or(Ok(()), |reason| {
         Err(format!("segment source fence: {reason}"))
     })
 }
@@ -2292,7 +2292,7 @@ pub(crate) async fn physical_probe() {
         );
     }
     assert!(encoded.len() > 100, "actual encoded Matroska output");
-    assert!(source.unchanged(), "same source revision retained");
+    assert!(source.unchanged().await, "same source revision retained");
     assert!(
         admissions
             .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
@@ -2406,7 +2406,7 @@ pub(crate) async fn physical_probe() {
     assert!(admissions
         .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
         .is_some());
-    assert!(source.unchanged());
+    assert!(source.unchanged().await);
     #[cfg(target_os = "linux")]
     if streaming {
         let slot = Arc::new(ProducerSlot::new());

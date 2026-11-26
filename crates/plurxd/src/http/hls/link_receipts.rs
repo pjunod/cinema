@@ -229,7 +229,7 @@ impl SourceLinkIdentity {
         let fence = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
             .ok()?;
-        if !fence.unchanged() {
+        if !fence.unchanged().await {
             return None;
         }
         Some(Self {
@@ -951,7 +951,9 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()?;
-        if !fence.unchanged() || fence.object_version() != captured.source.source_object_version {
+        if !fence.unchanged().await
+            || fence.object_version() != captured.source.source_object_version
+        {
             return None;
         }
         state
@@ -1008,7 +1010,7 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()??;
-        if !fence.unchanged()
+        if !fence.unchanged().await
             || !Self::route_for_observation(&captured, &route, &state.node_id, staged.as_ref())
         {
             return None;

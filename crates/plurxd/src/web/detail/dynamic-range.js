@@ -150,7 +150,9 @@ function playbackEnhancementFromWire(raw){
   // The Dolby Vision metadata row of an unprocessed delivery rides along
   // unread; playerDvRows checks it when it is shown.
   const dv_metadata=raw.dv_metadata&&typeof raw.dv_metadata==='object'?raw.dv_metadata:null;
-  return {active,details,requires_effective_processing:raw.requires_effective_processing===true,dv_metadata};
+  // Full or minimal, as the server's complete-title scan classified the layer.
+  const el_kind=['fel','mel'].includes(raw.el_kind)?raw.el_kind:null;
+  return {active,details,requires_effective_processing:raw.requires_effective_processing===true,dv_metadata,el_kind};
 }
 // A late optional-upgrade refusal belongs only to the session generation
 // that attempted it; it changes explanation text, never enhancement badges.
@@ -212,15 +214,20 @@ function playerEnhancement(p){
   const target=operations.find(op=>op?.DisplayTargetMapping)?.DisplayTargetMapping.nits;
   const trims=operations.includes('CreativeTrimApplication')?"with the colourist's creative trims"
     :report.creative_trims_partial===true?"with the colourist's creative trims on some shots":"L1 only; creative trims are not applied";
+  // A minimal layer (MEL), as the server's title scan classified it, has no
+  // detail to miss; the row is built from that fact, not from the snapshot
+  // (enhancement.rs's processed-route MEL row).
+  const mel=enhancement.el_kind==='mel';
   const current=[
-    {badge:'FEL',active:report.fel_contributed,text:report.fel_contributed
-      ?`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`
-      :'FEL: no enhancement-layer detail in this window'},
+    report.fel_contributed
+      ?{badge:'FEL',active:true,text:`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`}
+      :mel?{badge:'FEL',active:false,text:'MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU'}
+      :{badge:'FEL',active:false,text:'FEL: no enhancement-layer detail in this window'},
     {badge:'RPU',active:rpu.length>0,text:rpu.length?`RPU: ${rpu.join(', ')} applied by the server`:'RPU: no reshaping or colour conversion applied in this window'},
     {badge:'DYN',active:!!target,text:target?`DYN: per-shot Dolby display mapping for a ${target}-nit display by the server (${trims})`
       :'DYN: no per-shot Dolby display mapping applied in this window'}
   ];
-  const details=current.filter(d=>d.badge!=='FEL'||d.active||enhancement.details.some(old=>old.badge==='FEL'))
+  const details=current.filter(d=>d.badge!=='FEL'||d.active||mel||enhancement.details.some(old=>old.badge==='FEL'))
     .concat(enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge)));
   return {...enhancement,active:current.filter(d=>d.active).map(d=>d.badge),details};
 }

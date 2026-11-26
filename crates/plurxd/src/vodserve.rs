@@ -1192,7 +1192,7 @@ impl ProcessedRootReuse {
                 .rendition
                 .source
                 .as_ref()
-                .is_none_or(|source| source.unchanged())
+                .is_none_or(|source| source.unchanged_in_place())
     }
 }
 

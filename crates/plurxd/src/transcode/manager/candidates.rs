@@ -1686,7 +1686,7 @@ impl TranscodeManager {
             )
             .await
             .ok()?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return None;
         }
         // Persist the verdict for this source revision, so the next plan reads

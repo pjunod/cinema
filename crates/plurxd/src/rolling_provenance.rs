@@ -50,7 +50,7 @@ impl RollingProduction {
             .await
             .ok()?;
         let engine = crate::ffmpeg::EncodedEngine::capture(None).await.ok()?;
-        if !source.unchanged() || !engine.is_current_with_executable(&executable).await {
+        if !source.unchanged().await || !engine.is_current_with_executable(&executable).await {
             return None;
         }
         let mut digest = Sha256::new();
@@ -95,7 +95,7 @@ impl RollingProduction {
     /// an otherwise ordinary fallback into an empty-input producer.
     pub(crate) fn rewind_reaped_input(&self) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom};
-        if !self.source.unchanged() {
+        if !self.source.unchanged_in_place() {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
         let mut handle = &self.source.handle;
@@ -122,23 +122,23 @@ impl RollingProduction {
     pub(crate) async fn current(&self, attempt: u64) -> bool {
         !self.refused.load(Ordering::Acquire)
             && self.attempt.load(Ordering::Acquire) == attempt
-            && self.source.unchanged()
+            && self.source.unchanged().await
             && self
                 .engine
                 .is_current_with_executable(&self.executable)
                 .await
-            && self.source.unchanged()
+            && self.source.unchanged().await
             && !self.refused.load(Ordering::Acquire)
             && self.attempt.load(Ordering::Acquire) == attempt
     }
 
     pub(crate) async fn input_current(&self) -> bool {
-        self.source.unchanged()
+        self.source.unchanged().await
             && self
                 .engine
                 .is_current_with_executable(&self.executable)
                 .await
-            && self.source.unchanged()
+            && self.source.unchanged().await
     }
 
     pub(crate) fn binding(&self) -> [u8; 32] {

@@ -299,7 +299,7 @@ async fn measure_for_index(file: &MediaFile) -> Result<Option<Census>, String> {
         }
         Ok(
             if bounded::check_cancellation().is_ok()
-                && source.unchanged()
+                && source.unchanged().await
                 && !input
                     .as_ref()
                     .is_some_and(|input| input.source_read_failed())
