@@ -2546,10 +2546,9 @@ impl TranscodeManager {
                 requested,
             )
             .map_err(refused)?;
-            #[cfg(test)]
             self.source_workers
                 .probe_hooks
-                .deny_fixed_cpu_if_armed(runtime)
+                .before_fixed_admission(runtime)
                 .map_err(refused)?;
             // Synchronous P/M registration precedes the first native await.
             // The operation slot survives a cancelled waiter and supplies its
@@ -2568,8 +2567,9 @@ impl TranscodeManager {
                     // Generic constructor uncertainty stays in this SAME
                     // existing operation slot and cannot settle Source SQL.
                     *work = held;
-                    #[cfg(test)]
-                    self.source_workers.probe_hooks.record_fixed_refusal(&error);
+                    self.source_workers
+                        .probe_hooks
+                        .fixed_admission_refused(&error);
                     return Err(refused(error));
                 }
             }
@@ -2579,12 +2579,10 @@ impl TranscodeManager {
             return Err(SourceWorkerError::Conflict);
         }
 
-        #[cfg(test)]
         self.source_workers
             .probe_hooks
-            .install_fixed_native(operation)
+            .fixed_native_registered(operation)
             .await;
-        #[cfg(test)]
         self.source_workers.probe_hooks.before_fixed_inputs().await;
 
         drop(owner.gate.current_preparation(&owner.assignment).await?);
@@ -2592,7 +2590,6 @@ impl TranscodeManager {
             .prepare_fixed_inputs(deadline)
             .await
             .map_err(refused)?;
-        #[cfg(test)]
         self.source_workers.probe_hooks.before_fixed_collect().await;
         drop(owner.gate.current_preparation(&owner.assignment).await?);
         let report = operation.fixed_report(deadline).await.map_err(refused)?;
@@ -2623,7 +2620,6 @@ impl TranscodeManager {
             .finish_fixed_native(deadline)
             .await
             .map_err(refused)?;
-        #[cfg(test)]
         self.source_workers.probe_hooks.after_evidence().await;
         Ok(encoding)
     }

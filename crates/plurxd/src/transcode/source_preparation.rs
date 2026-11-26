@@ -25,6 +25,26 @@ trait SourceProbeHooks: std::any::Any + Send + Sync {
     fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_>;
     fn after_evidence(&self) -> crate::seam_hooks::HookFuture<'_>;
     fn inject_wait_failure(&self) -> bool;
+    /// Immediately before synchronous fixed planning admission, after the
+    /// function's own capacity observation.
+    #[cfg(target_os = "linux")]
+    fn before_fixed_admission(
+        &self,
+        runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+    ) -> Result<(), String>;
+    /// The fixed planning constructor refused with `error`.
+    #[cfg(target_os = "linux")]
+    fn fixed_admission_refused(&self, error: &str);
+    /// The original fixed P/M operation is registered, before its inputs open.
+    #[cfg(target_os = "linux")]
+    fn fixed_native_registered<'a>(
+        &'a self,
+        operation: &'a SourceProbeOperation,
+    ) -> crate::seam_hooks::HookFuture<'a>;
+    #[cfg(target_os = "linux")]
+    fn before_fixed_inputs(&self) -> crate::seam_hooks::HookFuture<'_>;
+    #[cfg(target_os = "linux")]
+    fn before_fixed_collect(&self) -> crate::seam_hooks::HookFuture<'_>;
     #[cfg(test)]
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -47,6 +67,30 @@ impl SourceProbeHooks for NoSourceProbeHooks {
     }
     fn inject_wait_failure(&self) -> bool {
         false
+    }
+    #[cfg(target_os = "linux")]
+    fn before_fixed_admission(
+        &self,
+        _: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn fixed_admission_refused(&self, _: &str) {}
+    #[cfg(target_os = "linux")]
+    fn fixed_native_registered<'a>(
+        &'a self,
+        _: &'a SourceProbeOperation,
+    ) -> crate::seam_hooks::HookFuture<'a> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    #[cfg(target_os = "linux")]
+    fn before_fixed_inputs(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    #[cfg(target_os = "linux")]
+    fn before_fixed_collect(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
     }
     #[cfg(test)]
     fn as_any(&self) -> &dyn std::any::Any {
@@ -119,6 +163,69 @@ impl SourceProbeHooks for PausingSourceProbeHooks {
         self.failed_wait
             .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
+    #[cfg(target_os = "linux")]
+    fn before_fixed_admission(
+        &self,
+        runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+    ) -> Result<(), String> {
+        if self.fixed_cpu_denial.load(Ordering::Acquire) {
+            // Only the exclusive, fresh runtime in Source fixture19 arms
+            // this negative ceiling. No standalone sampler exists there.
+            runtime
+                .fixture_deny_planning_cpu()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn fixed_admission_refused(&self, error: &str) {
+        if self.fixed_cpu_denial.load(Ordering::Acquire) {
+            *self.fixed_refusal.lock().expect("actual fixture refusal") = Some(error.to_owned());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn fixed_native_registered<'a>(
+        &'a self,
+        operation: &'a SourceProbeOperation,
+    ) -> crate::seam_hooks::HookFuture<'a> {
+        Box::pin(async move {
+            let mode = self.fixed_mode.load(Ordering::Acquire);
+            if mode == 0 || self.fixed_gate.lock().expect("fixture gate slot").is_some() {
+                return;
+            }
+            let SourceProbeState::Fixed(state) = &operation.state else {
+                panic!("original fixed Source state")
+            };
+            let gate = state
+                .work
+                .lock()
+                .await
+                .owner
+                .as_ref()
+                .expect("original Source planning before cleanup")
+                .fixture_native_gate(mode == 2)
+                .await
+                .expect("same original P native gate");
+            *self.fixed_gate.lock().expect("fixture gate slot") = Some(Arc::new(gate));
+            self.fixed_changed.notify_waiters();
+        })
+    }
+    #[cfg(target_os = "linux")]
+    fn before_fixed_inputs(&self) -> crate::seam_hooks::HookFuture<'_> {
+        if self.fixed_before_inputs.load(Ordering::Acquire) {
+            self.before.hold()
+        } else {
+            Box::pin(crate::seam_hooks::HookReady)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn before_fixed_collect(&self) -> crate::seam_hooks::HookFuture<'_> {
+        if self.fixed_before_inputs.load(Ordering::Acquire) {
+            Box::pin(crate::seam_hooks::HookReady)
+        } else {
+            self.before.hold()
+        }
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -136,6 +243,27 @@ impl SourceProbeHookOwner {
     }
     pub(crate) async fn after_evidence(&self) {
         self.slot.get().after_evidence().await;
+    }
+}
+#[cfg(target_os = "linux")]
+impl SourceProbeHookOwner {
+    pub(crate) fn before_fixed_admission(
+        &self,
+        runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+    ) -> Result<(), String> {
+        self.slot.get().before_fixed_admission(runtime)
+    }
+    pub(crate) fn fixed_admission_refused(&self, error: &str) {
+        self.slot.get().fixed_admission_refused(error);
+    }
+    pub(crate) async fn fixed_native_registered(&self, operation: &SourceProbeOperation) {
+        self.slot.get().fixed_native_registered(operation).await;
+    }
+    pub(crate) async fn before_fixed_inputs(&self) {
+        self.slot.get().before_fixed_inputs().await;
+    }
+    pub(crate) async fn before_fixed_collect(&self) {
+        self.slot.get().before_fixed_collect().await;
     }
 }
 #[cfg(test)]
@@ -208,28 +336,6 @@ impl SourceProbeHookOwner {
             .fixed_cpu_denial
             .store(true, Ordering::Release);
     }
-    pub(crate) fn deny_fixed_cpu_if_armed(
-        &self,
-        runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
-    ) -> Result<(), String> {
-        if self.test_hooks().fixed_cpu_denial.load(Ordering::Acquire) {
-            // Only the exclusive, fresh runtime in Source fixture19 arms
-            // this negative ceiling. No standalone sampler exists there.
-            runtime
-                .fixture_deny_planning_cpu()
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
-    }
-    pub(crate) fn record_fixed_refusal(&self, error: &str) {
-        if self.test_hooks().fixed_cpu_denial.load(Ordering::Acquire) {
-            *self
-                .test_hooks()
-                .fixed_refusal
-                .lock()
-                .expect("actual fixture refusal") = Some(error.to_owned());
-        }
-    }
     pub(crate) fn assert_fixed_cpu_refusal(&self) {
         let refusal = self
             .test_hooks()
@@ -259,52 +365,6 @@ impl SourceProbeHookOwner {
             .fixed_before_inputs
             .store(true, Ordering::Release);
         self.pause_before_spawn()
-    }
-    pub(crate) async fn before_fixed_inputs(&self) {
-        if self
-            .test_hooks()
-            .fixed_before_inputs
-            .load(Ordering::Acquire)
-        {
-            self.slot.get().before_spawn().await;
-        }
-    }
-    pub(crate) async fn before_fixed_collect(&self) {
-        if !self
-            .test_hooks()
-            .fixed_before_inputs
-            .load(Ordering::Acquire)
-        {
-            self.slot.get().before_spawn().await;
-        }
-    }
-    pub(crate) async fn install_fixed_native(&self, operation: &SourceProbeOperation) {
-        let hooks = self.test_hooks();
-        let mode = hooks.fixed_mode.load(Ordering::Acquire);
-        if mode == 0
-            || hooks
-                .fixed_gate
-                .lock()
-                .expect("fixture gate slot")
-                .is_some()
-        {
-            return;
-        }
-        let SourceProbeState::Fixed(state) = &operation.state else {
-            panic!("original fixed Source state")
-        };
-        let gate = state
-            .work
-            .lock()
-            .await
-            .owner
-            .as_ref()
-            .expect("original Source planning before cleanup")
-            .fixture_native_gate(mode == 2)
-            .await
-            .expect("same original P native gate");
-        *hooks.fixed_gate.lock().expect("fixture gate slot") = Some(Arc::new(gate));
-        hooks.fixed_changed.notify_waiters();
     }
     pub(crate) async fn fixed_native_gate(&self) -> SourceFixedNativeGate {
         let hooks = self.test_hooks();
