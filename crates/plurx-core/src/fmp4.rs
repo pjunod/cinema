@@ -7380,13 +7380,13 @@ pub fn playlist_entry(seconds: f64, name: &str) -> String {
     s
 }
 
-/// `seg00000.m4s` — five digits from zero, exactly what `-start_number 0` and
-/// `seg%05d.m4s` gave the muxer this replaces. The daemon's segment index
-/// parses these names.
 #[path = "fmp4/trim.rs"]
 mod trim;
 pub use trim::{FragmentTrimmer, TrimmedFragment, VideoOnlyFragment};
 
+/// `seg00000.m4s` — five digits from zero, exactly what `-start_number 0` and
+/// `seg%05d.m4s` gave the muxer this replaces. The daemon's segment index
+/// parses these names.
 pub fn segment_name(index: u64) -> String {
     format!("seg{index:05}.m4s")
 }

@@ -347,6 +347,9 @@ impl FragmentTrimmer {
                 "a fragment ended inside its mdat".into(),
             ));
         }
+        // Nothing is appended from here on, and what is held is charged at its
+        // length, so the allocation must be no larger.
+        self.out.shrink_to_fit();
         let header_len = peek_box(&self.out, 0)?
             .ok_or_else(|| Fmp4Error::Malformed("a fragment with no moof".into()))?
             .header_len;

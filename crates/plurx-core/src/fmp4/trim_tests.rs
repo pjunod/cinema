@@ -384,3 +384,27 @@ fn a_fragment_that_is_not_video_alone_is_kept_whole() {
         assert_eq!(trimmed(&init, &whole, 9), TrimmedFragment::whole(whole));
     }
 }
+
+/// What is held is charged at its length, so a kept fragment allocates no
+/// more than that, trimmed or kept whole, however its bytes arrived.
+#[test]
+fn a_kept_fragment_allocates_no_more_than_it_is_charged() {
+    let (init, fragments) = read(&testfixtures::pipe("closed-gop"));
+    let (video_init, video_fragments) = read(&testfixtures::with_dolby_vision_rpus(
+        &testfixtures::video_only_pipe("closed-gop"),
+    ));
+    let cases = fragments
+        .iter()
+        .map(|whole| (&init, whole))
+        .chain(video_fragments.iter().map(|whole| (&video_init, whole)));
+    for (init, whole) in cases {
+        for chunk in [1, 7, 4096] {
+            let kept = trimmed(init, whole, chunk);
+            assert_eq!(
+                kept.kept().bytes.capacity(),
+                kept.held_len(),
+                "chunks of {chunk}"
+            );
+        }
+    }
+}
