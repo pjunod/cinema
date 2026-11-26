@@ -1665,7 +1665,7 @@ pub(super) fn session_enhancement(
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     decline: Option<&str>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
-    session_enhancement_with_levels(
+    session_enhancement_with_title(
         source,
         kind,
         grade,
@@ -1678,13 +1678,14 @@ pub(super) fn session_enhancement(
     )
 }
 
-/// The title's recorded display-metadata levels, for the Playback info
-/// `Dolby Vision metadata` row. A read of the stored probe document; `None`
-/// for a non-DV source or a title the levels pass has not read.
-pub(crate) async fn session_title_levels(
+/// The title scans' recorded facts — display-metadata levels for the
+/// Playback info `Dolby Vision metadata` row, and whether the enhancement
+/// layer is full or minimal. A read of the stored probe document; `None` for
+/// a non-DV source.
+pub(crate) async fn session_title_scan(
     state: &AppState,
     source: Option<&MediaFile>,
-) -> Option<plurx_core::scan::dv_levels::DvTitleLevels> {
+) -> Option<plurx_core::playback::enhancement::TitleScanFacts> {
     let file = source.filter(|file| file.dolby_vision.profile.is_some())?;
     let probe = state
         .store
@@ -1692,14 +1693,14 @@ pub(crate) async fn session_title_levels(
         .await
         .ok()
         .flatten();
-    plurx_core::scan::dv_levels::title_levels_from_probe(probe.as_deref())
+    Some(plurx_core::playback::enhancement::TitleScanFacts::from_probe(probe.as_deref()))
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "each is an independent fact of the session being described"
 )]
-pub(crate) fn session_enhancement_with_levels(
+pub(crate) fn session_enhancement_with_title(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
@@ -1708,7 +1709,7 @@ pub(crate) fn session_enhancement_with_levels(
     effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     decline: Option<&str>,
-    levels: Option<&plurx_core::scan::dv_levels::DvTitleLevels>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
     let file = source?;
@@ -1767,11 +1768,12 @@ pub(crate) fn session_enhancement_with_levels(
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
         source_profile: profile,
         source_el_present: file.dolby_vision.el_present,
+        el_kind: title.and_then(|title| title.el_kind),
         route,
         hdr_processing_enabled: setting(plurx_core::store::keys::DV_HDR_PROCESSING),
         fel_reencode_enabled: setting(plurx_core::store::keys::DV_FEL_REENCODE),
         decline_reason: decline,
-        levels,
+        levels: title.and_then(|title| title.levels.as_ref()),
     })
 }
 
@@ -5133,8 +5135,8 @@ async fn create_with_purpose_attempt(
     };
     let effective_processing =
         super::control::current_dv_report(&state, &info.session_id, &incarnation_id).await;
-    let title_levels = session_title_levels(&state, source.as_ref()).await;
-    let enhancement = session_enhancement_with_levels(
+    let title_scan = session_title_scan(&state, source.as_ref()).await;
+    let enhancement = session_enhancement_with_title(
         source.as_ref(),
         &info.kind,
         info.grade,
@@ -5143,7 +5145,7 @@ async fn create_with_purpose_attempt(
         effective_processing.as_ref(),
         planning_snapshot,
         processing_decline.as_deref(),
-        title_levels.as_ref(),
+        title_scan.as_ref(),
     );
     let response = StartResponse {
         processed_upgrade: None,
@@ -7030,8 +7032,8 @@ impl PreparedSourcePlayback {
             self.resolved.native_subtitle,
             delivered_dynamic_range,
         );
-        let title_levels = if self.relays_enhancement {
-            session_title_levels(state, Some(&self.file)).await
+        let title_scan = if self.relays_enhancement {
+            session_title_scan(state, Some(&self.file)).await
         } else {
             None
         };
@@ -7044,7 +7046,7 @@ impl PreparedSourcePlayback {
             enhancement: self
                 .relays_enhancement
                 .then(|| {
-                    session_enhancement_with_levels(
+                    session_enhancement_with_title(
                         Some(&self.file),
                         &info.kind,
                         info.grade,
@@ -7053,7 +7055,7 @@ impl PreparedSourcePlayback {
                         None,
                         None,
                         None,
-                        title_levels.as_ref(),
+                        title_scan.as_ref(),
                     )
                 })
                 .flatten(),

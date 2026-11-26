@@ -395,6 +395,28 @@ assert(overlay.data:find('● EL: the dual-layer Profile 7 stream',1,true))
 update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true})
 timers[1]()
 assert(overlay.data:find("● EL: plurx Player's Dolby renderer composed the enhancement layer",1,true))
+assert(overlay.data:find('(full or minimal is not reported)',1,true))
+update('native-dovi-target-state',nil)
+-- The server's complete-title scan names the layer: a MEL title's EL pill says
+-- the composed layer is minimal and adds no picture detail, never FEL.
+local mel_row='MEL: minimal enhancement layer delivered for the display — it adds no picture detail; the Dolby grade is in the RPU'
+pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}});click(1125,681)
+for i=1,60 do if overlay.data:find('Dolby Vision mapper:',1,true) then break end; press('down') end
+-- The panel wraps long rows; read its visible text as one run.
+local function panel_run()
+    local run={}
+    for text in overlay.data:gmatch('\\an7[^}]*}([^\n]*)') do run[#run+1]=text end
+    return table.concat(run,' ')
+end
+for i=1,4 do press('down') end
+local first=panel_run();press('down');press('down')
+local shown=first..' '..panel_run()
+assert(shown:find(mel_row,1,true))
+assert(shown:find('which pairs its enhancement layer — a minimal enhancement layer (MEL), which adds no picture detail',1,true))
+assert(not shown:find('FEL: delivered',1,true))
+update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true})
+timers[1]()
+assert(panel_run():find("mapping — a minimal enhancement layer (MEL), which adds no picture detail",1,true))
 update('native-dovi-target-state',nil)
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
 -- No path, including the Info panel's 5 Hz refresh, ever reads the level synchronously.

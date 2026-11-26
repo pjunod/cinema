@@ -1,0 +1,19 @@
+# PR #1950: a Profile 7 MEL title's processed-route layer row said "FEL: no
+# enhancement-layer detail" instead of the server's MEL classification.
+[[fixes]]
+id = "linux-player.mel-layer-row-from-el-kind"
+commits = ["73af8adf7f29d22503089913876a8d679d6ea162"]
+source = "clients/linux-player/plurx_player/badges.py"
+source_anchor = 'mel = enhancement.get("el_kind") == "mel"'
+test = "clients/linux-player/tests/test_badges.py"
+test_anchor = "def test_mel_title_keeps_the_servers_mel_row_on_a_processed_route"
+
+# PR #1950: Cinema's EL pill names the composed layer FEL or MEL from the
+# server's el_kind instead of saying the kind is not reported.
+[[fixes]]
+id = "linux-player.cinema-el-pill-names-mel"
+commits = ["781b9e845805fa843cb9c65cbd4983ff34444b78"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local EL_KIND = {fel="
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "a MEL title's EL pill says"

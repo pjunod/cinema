@@ -33,6 +33,8 @@ ENHANCEMENTS = ("FEL", "RPU", "DYN")
 DV_METADATA_LABELS = ("In the file", "Applied by Cinema", "Left for the display")
 DISPLAY_TARGET_LABELS = ("Reported peak", "Mapped for", "Title peak")
 NATIVE_MAPPER = "shared native Dolby renderer"
+# enhancement.rs's MEL row for a processed route, which the report rebuild keeps.
+MEL_TEXT = "MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU"
 _RPU_NAMES = {"PolynomialReshape": "polynomial reshaping", "MmrReshape": "MMR reshaping",
               "RpuColorConversion": "RPU color conversion"}
 _GENERATION = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
@@ -132,9 +134,13 @@ def _processed(enhancement, report):
              else "L1 only; creative trims are not applied")
     fel = report["fel_contributed"]
     sdr = "SDR " if report.get("sdr_processed") is True else ""
+    # A minimal layer (MEL), as the server's title scan classified it, has no
+    # detail to miss; the row is built from that fact, not from the snapshot.
+    mel = enhancement.get("el_kind") == "mel"
     current = [
-        {"badge": "FEL", "active": fel, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"
-            if fel else "FEL: no enhancement-layer detail in this window"},
+        {"badge": "FEL", "active": True, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"}
+        if fel else {"badge": "FEL", "active": False, "text": MEL_TEXT}
+        if mel else {"badge": "FEL", "active": False, "text": "FEL: no enhancement-layer detail in this window"},
         {"badge": "RPU", "active": bool(rpu), "text": f"RPU: {', '.join(rpu)} applied by the server"
             if rpu else "RPU: no reshaping or colour conversion applied in this window"},
         {"badge": "DYN", "active": target is not None,
@@ -142,7 +148,7 @@ def _processed(enhancement, report):
             if target is not None else "DYN: no per-shot Dolby display mapping applied in this window"},
     ]
     had_fel = any(d["badge"] == "FEL" for d in enhancement["details"])
-    details = [d for d in current if d["badge"] != "FEL" or d["active"] or had_fel]
+    details = [d for d in current if d["badge"] != "FEL" or d["active"] or had_fel or mel]
     details += [d for d in enhancement["details"] if d["badge"] not in ENHANCEMENTS]
     return {"active": [d["badge"] for d in current if d["active"]], "details": details}
 
@@ -162,10 +168,13 @@ def server_enhancement(session):
         details = [dict(d, text=f"{d['badge']}: not used for this play — {reason}")
                    if not d["active"] and d["badge"] in ("FEL", "RPU") and d["text"].startswith(f"{d['badge']}: not used")
                    else d for d in details]
-    enhancement = {"active": [b for b in ENHANCEMENTS if b in raw["active"]], "details": details, "processed": None}
+    # Full or minimal, as the server's complete-title scan classified the layer.
+    el_kind = raw.get("el_kind") if raw.get("el_kind") in ("fel", "mel") else None
+    enhancement = {"active": [b for b in ENHANCEMENTS if b in raw["active"]], "details": details,
+                   "processed": None, "el_kind": el_kind}
     report, kind = current_report(session)
     if kind == "p81":
-        return {"active": ["FEL"], "processed": "P81", "details": [
+        return {"active": ["FEL"], "processed": "P81", "el_kind": el_kind, "details": [
             {"badge": "FEL", "active": True,
              "text": "FEL: full enhancement layer reconstructed into the Dolby Vision Profile 8.1 picture"}]
             + [d for d in details if d["badge"] not in ENHANCEMENTS]}
@@ -173,7 +182,8 @@ def server_enhancement(session):
         return enhancement
     if report is None:
         return None
-    return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E")
+    return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E",
+                el_kind=el_kind)
 
 
 def _row_text(value):

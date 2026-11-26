@@ -168,10 +168,13 @@ local RANGE_SHORT = {dolby_vision='DV', hdr10='HDR10', hlg='HLG', sdr='SDR'}
 local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
 -- EL is this player's own fact. The private mpv's native-dovi-target-state
 -- reports enhancement-layer-composed as a level: true while the picture its
--- native Dolby renderer maps has the enhancement layer composed in. Neither
--- plurx nor mpv reports whether that layer is full (FEL) or minimal (MEL), so
--- FEL stays the server's claim alone.
+-- native Dolby renderer maps has the enhancement layer composed in. Whether
+-- that layer is full (FEL) or minimal (MEL) is the server's complete-title
+-- classification (the enhancement's el_kind); without it the pill says the
+-- kind is not reported. The FEL pill stays the server's claim alone.
 local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
+local EL_KIND = {fel=' — the full enhancement layer (FEL)',
+    mel=' — a minimal enhancement layer (MEL), which adds no picture detail'}
 local function table_of(value) return type(value)=='table' and value or {} end
 -- One read of each property per render; the info timer runs at 5 Hz.
 local function snapshot()
@@ -292,13 +295,14 @@ local function enhancement_state(view)
         put('DYN',true,'DYN: per-shot Dolby display mapping on this device'..target..' by '..how)
         -- The level speaks for the native renderer. Other renderers, and mpv
         -- builds without the level, keep the inference from the stream.
+        local kind=EL_KIND[server and server.el_kind] or ' (full or minimal is not reported)'
         local composed=view.native['enhancement-layer-composed']
         if type(composed)=='boolean' and not (r and r.kind~='native') then
             if composed then
-                put('EL',true,"EL: plurx Player's Dolby renderer composed the enhancement layer into the picture it is mapping (full or minimal is not reported)")
+                put('EL',true,"EL: plurx Player's Dolby renderer composed the enhancement layer into the picture it is mapping"..kind)
             end
         elseif r and now==7 and s.dv_el_present==true then
-            put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer (full or minimal is not reported)')
+            put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer'..kind)
         end
     end
     -- Display order: FEL, EL, RPU, DYN, then any badge a newer server adds.
