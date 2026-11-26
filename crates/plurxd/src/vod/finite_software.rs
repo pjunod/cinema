@@ -420,7 +420,7 @@ impl FiniteSoftwareProducer {
                 "registered original finite driver has not been retained",
             )),
             OriginalDriver::Joined(original_id) => {
-                tracing::trace!(driver = %original_id, "original finite driver already joined");
+                tracing::trace!(target: "plurxd::vodserve", driver = %original_id, "original finite driver already joined");
                 Ok(())
             }
             OriginalDriver::Failed(original) => Err(io::Error::other(format!(

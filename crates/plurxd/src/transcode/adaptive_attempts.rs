@@ -139,7 +139,7 @@ impl ScalarAdaptiveDiagnostic {
 }
 impl From<String> for ScalarAdaptiveDiagnostic {
     fn from(message: String) -> Self {
-        tracing::warn!(target: "plurxd::adaptive_attempts", diagnostic = %message,
+        tracing::warn!(target: "plurxd::transcode", diagnostic = %message,
             "adaptive operation failed; retaining only its static diagnostic category in the reply");
         let category = match message.as_str() {
             "adaptive Adopt was refused; owner remains held" => {
@@ -2716,7 +2716,7 @@ impl super::TranscodeManager {
                         "adaptive adopted route could not be published; owner remains held".into(),
                     )
                 }
-                Ok(Err(error)) => tracing::debug!(
+                Ok(Err(error)) => tracing::debug!(target: "plurxd::transcode",
                     attempt_id = %entry.attempt_id(),
                     %error,
                     "adaptive adopted route publication is unknown; replaying the same Adopt"
@@ -2776,14 +2776,14 @@ impl super::TranscodeManager {
                         .spawn_control(admission, async move {
                             if let Err(error) = original.join_original_task(true, true).await {
                                 original.mark_unknown();
-                                tracing::error!(attempt_id = %original.attempt_id(), error,
+                                tracing::error!(target: "plurxd::transcode", attempt_id = %original.attempt_id(), error,
                                     "adaptive original coordinator failure remains held");
                                 return;
                             }
                             if let Err(error) =
                                 manager.finish_failed_adaptive_planning(&original).await
                             {
-                                tracing::warn!(attempt_id = %original.attempt_id(), %error,
+                                tracing::warn!(target: "plurxd::transcode", attempt_id = %original.attempt_id(), %error,
                                     "adaptive cancelled registration retains its original cleanup");
                             }
                         })
@@ -4306,7 +4306,7 @@ impl super::TranscodeManager {
                 )
                 .await
             {
-                tracing::warn!(%error,
+                tracing::warn!(target: "plurxd::transcode", %error,
                     "original failed copy admission remains in the core cleanup book");
             }
         }
@@ -4314,27 +4314,27 @@ impl super::TranscodeManager {
             for coordinator in [true, false] {
                 if let Err(error) = entry.join_finished_original(coordinator).await {
                     entry.mark_unknown();
-                    tracing::error!(attempt_id = %entry.attempt_id(), error, "adaptive original task failure remains held");
+                    tracing::error!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), error, "adaptive original task failure remains held");
                 }
             }
             if let Err(error) = entry.release_finished_application(&entry) {
-                tracing::warn!(attempt_id = %entry.attempt_id(), error,
+                tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), error,
                     "adaptive application fence remains held");
             }
             if let Err(error) = self.reconcile_adaptive_loser(&entry).await {
-                tracing::warn!(attempt_id = %entry.attempt_id(), %error,
+                tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), %error,
                     "adaptive loser retains its original finite owner");
             }
             if let Err(error) = self.reconcile_adaptive_handoff(&entry).await {
-                tracing::warn!(attempt_id = %entry.attempt_id(), %error,
+                tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), %error,
                     "adaptive cleanup registration remains held");
             }
             if let Err(error) = self.finish_failed_adaptive_planning(&entry).await {
-                tracing::warn!(attempt_id = %entry.attempt_id(), %error,
+                tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), %error,
                     "adaptive failed planning retains its exact P/M and Store operations");
             }
             if let Err(error) = self.finish_adopted_terminal(&entry).await {
-                tracing::warn!(attempt_id = %entry.attempt_id(), %error,
+                tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), %error,
                     "adopted attempt retains its exact terminal settlement");
             }
             match self.finish_adaptive_close(&entry).await {
@@ -4342,13 +4342,15 @@ impl super::TranscodeManager {
                     let terminal = matches!(*entry.state().await, AttemptState::Closed);
                     if terminal && entry.no_original_tasks_or_application() {
                         if let Err(error) = self.adaptive_attempts.remove_terminal(&entry) {
-                            tracing::warn!(attempt_id = %entry.attempt_id(), error,
+                            tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), error,
                                 "terminal adaptive attempt remains in registry");
                         }
                     }
                 }
-                Err(error) => tracing::warn!(attempt_id = %entry.attempt_id(), %error,
-                    "adaptive attempt retains its original cleanup operation"),
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::transcode", attempt_id = %entry.attempt_id(), %error,
+                    "adaptive attempt retains its original cleanup operation")
+                }
             }
         }
     }

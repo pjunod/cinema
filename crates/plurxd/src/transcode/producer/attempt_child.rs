@@ -1114,7 +1114,7 @@ impl Drop for AttemptChild {
         if let AttemptSupervisorJoin::Running(supervisor) = supervisor {
             self.join_runtime.spawn(async move {
                 if let Err(error) = supervisor.await {
-                    tracing::error!(%error, "abandoned producer supervisor failed during join");
+                    tracing::error!(target: "plurxd::transcode", %error, "abandoned producer supervisor failed during join");
                 }
             });
         }
