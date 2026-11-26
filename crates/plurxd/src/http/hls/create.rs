@@ -6373,7 +6373,7 @@ async fn create_with_purpose_attempt(
             let info = selection.preview.clone();
             let generation = selection.worker.serving_generation;
             adaptive_selection = Some(selection);
-            started = Some((candidate, info, None, Some(generation), (None, None)));
+            started = Some((candidate, info, None, Some(generation), None));
             break;
         }
         #[cfg(target_os = "linux")]

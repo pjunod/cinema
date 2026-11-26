@@ -29,18 +29,83 @@ fn opt_string(v: &Option<String>) -> usize {
 // Source: rust-lang/rust 8bab26f4f68e0e26f0bb7960be334d5b520ea452,
 // library/alloc/src/collections/btree/node.rs, lines 40-62 and 94-126.
 fn json_object_nodes(entries: usize) -> Option<usize> {
+    btree_nodes::<String, serde_json::Value>(entries)
+}
+
+/// The same requested-layout node bound for any `BTreeMap<K, V>`; a
+/// `BTreeSet<K>` is a `BTreeMap<K, ()>` (zero-sized value) in that source.
+fn btree_nodes<K, V>(entries: usize) -> Option<usize> {
     use std::mem::{align_of, size_of};
-    let pair = size_of::<String>().checked_add(size_of::<serde_json::Value>())?;
+    let pair = size_of::<K>().checked_add(size_of::<V>())?;
     let slots = pair.checked_mul(11)?;
     let pointers = size_of::<usize>().checked_mul(13)?;
     let fields = pointers
         .checked_add(2 * size_of::<u16>())?
         .checked_add(slots)?;
-    let alignment = align_of::<String>()
-        .max(align_of::<serde_json::Value>())
+    let alignment = align_of::<K>()
+        .max(align_of::<V>())
         .max(align_of::<usize>());
     let per_node = fields.checked_add(alignment.checked_mul(7)?)?;
     entries.checked_add(1)?.checked_mul(per_node)
+}
+
+fn processed_upgrade_ask(v: &crate::transcode::ProcessedUpgradeAsk) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let crate::transcode::ProcessedUpgradeAsk {
+        canonical_caps,
+        target_height: _,
+        grade: _,
+        names_processed: _,
+        route: _,
+        average_bps: _,
+        peak_bps: _,
+        recipe_digest: _,
+        required_fel_qualification,
+        catalog_query,
+        display_target: _,
+        display_target_note,
+        dv_row_facts,
+    } = v;
+    // The Box itself.
+    let mut n = std::mem::size_of::<crate::transcode::ProcessedUpgradeAsk>();
+    if let Some(caps) = canonical_caps {
+        n = add(n, device_caps(caps)?)?;
+    }
+    if let Some(pending) = required_fel_qualification {
+        let crate::transcode::PendingFelQualification {
+            file_id: _,
+            settings_generation: _,
+            source_object_version,
+            request,
+        } = pending;
+        let plurx_core::transcode::dv_fel_qualification::FelRecipeRequest {
+            identity,
+            backend_identity,
+            source_size: _,
+            source_mtime: _,
+            envelope: _,
+            output: _,
+        } = request;
+        for value in [source_object_version, identity, backend_identity] {
+            n = add(n, value.capacity())?;
+        }
+    }
+    if let Some(query) = catalog_query {
+        n = add(n, query.requested_heap_bytes()?)?;
+    }
+    n = add(n, opt_string(display_target_note))?;
+    if let Some(facts) = dv_row_facts {
+        let plurx_core::playback::dv_provenance::DvRowFacts {
+            levels,
+            title_peak_nits: _,
+            title_fits_nits: _,
+        } = facts;
+        if let Some(levels) = levels {
+            let plurx_core::scan::dv_levels::DvTitleLevels { levels, cm_v40: _ } = levels;
+            n = add(n, btree_nodes::<u8, ()>(levels.len())?)?;
+        }
+    }
+    Some(n)
 }
 
 fn json_value(v: &serde_json::Value) -> Option<usize> {
@@ -273,6 +338,7 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
         block_budget_secs: _,
         transport: _,
         source_telemetry: _,
+        accepted_processed_ask,
     } = v;
     // The fixed ordinary finite profile excludes continuous families. The
     // route's durable decode also has no skipped process-local candidates.
@@ -295,6 +361,9 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
     }
     if let Some(claim) = &v.audio_claim {
         n = add(n, claim.requested_heap_bytes()?)?;
+    }
+    if let Some(ask) = accepted_processed_ask {
+        n = add(n, processed_upgrade_ask(ask)?)?;
     }
     Some(n)
 }

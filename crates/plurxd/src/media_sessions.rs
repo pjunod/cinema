@@ -2128,6 +2128,7 @@ fn selected_finite_candidate_context_heap_bytes(
         retained_output,
         display_target,
         display_target_note,
+        dv_row_facts,
         canonical_caps,
         selected_candidate,
         planning_binding,
@@ -2144,6 +2145,9 @@ fn selected_finite_candidate_context_heap_bytes(
         || retained_output.is_some()
         || display_target.is_some()
         || display_target_note.is_some()
+        // Frozen beside the display-target policy from the same probe
+        // snapshot (main #4bc6527ad era): not part of a pure selected context.
+        || dv_row_facts.is_some()
     {
         return None;
     }
