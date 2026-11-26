@@ -4492,7 +4492,7 @@ mod split_reserve_tests {
     use std::sync::atomic::AtomicI64;
     use std::sync::Arc;
 
-    // nynuc's 2026-11-26 Resume, scaled down 1000x: a 91 MB ordinary
+    // A production 4K Resume (2026-11-26), scaled down 1000x: a 91 MB ordinary
     // startup, an 18 MB first segment, then 66 MB segments at 4K rates.
     const STARTUP: u64 = 91_218;
     const FIRST: usize = 18_222;
