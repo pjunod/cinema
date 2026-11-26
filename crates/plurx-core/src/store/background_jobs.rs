@@ -853,23 +853,10 @@ macro_rules! claim_foreground_admission {
         claim_foreground_window!("required.resource_key", "json_extract($1,'$.now_ms')"), ")") };
 }
 
-/// The job's previous physical reader may still be charged: a lease of an
-/// earlier fence that is not paused and has not passed its expiry plus
-/// grace. A takeover waits for it to settle or lapse, so one job never has
-/// two source readers at once.
-macro_rules! claim_previous_reader {
-    ($job:literal) => {
-        concat!(
-            "NOT EXISTS (SELECT 1 FROM source_leases previous WHERE previous.owner_kind='job' AND previous.work_id=",
-            $job,
-            " AND previous.phase!='paused' AND previous.expires_at_ms>json_extract($1,'$.now_ms')-60000)"
-        )
-    };
-}
-/// Per-root and explicit-domain holder caps, the unchanged provider slots,
-/// and the job's own previous reader. A claimant's prior fences are left out
-/// of the counts (other jobs still charge them through expiry plus grace)
-/// because `claim_previous_reader` already waits for them.
+/// Per-root and explicit-domain holder caps, plus the unchanged provider
+/// slots. A claimant excludes only its own job's prior fences; other jobs
+/// still count those leases through expiry plus grace, so a reader that may
+/// still be running stays charged while its successor starts (a05011f26).
 macro_rules! claim_holder_admission {
     ($job:literal) => { concat!(
         "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
@@ -877,8 +864,7 @@ macro_rules! claim_holder_admission {
         claim_source_holders!("required.resource_key", "json_extract($1,'$.node_id')", "json_extract($1,'$.now_ms')",
             concat!(" AND NOT (held.owner_kind='job' AND held.work_id=", $job, ")")),
         ") AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
-        " AND required.resource_key NOT LIKE 'source_io%' AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key=required.resource_key AND held.expires_at_ms>json_extract($1,'$.now_ms') AND held.job_id!=background_jobs.id)>=2) AND ",
-        claim_previous_reader!($job)) };
+        " AND required.resource_key NOT LIKE 'source_io%' AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key=required.resource_key AND held.expires_at_ms>json_extract($1,'$.now_ms') AND held.job_id!=background_jobs.id)>=2)") };
 }
 
 /// Reserve the last node/domain reader for live demand, on every claim path.
@@ -940,8 +926,7 @@ pub enum ClaimBlock {
     KindDemand,
     /// Playback does not permit background reads, including its expiry grace.
     ForegroundWindow,
-    /// A previous reader of this job remains charged, or the root/domain holder
-    /// cap or provider slots are full.
+    /// The root/domain holder cap or provider slots are full.
     SourceHolders,
     /// The last node/domain reader is reserved for live demand.
     MaintenanceReader,

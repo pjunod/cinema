@@ -1654,7 +1654,10 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 "{backend}"
             );
         }
-        let contend = store
+        // The replacement takes the job over at a new fence at once; the old
+        // fence's lease is not deleted and keeps charging every other reader
+        // through its grace, and the old worker loses publication by fence.
+        let takeover = store
             .claim_job(ClaimJob {
                 job_id: old.id.clone(),
                 expected_revision: old.revision,
@@ -1667,11 +1670,10 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 dispatched_at_ms: expiry,
             })
             .await
-            .expect("attempt replacement while physical reader is still charged");
-        assert!(
-            matches!(contend, ClaimOutcome::Contended),
-            "{backend}: {contend:?}"
-        );
+            .expect("replacement claim at expiry");
+        let ClaimOutcome::Claimed { job: current } = takeover else {
+            panic!("{backend}: replacement takes the expired attempt over: {takeover:?}")
+        };
         assert!(store
             .resolve_background_source_custody(custody.clone())
             .await
@@ -1716,7 +1718,7 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
         };
         assert!(
             claim_analysis(expiry).await.is_none(),
-            "{backend}: analysis must leave the second reader to playback"
+            "{backend}: the old reader stays charged, so analysis leaves the live slot to playback"
         );
         let recovered_at = expiry + SOURCE_LEASE_GRACE_MS;
         store
@@ -1728,7 +1730,6 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("observe release")
             .is_none());
-        let current = claim(&store, &old.id, recovered_at).await;
         assert!(current.fence > old.fence, "{backend}");
         let attempts = store.job_attempts(&old.id).await.expect("attempts");
         assert_eq!(attempts.len(), 2, "{backend}");
