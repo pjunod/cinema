@@ -130,8 +130,12 @@ pub fn executables() -> Result<Vec<std::path::PathBuf>> {
             .to_str()
             .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
         {
-            if let Ok(exe) = std::fs::read_link(entry.path().join("exe")) {
-                out.push(exe);
+            match std::fs::read_link(entry.path().join("exe")) {
+                Ok(exe) => out.push(exe),
+                // Exited mid-scan, or a kernel thread without an image.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // hidepid or another UID: unknown is not "not running".
+                Err(e) => return Err(e.into()),
             }
         }
     }

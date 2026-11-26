@@ -903,6 +903,8 @@ pub fn rollback(i: &InstallationV1, store: &TransactionStore, j: &JournalV1) -> 
 pub struct RetirementV1 {
     pub versions: Vec<String>,
     pub app_backups: Vec<String>,
+    /// Entries that could not be removed; the next committed upgrade retries.
+    pub failed: Vec<String>,
 }
 
 /// Retire superseded runtime closures once a native upgrade has committed.
@@ -925,14 +927,16 @@ pub fn retire_after_commit(i: &InstallationV1, store: &TransactionStore, j: &mut
         let running = crate::process::executables()?;
         retire_superseded_at(i, store, j, &home.join("Applications"), &running)
     });
-    if let Err(error) = retired {
-        j.detail = Some(format!(
-            "Update committed; superseded runtime retirement deferred: {}",
-            error.message
-        ));
-        // The commit is already durable; a lost note only loses this detail.
-        let _ = store.save(j);
-    }
+    let deferred = match retired {
+        Ok(r) if r.failed.is_empty() => return,
+        Ok(r) => r.failed.join("; "),
+        Err(error) => error.message,
+    };
+    j.detail = Some(format!(
+        "Update committed; superseded runtime retirement deferred: {deferred}"
+    ));
+    // The commit is already durable; a lost note only loses this detail.
+    let _ = store.save(j);
 }
 
 fn retire_superseded_at(
@@ -967,16 +971,7 @@ fn retire_superseded_at(
             _ => return Err(invalid("retained runtime escaped immutable versions root")),
         }
     }
-    let canonical = versions.canonicalize()?;
-    for exe in running {
-        for root in [&canonical, &versions] {
-            if let Ok(rest) = exe.strip_prefix(root) {
-                if let Some(Component::Normal(name)) = rest.components().next() {
-                    keep.insert(name.to_owned());
-                }
-            }
-        }
-    }
+    keep.extend(running_children(&versions, running)?);
     let mut retired = RetirementV1::default();
     secure_fs::open_dir(&versions, i.owner_uid)?;
     for entry in std::fs::read_dir(&versions)? {
@@ -985,17 +980,24 @@ fn retire_superseded_at(
         if keep.contains(&name) || !entry.file_type()?.is_dir() {
             continue;
         }
-        retire_tree(&versions, &name, i.owner_uid, ".retiring-")?;
-        retired.versions.push(name.to_string_lossy().into_owned());
+        // One stuck tree must not block every later sweep: continue, report.
+        match retire_tree(&versions, &name, i.owner_uid, ".retiring-") {
+            Ok(()) => retired.versions.push(name.to_string_lossy().into_owned()),
+            Err(e) => retired
+                .failed
+                .push(format!("{}: {}", name.to_string_lossy(), e.message)),
+        }
     }
     // Only this transaction's backup is the app matching `previous_current`.
     if apps.exists() {
         let own = format!(".Plurx-retained-{}", j.transaction_id);
+        let busy = running_children(apps, running)?;
         for entry in std::fs::read_dir(apps)? {
             let entry = entry?;
             let name = entry.file_name();
             let Some(text) = name.to_str() else { continue };
             if text == own
+                || busy.contains(&name)
                 || ![".Plurx-retained-", ".Plurx-incoming-", APP_RETIRING]
                     .iter()
                     .any(|prefix| text.starts_with(prefix))
@@ -1003,13 +1005,44 @@ fn retire_superseded_at(
             {
                 continue;
             }
-            retire_tree(apps, &name, i.owner_uid, APP_RETIRING)?;
-            retired.app_backups.push(text.to_owned());
+            match retire_tree(apps, &name, i.owner_uid, APP_RETIRING) {
+                Ok(()) => retired.app_backups.push(text.to_owned()),
+                Err(e) => retired.failed.push(format!("{text}: {}", e.message)),
+            }
         }
     }
     retired.versions.sort();
     retired.app_backups.sort();
     Ok(retired)
+}
+
+/// Names of `parent`'s direct children that contain a running executable.
+/// Matches the directory by device and inode, not spelling, so firmlinked or
+/// differently canonicalised paths reported by the kernel still match.
+fn running_children(parent: &Path, running: &[PathBuf]) -> Result<BTreeSet<std::ffi::OsString>> {
+    let root = std::fs::metadata(parent)?;
+    let canonical = parent.canonicalize()?;
+    let mut out = BTreeSet::new();
+    for exe in running {
+        let mut child = None;
+        for ancestor in exe.ancestors().skip(1) {
+            let same = ancestor == parent
+                || ancestor == canonical
+                || std::fs::metadata(ancestor)
+                    .is_ok_and(|m| m.dev() == root.dev() && m.ino() == root.ino());
+            if same {
+                child = exe.strip_prefix(ancestor).ok().and_then(|rest| {
+                    match rest.components().next() {
+                        Some(Component::Normal(name)) => Some(name.to_owned()),
+                        _ => None,
+                    }
+                });
+                break;
+            }
+        }
+        out.extend(child);
+    }
+    Ok(out)
 }
 
 /// Rename out of the addressable namespace first so an interrupted removal can
@@ -1901,6 +1934,79 @@ mod retirement_tests {
             RetirementV1::default(),
             "a second pass has nothing left to retire"
         );
+        f.done();
+    }
+
+    #[test]
+    fn running_executable_through_another_spelling_or_in_an_app_backup_is_kept() {
+        let f = Fixture::new();
+        for v in ["0.9.0-busy", "0.9.1-idle", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", None);
+        // The kernel may name the same directory through another path (a
+        // firmlink or alias); identity is by device and inode, not spelling.
+        let alias = f.scratch.join("alias");
+        std::os::unix::fs::symlink(f.versions(), &alias).expect("alias");
+        for name in [".Plurx-retained-busy", ".Plurx-retained-idle"] {
+            private_dir(&f.apps.join(name).join("Contents/MacOS"), f.i.owner_uid).expect("app");
+        }
+        let running = [
+            alias.join("0.9.0-busy/runtime/plurxd"),
+            f.apps
+                .join(".Plurx-retained-busy/Contents/MacOS/Plurx Server"),
+        ];
+        let retired = f.retire(&running).expect("retire");
+        assert_eq!(retired.versions, vec!["0.9.1-idle".to_owned()]);
+        assert_eq!(retired.app_backups, vec![".Plurx-retained-idle".to_owned()]);
+        assert!(f.versions().join("0.9.0-busy").exists());
+        assert!(f.apps.join(".Plurx-retained-busy").exists());
+        f.done();
+    }
+
+    #[test]
+    fn one_stuck_tree_is_reported_and_does_not_block_the_rest() {
+        let f = Fixture::new();
+        for v in ["0.9.0-stuck", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", None);
+        // A read-only subdirectory makes its entries unremovable for the owner.
+        let locked = f.versions().join("0.9.0-stuck/runtime");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("lock");
+        private_dir(&f.apps.join(".Plurx-retained-old/Contents"), f.i.owner_uid).expect("app");
+        let retired = f.retire(&[]).expect("retire");
+        assert_eq!(
+            retired.app_backups,
+            vec![".Plurx-retained-old".to_owned()],
+            "the app sweep still runs after a failed version"
+        );
+        // Root ignores directory modes, so only an ordinary UID can get stuck.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(retired.failed.len(), 1, "{retired:?}");
+            assert!(retired.versions.is_empty());
+            assert!(
+                !f.versions().join("0.9.0-stuck").exists(),
+                "a partial tree is never left under a valid version name"
+            );
+            for entry in std::fs::read_dir(f.versions()).expect("list") {
+                let path = entry.expect("entry").path();
+                if path.join("runtime").exists() && path != f.versions().join("0.9.2-cur") {
+                    std::fs::set_permissions(
+                        path.join("runtime"),
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .expect("unlock");
+                }
+            }
+            let again = f.retire(&[]).expect("retry");
+            assert_eq!(
+                again.versions.len(),
+                1,
+                "the hidden remainder is swept next time"
+            );
+            assert!(again.failed.is_empty());
+        }
         f.done();
     }
 
