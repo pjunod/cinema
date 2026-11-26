@@ -47,6 +47,9 @@ RUNTIME = runtime_identifier('tvOS', XCODE.split()[1])
 # commands conditional only on affected scope; failure-preserving artifacts.
 CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
 LEGACY_JOB_SHA256 = 'c6b5c40ac94f5505d0afd1f9d724a9fec8ca4f5a077fff01a6e738933bd8a415'
+# The same producer before its TV evidence went from 90 to 14 days' retention
+# (plurx#1932): the job is unchanged, only how long its artifact is kept.
+RETENTION90_JOB_SHA256 = '7edf7a8e71d8096ce3f51b11afcab6184b6d91b51148d1668f055b12b2ade5bf'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 50000
@@ -143,7 +146,8 @@ def native_block(workflow):
 def producer(commit, current):
     old = native_block(git('show', commit + ':' + WORKFLOW))
     now = native_block(git('show', current + ':' + WORKFLOW))
-    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256) or old == now,
+    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
+                                                         RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
     # The adapter's own adoption records are deliberately never accepted as
     # native origin evidence; producer output must still be an original pass.
