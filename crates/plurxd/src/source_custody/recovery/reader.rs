@@ -740,6 +740,23 @@ pub(super) fn record_source(
     receipt: &BackgroundSourceCustodyToken,
     source: &std::fs::File,
 ) -> Result<(), String> {
+    // Off Linux and macOS `prepare_at` enrolls no witness, so there is never
+    // an owner to bind a source to.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (directory, receipt, source);
+        Ok(())
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    record_enrolled_source(directory, receipt, source)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn record_enrolled_source(
+    directory: &Path,
+    receipt: &BackgroundSourceCustodyToken,
+    source: &std::fs::File,
+) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let record = Record::Background {
         token: receipt.clone(),

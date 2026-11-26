@@ -479,20 +479,6 @@ impl SourceViewerActor {
     }
 }
 
-/// A selected-caption window's own answer: still preparing (`Deadline`) or
-/// over its concurrent-work bound (`Capacity`) passes; anything else is this
-/// track's final answer for this request.
-pub(super) fn subtitle_refusal(error: SourceWorkerError) -> super::LiveRefusal {
-    if matches!(
-        error,
-        SourceWorkerError::Deadline | SourceWorkerError::Capacity
-    ) {
-        super::LiveRefusal::transient(error)
-    } else {
-        super::LiveRefusal::terminal(error)
-    }
-}
-
 impl TranscodeManager {
     async fn prepare_source_growing(
         &self,
