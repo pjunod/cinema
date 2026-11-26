@@ -474,8 +474,10 @@ impl RollingRetirementTicket {
 /// the existing startup/scheduled maintenance sweep; cached directories are
 /// never submitted here.
 pub(super) fn spawn_rolling_scratch_cleanup_owner(session_id: String, session: &Arc<Session>) {
+    // The selected core copy's output is its owner's charged inventory; a
+    // pathname sweep here would bypass that owner.
     if session.cached
-        || session.scratch.is_none()
+        || session.selected_core_copy
         || session
             .scratch_cleanup_started
             .compare_exchange(false, true, AcqRel, Acquire)
