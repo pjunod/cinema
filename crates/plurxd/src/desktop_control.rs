@@ -1521,19 +1521,19 @@ mod tests {
     async fn sole_voter_stays_in_sync_through_its_own_replicated_writes() {
         const WRITES: usize = 200;
         let voter = Box::pin(RealSoleVoter::start(true)).await;
-        let writer = voter.state.clone();
-        let reader = voter.state.clone();
+        let state = &voter.state;
         let done = CancellationToken::new();
-        let writes_done = done.clone();
-        let writes = tokio::spawn(async move {
-            let _done = writes_done.drop_guard();
+        // One task: while the writer awaits each Raft write, the reader samples
+        // with that entry in flight; the Raft core runs on the other worker.
+        let writes = async {
+            let _done = done.clone().drop_guard();
             for round in 0..WRITES {
-                writer
+                state
                     .store
                     .put_setting("desktop-control-in-sync-regression", &round.to_string())
                     .await
                     .expect("real replicated write");
-                let status = writer.cluster.replication_status().await;
+                let status = state.cluster.replication_status().await;
                 assert_eq!(
                     status.health,
                     ReplicationHealth::InSync,
@@ -1541,20 +1541,23 @@ mod tests {
                     status.explanation
                 );
             }
-        });
-        let mut concurrent_reads = 0_usize;
-        while !done.is_cancelled() {
-            let status = reader.cluster.replication_status().await;
-            assert_eq!(
-                status.health,
-                ReplicationHealth::InSync,
-                "read during writes: {}",
-                status.explanation
-            );
-            concurrent_reads += 1;
-            tokio::task::yield_now().await;
-        }
-        writes.await.expect("writer and its after-write reads");
+        };
+        let reads = async {
+            let mut concurrent_reads = 0_usize;
+            while !done.is_cancelled() {
+                let status = state.cluster.replication_status().await;
+                assert_eq!(
+                    status.health,
+                    ReplicationHealth::InSync,
+                    "read during writes: {}",
+                    status.explanation
+                );
+                concurrent_reads += 1;
+                tokio::task::yield_now().await;
+            }
+            concurrent_reads
+        };
+        let ((), concurrent_reads) = tokio::join!(writes, reads);
         assert!(concurrent_reads > 0);
         voter.close().await;
     }
