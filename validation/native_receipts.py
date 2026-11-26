@@ -106,7 +106,10 @@ BUILD_SPECS = {
     # the web-unit-check recipe (a Node web test); no native recipe changes.
     # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
     # no native recipe changes.
-    'Makefile': 'c4ad23b20355dfea405ddc07ceab1328932dd5a348a7787296dcf53a150bfd7d',
+    # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
+    # to the web-unit-check recipe (a Node playback-lab test); no native
+    # recipe changes.
+    'Makefile': '33beed31218800740e46627e53860dc2f4aca44074d7b6f649e7df2aff924e3c',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
