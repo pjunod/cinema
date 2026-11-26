@@ -98,8 +98,13 @@ async fn dropped_inference_waiter_retains_same_admission_until_original_task_exi
         .await
         .expect("same blocking task completed")
         .expect("completion witness");
+    // A zero strong count precedes the admission's drop on the blocking
+    // thread. Its restart admission is the last field to drop, after both
+    // physical permits, so the fence's in-flight count is the drop's end.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while original.upgrade().is_some() {
+        while original.upgrade().is_some()
+            || serving.restart_drain_status(0).await.admissions_in_flight != 0
+        {
             tokio::task::yield_now().await;
         }
     })

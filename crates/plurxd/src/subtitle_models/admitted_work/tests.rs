@@ -131,8 +131,13 @@ async fn cancelled_hash_waiter_retains_original_admission_until_actual_file_work
         .await
         .expect("same worker finished")
         .expect("completion witness"));
+    // A zero strong count precedes the admission's drop on the worker
+    // thread; wait for that drop to return the permits it owns.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while original.upgrade().is_some() {
+        while original.upgrade().is_some() || {
+            let (pool, heavy) = manager.original_legacy_drain_counts();
+            pool.software_used != 0 || heavy
+        } {
             tokio::task::yield_now().await;
         }
     })
