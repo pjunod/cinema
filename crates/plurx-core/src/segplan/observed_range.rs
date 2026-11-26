@@ -6,7 +6,7 @@ use super::packet_clock::{
     MAX_PACKET_CLOCK_LINE_BYTES,
 };
 use super::ranges::SourceTimestamp;
-use crate::fmp4::{Fragment, FragmentReader, Init, Unit};
+use crate::fmp4::{Fmp4Error, FragmentReader, FragmentTrimmer, Init, TrimmedFragment, Unit};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,10 +25,28 @@ pub enum ObservationError {
 pub enum ObservedUnit {
     Init(Init),
     /// Before Rust conversion: `clock` supplies timing, not final byte counts.
+    /// The fragment is kept without its slice data, which nothing reads.
     Fragment {
-        fragment: Fragment,
+        fragment: TrimmedFragment,
         clock: SourceFragmentClock,
     },
+}
+
+/// Where a top-level box's bytes go as they arrive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Reader,
+    Moof,
+    Mdat,
+}
+
+fn media_error(error: Fmp4Error) -> ObservationError {
+    match error.unsupported_kind() {
+        Some(crate::fmp4::Fmp4UnsupportedKind::InitContractChanged) => {
+            ObservationError::InitContractChanged
+        }
+        None => ObservationError::Media,
+    }
 }
 
 #[derive(Debug)]
@@ -40,8 +58,19 @@ pub struct FeedProgress {
 /// Callers retain unconsumed input and concurrently drain both pipes. In
 /// particular, media feeding makes no progress while its sole held fragment
 /// awaits clocks. No async task or independent source reader is created here.
+///
+/// A fragment's slice data is dropped as its `mdat` arrives
+/// ([`FragmentTrimmer`]), so neither the framing nor the fragment waiting for
+/// its clock ever holds it.
 pub struct ObservedRangeAssembler {
+    /// Frames the init, the trailer and every box that is not a fragment.
     media: FragmentReader,
+    /// Where the top-level box being framed goes.
+    route: Route,
+    /// A fragment's `moof`, arriving or waiting for its `mdat`.
+    moof: Vec<u8>,
+    moof_ready: bool,
+    trimmer: Option<FragmentTrimmer>,
     clocks: PacketClockParser,
     packets: VecDeque<SourcePacketObservation>,
     line: Vec<u8>,
@@ -49,7 +78,7 @@ pub struct ObservedRangeAssembler {
     box_remaining: usize,
     held_media_bytes: usize,
     init: Option<Init>,
-    fragment: Option<Fragment>,
+    fragment: Option<TrimmedFragment>,
     next_sequence: u64,
     /// The strict-muxer decode time the previous fragment ended on.
     muxed_dts: Option<i64>,
@@ -77,6 +106,10 @@ impl ObservedRangeAssembler {
         media.reject_reinitialization();
         Ok(Self {
             media,
+            route: Route::Reader,
+            moof: Vec::new(),
+            moof_ready: false,
+            trimmer: None,
             clocks: PacketClockParser::new(),
             packets: VecDeque::new(),
             line: Vec::new(),
@@ -98,12 +131,15 @@ impl ObservedRangeAssembler {
         })
     }
 
-    /// Bytes this assembler holds now: the canonical box being framed, the
-    /// framed fragment waiting for its clock, and the clock packets queued.
+    /// Bytes this assembler holds now: the canonical box being framed, what
+    /// is kept of the fragment being framed and of the framed fragment
+    /// waiting for its clock, and the clock packets queued.
     pub fn held_bytes(&self) -> usize {
         self.media
             .buffered()
-            .saturating_add(self.fragment.as_ref().map_or(0, Fragment::len))
+            .saturating_add(self.moof.len())
+            .saturating_add(self.trimmer.as_ref().map_or(0, FragmentTrimmer::held))
+            .saturating_add(self.fragment.as_ref().map_or(0, TrimmedFragment::held_len))
             .saturating_add(
                 self.packets
                     .len()
@@ -179,28 +215,73 @@ impl ObservedRangeAssembler {
                 if size > self.max_media.saturating_sub(self.held_media_bytes) {
                     return Err(ObservationError::Limit);
                 }
-                self.media.push(&self.header);
+                // After the init, a `moof` and the `mdat` that must follow it
+                // are a fragment, framed here so its slice data is never held.
+                let kind = &self.header[4..8];
+                self.route = if self.moof_ready {
+                    if kind != b"mdat" {
+                        return Err(ObservationError::Media);
+                    }
+                    let init = self.init.as_ref().ok_or(ObservationError::Media)?;
+                    self.trimmer = Some(
+                        FragmentTrimmer::begin(std::mem::take(&mut self.moof), &self.header, init)
+                            .map_err(media_error)?,
+                    );
+                    self.moof_ready = false;
+                    Route::Mdat
+                } else if self.init.is_some() && kind == b"moof" {
+                    self.moof.extend_from_slice(&self.header);
+                    Route::Moof
+                } else {
+                    self.media.push(&self.header);
+                    Route::Reader
+                };
                 self.held_media_bytes += header_size;
                 self.header.clear();
                 self.box_remaining = size - header_size;
             }
             let take = self.box_remaining.min(bytes.len() - consumed);
-            self.media.push(&bytes[consumed..consumed + take]);
+            let body = &bytes[consumed..consumed + take];
+            match self.route {
+                Route::Reader => self.media.push(body),
+                Route::Moof => self.moof.extend_from_slice(body),
+                Route::Mdat => self
+                    .trimmer
+                    .as_mut()
+                    .ok_or(ObservationError::Media)?
+                    .push(body),
+            }
             self.held_media_bytes += take;
             consumed += take;
             self.box_remaining -= take;
             if self.box_remaining != 0 {
                 continue;
             }
-            match self
-                .media
-                .next_unit()
-                .map_err(|error| match error.unsupported_kind() {
-                    Some(crate::fmp4::Fmp4UnsupportedKind::InitContractChanged) => {
-                        ObservationError::InitContractChanged
+            match self.route {
+                Route::Reader => {}
+                Route::Moof => {
+                    self.moof_ready = true;
+                    continue;
+                }
+                Route::Mdat => {
+                    let fragment = self
+                        .trimmer
+                        .take()
+                        .ok_or(ObservationError::Media)?
+                        .finish()
+                        .map_err(media_error)?;
+                    self.held_media_bytes = 0;
+                    if fragment.wire_len() > self.max_media as u64 {
+                        return Err(ObservationError::Limit);
                     }
-                    None => ObservationError::Media,
-                })? {
+                    self.fragment = Some(fragment);
+                    return Ok(FeedProgress {
+                        consumed,
+                        event: self.ready_fragment()?,
+                    });
+                }
+            }
+            match self.media.next_unit().map_err(media_error)? {
                 Some(Unit::Init(init)) => {
                     if self.init.is_some() || init.tracks.len() != 1 || init.video().is_none() {
                         return Err(ObservationError::Media);
@@ -212,21 +293,16 @@ impl ObservedRangeAssembler {
                         event: Some(ObservedUnit::Init(init)),
                     });
                 }
-                Some(Unit::Fragment(fragment)) => {
-                    self.held_media_bytes = 0;
-                    if fragment.len() > self.max_media {
-                        return Err(ObservationError::Limit);
-                    }
-                    self.fragment = Some(fragment);
-                    return Ok(FeedProgress {
-                        consumed,
-                        event: self.ready_fragment()?,
-                    });
-                }
+                // Every fragment after the init is framed above, and the
+                // reader steps over a `moof` that precedes it.
+                Some(Unit::Fragment(_)) => return Err(ObservationError::Media),
                 Some(Unit::Trailer) => {
                     self.held_media_bytes = 0;
                     self.trailer = true;
                 }
+                // A box the reader stepped over after the init is not held
+                // for the next. Before it, the reader is keeping the `ftyp`.
+                None if self.init.is_some() && self.media.buffered() == 0 => self.media.compact(),
                 None => {}
             }
         }
@@ -297,6 +373,7 @@ impl ObservedRangeAssembler {
         let init = self.init.as_ref().ok_or(ObservationError::Media)?;
         let video = init.video().ok_or(ObservationError::Media)?;
         let count = fragment
+            .kept()
             .track(video.id)
             .ok_or(ObservationError::Media)?
             .sample_count();
@@ -331,7 +408,11 @@ impl ObservedRangeAssembler {
         if self.failed {
             return Err(ObservationError::Failed);
         }
-        if self.box_remaining != 0 || !self.header.is_empty() || self.media.buffered() != 0 {
+        if self.box_remaining != 0
+            || !self.header.is_empty()
+            || self.media.buffered() != 0
+            || !self.moof.is_empty()
+        {
             self.failed = true;
             return Err(ObservationError::Incomplete);
         }
@@ -367,6 +448,7 @@ impl ObservedRangeAssembler {
             || !self.header.is_empty()
             || self.box_remaining != 0
             || self.media.buffered() != 0
+            || !self.moof.is_empty()
         {
             self.failed = true;
             return Err(ObservationError::Incomplete);
@@ -550,6 +632,79 @@ mod tests {
                 >= assembler.packets.len() * std::mem::size_of::<SourcePacketObservation>()
         );
         assert!(!assembler.packets.is_empty());
+    }
+
+    /// A fragment's slice data is dropped as its `mdat` arrives: from its
+    /// first byte to its release, the assembler holds no more than what is
+    /// kept of it, and what it releases is that, associated with its clock.
+    #[test]
+    fn a_fragment_is_never_held_with_its_slice_data() {
+        let stream = crate::testfixtures::with_dolby_vision_rpus(
+            &crate::testfixtures::video_only_pipe("closed-gop"),
+        );
+        let mut reader = FragmentReader::new();
+        reader.push(&stream);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("init") else {
+            panic!("init");
+        };
+        let Some(Unit::Fragment(whole)) = reader.next_unit().expect("fragment") else {
+            panic!("fragment");
+        };
+        let kept = crate::testfixtures::trimmed(&init, &whole, usize::MAX);
+        assert!(kept.held_len() < whole.len());
+        let video = init.video().expect("video");
+        let track = whole.track(video.id).expect("video");
+        let mut clocks = format!("#tb 0: 1/{}\n#media_type 0: video\n", video.timescale);
+        let mut dts = 0i64;
+        for sample in track.samples() {
+            clocks.push_str(&format!(
+                "0, {}, {}, {}, {}, 0x00000000\n",
+                dts,
+                dts + sample.cto,
+                sample.duration,
+                sample.size
+            ));
+            dts += i64::from(sample.duration);
+        }
+        let origin = SourceTimestamp {
+            dts: 0,
+            time_base_num: 1,
+            time_base_den: video.timescale,
+        };
+        let mut assembler =
+            ObservedRangeAssembler::new(origin, 0, track.sample_count() + 1, stream.len())
+                .expect("valid bounded assembler limits");
+        let media = [init.bytes.as_slice(), whole.bytes.as_slice()].concat();
+        let (mut fed, mut peak) = (0, 0);
+        while fed < media.len() {
+            let progress = assembler
+                .feed_media(&media[fed..(fed + 512).min(media.len())])
+                .expect("valid media");
+            fed += progress.consumed;
+            assert!(!matches!(
+                progress.event,
+                Some(ObservedUnit::Fragment { .. })
+            ));
+            if fed > init.bytes.len() {
+                peak = peak.max(assembler.held_bytes());
+            }
+        }
+        assert!(
+            peak <= kept.held_len() + 8,
+            "held {peak} of a {} byte fragment, of which {} are kept",
+            whole.len(),
+            kept.held_len()
+        );
+        assert_eq!(assembler.held_bytes(), kept.held_len());
+        let Some(ObservedUnit::Fragment { fragment, clock }) = assembler
+            .feed_clock(clocks.as_bytes())
+            .expect("valid clocks")
+            .event
+        else {
+            panic!("the clocks release the fragment");
+        };
+        assert_eq!(fragment, kept);
+        assert_eq!(clock.duration, track.duration());
     }
 
     #[test]

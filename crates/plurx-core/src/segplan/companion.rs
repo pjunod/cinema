@@ -2,7 +2,7 @@
 //! This does not attest source content or authenticate range publication.
 
 use super::{packet_clock::SourceFragmentClock, IndexRow};
-use crate::fmp4::{self, Fragment, Init};
+use crate::fmp4::{self, Fragment, Init, VideoOnlyFragment};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompanionError {
@@ -48,16 +48,20 @@ impl CopyCompanionVerifier {
     /// become servable. `clock` was associated before conversion; row byte
     /// measurements below are after conversion. A good prefix never disables
     /// later checks. The caller discards audio-only AV flushes separately.
-    pub fn verify(
+    ///
+    /// `canonical` may be kept without its slice data: its row and each
+    /// sample's size are then the whole fragment's, derived from what was
+    /// kept and converted plus what was dropped, never from `av`.
+    pub fn verify<'a>(
         &mut self,
-        canonical: &Fragment,
+        canonical: impl Into<VideoOnlyFragment<'a>>,
         clock: SourceFragmentClock,
         av: &Fragment,
     ) -> Result<IndexRow, CompanionError> {
         if self.failed {
             return Err(CompanionError::Failed);
         }
-        let result = self.verify_inner(canonical, clock, av);
+        let result = self.verify_inner(canonical.into(), clock, av);
         if result.is_err() {
             self.failed = true;
         }
@@ -66,7 +70,7 @@ impl CopyCompanionVerifier {
 
     fn verify_inner(
         &mut self,
-        canonical: &Fragment,
+        canonical: VideoOnlyFragment<'_>,
         clock: SourceFragmentClock,
         av: &Fragment,
     ) -> Result<IndexRow, CompanionError> {
@@ -78,6 +82,7 @@ impl CopyCompanionVerifier {
             .ok_or(CompanionError::MissingVideo)?;
         let av_video = self.av_init.video().ok_or(CompanionError::MissingVideo)?;
         let canonical_track = canonical
+            .fragment()
             .track(canonical_video.id)
             .ok_or(CompanionError::MissingVideo)?;
         let av_track = av.track(av_video.id).ok_or(CompanionError::MissingVideo)?;
@@ -85,9 +90,19 @@ impl CopyCompanionVerifier {
             || canonical_track
                 .samples()
                 .zip(av_track.samples())
-                .any(|(left, right)| {
-                    (left.duration, left.size, left.flags, left.cto)
-                        != (right.duration, right.size, right.flags, right.cto)
+                .enumerate()
+                .any(|(index, (left, right))| {
+                    (
+                        left.duration,
+                        canonical.sample_size(index, left.size),
+                        left.flags,
+                        left.cto,
+                    ) != (
+                        right.duration,
+                        u64::from(right.size),
+                        right.flags,
+                        right.cto,
+                    )
                 })
             || fmp4::classify(av, &self.av_init) != row.class
         {
@@ -185,6 +200,61 @@ mod tests {
         assert_eq!(
             verifier.verify(&fragment, first_clock, &fragment),
             Err(CompanionError::Failed)
+        );
+    }
+
+    /// A canonical fragment kept without its slice data verifies to the row
+    /// of the whole one. Its sample sizes are its own, what was kept plus
+    /// what was dropped, never its twin's: a canonical slice one byte
+    /// shorter than the AV twin's leaves the kept bytes identical and still
+    /// fails the pair.
+    #[test]
+    fn a_trimmed_canonical_is_verified_by_its_own_sizes() {
+        let (init, fragment) = fixture();
+        let video = init.video().expect("video");
+        let width = usize::from(video.nal_length_size);
+        let clock = SourceFragmentClock {
+            first_packet: fixture_packet(),
+            canonical_dts: 0,
+            duration: fragment.video_duration(&init),
+            next_packet_sequence: 1,
+            last_muxed_dts: 0,
+        };
+        let verifier = || CopyCompanionVerifier::new(init.clone(), init.clone()).expect("inits");
+        let whole_row = verifier()
+            .verify(&fragment, clock, &fragment)
+            .expect("the whole canonical verifies");
+        let kept = crate::testfixtures::trimmed(&init, &fragment, 11);
+        assert!(kept.held_len() < fragment.len(), "slice data was dropped");
+        assert_eq!(verifier().verify(&kept, clock, &fragment), Ok(whole_row));
+
+        let mut shorter = fragment.clone();
+        let mut shortened = false;
+        fmp4::rewrite_video_samples(&mut shorter, &init.tracks, video.id, |sample| {
+            let length = sample[..width]
+                .iter()
+                .fold(0usize, |length, byte| (length << 8) | usize::from(*byte));
+            let slice = (sample[width] >> 1) & 0x3f < 32 && length > 3;
+            if shortened || !slice {
+                return Ok(sample.to_vec());
+            }
+            shortened = true;
+            let mut next = ((length - 1) as u32).to_be_bytes()[4 - width..].to_vec();
+            next.extend_from_slice(&sample[width..width + length - 1]);
+            next.extend_from_slice(&sample[width + length..]);
+            Ok(next)
+        })
+        .expect("a canonical slice one byte shorter");
+        assert!(shortened, "the fixture's samples open on a slice");
+        let shorter = crate::testfixtures::trimmed(&init, &shorter, 11);
+        assert_eq!(
+            shorter.kept().bytes[shorter.kept().mdat_payload.clone()],
+            kept.kept().bytes[kept.kept().mdat_payload.clone()],
+            "only dropped slice data differs"
+        );
+        assert_eq!(
+            verifier().verify(&shorter, clock, &fragment),
+            Err(CompanionError::Samples)
         );
     }
 

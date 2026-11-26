@@ -2,7 +2,7 @@
 //! range copies. It does not issue whole-source parameter-constancy proof.
 use plurx_core::{
     domain::MediaFile,
-    fmp4::{self, Fragment, Init, PromotionInputs},
+    fmp4::{self, Fragment, Init, PromotionInputs, TrimmedFragment},
     transcode::CopyVideoOptions,
 };
 
@@ -175,16 +175,32 @@ impl CopyNormalizers {
     pub(crate) fn av_init(&self) -> &Init {
         &self.av.served_init
     }
+    /// Normalize one pair. The canonical twin is kept without its slice
+    /// data, which neither its parameter sets nor the conversion read: the
+    /// same conversion runs on what is kept, so its sizes after conversion
+    /// are its own, and a refusal of it fails the pair as it always did.
     pub(crate) fn normalize_pair(
         &mut self,
-        canonical: &mut Fragment,
+        canonical: &mut TrimmedFragment,
         av: &mut Fragment,
     ) -> Result<(), CopyNormalizationError> {
         if self.failed {
             return Err(CopyNormalizationError::Failed);
         }
-        let result = normalize_fragment(&mut self.canonical, canonical, &self.raw_parameters)
-            .and_then(|()| normalize_fragment(&mut self.av, av, &self.raw_parameters));
+        let kept = canonical.kept_mut();
+        let result = match normalize_fragment(&mut self.canonical, kept, &self.raw_parameters) {
+            Ok(()) => normalize_fragment(&mut self.av, av, &self.raw_parameters),
+            // A conversion refusal names a byte offset in its sample, and the
+            // canonical one counts only what was kept. The AV twin refuses
+            // the same sample at its real offset, so that is the one reported.
+            Err(CopyNormalizationError::Conversion(canonical)) => Err(
+                match normalize_fragment(&mut self.av, av, &self.raw_parameters) {
+                    Err(av @ CopyNormalizationError::Conversion(_)) => av,
+                    _ => CopyNormalizationError::Conversion(canonical),
+                },
+            ),
+            Err(other) => Err(other),
+        };
         if result.is_err() {
             self.failed = true;
         }
