@@ -140,9 +140,17 @@ fn containment(threads: Metric<u64>, view: Option<&LinuxView>) -> (Metric<u64>, 
             Metric::Known(value) => value,
             _ => return None,
         };
-        let (cpu, memory) = hierarchy_limits(&view.root, &view.leaf, threads, |path| {
-            view.native.read_controller(path)
-        })?;
+        let read = |path: &std::path::Path| view.native.read_controller(path);
+        let (cpu, memory) = match view.native.boundary {
+            RootBoundary::True => hierarchy_limits(&view.root, &view.leaf, threads, read)?,
+            RootBoundary::Visible => visible_hierarchy_limits(
+                &view.root,
+                &view.leaf,
+                threads,
+                &calling_thread_cpus()?,
+                read,
+            )?,
+        };
         if !view.matches_current() {
             return None;
         }
@@ -186,8 +194,9 @@ impl LinuxView {
         let (cgroups, mounts) = current_cgroup_view()?;
         let (root, leaf) = unified_path(&cgroups, &mounts)?;
         // Mountinfo's '/' is namespace-relative. Only an actual root-only
-        // kernel interface establishes the complete hierarchy boundary.
-        let native = verified_unified_root(&root, &leaf)?;
+        // kernel interface establishes the complete hierarchy boundary;
+        // without it the view is bounded by what this process can see.
+        let native = verified_cgroup_root(&root, &leaf)?;
         if !native.matches_view(&root, &leaf, &cgroups, &mounts) {
             return None;
         }
@@ -233,8 +242,18 @@ fn containment(_threads: Metric<u64>) -> (Metric<u64>, Metric<u64>) {
 #[cfg(target_os = "linux")]
 struct UnifiedRoot {
     directory: std::fs::File,
-    _root_only_interface: std::fs::File,
+    _root_only_interface: Option<std::fs::File>,
     leaf: std::fs::File,
+    boundary: RootBoundary,
+}
+
+/// Whether the retained root is the kernel's true root or only the root this
+/// process can see.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootBoundary {
+    True,
+    Visible,
 }
 
 #[cfg(target_os = "linux")]
@@ -255,6 +274,9 @@ impl UnifiedRoot {
         let name: &[u8] = match path.file_name()?.to_str()? {
             "cpu.max" => b"cpu.max\0",
             "memory.max" => b"memory.max\0",
+            "cgroup.controllers" => b"cgroup.controllers\0",
+            "cgroup.type" => b"cgroup.type\0",
+            "cpuset.cpus.effective" => b"cpuset.cpus.effective\0",
             "pids.max" => b"pids.max\0",
             "pids.current" => b"pids.current\0",
             _ => return None,
@@ -373,8 +395,17 @@ fn member_present(document: &str, id: u32) -> bool {
     found
 }
 
+/// The TRUE cgroup2 root only: a namespace or subtree root is never this.
 #[cfg(target_os = "linux")]
 fn verified_unified_root(root: &std::path::Path, leaf: &std::path::Path) -> Option<UnifiedRoot> {
+    verified_cgroup_root(root, leaf).filter(|native| native.boundary == RootBoundary::True)
+}
+
+/// The cgroup2 root this process can see. Where the kernel's root-only
+/// marker is absent the mount's '/' is a visible root: a cgroup namespace's
+/// own root, or the true root of a kernel without isolated partitions.
+#[cfg(target_os = "linux")]
+fn verified_cgroup_root(root: &std::path::Path, leaf: &std::path::Path) -> Option<UnifiedRoot> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let directory = std::fs::OpenOptions::new()
@@ -392,9 +423,17 @@ fn verified_unified_root(root: &std::path::Path, leaf: &std::path::Path) -> Opti
     if stats.f_type != libc::CGROUP2_SUPER_MAGIC {
         return None;
     }
-    // Kernel cgroup-v2 ABI: cpuset.cpus.isolated exists ONLY at the true root.
-    // A non-init cgroup namespace may call its subtree '/', but cannot create
-    // this root-only kernfs interface. Absence/unsupported kernels stay Unknown.
+    if !metadata.is_dir() {
+        return None;
+    }
+    // Kernel cgroup-v2 ABI: cpuset.cpus.isolated is "a read-only and root
+    // cgroup only" file (Documentation/admin-guide/cgroup-v2.rst, Cpuset
+    // Interface Files). A non-init cgroup namespace may call its subtree '/',
+    // but cannot create this root-only kernfs interface, so its presence
+    // proves the true root. Its absence (a namespace root, or a kernel that
+    // predates isolated partitions) leaves a visible root, whose limits come
+    // from the files this process can read; any other open failure stays
+    // Unknown.
     // SAFETY: a static NUL-terminated component is opened relative to the SAME
     // owned cgroup2 directory; no pathname fallback or symlink adoption exists.
     let fd = unsafe {
@@ -404,15 +443,20 @@ fn verified_unified_root(root: &std::path::Path, leaf: &std::path::Path) -> Opti
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
     };
-    if fd < 0 {
-        return None;
-    }
-    // SAFETY: openat returned a new, uniquely owned descriptor.
-    let marker = unsafe { std::fs::File::from_raw_fd(fd) };
-    let marker_metadata = marker.metadata().ok()?;
-    if !metadata.is_dir() || !marker_metadata.is_file() || metadata.dev() != marker_metadata.dev() {
-        return None;
-    }
+    let (marker, boundary) = if fd < 0 {
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+            return None;
+        }
+        (None, RootBoundary::Visible)
+    } else {
+        // SAFETY: openat returned a new, uniquely owned descriptor.
+        let marker = unsafe { std::fs::File::from_raw_fd(fd) };
+        let marker_metadata = marker.metadata().ok()?;
+        if !marker_metadata.is_file() || metadata.dev() != marker_metadata.dev() {
+            return None;
+        }
+        (Some(marker), RootBoundary::True)
+    };
     let leaf = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -426,7 +470,101 @@ fn verified_unified_root(root: &std::path::Path, leaf: &std::path::Path) -> Opti
         directory,
         _root_only_interface: marker,
         leaf,
+        boundary,
     })
+}
+
+/// Fold what a process under a visible root can see: its own cgroup's
+/// granted CPUs within its affinity, then every visible level's quota.
+///
+/// CPUs in an isolated partition are not in any other cgroup's
+/// cpuset.cpus.effective ("other cgroups outside of that partition cannot use
+/// any CPUs in that set", cgroup-v2.rst, cpuset.cpus.partition), so counting
+/// the leaf's effective CPUs that the calling thread may run on cannot count
+/// an isolated CPU. A visible root that is itself a non-root cgroup (it has
+/// cgroup.type, "exists on non-root cgroups") carries its own cpu.max and
+/// memory.max for each controller it lists; a true root has neither file.
+/// Any file the fold needs and cannot read leaves the view Unknown.
+#[cfg(any(target_os = "linux", test))]
+fn visible_hierarchy_limits(
+    root: &std::path::Path,
+    leaf: &std::path::Path,
+    threads: u64,
+    affinity: &[usize],
+    mut read: impl FnMut(&std::path::Path) -> Option<String>,
+) -> Option<(u64, Option<u64>)> {
+    let leaf_controllers = read(&leaf.join("cgroup.controllers"))?;
+    let width = if leaf_controllers
+        .split_whitespace()
+        .any(|name| name == "cpuset")
+    {
+        let effective = parse_cpu_list(&read(&leaf.join("cpuset.cpus.effective"))?)?;
+        affinity
+            .iter()
+            .filter(|cpu| effective.contains(cpu))
+            .count()
+    } else {
+        // Without the cpuset controller here, the kernel still confines the
+        // thread's affinity to the CPUs its cpuset grants.
+        affinity.len()
+    };
+    let width = u64::try_from(width).ok().filter(|width| *width > 0)?;
+    let (mut cpu, mut memory) = hierarchy_limits(root, leaf, threads.min(width), &mut read)?;
+    if read(&root.join("cgroup.type")).is_some() {
+        let controllers = read(&root.join("cgroup.controllers"))?;
+        let listed = |name: &str| controllers.split_whitespace().any(|entry| entry == name);
+        if listed("cpu") {
+            if let Some(quota) = parse_cpu_max(&read(&root.join("cpu.max"))?)? {
+                cpu = cpu.min(quota);
+            }
+        }
+        if listed("memory") {
+            if let Some(limit) = parse_memory_max(&read(&root.join("memory.max"))?)? {
+                memory = Some(memory.map_or(limit, |old: u64| old.min(limit)));
+            }
+        }
+    }
+    Some((cpu, memory))
+}
+
+/// The kernel's cpu list format: comma-separated CPUs and inclusive ranges.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpu_list(value: &str) -> Option<Vec<usize>> {
+    const MAX_CPUS: usize = 1 << 16;
+    let mut cpus = Vec::new();
+    for part in value.trim().split(',').filter(|part| !part.is_empty()) {
+        let (first, last) = match part.split_once('-') {
+            Some((first, last)) => (first.parse::<usize>().ok()?, last.parse::<usize>().ok()?),
+            None => {
+                let cpu = part.parse::<usize>().ok()?;
+                (cpu, cpu)
+            }
+        };
+        if first > last || last >= MAX_CPUS {
+            return None;
+        }
+        cpus.extend(first..=last);
+    }
+    cpus.sort_unstable();
+    cpus.dedup();
+    Some(cpus)
+}
+
+/// The CPUs the calling thread may run on.
+#[cfg(target_os = "linux")]
+fn calling_thread_cpus() -> Option<Vec<usize>> {
+    // SAFETY: sched_getaffinity initializes this caller-owned set for pid
+    // zero, which denotes the calling thread.
+    let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&set), &mut set) } != 0 {
+        return None;
+    }
+    Some(
+        (0..libc::CPU_SETSIZE as usize)
+            // SAFETY: each index is below CPU_SETSIZE, and set is initialized.
+            .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu, &set) })
+            .collect(),
+    )
 }
 
 /// Fold controller data only. The caller must first retain a verified true
@@ -585,10 +723,20 @@ fn hierarchy_mount_is_unshadowed(
         let membership = parent == leaf
             && (matches!(name, "cgroup.procs" | "cgroup.threads")
                 || (leaf != root && name == "cgroup.type"));
-        let controller = parent != root
-            && parent.starts_with(root)
+        // A visible root's own interfaces are read too, so the root's files
+        // count as well as every ancestor's.
+        let controller = parent.starts_with(root)
             && leaf.starts_with(parent)
-            && matches!(name, "cpu.max" | "memory.max" | "pids.max" | "pids.current");
+            && matches!(
+                name,
+                "cpu.max"
+                    | "memory.max"
+                    | "pids.max"
+                    | "pids.current"
+                    | "cgroup.controllers"
+                    | "cgroup.type"
+                    | "cpuset.cpus.effective"
+            );
         if root_marker || membership || controller {
             return Some(false);
         }
@@ -732,6 +880,168 @@ mod tests {
             verified_unified_root(directory.path(), directory.path()).is_none(),
             "a pathname or absent controller files cannot manufacture kernel root identity"
         );
+    }
+
+    /// Write cgroup interface files under a temp hierarchy, keyed by the
+    /// directory relative to its root.
+    fn cgroup_files(root: &std::path::Path, files: &[(&str, &str, &str)]) {
+        for (directory, name, value) in files {
+            let directory = root.join(directory);
+            std::fs::create_dir_all(&directory).expect("cgroup directory");
+            std::fs::write(directory.join(name), value).expect("cgroup interface");
+        }
+    }
+
+    fn read_file(path: &std::path::Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+
+    /// Inside a private cgroup namespace the visible root is the container's
+    /// own cgroup: its cpu.max, memory.max and granted CPUs bound the process.
+    #[test]
+    fn a_namespace_root_bounds_capacity_with_its_own_controllers() {
+        let hierarchy = tempfile::tempdir().expect("visible hierarchy");
+        let root = hierarchy.path();
+        cgroup_files(
+            root,
+            &[
+                ("", "cgroup.type", "domain\n"),
+                ("", "cgroup.controllers", "cpuset cpu io memory pids\n"),
+                ("", "cpu.max", "150000 100000\n"),
+                ("", "memory.max", "2147483648\n"),
+                ("", "cpuset.cpus.effective", "0-1,3\n"),
+            ],
+        );
+        assert_eq!(
+            visible_hierarchy_limits(root, root, 4, &[0, 1, 2, 3], read_file),
+            Some((1_500_000_000, Some(2_147_483_648)))
+        );
+    }
+
+    /// A stricter visible ancestor still binds a nested member, and the
+    /// leaf's granted CPUs bound it before any quota.
+    #[test]
+    fn a_nested_member_under_a_namespace_root_keeps_the_stricter_level() {
+        let hierarchy = tempfile::tempdir().expect("visible hierarchy");
+        let root = hierarchy.path();
+        cgroup_files(
+            root,
+            &[
+                ("", "cgroup.type", "domain\n"),
+                ("", "cgroup.controllers", "cpuset cpu memory\n"),
+                ("", "cpu.max", "max 100000\n"),
+                ("", "memory.max", "1073741824\n"),
+                ("job", "cgroup.controllers", "cpuset cpu memory\n"),
+                ("job", "cpu.max", "max 100000\n"),
+                ("job", "memory.max", "max\n"),
+                ("job", "cpuset.cpus.effective", "2-3\n"),
+            ],
+        );
+        assert_eq!(
+            visible_hierarchy_limits(root, &root.join("job"), 8, &[0, 1, 2, 3], read_file),
+            Some((2_000_000_000, Some(1_073_741_824)))
+        );
+    }
+
+    /// CPUs in an isolated partition are absent from every other cgroup's
+    /// effective set, so a thread whose affinity still names them cannot
+    /// count them.
+    #[test]
+    fn cpus_outside_the_granted_set_are_not_counted() {
+        let hierarchy = tempfile::tempdir().expect("visible hierarchy");
+        let root = hierarchy.path();
+        cgroup_files(
+            root,
+            &[
+                ("", "cgroup.type", "domain\n"),
+                ("", "cgroup.controllers", "cpuset cpu\n"),
+                ("", "cpu.max", "max 100000\n"),
+                ("", "cpuset.cpus.effective", "0-1\n"),
+            ],
+        );
+        assert_eq!(
+            visible_hierarchy_limits(root, root, 4, &[0, 1, 2, 3], read_file),
+            Some((2_000_000_000, None))
+        );
+        cgroup_files(root, &[("", "cpuset.cpus.effective", "\n")]);
+        assert_eq!(
+            visible_hierarchy_limits(root, root, 4, &[0, 1, 2, 3], read_file),
+            None,
+            "no granted CPU is no capacity"
+        );
+    }
+
+    /// A kernel without isolated partitions has no root-only marker, so its
+    /// true root is a visible root. It has no cgroup.type and no controller
+    /// max files; the calling thread's CPUs bound it.
+    #[test]
+    fn a_true_root_without_isolated_partitions_is_known_from_its_cpus() {
+        let hierarchy = tempfile::tempdir().expect("visible hierarchy");
+        let root = hierarchy.path();
+        cgroup_files(root, &[("", "cgroup.controllers", "cpu memory pids\n")]);
+        assert_eq!(
+            visible_hierarchy_limits(root, root, 8, &[0, 1, 2], read_file),
+            Some((3_000_000_000, None))
+        );
+    }
+
+    /// Every file the visible fold needs is mandatory once its controller is
+    /// listed; an unreadable one leaves capacity unknown.
+    #[test]
+    fn an_unreadable_visible_interface_stays_unknown() {
+        let complete = [
+            ("", "cgroup.type", "domain\n"),
+            ("", "cgroup.controllers", "cpuset cpu memory\n"),
+            ("", "cpu.max", "200000 100000\n"),
+            ("", "memory.max", "max\n"),
+            ("", "cpuset.cpus.effective", "0-3\n"),
+        ];
+        for missing in [
+            "cgroup.controllers",
+            "cpu.max",
+            "memory.max",
+            "cpuset.cpus.effective",
+        ] {
+            let hierarchy = tempfile::tempdir().expect("visible hierarchy");
+            let root = hierarchy.path();
+            cgroup_files(root, &complete);
+            std::fs::remove_file(root.join(missing)).expect("drop interface");
+            assert_eq!(
+                visible_hierarchy_limits(root, root, 4, &[0, 1, 2, 3], read_file),
+                None,
+                "{missing} is required"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_lists_follow_the_kernel_format() {
+        assert_eq!(parse_cpu_list("0-2,5,7-8\n"), Some(vec![0, 1, 2, 5, 7, 8]));
+        assert_eq!(parse_cpu_list("\n"), Some(vec![]));
+        assert_eq!(parse_cpu_list("3-1"), None);
+        assert_eq!(parse_cpu_list("a"), None);
+    }
+
+    #[test]
+    fn a_bind_over_a_visible_root_interface_hides_the_hierarchy() {
+        let root = "41 25 0:32 / /sys/fs/cgroup ro - cgroup2 cgroup ro";
+        for mount in [
+            "/sys/fs/cgroup/cpu.max",
+            "/sys/fs/cgroup/memory.max",
+            "/sys/fs/cgroup/cgroup.type",
+            "/sys/fs/cgroup/cgroup.controllers",
+            "/sys/fs/cgroup/cpuset.cpus.effective",
+        ] {
+            let views = format!("{root}\n42 41 0:32 /other {mount} ro - cgroup2 cgroup ro");
+            assert!(unified_path("0::/\n", &views).is_none(), "{mount}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ordinary_directory_is_not_a_visible_cgroup_root() {
+        let directory = tempfile::tempdir().expect("owned capacity fixture directory");
+        assert!(verified_cgroup_root(directory.path(), directory.path()).is_none());
     }
 
     #[test]
