@@ -515,21 +515,51 @@ impl Pipeline {
         }
     }
 
-    /// Initialize both device families together. A Vulkan upload uses the
-    /// global filter device, so its VA-API encoder must be an ancestor that
-    /// the final upload can recover with `derive_device=vaapi`.
+    /// Initialize both device families together. ffmpeg accepts exactly one
+    /// `-filter_hw_device`, and libplacebo needs it to be Vulkan, so an encoder
+    /// that names a filter device of its own (QSV) cannot simply have the
+    /// Vulkan flags appended. Instead the encoder's device and Vulkan are
+    /// derived from one VA-API parent: Vulkan is the filter device, and the
+    /// final upload ([`Pipeline::encoder_upload`]) recovers the encoder's
+    /// family from that chain with `derive_device`.
+    ///
+    /// For QSV the parent must be VA-API rather than QSV itself: Vulkan derives
+    /// from VA-API, DRM or CUDA but not from QSV, while QSV derives from
+    /// VA-API. `derive_device=qsv` on the Vulkan filter device walks Vulkan's
+    /// ancestors and creates a fresh QSV session on the VA-API parent (the
+    /// named `hw` is a sibling of Vulkan, not an ancestor, so it is not the
+    /// one reused); both sit on the same VA display. The named QSV device is
+    /// what a QSV hardware decode picks up. Only [`Pipeline::Libplacebo`]
+    /// pairs with QSV ([`Pipeline::pairs_with`]); the VA-API-mapped variant
+    /// ends in VA-API surfaces a QSV upload cannot take.
     pub fn device_args(self, encoder: Encoder) -> Vec<String> {
-        if matches!(self, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
-            && encoder == Encoder::Vaapi
-        {
-            return vec![
-                "-init_hw_device".into(),
-                format!("vaapi=hw:{}", super::encoder::vaapi_device()),
-                "-init_hw_device".into(),
-                "vulkan=vk@hw".into(),
-                "-filter_hw_device".into(),
-                "vk".into(),
-            ];
+        if matches!(self, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi) {
+            let vaapi = super::encoder::vaapi_device();
+            match encoder {
+                Encoder::Vaapi => {
+                    return vec![
+                        "-init_hw_device".into(),
+                        format!("vaapi=hw:{vaapi}"),
+                        "-init_hw_device".into(),
+                        "vulkan=vk@hw".into(),
+                        "-filter_hw_device".into(),
+                        "vk".into(),
+                    ];
+                }
+                Encoder::Qsv if self == Pipeline::Libplacebo => {
+                    return vec![
+                        "-init_hw_device".into(),
+                        format!("vaapi=va:{vaapi}"),
+                        "-init_hw_device".into(),
+                        "qsv=hw@va".into(),
+                        "-init_hw_device".into(),
+                        "vulkan=vk@va".into(),
+                        "-filter_hw_device".into(),
+                        "vk".into(),
+                    ];
+                }
+                _ => {}
+            }
         }
         let mut args = encoder.init_args();
         args.extend(self.init_args());
@@ -537,15 +567,19 @@ impl Pipeline {
     }
 
     /// Upload software output (including a subtitle composite) to the encoder.
-    /// A bare upload would use Vulkan again and hand the VA-API encoder the
-    /// wrong hardware surface; recover its device from the derived context.
+    /// A bare upload would use Vulkan again and hand the VA-API or QSV encoder
+    /// the wrong hardware surface; recover its device from the derived context
+    /// ([`Pipeline::device_args`]). The QSV spelling is the encoder's own
+    /// suffix with only the device source added.
     pub fn encoder_upload(self, encoder: Encoder) -> Option<&'static str> {
-        if matches!(self, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
-            && encoder == Encoder::Vaapi
-        {
-            Some("format=nv12,hwupload=derive_device=vaapi")
-        } else {
-            encoder.filter_suffix_for(self.output_grade())
+        match (self, encoder) {
+            (Pipeline::Libplacebo | Pipeline::LibplaceboVaapi, Encoder::Vaapi) => {
+                Some("format=nv12,hwupload=derive_device=vaapi")
+            }
+            (Pipeline::Libplacebo, Encoder::Qsv) => {
+                Some("hwupload=derive_device=qsv:extra_hw_frames=64,format=qsv")
+            }
+            _ => encoder.filter_suffix_for(self.output_grade()),
         }
     }
 
@@ -1268,9 +1302,13 @@ mod tests {
                 Encoder::Nvenc,
                 Encoder::VideoToolbox,
             ] {
-                if matches!(pipeline, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
-                    && encoder == Encoder::Vaapi
-                {
+                if matches!(
+                    (pipeline, encoder),
+                    (
+                        Pipeline::Libplacebo | Pipeline::LibplaceboVaapi,
+                        Encoder::Vaapi
+                    ) | (Pipeline::Libplacebo, Encoder::Qsv)
+                ) {
                     continue;
                 }
                 let mut expected = encoder.init_args();
@@ -1282,6 +1320,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A QSV node must get one filter device. Appending libplacebo's own
+    /// `vulkan=vk` + `-filter_hw_device vk` after QSV's `-filter_hw_device hw`
+    /// is refused by ffmpeg ("Only one filter device can be used").
+    #[test]
+    fn vulkan_with_qsv_encoder_shares_one_vaapi_parent() {
+        let pipeline = Pipeline::Libplacebo;
+        assert!(pipeline.pairs_with(Encoder::Qsv));
+        let args = pipeline.device_args(Encoder::Qsv);
+        // The render node is environment-dependent (another test sets
+        // PLURX_VAAPI_DEVICE in parallel); pin the structure, not the path.
+        assert!(args[1].starts_with("vaapi=va:"), "{args:?}");
+        assert_eq!(
+            args,
+            vec![
+                "-init_hw_device".to_owned(),
+                args[1].clone(),
+                "-init_hw_device".to_owned(),
+                "qsv=hw@va".to_owned(),
+                "-init_hw_device".to_owned(),
+                "vulkan=vk@va".to_owned(),
+                "-filter_hw_device".to_owned(),
+                "vk".to_owned(),
+            ]
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "-filter_hw_device").count(),
+            1,
+            "{args:?}"
+        );
+        // The final upload must not land on the Vulkan filter device.
+        assert_eq!(
+            pipeline.encoder_upload(Encoder::Qsv),
+            Some("hwupload=derive_device=qsv:extra_hw_frames=64,format=qsv")
+        );
+        // The filter string itself is untouched (ruling R2 owns it).
+        let graph = pipeline.filters(None, 720, Some("hdr10")).expect("graph");
+        assert!(graph.starts_with("hwupload,libplacebo="), "{graph}");
+        assert!(graph.ends_with("hwdownload,format=nv12"), "{graph}");
     }
 
     #[test]
