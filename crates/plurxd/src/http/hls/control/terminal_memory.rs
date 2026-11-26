@@ -659,3 +659,77 @@ pub(super) fn preparation_context_value(value: &PreparationSettlementContext) ->
     } = value;
     preparation_context_parts(route, start, recipe, request, status.as_ref())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A start's accepted processed ask is retained with the terminal
+    /// request, so its owned data (the catalog query and the frozen DV
+    /// levels set) is charged on top of the same request without one.
+    #[test]
+    fn an_accepted_processed_ask_is_charged_with_its_catalog_query_and_dv_levels() {
+        use crate::http::hls::processed_upgrade::tests::ordinary_request;
+        let without = ordinary_request("terminal-memory");
+        let mut ask = crate::transcode::ProcessedUpgradeAsk::accepted(
+            plurx_core::playback::DeviceCaps::default(),
+            1080,
+            plurx_core::transcode::OutputGrade::Sdr,
+            false,
+            crate::media_pool::QualityCatalogRequest {
+                audio_claim: None,
+                audio_delivery: None,
+                copy_contract: None,
+                file_id: 7,
+                source_size: 1,
+                source_mtime: 1,
+                caps: plurx_core::playback::DeviceCaps::default(),
+                audio_index: None,
+                audio_offset_ms: 0,
+                subtitle_burn: None,
+                presentation: crate::transcode::Presentation::Vod,
+            },
+        );
+        ask.dv_row_facts = Some(plurx_core::playback::dv_provenance::DvRowFacts {
+            levels: Some(plurx_core::scan::dv_levels::DvTitleLevels {
+                levels: [1_u8, 2, 6].into_iter().collect(),
+                cm_v40: true,
+            }),
+            title_peak_nits: Some(1000),
+            title_fits_nits: None,
+        });
+        let levels_alone = btree_nodes::<u8, ()>(3).expect("levels bound");
+        let ask_bytes = processed_upgrade_ask(&ask).expect("the ask is bounded");
+        assert!(
+            ask_bytes > levels_alone,
+            "the ask charges its box and catalog query beside its levels"
+        );
+        let mut with = without.clone();
+        with.accepted_processed_ask = Some(Box::new(ask));
+        let without_bytes = session_request(&without).expect("bounded request");
+        let with_bytes = session_request(&with).expect("bounded request with its ask");
+        assert_eq!(
+            with_bytes,
+            without_bytes + ask_bytes,
+            "the request charges exactly its accepted ask on top"
+        );
+        assert!(with_bytes > without_bytes);
+    }
+
+    /// The JSON object bound is the generic map bound at serde_json's own
+    /// entry types; delegating it changed no charge.
+    #[test]
+    fn the_json_object_bound_is_the_btree_bound_at_its_entry_types() {
+        for entries in [0, 1, 11, 12, 1000] {
+            assert_eq!(
+                json_object_nodes(entries),
+                btree_nodes::<String, serde_json::Value>(entries),
+                "{entries} entries"
+            );
+        }
+        assert!(
+            json_object_nodes(usize::MAX).is_none(),
+            "overflow is refused"
+        );
+    }
+}
