@@ -413,12 +413,16 @@ async fn adopt_adaptive_origin(
             "adaptive original Adopt remains durably owned and unpublished".into(),
         ));
     }
-    let route = state
-        .store
-        .media_session_route(&activation.session_id)
-        .await
-        .map_err(|error| session_store_error("reading adaptive adopted route", error))?
-        .ok_or_else(|| ApiError::ServiceUnavailable("adaptive adopted route is absent".into()))?;
+    // An ownership proof before the route is served: an authority read,
+    // counted as a verdict.
+    let route = crate::media_sessions::read_media_session_route(
+        &*state.store,
+        crate::media_sessions::RouteReadSite::Verdict,
+        &activation.session_id,
+    )
+    .await
+    .map_err(|error| session_store_error("reading adaptive adopted route", error))?
+    .ok_or_else(|| ApiError::ServiceUnavailable("adaptive adopted route is absent".into()))?;
     // The original worker publishes its own Adopt after attaching, before
     // it reports `adopted`; the route carries the attempt's ordinal epoch.
     if !route_matches_adoption(&route, &activation, &selected.claim.key)
