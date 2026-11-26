@@ -63,18 +63,26 @@ class WorkerControlCiTests(unittest.TestCase):
                 self.assertIn(path, selection)
 
     def test_selected_inputs_run_pinned_full_proof_and_preserve_attempt(self) -> None:
-        python = step_block(self.proof, "Install the pinned Python 3.12 runtime")
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", python)
-        self.assertIn("target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", python)
-        self.assertIn("731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91", python)
-        self.assertIn("sys.version_info[:3] == (3, 12, 15)", python)
-
-        rust = step_block(self.proof, "Install the pinned Rust controller prerequisite")
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", rust)
-        self.assertIn("dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", rust)
-        self.assertIn('toolchain: "1.97.1"', rust)
-        self.assertLess(self.proof.index("Install the pinned Rust controller prerequisite"),
+        # Kani's goto-cc needs gcc; the pinned CI image carries it, Python
+        # 3.12.15 and rustc 1.97.1, so no host-specific installs remain.
+        header = self.proof.split("    steps:\n", 1)[0]
+        self.assertIn("    container:\n", header)
+        self.assertIn("/noirr/plurx-ci@sha256:"
+                      "6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d", header)
+        self.assertIn("        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}\n", header)
+        self.assertIn("        shell: bash\n", header)
+        self.assertNotIn("dtolnay/rust-toolchain", self.proof)
+        self.assertNotIn("python-build-standalone", self.proof)
+        prerequisites = step_block(self.proof, "Require the pinned image's proof prerequisites")
+        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", prerequisites)
+        self.assertIn("sys.version_info[:3] == (3, 12, 15)", prerequisites)
+        self.assertIn("rustc +1.97.1 --version | grep -F 'rustc 1.97.1 '", prerequisites)
+        self.assertIn("gcc -dumpfullversion", prerequisites)
+        self.assertLess(self.proof.index("Require the pinned image's proof prerequisites"),
                         self.proof.index("Run the pinned production worker controller proof"))
+        ownership = step_block(self.proof, "Restore persistent runner workspace ownership")
+        self.assertIn("if: always()", ownership)
+        self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', ownership)
 
         resume = step_block(self.proof, "Prepare same-PR worker proof resumption")
         self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", resume)
