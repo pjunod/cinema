@@ -60,6 +60,9 @@ the earlier inference.
 0.5.4 read that level on every render, which kept Cinema's controls on screen
 during Dolby Vision playback; 0.5.5 takes it from the property's notification.
 
+0.5.6 names the EL pill FEL or MEL from the server's title-scan `el_kind`;
+an unclassified layer keeps EL.
+
 ## Session control sequence repair (0.5.1)
 
 **Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source
