@@ -287,8 +287,7 @@ impl SourceFence {
     pub(crate) fn clone_current_held(source: &std::fs::File) -> Result<Self, String> {
         #[cfg(unix)]
         let version = object_version(
-            &source
-                .metadata()
+            &plurx_core::media_io::fstat(source)
                 .map_err(|error| format!("checking held source: {error}"))?,
         )?;
         #[cfg(windows)]
@@ -307,8 +306,7 @@ impl SourceFence {
             .map_err(|error| format!("duplicating held source: {error}"))?;
         #[cfg(unix)]
         let version = object_version(
-            &handle
-                .metadata()
+            &plurx_core::media_io::fstat(&handle)
                 .map_err(|error| format!("checking held source: {error}"))?,
         )?;
         #[cfg(windows)]
@@ -347,8 +345,10 @@ impl SourceFence {
         open_source_fence_classified(file, Some(&self.object_version)).await
     }
 
-    pub(crate) fn unchanged(&self) -> bool {
-        self.drift().is_none()
+    /// Whether the held source is still the object this fence attested.
+    /// See [`Self::drift`].
+    pub(crate) async fn unchanged(&self) -> bool {
+        self.drift().await.is_none()
     }
 
     /// What moved under this fence, in the operator's terms, or `None` if
@@ -366,27 +366,52 @@ impl SourceFence {
     /// Naming the component makes the refusal a diagnosis. Sizes and times
     /// come from the same `fstat` the object version is built from, so this
     /// adds no syscall to the hot path beyond the one already there.
-    pub(crate) fn drift(&self) -> Option<String> {
-        #[cfg(unix)]
-        let metadata = match self.handle.metadata() {
-            Ok(metadata) => metadata,
-            // A fence whose own descriptor cannot be stated is not evidence
-            // that the source changed. It is refused just the same, because
-            // publishing against a source nothing can vouch for is worse, but
-            // it is refused under its own name.
+    ///
+    /// That `fstat` revalidates against the media server on NFS, so it runs
+    /// on the bounded media pool (`media_io::blocking`): a hung mount parks
+    /// one of its 64 threads and only this caller waits. Once the slot is
+    /// held, the descriptor is duplicated for the call (`dup` is local to the
+    /// kernel and never reaches the server) so the fence itself stays with
+    /// the caller, and a queued check holds no extra descriptor.
+    pub(crate) async fn drift(&self) -> Option<String> {
+        let slot = plurx_core::media_io::slot().await;
+        let handle = match self.handle.try_clone() {
+            Ok(handle) => handle,
             Err(error) => {
                 return Some(format!(
-                    "the source descriptor could not be stated: {error}"
+                    "the source descriptor could not be duplicated: {error}"
                 ));
             }
         };
-        #[cfg(unix)]
-        let current = object_version(&metadata);
-        #[cfg(windows)]
-        let current = windows_object_version(&self.handle);
+        let current = slot
+            .run(move || current_object_version(&handle))
+            .await
+            .unwrap_or_else(|error| Err(format!("the source check did not run: {error}")));
+        self.compare(current)
+    }
+
+    /// [`Self::unchanged`] for code that cannot await.
+    pub(crate) fn unchanged_in_place(&self) -> bool {
+        self.drift_in_place().is_none()
+    }
+
+    /// [`Self::drift`] for code that cannot await: synchronous decision code
+    /// and work already on the blocking pool. On a runtime worker the `fstat`
+    /// runs through `media_io::in_place`, which hands the worker's scheduler
+    /// to another thread while the call is parked, but holds a thread outside
+    /// the media pool's bound. Use [`Self::drift`] wherever the caller can
+    /// await.
+    pub(crate) fn drift_in_place(&self) -> Option<String> {
+        let handle = &self.handle;
+        self.compare(plurx_core::media_io::in_place(|| {
+            current_object_version(handle)
+        }))
+    }
+
+    fn compare(&self, current: Result<String, String>) -> Option<String> {
         let current = match current {
             Ok(version) => version,
-            Err(error) => return Some(format!("the source identity could not be read: {error}")),
+            Err(error) => return Some(error),
         };
         if current == self.object_version {
             return None;
@@ -395,6 +420,79 @@ impl SourceFence {
             &self.object_version,
             &current,
         ))
+    }
+}
+
+/// The awaitable source checks for a fence that may not be held, so
+/// `Option` call sites read like the `is_some_and`/`is_none_or` they replace
+/// while still awaiting [`SourceFence::unchanged`] on the media pool.
+pub(crate) trait HeldSource {
+    /// Held, and still the attested object.
+    async fn held_unchanged(self) -> bool;
+    /// Not held, or no longer the attested object.
+    async fn missing_or_changed(self) -> bool;
+    /// Held, and no longer the attested object.
+    async fn held_and_changed(self) -> bool;
+    /// Held, unchanged, and attested at exactly `version`.
+    async fn held_unchanged_as(self, version: &str) -> bool;
+    /// What moved under a held fence; `None` when nothing did or none is held.
+    async fn held_drift(self) -> Option<String>;
+}
+
+impl HeldSource for Option<&SourceFence> {
+    async fn held_unchanged(self) -> bool {
+        match self {
+            Some(source) => source.unchanged().await,
+            None => false,
+        }
+    }
+
+    async fn missing_or_changed(self) -> bool {
+        !self.held_unchanged().await
+    }
+
+    async fn held_and_changed(self) -> bool {
+        match self {
+            Some(source) => !source.unchanged().await,
+            None => false,
+        }
+    }
+
+    async fn held_unchanged_as(self, version: &str) -> bool {
+        match self {
+            Some(source) => source.object_version() == version && source.unchanged().await,
+            None => false,
+        }
+    }
+
+    async fn held_drift(self) -> Option<String> {
+        match self {
+            Some(source) => source.drift().await,
+            None => None,
+        }
+    }
+}
+
+/// The object version of a held descriptor, for [`SourceFence::drift`]. It
+/// makes the media call directly; callers put it on the media pool or run it
+/// in place.
+fn current_object_version(handle: &std::fs::File) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        // A fence whose own descriptor cannot be stated is not evidence that
+        // the source changed. It is refused just the same, because publishing
+        // against a source nothing can vouch for is worse, but it is refused
+        // under its own name.
+        let metadata = handle
+            .metadata()
+            .map_err(|error| format!("the source descriptor could not be stated: {error}"))?;
+        object_version(&metadata)
+            .map_err(|error| format!("the source identity could not be read: {error}"))
+    }
+    #[cfg(windows)]
+    {
+        windows_object_version(handle)
+            .map_err(|error| format!("the source identity could not be read: {error}"))
     }
 }
 
@@ -559,7 +657,11 @@ pub(crate) async fn open_source_fence_classified(
     let after_metadata = LEGACY_OPEN_AFTER_METADATA
         .try_with(std::sync::Arc::clone)
         .ok();
+    // The open and its fstat reach the media server, so the admitted job
+    // holds a media I/O slot for them (media_io; A-0A22BF6A).
+    let media_slot = plurx_core::media_io::slot().await;
     let native_result = crate::subtitle_models::admitted_work::spawn_blocking(move || {
+        let _media_slot = media_slot;
         // Unix legacy reopening intentionally follows links. Playback's
         // separate no-follow policy must not replace this existing policy.
         #[cfg(unix)]
@@ -695,7 +797,12 @@ pub(crate) async fn open_source_playback_fence_classified(
     let after_open = PLAYBACK_OPEN_AFTER_OPEN
         .try_with(std::sync::Arc::clone)
         .ok();
+    // The open reaches the media server, so the admitted job holds a media
+    // I/O slot for it (media_io; A-0A22BF6A). The slot is taken before the
+    // job so a queued open holds no blocking thread.
+    let media_slot = plurx_core::media_io::slot().await;
     let native_result = crate::subtitle_models::admitted_work::spawn_blocking(move || {
+        let _media_slot = media_slot;
         let source = opened(
             &path,
             plurx_core::fs_secure::open_read_nofollow_blocking(&path),
@@ -717,8 +824,7 @@ pub(crate) async fn open_source_playback_fence_classified(
             &error,
         )
     })?;
-    let metadata = source
-        .metadata()
+    let metadata = plurx_core::media_io::fstat(&source)
         .map_err(|_| SourceFenceError::Unreachable("Source file cannot be stated".to_owned()))?;
     if !metadata.is_file() || file.size < 0 {
         return Err(SourceFenceError::Changed(
@@ -2019,6 +2125,55 @@ mod tests {
     #[cfg(unix)]
     mod timed_opener;
 
+    /// An awaited source check runs on the bounded media pool, not on the
+    /// runtime worker that awaits it (A-0A22BF6A).
+    ///
+    /// Every media slot held is the state a hung mount leaves the pool in:
+    /// each slot's thread parked in the kernel. An awaited `unchanged()` must
+    /// then queue behind the bound and run only once a slot comes back. Run
+    /// in place it would hold another thread outside the bound instead, so
+    /// the in-place check completing at the same moment is what shows this
+    /// test can tell the two paths apart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_awaited_source_check_queues_on_the_media_bound() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.mkv");
+        std::fs::write(&path, b"source bytes").expect("source");
+        let fence = std::sync::Arc::new(
+            super::SourceFence::clone_current_held(&std::fs::File::open(&path).expect("open"))
+                .expect("fence"),
+        );
+
+        let mut held = Vec::with_capacity(plurx_core::media_io::MEDIA_IO_CONCURRENCY);
+        for _ in 0..plurx_core::media_io::MEDIA_IO_CONCURRENCY {
+            held.push(plurx_core::media_io::slot().await);
+        }
+        let awaited = tokio::spawn({
+            let fence = std::sync::Arc::clone(&fence);
+            async move { fence.unchanged().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            plurx_core::media_io::observation().1 >= 1,
+            "the awaited check never reached the media semaphore"
+        );
+        assert!(
+            !awaited.is_finished(),
+            "the awaited check ran without a media slot"
+        );
+        assert!(
+            fence.unchanged_in_place(),
+            "the in-place check runs outside the bound"
+        );
+
+        drop(held);
+        let unchanged = tokio::time::timeout(Duration::from_secs(5), awaited)
+            .await
+            .expect("the check runs once a slot is free")
+            .expect("check task");
+        assert!(unchanged, "an untouched source is unchanged");
+    }
     /// The refusal has to say which component moved, because the three things
     /// it covers need opposite responses and the sentence in front of it —
     /// "source changed" — is only true for one of them.

@@ -476,7 +476,8 @@ impl VerifiedSource {
     }
 
     pub(crate) fn unchanged(&self) -> bool {
-        self.fence.unchanged() && std_file_identity(&self.fence.handle).ok() == Some(self.identity)
+        self.fence.unchanged_in_place()
+            && std_file_identity(&self.fence.handle).ok() == Some(self.identity)
     }
 
     async fn recheck(

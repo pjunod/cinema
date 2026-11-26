@@ -577,6 +577,9 @@ pub struct CandidateExecutionContext {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
@@ -735,6 +738,13 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
+    /// The processed-upgrade ask of a start without an Auto candidate
+    /// (Original or a manual rung), derived at create from its accepted
+    /// capabilities. An Auto start leaves it `None`: its candidate context
+    /// is the ask. Read both through [`SessionRequest::processed_upgrade_ask`].
+    /// Process-private, like the candidate context it stands in for.
+    #[serde(skip)]
+    pub(crate) accepted_processed_ask: Option<Box<super::ProcessedUpgradeAsk>>,
     /// The viewer's per-playback output-retention choice from the HTTP
     /// create (`CreateOverrides::retain_output`). `Some(false)` means this
     /// playback queues no complete-output preparation and does no rolling
@@ -1126,6 +1136,44 @@ impl SessionKind {
 }
 
 impl SessionRequest {
+    /// The one processed-upgrade ask for this request: its Auto candidate's,
+    /// or the accepted ask of a start that has none. `None` only for a start
+    /// that reported no capabilities, which no processed route can serve.
+    pub(crate) fn processed_upgrade_ask(&self) -> Option<super::ProcessedUpgradeAsk> {
+        self.candidate_context
+            .as_deref()
+            .map(super::ProcessedUpgradeAsk::from_candidate)
+            .or_else(|| self.accepted_processed_ask.as_deref().cloned())
+    }
+
+    /// The rendition height the processed ask describes, if there is one.
+    pub(crate) fn processed_ask_target_height(&self) -> Option<u32> {
+        self.candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.target_height)
+            .or_else(|| {
+                self.accepted_processed_ask
+                    .as_ref()
+                    .map(|ask| ask.target_height)
+            })
+    }
+
+    /// Record a completed FEL qualification on whichever ask this request
+    /// carries. `None` when it carries neither.
+    pub(crate) fn require_fel_qualification(
+        &mut self,
+        qualification: super::PendingFelQualification,
+    ) -> Option<()> {
+        if let Some(context) = self.candidate_context.as_mut() {
+            context.required_fel_qualification = Some(qualification);
+        } else {
+            self.accepted_processed_ask
+                .as_mut()?
+                .required_fel_qualification = Some(qualification);
+        }
+        Some(())
+    }
+
     /// Resolve legacy routes and explicit encoded destinations in one place so
     /// preflight and the completed-window runtime cannot disagree.
     pub(crate) fn dv_processing_route(
@@ -1352,10 +1400,6 @@ pub struct StartInfo {
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
     pub(crate) degraded_processing: Option<String>,
-    /// Why this start's own processing (a reconstructed 8.1 or HDR10-E the
-    /// ordinary request was eligible for) was declined: the verdict, a busy
-    /// reconstruction slot, a refused window. For the enhancement detail.
-    pub(crate) processing_note: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,

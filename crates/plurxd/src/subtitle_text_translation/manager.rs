@@ -85,7 +85,7 @@ async fn current_source(
     file: &MediaFile,
     held: &crate::fragment_index_cluster::SourceFence,
 ) -> Result<(), StoreError> {
-    if !held.unchanged() {
+    if !held.unchanged().await {
         return Err(failure("source_changed"));
     }
     let current = state
@@ -101,7 +101,7 @@ async fn current_source(
     .await
     .map_err(|_| failure("source_changed"))?;
     if std_file_identity(&named.handle).ok() != std_file_identity(&held.handle).ok()
-        || !named.unchanged()
+        || !named.unchanged().await
     {
         return Err(failure("source_changed"));
     }

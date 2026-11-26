@@ -396,7 +396,7 @@ impl RefitTask {
         }
         super::title_work::probe_preempts(
             state,
-            &self.job_id,
+            Some(&self.job_id),
             &self.probe_pipeline,
             &mut self.probe_after,
         )

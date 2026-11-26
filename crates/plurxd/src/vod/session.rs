@@ -203,7 +203,7 @@ impl<'a> RetainedAttachProbe<'a> {
     }
 
     pub(super) fn source_unchanged(&self) -> bool {
-        matches!(self.source, RetainedAttachSource::Fence(source) if source.unchanged())
+        matches!(self.source, RetainedAttachSource::Fence(source) if source.unchanged_in_place())
     }
 
     /// Whether this target attaches under the held source `version` a
@@ -215,7 +215,7 @@ impl<'a> RetainedAttachProbe<'a> {
     pub(super) fn attaches_under_source_version(&self, version: &str) -> bool {
         match self.source {
             RetainedAttachSource::Fence(source) => {
-                source.unchanged() && source.object_version() == version
+                source.unchanged_in_place() && source.object_version() == version
             }
             #[cfg(target_os = "linux")]
             RetainedAttachSource::Finite => {

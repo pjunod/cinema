@@ -560,7 +560,12 @@ impl TranscodeManager {
         let response: crate::http::hls::StartResponse = serde_json::from_str(&stage.response_json)
             .map_err(|error| format!("decoding staged FEL response: {error}"))?;
         let preview = pending.preview(&stage.session_id, entry.serving_generation());
-        let enhancement = crate::http::hls::session_enhancement(
+        // The staged response carries the title scans' facts beside the
+        // route (stage_prepared_successor_with_delivery_as), so the check
+        // re-derives it from the same stored probe.
+        let title_scan =
+            crate::http::hls::session_title_scan_in(self.store.as_ref(), Some(&pending.file)).await;
+        let enhancement = crate::http::hls::session_enhancement_with_title(
             Some(&pending.file),
             &preview.kind,
             preview.grade,
@@ -569,6 +574,7 @@ impl TranscodeManager {
             None,
             None,
             None,
+            title_scan.as_ref(),
         );
         if !route.is_valid()
             || route.candidate_id != response.quality_candidate_id

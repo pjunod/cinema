@@ -276,7 +276,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             crate::transcode::errors::pending_fel_qualification(&reason).is_some(),
             "missing measurement must leave an exact pending continuation: {reason}"
         );
-        let reason = crate::transcode::errors::ordinary_processing_decline(reason);
+        let reason = crate::transcode::errors::pending_fel_qualification(&reason)
+            .expect("pending continuation")
+            .reason()
+            .to_owned();
         assert!(
             reason.contains("quality measurement"),
             "missing measurement must be named: {reason}"
@@ -1589,6 +1592,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1608,6 +1612,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1827,6 +1832,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1971,6 +1977,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2071,6 +2078,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2121,6 +2129,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2163,6 +2172,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2274,6 +2284,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2370,6 +2381,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2544,6 +2556,7 @@ async fn encoding_shipped_shape() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2632,6 +2645,7 @@ async fn an_encode_the_software_budget_can_never_admit_is_refused_at_create() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2786,6 +2800,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
             role: ContinuousMediaRole::Video,
         })),
         candidate_context: None,
+        accepted_processed_ask: None,
         request_id: Some(uuid::Uuid::new_v4().to_string()),
         previous_session_id: None,
         reopen_reason: None,
@@ -3858,6 +3873,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,

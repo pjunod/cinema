@@ -137,8 +137,10 @@ CI passes the tag name automatically when it publishes an image.
    with `Cargo.toml`, so a mismatch fails before anything reaches a registry
    rather than after.
 
-6. **CI does the rest.** A `v*` tag runs the full gate, then calls the same
-   publication workflow used for recovery. That workflow peels the annotated
+6. **CI does the rest.** A `v*` tag starts `release-tag.yml`, which retests
+   nothing: it requires the tagged commit's existing green promotion gate
+   (`validation.release_evidence`, as in the weekly run below) and then calls
+   the same publication workflow used for recovery. That workflow peels the annotated
    tag once, builds x86-64 and aarch64 binaries inside the pinned Bookworm
    toolchain, and stamps both with the validated tag. It packages and smoke
    tests each platform by digest before assigning the local Forgejo registry
@@ -174,8 +176,7 @@ at 06:00 UTC and starts from `main`'s tip:
   waiting, the run says so and stops; `main` is tested where it merges.
 - Only when that evidence is found, on a scheduled run, for a pending release,
   does the `tag` job push the annotated tag, onto the release commit whose gate
-  passed. The tag starts `ci.yml`'s full sweep and the image publication in
-  step 6.
+  passed. The tag starts the image publication in step 6.
 
 The push uses the `RELEASE_TAG_TOKEN` repository secret, scoped to that one
 step: a tag pushed with a run's own token starts no workflow, and this tag has

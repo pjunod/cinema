@@ -141,7 +141,7 @@ impl TranscodeManager {
             .await
             .map_err(|error| error.to_string())?;
         let copied = copied.map_err(|error| error.to_string())?;
-        if !copied.status.success() || cancel.is_cancelled() || !source.unchanged() {
+        if !copied.status.success() || cancel.is_cancelled() || !source.unchanged().await {
             return Err("native FEL prefix did not finish against the admitted source".into());
         }
         let observed = tokio::fs::File::open(&mux)
@@ -362,6 +362,7 @@ impl TranscodeManager {
             display_target: None,
             display: None,
             display_target_note: None,
+            dv_row_facts: None,
             source_mastering: source_mastering_metadata(stream),
             source_mastering_minimum: source_mastering_minimum(stream),
             source_master_metadata: source_master_metadata(stream),
@@ -702,7 +703,7 @@ impl NativeFelHead {
             && self.required.settings_generation == generation
             && matches!(verdict_state(probe, file.size, file.mtime, &self.required.request.identity),
                 VerdictState::Current(verdict) if verdict.admitted)
-            && self.source.unchanged()
+            && self.source.unchanged().await
             && self.source.reopen(file).await.is_ok()
             && self.tools.is_current().await
             && self.executable.is_current().await
@@ -807,7 +808,7 @@ impl NativeFelHead {
                     || session.control.is_retired()
                     || session.replacing_child.load(Acquire)
                     || session.failed.load(Relaxed)
-                    || !self.source.unchanged()
+                    || !self.source.unchanged_in_place()
                 {
                     return Err("prepared FEL lost its first-publication owner".into());
                 }

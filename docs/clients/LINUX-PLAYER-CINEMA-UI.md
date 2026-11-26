@@ -57,6 +57,12 @@ which the installed 0.5.3-1 package predates, so they are packaged as 0.5.4.
 The level needs mpv `+rogdv5.7` (patch 0011); with `+rogdv5.6` the pill keeps
 the earlier inference.
 
+0.5.4 read that level on every render, which kept Cinema's controls on screen
+during Dolby Vision playback; 0.5.5 takes it from the property's notification.
+
+0.5.6 names the EL pill FEL or MEL from the server's title-scan `el_kind`;
+an unclassified layer keeps EL.
+
 ## Session control sequence repair (0.5.1)
 
 **Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source

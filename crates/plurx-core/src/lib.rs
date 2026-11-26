@@ -39,6 +39,7 @@ pub mod channel_subjects;
 pub mod hevc_configuration;
 pub mod library_channels;
 pub mod live_tv_resource;
+pub mod media_io;
 pub mod mediafacts;
 pub mod metadata;
 pub mod output_measurement;

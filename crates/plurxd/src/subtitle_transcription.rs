@@ -546,7 +546,7 @@ async fn transcribe_selected(
         managed: None,
     })
     .await?;
-    if !source.unchanged()
+    if !source.unchanged().await
         || plurx_core::fs_secure::std_file_identity(&model.handle).ok() != Some(model.identity)
     {
         return Err(StoreError::Task(
@@ -1520,7 +1520,7 @@ pub(crate) async fn transcribe_managed(
     if cancel.is_cancelled() {
         return Err(StoreError::Task("worker_interrupted".into()));
     }
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err(StoreError::Task("worker_source_unavailable".into()));
     }
     managed_source(file, Some(source.object_version())).await?;

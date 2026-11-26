@@ -16096,6 +16096,35 @@ pub(crate) fn record_processed_upgrade(outcome: &'static str) {
     PROCESSED_UPGRADES[index].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Why a processed upgrade's recovery-memory read was unavailable, by
+/// admission stage (`[before_trial, after_trial]`) and
+/// [`RecoveryUnavailable::index`]. Only `after_trial` refuses an upgrade.
+///
+/// [`RecoveryUnavailable::index`]: crate::http::hls::candidate_recovery::RecoveryUnavailable::index
+static PROCESSED_RECOVERY_UNAVAILABLE: [[AtomicU64;
+    crate::http::hls::candidate_recovery::RecoveryUnavailable::ALL.len()];
+    2] = [const {
+    [const { AtomicU64::new(0) };
+        crate::http::hls::candidate_recovery::RecoveryUnavailable::ALL.len()]
+}; 2];
+const PROCESSED_RECOVERY_STAGES: [&str; 2] = ["before_trial", "after_trial"];
+
+pub(crate) fn record_processed_recovery_unavailable(
+    reason: crate::http::hls::candidate_recovery::RecoveryUnavailable,
+    after_trial: bool,
+) {
+    PROCESSED_RECOVERY_UNAVAILABLE[usize::from(after_trial)][reason.index()]
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn processed_recovery_unavailable_count(
+    reason: crate::http::hls::candidate_recovery::RecoveryUnavailable,
+    after_trial: bool,
+) -> u64 {
+    PROCESSED_RECOVERY_UNAVAILABLE[usize::from(after_trial)][reason.index()].load(Ordering::Relaxed)
+}
+
 pub(crate) fn processed_upgrade_count(outcome: &str) -> u64 {
     PROCESSED_UPGRADE_OUTCOMES
         .iter()
@@ -16642,6 +16671,19 @@ pub(crate) fn prometheus() -> String {
             "plurx_playback_preparation_processed_upgrades_total{{outcome=\"{outcome}\"}} {}\n",
             PROCESSED_UPGRADES[index].load(Ordering::Relaxed)
         ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_processed_recovery_unavailable_total Processed upgrade recovery-memory reads that could not answer, by admission stage and reason; only after_trial refuses.\n\
+         # TYPE plurx_playback_preparation_processed_recovery_unavailable_total counter\n",
+    );
+    for (stage_index, stage) in PROCESSED_RECOVERY_STAGES.iter().enumerate() {
+        for reason in crate::http::hls::candidate_recovery::RecoveryUnavailable::ALL {
+            output.push_str(&format!(
+                "plurx_playback_preparation_processed_recovery_unavailable_total{{stage=\"{stage}\",reason=\"{}\"}} {}\n",
+                reason.label(),
+                PROCESSED_RECOVERY_UNAVAILABLE[stage_index][reason.index()].load(Ordering::Relaxed)
+            ));
+        }
     }
     output.push_str(
         "# HELP plurx_playback_preparation_seams_total Prepared switches as the client reported their seam, by platform, whether the successor was processed, and outcome.\n\

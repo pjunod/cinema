@@ -129,8 +129,8 @@ and written to `target/validation/history.json` as `inherited`; it needs a
 follow-up on `main` (an errata row, or the evidence).
 
 The full failing audit is unchanged wherever no merge target is given: `make
-history-check` and `make check` locally, `ci.yml` (release tags and manual
-dispatch, which is where `main` itself is audited) and `effort-ci.yml`. No
+history-check` and `make check` locally, `ci.yml` (manual dispatch, which is
+where `main` itself is audited) and `effort-ci.yml`. No
 workflow audits `main` on every push, so the PR lane's report is where a new
 gap on `main` first shows up.
 

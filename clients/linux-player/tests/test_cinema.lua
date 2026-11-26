@@ -2,6 +2,17 @@
 local script = arg[1] or 'plurx_player/scripts/cinema.lua'
 local P, bindings, watchers, events, commands, timers, overlay = {}, {}, {}, {}, {}, {}, {}
 local reads, read_overrides = {}, {}
+-- mpv's Lua loop (player/lua/defaults.lua) handles one event, then, once the
+-- queue is empty, runs due timers and the idle handlers. Each event delivered
+-- here is followed by that drain; watchers and raw_timers keep the bare callbacks so a test can
+-- model a queue that holds several events at once.
+local idles, raw_timers = {}, {}
+local function drain() for _,f in ipairs(idles) do f() end end
+local function drained(f) return function(...) f(...); drain() end end
+-- Each overlay update or removal is one render; render_cost models its time.
+local render_cost = 0
+-- mpv applies binding changes only at a flush, which it runs before this script's idle handlers.
+local flushes = 0
 local now, mx, my, width, height = 0, 0, 0, 1280, 720
 package.preload['mp'] = function() return {
     get_property_native=function(n)
@@ -12,16 +23,21 @@ package.preload['mp'] = function() return {
     set_property=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     set_property_number=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     commandv=function(...) commands[#commands+1]={...} end,
-    create_osd_overlay=function() overlay.update=function() overlay.removed=false end; overlay.remove=function() overlay.removed=true end; return overlay end,
+    create_osd_overlay=function() overlay.renders=0
+        overlay.update=function() overlay.removed=false; overlay.renders=overlay.renders+1; now=now+render_cost end
+        overlay.remove=function() overlay.removed=true; overlay.renders=overlay.renders+1; now=now+render_cost end
+        return overlay end,
     get_osd_size=function() return width,height end,
     get_mouse_pos=function() return mx,my end,
     get_time=function() return now end,
-    add_forced_key_binding=function(k,n,f) bindings[n]=f end,
-    add_key_binding=function(k,n,f) bindings[n]=f end,
+    add_forced_key_binding=function(k,n,f) bindings[n]=drained(f) end,
+    add_key_binding=function(k,n,f) bindings[n]=drained(f) end,
     remove_key_binding=function(n) bindings[n]=nil end,
     observe_property=function(n,t,f) watchers[n]=watchers[n] or {}; table.insert(watchers[n],f) end,
-    register_event=function(n,f) events[n]=f end,
-    add_periodic_timer=function(t,f) timers[#timers+1]=f end,
+    register_event=function(n,f) events[n]=drained(f) end,
+    add_periodic_timer=function(t,f) raw_timers[#raw_timers+1]={period=t,f=f}; timers[#timers+1]=drained(f) end,
+    register_idle=function(f) idles[#idles+1]=f end,
+    flush_keybindings=function() flushes=flushes+1 end,
 } end
 package.preload['mp.options'] = function() return {read_options=function() end} end
 package.preload['mp.assdraw'] = function() return {ass_new=function()
@@ -35,6 +51,7 @@ P={['time-pos']=5,duration=30,pause=false,['user-data/osc/film']={origin=60,dura
    ['track-list']={{type='audio',id=1,lang='eng',selected=true},{type='audio',id=2,lang='fra'},
                   {type='sub',id=3,lang='eng',selected=true}},sid=3}
 dofile(script)
+drain()
 local function press(n) assert(bindings['cinema-'..n],n)() end
 local function move(x,y) mx=x;my=y;press('move') end
 local function down(x,y) move(x,y); assert(bindings['cinema-click'],'click target')( {event='down'} ) end
@@ -91,6 +108,7 @@ reset();click(222,681);eq(last()[1],'seek');eq(last()[2],110)
 local function update(name,value)
     P[name]=value
     for _,callback in ipairs(watchers[name] or {}) do callback(name,value) end
+    drain()
 end
 local function context(extra)
     local value={metadata={title='Pilot {\\bord99}',series_title='The Expedition',kind='episode',
@@ -377,8 +395,137 @@ assert(overlay.data:find('● EL: the dual-layer Profile 7 stream',1,true))
 update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true})
 timers[1]()
 assert(overlay.data:find("● EL: plurx Player's Dolby renderer composed the enhancement layer",1,true))
+assert(overlay.data:find('(full or minimal is not reported)',1,true))
+update('native-dovi-target-state',nil)
+-- The server's complete-title scan names the layer: a MEL title's EL pill says
+-- the composed layer is minimal and adds no picture detail, never FEL.
+local mel_row='MEL: minimal enhancement layer delivered for the display — it adds no picture detail; the Dolby grade is in the RPU'
+test('el_pill_names_the_scanned_layer_kind',function()
+    local data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}})
+    assert(has(data,'MEL') and not has(data,'EL'),'a MEL title names its EL pill MEL')
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='fel'})
+    assert(has(data,'FEL') and not has(data,'EL'),'a FEL title names its EL pill FEL')
+    data=pills_case(dv,native,nil,{active={'FEL','DYN'},el_kind='fel'})
+    local _,fels=data:gsub('}FEL\n','');eq(fels,1)
+    assert(has(pills_case(dv,native,nil,{active={'DYN'}}),'EL'),'an unclassified layer keeps EL')
+end)
+pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}});click(1125,681)
+for i=1,60 do if overlay.data:find('Dolby Vision mapper:',1,true) then break end; press('down') end
+-- The panel wraps long rows; read its visible text as one run.
+local function panel_run()
+    local run={}
+    for text in overlay.data:gmatch('\\an7[^}]*}([^\n]*)') do run[#run+1]=text end
+    return table.concat(run,' ')
+end
+for i=1,4 do press('down') end
+local first=panel_run();press('down');press('down')
+local shown=first..' '..panel_run()
+assert(shown:find(mel_row,1,true))
+assert(shown:find('which pairs its enhancement layer — a minimal enhancement layer (MEL), which adds no picture detail',1,true))
+assert(not shown:find('FEL: delivered',1,true))
+assert(shown:find('Dolby Vision enhancements: MEL · RPU · DYN',1,true))
+update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true})
+timers[1]()
+assert(panel_run():find("mapping — a minimal enhancement layer (MEL), which adds no picture detail",1,true))
 update('native-dovi-target-state',nil)
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
 -- No path, including the Info panel's 5 Hz refresh, ever reads the level synchronously.
 eq(reads['native-dovi-target-state'],nil)
-print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions and 18 quality pill cases passed')
+-- The server's Dolby Vision metadata and display target rows, under the three
+-- headings. Every page of the panel is gathered; first occurrences give order.
+local function info_text(provenance)
+    P['video-params']=dv;reset()
+    update('user-data/cinema-video',{source={hdr='dolby_vision',dv_profile=7,dv_el_present=true},
+        renderer=native,provenance=provenance})
+    click(1125,681)
+    local pieces={overlay.data}
+    for i=1,80 do press('down');pieces[#pieces+1]=overlay.data end
+    for i=1,80 do press('up') end
+    press('escape')
+    return table.concat(pieces,'\n')
+end
+local function at(text,part) return assert(text:find(part,1,true),part..' missing') end
+local metadata={value='HDR10+ dynamic metadata applied',rows={
+    {label='In the file',text='Dolby Vision RPU, CM v4.0, L1 and L2 trims'},
+    {label='Applied by Cinema',text='HDR10+ dynamic metadata applied'},
+    {label='Left for the display',text='Nothing: the picture is fully mapped'}}}
+local function target(mapped,reported,title)
+    return {value=mapped,rows={{label='Reported peak',text=reported or '800 nits'},
+        {label='Mapped for',text=mapped},{label='Title peak',text=title or '4000 nits'}}}
+end
+-- Targeted, not targeted and already fits.
+for _,mapped in ipairs({'1000 nits','Not targeted — the display did not report a peak',
+        'Not needed — the title already fits a 1000-nit display'}) do
+    local text=info_text({dv_metadata=metadata,display_target=target(mapped)})
+    at(text,'Dolby Vision metadata: HDR10+ dynamic metadata applied')
+    at(text,'In the file: Dolby Vision RPU, CM v4.0')
+    at(text,'Applied by Cinema: HDR10+ dynamic metadata applied')
+    at(text,'Left for the display: Nothing')
+    at(text,'Display target: '..mapped)
+    at(text,'Reported peak: 800 nits');at(text,'Mapped for: '..mapped);at(text,'Title peak: 4000 nits')
+    assert(at(text,'Dolby Vision metadata:')<at(text,'Display target:'))
+    assert(at(text,'Left for the display:')<at(text,'Display target:'))
+    assert(at(text,'Display target:')<at(text,'Renderer:'))
+end
+-- An unprocessed delivery has metadata and no display target; neither row says Unavailable.
+local text=info_text({dv_metadata=metadata})
+at(text,'Dolby Vision metadata:');assert(not text:find('Display target',1,true))
+assert(not text:find('Dolby Vision metadata: Unavailable',1,true))
+-- A missing or stale report leaves both rows out.
+for _,none in ipairs({{},false}) do
+    text=info_text(none or nil)
+    assert(not text:find('Dolby Vision metadata',1,true));assert(not text:find('Display target',1,true))
+    assert(not text:find('Left for the display',1,true))
+end
+-- Headings in order, with the new rows under Processing.
+text=info_text({dv_metadata=metadata,display_target=target('1000 nits')})
+local i,pr,o=at(text,'Input'),at(text,'Processing'),at(text,'Output')
+assert(i<pr and pr<o)
+assert(at(text,'Source dynamic range:')>i and at(text,'Source dynamic range:')<pr)
+assert(at(text,'Dolby Vision metadata:')>pr and at(text,'Display target:')>pr and at(text,'Title peak:')<o)
+assert(at(text,'Renderer:')>pr and at(text,'Renderer:')<o and at(text,'Player window size:')>o)
+update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
+test('renders_coalesce_so_a_slow_render_cannot_starve_the_hide_timer',function()
+    width=1280;P.pause=false;update('user-data/cinema',{});reset()
+    local function deliver(name) for _,callback in ipairs(watchers[name]) do callback(name,P[name]) end end
+    -- A burst of per-frame property changes queued together draws one frame,
+    -- and only once the queue has drained.
+    local before=overlay.renders
+    for i=1,50 do
+        P['time-pos']=i
+        for _,name in ipairs({'time-pos','video-target-params','demuxer-cache-state','native-dovi-target-state'}) do deliver(name) end
+    end
+    eq(overlay.renders,before)
+    drain();eq(overlay.renders,before+1);assert(overlay.data:find('}0:50\n',1,true),'the drawn frame is current')
+    drain();eq(overlay.renders,before+1)
+    -- The click binding a frame adds or removes reaches mpv in that same pass.
+    move(0,360);assert(not bindings['cinema-click'])
+    local flushed=flushes;move(780,681);assert(bindings['cinema-click']);assert(flushes>flushed,'binding flushed')
+    flushed=flushes;move(0,360);assert(not bindings['cinema-click']);assert(flushes>flushed,'unbinding flushed')
+    -- mpv's loop at 24 fps with two property changes per frame, each render
+    -- costing a whole frame (40 ms): synchronous renders never let the queue
+    -- drain, so the hide timer never ran. Coalesced, it hides on time.
+    -- (mpv coalesces a property's pending notifications; queuing each one
+    -- here only lengthens the old backlog, as each render outlives a frame.)
+    render_cost=0.04
+    local timer,frame=raw_timers[1],1/24
+    local queue,next_frame,due,start={},now,now+timer.period,now
+    while now<start+20 and not overlay.removed do
+        while next_frame<=now do
+            queue[#queue+1]='time-pos';queue[#queue+1]='video-target-params'
+            next_frame=next_frame+frame
+        end
+        if #queue>0 then
+            local name=table.remove(queue,1);P['time-pos']=now;deliver(name)
+        else
+            if now>=due then due=now+timer.period;timer.f() end
+            drain()
+            if next_frame>now and due>now then now=math.min(next_frame,due) end
+        end
+    end
+    render_cost=0
+    eq(overlay.removed,true)
+    assert(now-start<4+timer.period+0.1,'hidden after '..(now-start)..' s')
+    reset()
+end)
+print('Cinema overlay: 32 control scenarios, 3 live playback Info regressions, 23 quality pill cases, the provenance rows and render coalescing passed')

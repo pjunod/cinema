@@ -47,6 +47,9 @@ RUNTIME = runtime_identifier('tvOS', XCODE.split()[1])
 # commands conditional only on affected scope; failure-preserving artifacts.
 CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
 LEGACY_JOB_SHA256 = 'c6b5c40ac94f5505d0afd1f9d724a9fec8ca4f5a077fff01a6e738933bd8a415'
+# The same producer before its TV evidence went from 90 to 14 days' retention
+# (plurx#1932): the job is unchanged, only how long its artifact is kept.
+RETENTION90_JOB_SHA256 = '7edf7a8e71d8096ce3f51b11afcab6184b6d91b51148d1668f055b12b2ade5bf'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 50000
@@ -101,7 +104,11 @@ BUILD_SPECS = {
     # registry package located through cargo metadata; no native recipe changes.
     # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
     # the web-unit-check recipe (a Node web test); no native recipe changes.
-    'Makefile': '562fe36a23271d6bbf6654768af01d3fbf226bcaea9e9de1b8857f05e3f946b9',
+    # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
+    # no native recipe changes.
+    # plurx#1953 changes only cluster-transport-recovery-contracts' expected
+    # test count from 76 to 79; no native recipe changes.
+    'Makefile': '061c7b4132a0bb1d721adc2c499dbe655ac2a32f70df9e76e5e5751d85766b2f',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
@@ -110,8 +117,8 @@ BUILD_SPECS = {
     # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
     # fingerprints and case compatibility. Resource, script, or flag changes
     # require a newly reviewed boundary, not counter normalization.
-    # release: v0.9.1 changes only MARKETING_VERSION "0.9.0" -> "0.9.1".
-    'clients/apple/project.yml': '05b2c38d0513958e4edcc30eca9abaa749525be0f1099e3ffd9c0c03390135c2',
+    # release: v0.9.2 changes only MARKETING_VERSION "0.9.1" -> "0.9.2".
+    'clients/apple/project.yml': 'f20d8ed75aa34011197a65bd9fa063c53440aee5eed69166b2ac1e914e33e33d',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -141,7 +148,8 @@ def native_block(workflow):
 def producer(commit, current):
     old = native_block(git('show', commit + ':' + WORKFLOW))
     now = native_block(git('show', current + ':' + WORKFLOW))
-    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256) or old == now,
+    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
+                                                         RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
     # The adapter's own adoption records are deliberately never accepted as
     # native origin evidence; producer output must still be an original pass.
@@ -150,7 +158,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "a8ff2ff4d55f5224a9b60e1432b39a2363e53901dae3967dadfd3e38614c27d8"
+APPLE_PROJECT_SHAPE = "9ef3285ec7f9ce17eafad6719c7c53f0de0f6a090b7418f9174f9ff5ec425df0"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 

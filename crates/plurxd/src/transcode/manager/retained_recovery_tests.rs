@@ -501,6 +501,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),
         vod_only: false,
         passive_vod: false,

@@ -860,7 +860,7 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
 }
 
 fn check_source(source: &SourceFence) -> Result<(), String> {
-    source.drift().map_or(Ok(()), |reason| {
+    source.drift_in_place().map_or(Ok(()), |reason| {
         Err(format!("segment source fence: {reason}"))
     })
 }
@@ -936,10 +936,7 @@ async fn run(
         lane = request.source_offsets.acquire_owned() => lane.map_err(|_| "source offset lane closed")?,
     };
     check_source(&request.source)?;
-    let source_size = request
-        .source
-        .handle
-        .metadata()
+    let source_size = plurx_core::media_io::fstat(&request.source.handle)
         .map_err(|e| e.to_string())?
         .len();
     if source_size == 0 || source_size > SOURCE_LIMIT {
@@ -1477,10 +1474,7 @@ async fn launch_streaming(
     )
     .await?;
     check_source(&request.source)?;
-    let bytes = request
-        .source
-        .handle
-        .metadata()
+    let bytes = plurx_core::media_io::fstat(&request.source.handle)
         .map_err(|e| e.to_string())?
         .len();
     // Window mode keeps the original movie descriptor. The helper bounds all
@@ -2308,7 +2302,7 @@ pub(crate) async fn physical_probe() {
         );
     }
     assert!(encoded.len() > 100, "actual encoded Matroska output");
-    assert!(source.unchanged(), "same source revision retained");
+    assert!(source.unchanged().await, "same source revision retained");
     assert!(
         admissions
             .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
@@ -2422,7 +2416,7 @@ pub(crate) async fn physical_probe() {
     assert!(admissions
         .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
         .is_some());
-    assert!(source.unchanged());
+    assert!(source.unchanged().await);
     #[cfg(target_os = "linux")]
     if streaming {
         let slot = Arc::new(ProducerSlot::new());

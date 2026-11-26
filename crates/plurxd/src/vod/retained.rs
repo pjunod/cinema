@@ -64,7 +64,7 @@ impl VodServe {
         source: &crate::fragment_index_cluster::SourceFence,
     ) -> Option<MeasuredCandidateCostProof> {
         let context = request.candidate_context.as_ref()?;
-        if !source.unchanged()
+        if !source.unchanged_in_place()
             || !candidate.identity_matches()
             || !candidate.decoder_compatible
             || candidate.id != context.candidate_id
@@ -288,6 +288,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
         passive_vod: false,
         finite_bitrate_limit_bps: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
         file_id: file.id,
         playback_id: "reorder-cost".to_owned(),
@@ -633,7 +634,7 @@ impl RetainedVodArtifact {
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged_in_place())
                 && init
                     .as_ref()
                     .is_some_and(|init| init.served_init == self.observation.served_init)
@@ -1609,10 +1610,12 @@ impl RetainedArtifactRegistry {
             || artifact.logical.is_none()
             || artifact.logical != *incoming_logical
             || artifact.observation.preimage.playlist.as_slice() != rendition.playlist.as_slice()
-            || !rendition
-                .source
-                .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+            // The collector and validation locks are held here: check in
+            // place, so they are never held while queued for a media slot.
+            || !rendition.source.as_ref().is_some_and(|source| {
+                source.object_version() == artifact.source_version
+                    && source.unchanged_in_place()
+            })
         {
             return None;
         }
@@ -1642,10 +1645,12 @@ impl RetainedArtifactRegistry {
         )
         .await;
         if !matches!(validated, Ok(Ok(Ok(()))))
-            || !rendition
-                .source
-                .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+            // The collector and validation locks are held here: check in
+            // place, so they are never held while queued for a media slot.
+            || !rendition.source.as_ref().is_some_and(|source| {
+                source.object_version() == artifact.source_version
+                    && source.unchanged_in_place()
+            })
         {
             return None;
         }
@@ -2037,7 +2042,7 @@ impl RetainedArtifactRegistry {
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged());
+                    .is_some_and(|source| source.unchanged_in_place());
             let init_matches = source_current
                 && init
                     .as_ref()
@@ -2655,6 +2660,7 @@ mod tests {
             passive_vod: false,
             finite_bitrate_limit_bps: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: "durable".into(),
             quality_catalog: None,
@@ -4062,6 +4068,7 @@ mod tests {
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
+            accepted_processed_ask: None,
             candidate_context: Some(Box::new(
                 crate::transcode::TranscodeManager::candidate_context(&candidate),
             )),

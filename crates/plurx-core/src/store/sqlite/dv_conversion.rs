@@ -1785,6 +1785,10 @@ mod tests {
             "CREATE TABLE library_curation_schema",
             // v134: the shared title rewind removes the exact empty F+ curve extension.
             "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
+            // v137/v138: the shared curation rewind restores the exact managed
+            // v6 view and marker and the original analysis view, first.
+            "INSERT INTO subtitle_managed_schema VALUES(1,7)",
+            "CREATE TABLE IF NOT EXISTS analysis_source_scope_schema",
         ];
 
         assert!(

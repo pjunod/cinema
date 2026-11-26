@@ -3077,6 +3077,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # settle the helper and holds no process or source. Four are joined test
 # tasks in the same module. The helper's stage task and its launch moved into
 # the single/run split without changing count.
+# Media I/O isolation (E-08DAF9B91B): spawn_blocking sites that touch media storage moved to plurx_core::media_io::blocking (bounded, reviewed in docs/server/MEDIA-IO-ISOLATION-PLAN.md).
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 6
 "crates/plurx-core/src/process/bounded/pause.rs" = 2
@@ -3091,7 +3092,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurx-core/src/scan/removed.rs" = 2
 "crates/plurx-core/src/scan/tests.rs" = 1
 "crates/plurx-core/src/scan/tests/original_keeper.rs" = 1
-"crates/plurxd/src/admission.rs" = 4
+# Main 7dfcde82b merge: main's copy-memory pool and its fixtures (4 -> 18).
+"crates/plurxd/src/admission.rs" = 18
 "crates/plurxd/src/availability.rs" = 1
 "crates/plurxd/src/background_jobs.rs" = 2
 "crates/plurxd/src/background_jobs/source/completion.rs" = 1
@@ -3099,6 +3101,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/cachekeep.rs" = 4
 "crates/plurxd/src/cluster.rs" = 7
 "crates/plurxd/src/copy_analysis/work.rs" = 3
+"crates/plurxd/src/copyrange/observed.rs" = 2
 "crates/plurxd/src/copyrange/pipes.rs" = 2
 "crates/plurxd/src/copyrange/production.rs" = 3
 "crates/plurxd/src/copyseg.rs" = 6
@@ -3121,7 +3124,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/fontenv_tests.rs" = 2
 "crates/plurxd/src/fragindex.rs" = 5
 "crates/plurxd/src/fragindex/ride_along_tests.rs" = 2
-"crates/plurxd/src/fragment_index_cluster.rs" = 4
+# Main 7dfcde82b merge: the effort's admitted opener jobs plus main's media-pool fence test task (4 -> 5).
+"crates/plurxd/src/fragment_index_cluster.rs" = 5
 "crates/plurxd/src/fragment_index_cluster/tests/legacy_opener.rs" = 1
 "crates/plurxd/src/fragment_index_cluster/tests/timed_opener.rs" = 1
 "crates/plurxd/src/http/analysis.rs" = 1
@@ -3131,7 +3135,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/http/cluster_operations.rs" = 1
 "crates/plurxd/src/http/cluster_operations/tests.rs" = 9
 "crates/plurxd/src/http/comingsoon.rs" = 1
-"crates/plurxd/src/http/developer.rs" = 8
+# Main 7dfcde82b merge: main moved the root probe off tokio spawn_blocking onto media_io (8 -> 7).
+"crates/plurxd/src/http/developer.rs" = 7
 "crates/plurxd/src/http/dvr.rs" = 1
 "crates/plurxd/src/http/extract.rs" = 3
 "crates/plurxd/src/http/hls/control.rs" = 5
@@ -3242,15 +3247,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/sharing_host.rs" = 1
 "crates/plurxd/src/sharing_network.rs" = 1
 "crates/plurxd/src/sharing_playback_client.rs" = 3
-"crates/plurxd/src/source_custody.rs" = 4
+"crates/plurxd/src/source_custody.rs" = 3
 "crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 11
 "crates/plurxd/src/source_generation.rs" = 2
-"crates/plurxd/src/source_input.rs" = 5
+"crates/plurxd/src/source_input.rs" = 3
 "crates/plurxd/src/source_input/tests.rs" = 7
 "crates/plurxd/src/source_probe.rs" = 3
 "crates/plurxd/src/source_probe/dv_refit.rs" = 2
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 6
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 1
+# DV levels pass: one spawn_blocking pipe fold, awaited by the lane after the
+# child exits; it reaches EOF when the stream copy is reaped.
+"crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/refit_work.rs" = 1
 "crates/plurxd/src/source_probe/refit_work_tests.rs" = 2
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 5
@@ -3291,7 +3299,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/transcode/manager/rolling_retained.rs" = 1
 "crates/plurxd/src/transcode/manager/start.rs" = 1
 "crates/plurxd/src/transcode/media_origin.rs" = 1
-"crates/plurxd/src/transcode/pretranscode/source.rs" = 3
+"crates/plurxd/src/transcode/pretranscode/source.rs" = 2
 "crates/plurxd/src/transcode/producer/attempt_child.rs" = 1
 "crates/plurxd/src/transcode/producer/attempt_child/settlement_tests.rs" = 2
 "crates/plurxd/src/transcode/producer/prepublication_executor.rs" = 5
@@ -4786,6 +4794,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 "crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 1
 "crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 4
 "crates/plurxd/src/source_custody/recovery/tests.rs" = 3
+# DV levels pass: the lane future is boxed and owned by LevelsTask; stop()
+# cancels and awaits it, reaping the child before the lane is released.
+"crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 1
 "crates/plurxd/src/state.rs" = 1
 "crates/plurxd/src/subtitle_translation/installer.rs" = 1
@@ -4939,7 +4950,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurx-core/src/scan/probe_batch.rs" = 1
 "crates/plurx-core/src/scan/tests.rs" = 2
 "crates/plurx-core/src/scan/tests/original_keeper.rs" = 2
-"crates/plurxd/src/admission.rs" = 2
+# Main 7dfcde82b merge: main's copy-memory pool and fixtures (2 -> 21); the effort's trial lane is in playback_trial.rs.
+"crates/plurxd/src/admission.rs" = 21
 "crates/plurxd/src/admission/playback_trial.rs" = 1
 "crates/plurxd/src/artifact_integrity.rs" = 1
 "crates/plurxd/src/availability.rs" = 2
@@ -4956,6 +4968,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/copy_analysis/physical.rs" = 3
 "crates/plurxd/src/copyrange/census.rs" = 1
 "crates/plurxd/src/copyrange/meter.rs" = 5
+"crates/plurxd/src/copyrange/observed.rs" = 5
 "crates/plurxd/src/copyrange/production.rs" = 4
 "crates/plurxd/src/copyseg.rs" = 6
 "crates/plurxd/src/decode_facts/source_session.rs" = 5
@@ -4979,6 +4992,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/fragindex/refit_acceptance_tests.rs" = 1
 "crates/plurxd/src/fragindex/ride_along_tests.rs" = 8
 "crates/plurxd/src/fragindex/tests.rs" = 2
+# Main 7dfcde82b merge: main's media-pool fence test bounds its wait with one sleep and one timeout.
+"crates/plurxd/src/fragment_index_cluster.rs" = 2
 "crates/plurxd/src/fragment_index_cluster/tests/legacy_opener.rs" = 3
 "crates/plurxd/src/fragment_index_cluster/tests/timed_opener.rs" = 5
 "crates/plurxd/src/hevc_census.rs" = 1
@@ -5069,7 +5084,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/http/shared_source_forwarding_tests.rs" = 9
 "crates/plurxd/src/http/shared_source_ingress.rs" = 8
 "crates/plurxd/src/http/shared_source_playback.rs" = 7
-"crates/plurxd/src/http/shared_source_playback/tests.rs" = 53
+"crates/plurxd/src/http/shared_source_playback/tests.rs" = 57
 "crates/plurxd/src/http/sharing.rs" = 1
 "crates/plurxd/src/http/sharing_source_adapter_tests.rs" = 2
 "crates/plurxd/src/http/sharing_start_decode.rs" = 2
@@ -6985,6 +7000,7 @@ pattern = "use\\s+tokio::time"
 # their measurements follow tokio's test clock. Observation only.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded/pause.rs" = 1
+"crates/plurxd/src/admission.rs" = 1
 "crates/plurxd/src/availability.rs" = 1
 "crates/plurxd/src/background_jobs.rs" = 1
 "crates/plurxd/src/copyrange/meter.rs" = 1
@@ -7582,6 +7598,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 "crates/plurxd/src/source_probe/dv_refit.rs" = 3
 "crates/plurxd/src/source_probe/dv_title.rs" = 2
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 10
+# DV levels pass: the stream copy (production) and two fixture FFmpeg runs in
+# its own tests; the production child runs under the bounded owner.
+"crates/plurxd/src/source_probe/levels_work.rs" = 3
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 2
 "crates/plurxd/src/startup_tests.rs" = 2
 "crates/plurxd/src/state.rs" = 1
@@ -7830,6 +7849,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/source_probe/dv_refit.rs" = 2
 "crates/plurxd/src/source_probe/dv_title.rs" = 1
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 2
+# DV levels pass: the bounded stream copy and its source-lifetime mediation,
+# both awaited inside read_levels.
+"crates/plurxd/src/source_probe/levels_work.rs" = 2
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 2
 "crates/plurxd/src/startup_tests.rs" = 10
 "crates/plurxd/src/state.rs" = 1
@@ -8758,6 +8780,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 "crates/plurxd/src/source_custody/recovery/tests.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 3
+# DV levels pass: LevelsTask::stop cancels and awaits the owned read.
+"crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 3
 "crates/plurxd/src/startup_tests.rs" = 2
 "crates/plurxd/src/state.rs" = 3

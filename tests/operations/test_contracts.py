@@ -3493,6 +3493,19 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--memory 20g --memory-swap 20g --cpus 4", options)
         self.assertIn("--cpuset-cpus 0-3 --pids-limit 4096", options)
 
+    def test_release_package_smoke_binds_the_host_identity_its_unit_binds(self):
+        # v0.9.1's Linux packages failed their install smoke because plurxd,
+        # started there without systemd, had no host identity to read.
+        job = workflow_job_blocks(".github/workflows/github-release.yml")["linux"]
+        run_in = job.split("          run_in() {\n", 1)[1].split("          }\n", 1)[0]
+        unit = (ROOT / "deploy/plurxd.service").read_text()
+        for source, target in (
+            ("/etc/machine-id", "/run/plurx-host-machine-id"),
+            ("/proc/sys/kernel/random/boot_id", "/run/plurx-host-boot-id"),
+        ):
+            self.assertIn(f"BindReadOnlyPaths={source}:{target}", unit)
+            self.assertIn(f"--mount type=bind,src={source},dst={target},readonly", run_in)
+
     def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
@@ -4238,7 +4251,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=76", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=79", contract_commands[1])
         self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
@@ -4669,7 +4682,8 @@ assert.equal(context.ACT_TIMER, null);
         unraid = read("deploy/unraid-plurx.xml")
         readiness = read(".github/workflows/release-readiness.yml")
 
-        self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
+        self.assertNotIn("publish-release.yml", ci)
+        self.assertIn("uses: ./.github/workflows/publish-release.yml", read(".github/workflows/release-tag.yml"))
         self.assertIn("REGISTRY_IMAGE: " + FLEET_REGISTRY_EXPR + "/noirr/plurxd", publisher)
         self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
         self.assertEqual(
@@ -5118,15 +5132,24 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertEqual(re.findall(r"(?m)^ +runs-on: (.+)$", block),
                                      [declaration])
                     ephemeral_declarations.append(declaration)
-                    self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
-                    # A job is either pinned to one commit or routed by an
-                    # explicit switch while CI Fleet checks its reviewed content.
-                    self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
-                    route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
-                             else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
-                    expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
-                                f" && {route}")
-                    self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
+                    main_only = "github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
+                    if profile.get("trust") == "same_repository":
+                        # Trusted as this repository's own branches are: a dispatch on
+                        # main that takes inputs, with no content pin or switch.
+                        self.assertFalse({"commit_variable", "switch_variable"} & set(profile))
+                        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n    inputs:\n")
+                        self.assertNotRegex(workflow, r"(?m)^  (push|pull_request|pull_request_target|schedule|workflow_call):")
+                        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {main_only} }}}}"])
+                    else:
+                        self.assertNotIn("trust", profile)
+                        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
+                        # A job is either pinned to one commit or routed by an
+                        # explicit switch while CI Fleet checks its reviewed content.
+                        self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
+                        route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
+                                 else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
+                        expected = f"{main_only} && {route}"
+                        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
                 for labels in self_hosted_label_sets(block):
                     parsed.append(labels)
                     selections += 1
@@ -5246,6 +5269,9 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_root_job_containers_restore_persistent_workspace_ownership(self):
         workflow_root = ROOT / ".github/workflows"
+        # A CI Fleet job's VM is fresh, but its Cargo cache disk is not.
+        ephemeral = {(profile["workflow"], profile["job"]): f"    runs-on: [{profile['label']}]"
+                     for profile in runner_fleet().get("ephemeral_jobs", [])}
         for path in sorted(workflow_root.glob("*.y*ml")):
             relative = path.relative_to(ROOT).as_posix()
             for name, block in workflow_job_blocks(relative).items():
@@ -5253,7 +5279,8 @@ assert.equal(context.ACT_TIMER, null);
                     continue
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
-                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n"))
+                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n")
+                                or ephemeral.get((relative, name)) == runs_on.group(0))
                 self.assertIn(
                     "Restore persistent runner workspace ownership",
                     block,

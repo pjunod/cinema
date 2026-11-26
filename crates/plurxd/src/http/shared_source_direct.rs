@@ -274,7 +274,9 @@ pub(super) async fn prepare_source_direct(
         let fence = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
             .await
             .map_err(|_| refused)?;
-        let length = fence.handle.metadata().map_err(|_| refused)?.len();
+        let length = plurx_core::media_io::fstat(&fence.handle)
+            .map_err(|_| refused)?
+            .len();
         (length, Some(fence.object_version().to_owned()))
     };
     let SourceDetailsRead::Authorized(current) = read_witness().await.map_err(|_| refused)? else {

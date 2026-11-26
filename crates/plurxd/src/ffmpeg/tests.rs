@@ -3029,7 +3029,7 @@ async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_argum
 #[cfg(unix)]
 #[tokio::test]
 async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
-    async fn run(script: &str) -> Result<super::BoundedOutput, super::HeldMetadataProbeError> {
+    async fn run(script: &str) -> Result<super::BoundedOutput, super::HeldProbeError> {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", script]);
         super::metadata_probe_output(
@@ -3044,13 +3044,13 @@ async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
     }
     assert_eq!(
         run("kill -9 $$").await.err(),
-        Some(super::HeldMetadataProbeError::Interrupted(
+        Some(super::HeldProbeError::Interrupted(
             "index metadata probe exited signal: 9 (SIGKILL)".into()
         ))
     );
     assert!(matches!(
         run("exit 1").await,
-        Err(super::HeldMetadataProbeError::Failed(_))
+        Err(super::HeldProbeError::Failed(_))
     ));
     assert!(run("exit 0").await.is_ok());
     let mut command = tokio::process::Command::new("/bin/sh");
@@ -3066,7 +3066,37 @@ async fn a_metadata_probe_killed_from_outside_is_an_interruption() {
     .await
     .err();
     assert!(
-        matches!(timed_out, Some(super::HeldMetadataProbeError::Timeout(_))),
+        matches!(&timed_out, Some(super::HeldProbeError::Timeout(reason))
+            if reason.starts_with("index metadata probe timed out after ")),
         "{timed_out:?}"
     );
+}
+
+/// The F+ first-packet identity's exit statuses, classified by the shared
+/// runner step. The SIGKILL wording is the one revision 5 of the index failure
+/// policy reopens (`FragmentIndexOutcome::state`).
+#[cfg(unix)]
+#[test]
+fn an_f_plus_identity_exit_is_classified_by_its_status() {
+    use std::os::unix::process::ExitStatusExt;
+    let outcome = |raw| super::BoundedCommandOutcome {
+        status: std::process::ExitStatus::from_raw(raw),
+        output: Ok(super::BoundedOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }),
+    };
+    assert_eq!(
+        super::held_probe_outcome("F+ first packet identity", outcome(libc::SIGKILL)).err(),
+        Some(super::HeldProbeError::Interrupted(
+            "F+ first packet identity exited signal: 9 (SIGKILL)".into()
+        ))
+    );
+    assert_eq!(
+        super::held_probe_outcome("F+ first packet identity", outcome(256)).err(),
+        Some(super::HeldProbeError::Failed(
+            "F+ first packet identity exited exit status: 1".into()
+        ))
+    );
+    assert!(super::held_probe_outcome("F+ first packet identity", outcome(0)).is_ok());
 }

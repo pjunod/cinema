@@ -1827,7 +1827,7 @@ async fn ensure_burn_source_with(
                             MAX_BURN_BYTES,
                         )
                         .await
-                            && source.unchanged()
+                            && source.unchanged().await
                         {
                             #[cfg(test)]
                             note_burn_route(file.id, "store");
@@ -1849,7 +1849,7 @@ async fn ensure_burn_source_with(
                         {
                             #[cfg(test)]
                             note_burn_route(file.id, "store");
-                            if !source.unchanged() {
+                            if !source.unchanged().await {
                                 return Err("source changed during burn-track derivation".into());
                             }
                             return Ok(());
@@ -1879,7 +1879,7 @@ async fn ensure_burn_source_with(
             other => other?,
         }
     };
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err("source changed before burn sidecar attachment".into());
     }
     tokio::task::spawn_blocking(move || {
@@ -2350,7 +2350,7 @@ async fn extract_burn_from_source(
             diagnostics.trim()
         ));
     }
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err("source changed during burn-track extraction".into());
     }
     Ok(())
@@ -2705,7 +2705,7 @@ async fn sparse_subtitle_input_optional(
             return None;
         }
     };
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return None;
     }
     let mut input_args = vec!["-copyts".to_owned()];
@@ -3459,7 +3459,7 @@ pub(crate) async fn extract_vtt_window(
             diagnostics.trim()
         ));
     }
-    if !source.unchanged() || source.reopen(file).await.is_err() {
+    if !source.unchanged().await || source.reopen(file).await.is_err() {
         return Err("subtitle window source changed during extraction".to_owned());
     }
     if !diagnostics.trim().is_empty() {

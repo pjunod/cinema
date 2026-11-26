@@ -83,6 +83,17 @@ label = "ci-fleet-plurx-markers-v1"
 switch_variable = "CI_FLEET_MARKER_UNITS"
 switch_value = "firecracker"
 
+# An agent session's RAM-heavy build, submitted with `ci-fleet compile`. CI
+# Fleet trusts it as it trusts this repository's own branches (a dispatch on
+# main whose inputs name a snapshot ref); its compile policy is a background
+# policy: one at a time, and only on hosts no waiting CI job could use. No
+# persistent runner carries the label, so nothing else can run it.
+[[ephemeral_jobs]]
+workflow = ".github/workflows/compile.yml"
+job = "compile"
+label = "ci-fleet-plurx-compile-v1"
+trust = "same_repository"
+
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]
 name = "gha-lab1-general-01"

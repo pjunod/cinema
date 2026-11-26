@@ -110,8 +110,14 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 # rust_units.py re-reviewed: a shard now gives its tests a temp directory on
 # the checkout's filesystem instead of the container overlay, which resource
 # custody refuses; the nextest commands, filters and bounds are unchanged.
+# main-fast-lane.yml re-reviewed for the TV navigation evidence retention
+# (90 -> 14 days on its upload step); no compile or test step changes.
+# main-fast-lane.yml re-reviewed for worker_control_proof moving into the
+# pinned plurx-ci image (gcc for Kani's goto-cc): only that job's container,
+# prerequisite checks and ownership restore change; every compile and test
+# command, image and resource bound of the pinned recipes is unchanged.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
- '.github/workflows/main-fast-lane.yml': 'a8b463033b006e0fc5ef8d110ce085f65a45b0c4651d33c8ef0dc080b8984847',
+ '.github/workflows/main-fast-lane.yml': '1d145bca0a46ba2d1173ccb4f274fdb7cfcf6e55fa322ecbb4c0251e84020b3f',
  '.github/workflows/rust-units.yml': '9bac3e8aebfe7fc16025588bef9283799f3c396a68c318f4efcf559422488548',
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
  'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',

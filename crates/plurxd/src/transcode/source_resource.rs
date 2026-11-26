@@ -63,12 +63,7 @@ impl SourceResourceReadCustody {
         delivery: &Arc<crate::meter::Meter>,
     ) -> std::io::Result<crate::vodserve::SegmentReady> {
         let cache_pin = crate::playback_cache::pin(path)?;
-        if self
-            .guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        if self.guard.source.as_ref().missing_or_changed().await {
             return Err(std::io::Error::other(
                 "Source physical input changed before resource open",
             ));
@@ -84,7 +79,7 @@ impl SourceResourceReadCustody {
                     .guard
                     .source
                     .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                    .is_none_or(|source| !source.unchanged_in_place())
             {
                 return Err(std::io::Error::other(
                     "Source resource changed during observation",
@@ -108,7 +103,7 @@ impl SourceResourceReadCustody {
         self.guard
             .source
             .as_ref()
-            .filter(|source| source.unchanged())
+            .filter(|source| source.unchanged_in_place())
             .ok_or_else(|| "Source physical input changed".to_owned())
     }
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -267,7 +262,7 @@ impl SourceResourceReadCustody {
                 .guard
                 .source
                 .as_ref()
-                .is_none_or(|source| !source.unchanged())
+                .is_none_or(|source| !source.unchanged_in_place())
             {
                 return Err(std::io::Error::other(
                     "Source physical input changed before resource open",
@@ -281,7 +276,7 @@ impl SourceResourceReadCustody {
                     .guard
                     .source
                     .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                    .is_none_or(|source| !source.unchanged_in_place())
             {
                 return Err(std::io::Error::other(
                     "Source resource or input changed during observation",

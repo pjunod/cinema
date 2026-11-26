@@ -1691,8 +1691,11 @@ async fn run_authorized_child(
     .await?;
     if cancel.is_cancelled()
         || authority.is_cancelled()
-        || !source.unchanged()
-        || !current.unchanged()
+        || !source.unchanged().await
+        || !current.unchanged().await
+        // Again after the awaited fence checks, which can wait for a slot.
+        || cancel.is_cancelled()
+        || authority.is_cancelled()
     {
         return Err("Source probe cancelled or file changed before spawn".into());
     }
@@ -1723,8 +1726,11 @@ async fn run_authorized_child(
     }
     if cancel.is_cancelled()
         || authority.is_cancelled()
-        || !source.unchanged()
-        || !current.unchanged()
+        || !source.unchanged().await
+        || !current.unchanged().await
+        // Again after the awaited fence checks, which can wait for a slot.
+        || cancel.is_cancelled()
+        || authority.is_cancelled()
     {
         return Err("Source probe expired at spawn".into());
     }
@@ -1841,7 +1847,7 @@ async fn run_authorized_child(
     if !status.success() {
         return Err(SourceChildFailure::ChildFailed);
     }
-    if !source.unchanged() || !current.unchanged() {
+    if !source.unchanged().await || !current.unchanged().await {
         return Err("Source file changed during probe".into());
     }
     Ok(collected_output)

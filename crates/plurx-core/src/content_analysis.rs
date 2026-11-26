@@ -16,7 +16,10 @@ pub const INDEX_RETRY_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 /// 3: an index pipe killed from outside (SIGKILL) is transient.
 /// 4: so is a metadata or packet probe killed from outside. Revision 3
 /// recorded those as terminal process failures; they are due once more.
-pub const INDEX_FAILURE_POLICY_REVISION: u32 = 4;
+/// 5: so are the F+ first-packet identity's own deadline, an outside kill of
+/// it, and a source read for it. Its deadline and kills recorded before 5 as
+/// terminal `index_completion_unverified` are due once more.
+pub const INDEX_FAILURE_POLICY_REVISION: u32 = 5;
 pub const MAX_INDEX_DIAGNOSTIC_BYTES: usize = 8 * 1_024;
 pub const MAX_INDEX_STDERR_BYTES: usize = 4 * 1_024;
 pub const MAX_INDEX_STDERR_LINES: usize = 16;

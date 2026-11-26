@@ -1,15 +1,19 @@
 """Cinema's quality-pill facts: whitelisted, server-authored, and current."""
 import json
+import pathlib
 import unittest
 from unittest import mock
 
 import support  # noqa: F401  (puts plurx_player on the path)
-from plurx_player.badges import renderer_facts, server_enhancement, source_facts, video_facts
+from plurx_player import badges
+from plurx_player.badges import provenance_facts, renderer_facts, server_enhancement, source_facts, video_facts
 from plurx_player.api import ApiError
 from plurx_player.playback import Playback
 
 TOKEN = "secret-token-value"
 GENERATION = "0f8fad5b-d9cb-469f-a165-70867728950e"
+# The server-side field contract; the Debian source package does not carry it.
+CONTRACT = pathlib.Path(__file__).resolve().parents[3] / "tests/playback/playback-info-fields.json"
 
 
 class SourceFacts(unittest.TestCase):
@@ -38,6 +42,34 @@ class ServerEnhancement(unittest.TestCase):
         self.assertEqual([d["badge"] for d in shown["details"]], ["FEL", "RPU", "DYN"])
         self.assertIsNone(server_enhancement({"enhancement": {"active": "DYN"}}))
         self.assertIsNone(server_enhancement(None))
+
+    MEL_ROW = {"badge": "FEL", "active": False, "text":
+               "MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU"}
+
+    def test_mel_title_keeps_the_servers_mel_row_on_a_processed_route(self):
+        # A Profile 7 MEL title: the server names the layer MEL and the
+        # report proves no full layer, so the row must not read as missing FEL.
+        enhancement = dict(self.NATIVE, el_kind="mel", requires_effective_processing=True,
+                           details=[self.MEL_ROW] + self.NATIVE["details"][1:])
+        report = {"generation": GENERATION, "hdr10_enhanced": True, "fel_contributed": False,
+                  "applied_operations": ["PolynomialReshape", {"DisplayTargetMapping": {"nits": 1000}}]}
+        shown = server_enhancement(self.session(report, enhancement=enhancement))
+        self.assertEqual((shown["active"], shown["el_kind"]), (["RPU", "DYN"], "mel"))
+        self.assertEqual(shown["details"][0], self.MEL_ROW)
+        native = server_enhancement({"enhancement": dict(enhancement, requires_effective_processing=False)})
+        self.assertEqual((native["el_kind"], native["details"][0]), ("mel", self.MEL_ROW))
+        # A proven full layer still wins, and an unknown kind is not passed on.
+        shown = server_enhancement(self.session(dict(report, fel_contributed=True), enhancement=enhancement))
+        self.assertTrue(shown["details"][0]["text"].startswith("FEL: full enhancement layer"))
+        self.assertIsNone(server_enhancement({"enhancement": dict(self.NATIVE, el_kind="xel")})["el_kind"])
+        # A prepared successor's neutral snapshot has no rows; the MEL row
+        # still comes from el_kind, never from a stale FEL sentence.
+        cleared = dict(enhancement, active=[], details=[])
+        shown = server_enhancement(self.session(report, enhancement=cleared))
+        self.assertEqual(shown["details"][0], self.MEL_ROW)
+        stale = dict(enhancement, details=[{"badge": "FEL", "active": True,
+                                            "text": "FEL: full enhancement layer reconstructed into the picture"}])
+        self.assertEqual(server_enhancement(self.session(report, enhancement=stale))["details"][0], self.MEL_ROW)
 
     def session(self, report, delivered="hdr10", **extra):
         return dict({"enhancement": dict(self.NATIVE, requires_effective_processing=True),
@@ -92,6 +124,70 @@ class RendererFacts(unittest.TestCase):
         self.assertIsNone(renderer_facts(None))
         self.assertIsNone(renderer_facts("closed-form CM v4.0 target=bad")["target_nits"])
         self.assertEqual(renderer_facts("closed-form CM v4.0 target=5e-05-1000 nits gamut=P3")["target_nits"], 1000)
+
+
+class Provenance(unittest.TestCase):
+    META = {"in_file": {"levels": ["L1"], "cm_version": "v4.0", "text": "RPU, CM v4.0"},
+            "applied": {"levels": ["L1"], "text": "L1 applied"},
+            "left_for_display": {"levels": [], "text": "Nothing left"}}
+    TARGET = {"reported_peak": 800, "reported_peak_text": "800 nits", "state": "targeted",
+              "mapped_for_text": "1000 nits", "title_peak_nits": 4000, "title_peak_text": "4000 nits"}
+    REPORT = {"generation": GENERATION, "hdr10_enhanced": True, "fel_contributed": True,
+              "applied_operations": ["PolynomialReshape", {"DisplayTargetMapping": {"nits": 1000}}]}
+
+    def processed(self, **report):
+        return {"enhancement": {"active": [], "details": [], "requires_effective_processing": True,
+                                "dv_metadata": {"applied": {"text": "stale snapshot"}}},
+                "control": {"generation": GENERATION}, "delivered_dynamic_range": "hdr10",
+                "effective_processing": dict(self.REPORT, **dict({"dv_metadata": self.META, "display_target": self.TARGET}, **report))}
+
+    @unittest.skipUnless(CONTRACT.exists(), "needs the plurx source tree")
+    def test_labels_equal_the_contract(self):
+        fields = json.loads(CONTRACT.read_text())
+        fields = fields if isinstance(fields, list) else fields["fields"]
+        sub_rows = {f["id"]: f.get("sub_rows") for f in fields}
+        self.assertEqual(list(badges.DV_METADATA_LABELS), sub_rows["dv_metadata"])
+        self.assertEqual(list(badges.DISPLAY_TARGET_LABELS), sub_rows["display_target"])
+
+    def test_unprocessed_delivery_has_metadata_and_no_target(self):
+        session = {"enhancement": {"active": [], "details": [], "dv_metadata": self.META, "display_target": self.TARGET}}
+        facts = provenance_facts(session)
+        self.assertEqual(list(facts), ["dv_metadata"])
+        self.assertEqual(facts["dv_metadata"]["value"], "L1 applied")
+        self.assertEqual([(r["label"], r["text"]) for r in facts["dv_metadata"]["rows"]],
+                         [("In the file", "RPU, CM v4.0"), ("Applied by Cinema", "L1 applied"),
+                          ("Left for the display", "Nothing left")])
+        self.assertEqual(provenance_facts({"enhancement": {"active": [], "details": []}}), {})
+        self.assertEqual(provenance_facts(None), {})
+
+    def test_processed_delivery_reads_only_the_current_report(self):
+        facts = provenance_facts(self.processed())
+        self.assertEqual(facts["dv_metadata"]["value"], "L1 applied")
+        self.assertEqual(facts["display_target"]["value"], "1000 nits")
+        self.assertEqual([r["label"] for r in facts["display_target"]["rows"]],
+                         ["Reported peak", "Mapped for", "Title peak"])
+        self.assertEqual(video_facts({}, self.processed(), None)["provenance"], facts)
+        stale = self.processed(generation="0f8fad5b-d9cb-469f-a165-000000000000")
+        self.assertEqual(provenance_facts(stale), {})
+        missing = self.processed()
+        del missing["effective_processing"]
+        self.assertEqual(provenance_facts(missing), {})
+        wrong = self.processed()
+        wrong["delivered_dynamic_range"] = "sdr"
+        self.assertEqual(provenance_facts(wrong), {})
+
+    def test_an_invalid_text_drops_only_its_row(self):
+        for bad in ("", "   ", None, 7, "x" * 513, "a\x07b", "a\x85b"):
+            session = self.processed(display_target=dict(self.TARGET, title_peak_text=bad))
+            facts = provenance_facts(session)
+            self.assertNotIn("display_target", facts, repr(bad))
+            self.assertIn("dv_metadata", facts)
+            meta = dict(self.META, left_for_display={"text": bad})
+            facts = provenance_facts(self.processed(dv_metadata=meta))
+            self.assertNotIn("dv_metadata", facts, repr(bad))
+            self.assertIn("display_target", facts)
+        self.assertIn("dv_metadata", provenance_facts(self.processed(
+            dv_metadata=dict(self.META, applied={"text": "x" * 512}))))
 
 
 class PublishVideo(unittest.TestCase):

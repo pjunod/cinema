@@ -180,6 +180,7 @@ impl NativeFelWindow {
     fn package_splice_window(
         &self,
         format: &plurx_core::fmp4::video_splice::SpliceVideoFormat,
+        copy_static: &plurx_core::fmp4::video_splice::CopyStaticMetadata,
         times: &[plurx_core::fmp4::video_splice::CopyPictureTime],
         copy_timescale: u32,
         decode_start: u64,
@@ -219,6 +220,7 @@ impl NativeFelWindow {
         format
             .admit(&video_init)
             .map_err(media_error)?
+            .replacing(copy_static)
             .fragment_at_copy_times(
                 &video,
                 times,
@@ -271,6 +273,9 @@ pub(crate) fn package_fel_segment(
     let times =
         plurx_core::fmp4::video_splice::match_splice_pictures(ordinary, ordinary_video, &digests)
             .map_err(|error| error.to_string())?;
+    let copy_static =
+        plurx_core::fmp4::video_splice::CopyStaticMetadata::of(ordinary, ordinary_video)
+            .map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     let mut consumed = 0;
     for (subwindow, window) in windows.iter().enumerate() {
@@ -278,6 +283,7 @@ pub(crate) fn package_fel_segment(
         let ordinal = u32::try_from(subwindow).map_err(|_| "FEL fragment sequence overflows")?;
         let fragment = window.package_splice_window(
             format,
+            &copy_static,
             &times[consumed..end],
             ordinary_video.timescale,
             decode_start,
@@ -563,6 +569,9 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     /// Where the renderer was admitted to decode; it sized the graph's CPU debit.
@@ -625,7 +634,7 @@ impl RuntimeRecipe {
         let mut selected = required.cloned();
         let mut windows = Vec::with_capacity(entries.len());
         for entry in entries {
-            if cancellation.is_cancelled() || !self.source.unchanged() {
+            if cancellation.is_cancelled() || !self.source.unchanged().await {
                 return Err("native splice lost its source or owner".into());
             }
             let worker = permit
@@ -1065,7 +1074,7 @@ impl RuntimeRecipe {
                 || !entry
                     .start_ticks
                     .is_multiple_of(u64::from(grid.denominator))
-                || !self.source.unchanged()
+                || !self.source.unchanged().await
                 || !self.tools.is_current().await
             {
                 return Err("source/backend/window changed before processing".into());
@@ -1339,7 +1348,7 @@ impl RuntimeRecipe {
                             .then_some(plan.options().audio_channels),
                     )
                     .await?;
-                if !self.source.unchanged() || !self.tools.is_current().await {
+                if !self.source.unchanged().await || !self.tools.is_current().await {
                     return Err("source/backend changed before publication validation".into());
                 }
                 trace_window_stage(entry.index, "finalize_and_backend", &mut stage_started);

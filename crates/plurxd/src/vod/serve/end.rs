@@ -1,4 +1,5 @@
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 impl VodServe {
     /// A cache offer never creates a rendition or starts a producer. Only an
@@ -59,10 +60,7 @@ impl VodServe {
             let Some(encoding) = rendition.recipe.encoding.as_ref() else {
                 return false;
             };
-            if !rendition
-                .source
-                .as_ref()
-                .is_some_and(|source| source.unchanged())
+            if !rendition.source.as_ref().held_unchanged().await
                 || !encoding
                     .engine
                     .is_current_with_executable(&encoding.executable)
@@ -119,10 +117,7 @@ impl VodServe {
             }
             !rendition.closed.load(Relaxed)
                 && rendition.failure().is_none()
-                && rendition
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                && rendition.source.as_ref().held_unchanged().await
                 && rendition.manifest.lock().await.is_admitted()
         };
         // A slow or unavailable volume is not a reason to delay playback or

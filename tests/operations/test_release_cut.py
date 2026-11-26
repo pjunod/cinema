@@ -573,5 +573,29 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertIn('http.extraheader="AUTHORIZATION: basic $auth"', self.tag)
 
 
+class ReleaseTagPublicationCase(unittest.TestCase):
+    """A pushed tag publishes from its commit's existing gate; nothing is retested (Paul, 2026-11-25)."""
+
+    def setUp(self):
+        self.workflow = (ROOT / ".github/workflows/release-tag.yml").read_text(encoding="utf-8")
+
+    def test_a_tag_publishes_only_after_its_commit_s_existing_gate(self):
+        self.assertIn('on:\n  push:\n    tags: ["v*"]\n\n', self.workflow)
+        evidence = self.workflow.split("\n  evidence:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        publish = self.workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn('sha=$(git rev-parse --verify "refs/tags/$TAG^{commit}")', evidence)
+        self.assertIn('python3 -m validation.release_evidence --sha "$sha"', evidence)
+        self.assertIn("    needs: evidence\n", publish)
+        self.assertIn("    uses: ./.github/workflows/publish-release.yml\n", publish)
+        self.assertIn("      release_tag: ${{ github.ref_name }}\n", publish)
+
+    def test_a_tag_starts_no_test_sweep(self):
+        for command in ("make ", "cargo", "scripts/validate", "rust-toolchain", "nonvoter"):
+            self.assertNotIn(command, self.workflow, command)
+        for name in ("ci", "lint"):
+            triggers = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8").split("\njobs:", 1)[0]
+            self.assertNotIn("tags:", triggers, name)
+
+
 if __name__ == "__main__":
     unittest.main()

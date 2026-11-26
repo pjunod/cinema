@@ -872,6 +872,19 @@ impl ProcessingActivity {
     }
 }
 
+/// The session's display-target facts beside its current processing report:
+/// what the client reported and what the policy concluded, for the Playback
+/// info `Display target` row. Observation only.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct DvReportDisplay {
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) note: Option<String>,
+    /// Frozen beside the policy at session start; `None` for a route that
+    /// carries no display-target policy.
+    pub(crate) facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DisplayTargetActivity {
     pub reported_peak_nits: Option<i64>,
@@ -1211,7 +1224,7 @@ impl ProcessedRootReuse {
                 .rendition
                 .source
                 .as_ref()
-                .is_none_or(|source| source.unchanged())
+                .is_none_or(|source| source.unchanged_in_place())
     }
 }
 

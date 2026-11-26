@@ -166,6 +166,20 @@ jobs:
       github.event.pull_request.draft == false && needs.scope.outputs.lane_requested == 'true' &&
       needs.scope.outputs.worker_control == 'true'
     runs-on: [ci-nonvoter-heavy-amd64]
+    # Kani's goto-cc preprocesses its C library with gcc. The pinned CI image
+    # carries gcc 12, Python 3.12.15 and rustc 1.97.1, so the proof no longer
+    # depends on what each heavy host happens to have installed (run 9326 on
+    # lab1: `execvp gcc failed`). The container carries the same 4-CPU / 20 GiB
+    # box that the first step verifies.
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 45
     steps:
       - name: Verify effective nonvoter resource bounds
@@ -228,31 +242,14 @@ jobs:
           done <<< "$changed"
           printf 'affected=%s\n' "$affected" >> "$GITHUB_OUTPUT"
           echo "Worker controller proof inputs affected: $affected"
-      - name: Install the pinned Python 3.12 runtime
+      - name: Require the pinned image's proof prerequisites
         if: steps.worker-control-inputs.outputs.affected == 'true'
         run: |
           set -euo pipefail
-          python_dir="$GITHUB_WORKSPACE/target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          test ! -e "$python_dir"
-          mkdir -p "$python_dir"
-          runtime_archive="$python_dir/runtime.tgz"
-          curl -q --fail --location --proto '=https' --proto-redir '=https' \
-            --connect-timeout 20 --max-time 180 --max-filesize 34285590 \
-            --output "$runtime_archive" \
-            'https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
-          test "$(wc -c < "$runtime_archive")" -eq 34285590
-          printf '%s  %s\n' '731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91' \
-            "$runtime_archive" | sha256sum --check --status
-          tar -xzf "$runtime_archive" -C "$python_dir"
-          "$python_dir/python/bin/python3" -c \
-            'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
-          rm -- "$runtime_archive"
-          printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
-      - name: Install the pinned Rust controller prerequisite
-        if: steps.worker-control-inputs.outputs.affected == 'true'
-        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
-        with:
-          toolchain: "1.97.1"
+          python3 -c 'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
+          rustc +1.97.1 --version | grep -F 'rustc 1.97.1 '
+          command -v rustup
+          gcc -dumpfullversion
       - name: Prepare same-PR worker proof resumption
         id: worker-control-resume
         if: steps.worker-control-inputs.outputs.affected == 'true'
@@ -301,12 +298,11 @@ jobs:
           path: target/verification/worker-control-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error
           retention-days: 90
-      - name: Remove this job's Python runtime
-        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+      - name: Restore persistent runner workspace ownership
+        if: always()
         run: |
-          python_dir="$GITHUB_WORKSPACE/target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          test -n "$GITHUB_WORKSPACE"
-          rm -rf -- "$python_dir"
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   preflight:
     name: fast policy and contract preflight
@@ -750,7 +746,10 @@ jobs:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
-          retention-days: 90
+          # About 300 MB per run. Held 90 days, they reached 29 GB on the forge's
+          # disk and kept growing; 14 is the server default every other evidence
+          # artifact uses. Native receipts adopt journeys from the last 14 days.
+          retention-days: 14
 
   android_compile:
     name: fast Android compile

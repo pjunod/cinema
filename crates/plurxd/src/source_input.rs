@@ -338,9 +338,7 @@ impl SourceInput {
     ) -> Result<Self, String> {
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(request.file(), None).await?;
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let mime = crate::http::stream::file_content_type(&request.file().path);
@@ -447,9 +445,7 @@ impl SourceInput {
         request: SourceRequest,
         attempt: impl ToString,
     ) -> Result<Self, String> {
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let custody = request
@@ -551,12 +547,10 @@ impl SourceInput {
         budget: Arc<crate::background_jobs::SourceReadBudget>,
     ) -> Result<Self, String> {
         let holder = budget.source_holder()?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err("held source changed before input bridge".into());
         }
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let state = Arc::new(InputState {
@@ -756,9 +750,16 @@ impl SourceInput {
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn source_object_version(&self) -> Option<String> {
-        let state = self.state.source.lock().expect("source input fence");
-        let source = state.as_ref().filter(|source| source.unchanged())?;
-        Some(source.object_version().to_owned())
+        // The fence's lock is held across each positioned read of the source
+        // (`read_source`), so on a hung mount it is held for as long as the
+        // mount is hung. Wait for it off the scheduler, like the fstat after.
+        plurx_core::media_io::in_place(|| {
+            let state = self.state.source.lock().expect("source input fence");
+            let source = state
+                .as_ref()
+                .filter(|source| source.unchanged_in_place())?;
+            Some(source.object_version().to_owned())
+        })
     }
     /// Whether any read this input served to its consumer failed.
     pub(crate) fn source_read_failed(&self) -> bool {
@@ -845,7 +846,7 @@ impl SourceInput {
                 .await
                 .map_err(std::io::Error::other)?;
             let state = Arc::clone(&self.state);
-            tokio::task::spawn_blocking(move || {
+            plurx_core::media_io::blocking(move || {
                 let _permit = permit;
                 drop(state.source.lock().expect("source input").take());
                 drop(state.custody.lock().expect("source custody").take());
@@ -984,14 +985,14 @@ async fn read_source(
             .acquire_owned()
             .await
             .map_err(std::io::Error::other)?;
-        let valid = tokio::task::spawn_blocking(move || {
+        let valid = plurx_core::media_io::blocking(move || {
             let _permit = permit;
             source
                 .source
                 .lock()
                 .expect("source input")
                 .as_ref()
-                .is_some_and(|source| source.unchanged())
+                .is_some_and(|source| source.unchanged_in_place())
         })
         .await
         .map_err(std::io::Error::other)?;
@@ -1201,11 +1202,15 @@ async fn read_source(
         if size == 0 || read_state.close.is_cancelled() {
             return Err(std::io::Error::other("source purpose or input closed"));
         }
+        // The media slot covers the source lock, fence checks and reads only.
+        // The revalidation above waits on grants and the store; holding a
+        // slot through it would let healthy waits pin every media slot.
+        let _media = tokio::runtime::Handle::current().block_on(plurx_core::media_io::slot());
         let mut source = read_state.source.lock().expect("source input");
         let source = source
             .as_mut()
             .ok_or_else(|| std::io::Error::other("source input closed"))?;
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         window.resize(size, 0);
@@ -1237,7 +1242,7 @@ async fn read_source(
         read_state
             .source_bytes
             .fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         if count > 0 {

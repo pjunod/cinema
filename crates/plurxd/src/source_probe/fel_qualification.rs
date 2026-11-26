@@ -1381,7 +1381,7 @@ async fn qualify_with_mode(
         == request.backend_identity;
     if !renderer_current
         || !encoder_current
-        || !source.unchanged()
+        || !source.unchanged().await
         || source.reopen(file).await.is_err()
     {
         return Err("the renderer, encoder or source changed during FEL qualification".into());

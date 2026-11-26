@@ -832,6 +832,7 @@ impl TranscodeManager {
         let (hardware_slots_used, hardware_slots_max) = self.hardware_slots().await;
         let software_threads_max = self.software_budget().await;
         let software_threads_used = self.admissions.software_in_use();
+        let (copy_memory_used, copy_memory_max) = self.admissions.copy_memory().usage();
         let mut tone_map_pipelines = if capabilities.tone_map {
             vec![self.pipeline.name().to_owned()]
         } else {
@@ -921,6 +922,8 @@ impl TranscodeManager {
             hardware_slots_max,
             software_threads_used,
             software_threads_max,
+            copy_memory_used,
+            copy_memory_max,
             live_waiting: self.admissions.live_is_waiting(),
             background_active: self.admissions.background_is_active(),
         }

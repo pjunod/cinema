@@ -1,5 +1,6 @@
 //! Private background preparation accounting; never viewer demand or wire authority.
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 /// Private complete body held across the queue statement. Neither the job's
 /// result reference nor this handle is a remotely reconstructible capability.
@@ -319,9 +320,11 @@ impl CopyPreparation {
                 .map(|encoding| encoding.plan.plan_digest())
                 == self.expected_encoded_plan
             && rendition.recipe.retained_logical.as_ref() == Some(&self.logical)
-            && rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == self.source_version
-            })
+            && rendition
+                .source
+                .as_ref()
+                .held_unchanged_as(&self.source_version)
+                .await
     }
 
     /// Why a preparation stopped being live. A production fault consumes an
@@ -333,7 +336,7 @@ impl CopyPreparation {
     ) -> crate::background_jobs::PreparationError {
         use crate::background_jobs::PreparationError;
         if !rendition.source.as_ref().is_some_and(|source| {
-            source.unchanged() && source.object_version() == self.source_version
+            source.unchanged_in_place() && source.object_version() == self.source_version
         }) {
             PreparationError::Stop("source_changed")
         } else if let Some(cause) = rendition.failure_cause() {
@@ -389,7 +392,7 @@ impl CopyPreparation {
             && !rendition.closed.load(Acquire)
             && rendition.recipe.retained_logical.as_ref() == Some(&self.logical)
             && rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == self.source_version
+                source.unchanged_in_place() && source.object_version() == self.source_version
             })
     }
 
@@ -414,7 +417,7 @@ impl CopyPreparation {
             || rendition.closed.load(Acquire)
             || rendition.recipe.retained_logical.as_ref() != Some(&self.logical)
             || !rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == self.source_version
+                source.unchanged_in_place() && source.object_version() == self.source_version
             })
             || !staged
                 .as_ref()

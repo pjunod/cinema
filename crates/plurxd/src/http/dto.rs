@@ -821,11 +821,7 @@ pub struct PlaysOnDto {
 /// What the complete-title Dolby Vision scan found about the enhancement
 /// layer: `fel` or `mel` when consistent across the title.
 pub fn dv_el_kind(probe: &serde_json::Value) -> Option<plurx_core::scan::dv_title::TitleElKind> {
-    use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant};
-    match DvTitleStats::from_probe_value(probe)?.el_kind {
-        TitleConstant::Consistent(kind) => Some(kind),
-        _ => None,
-    }
+    plurx_core::scan::dv_title::DvTitleStats::from_probe_value(probe)?.consistent_el_kind()
 }
 
 pub fn el_kind_str(kind: plurx_core::scan::dv_title::TitleElKind) -> &'static str {

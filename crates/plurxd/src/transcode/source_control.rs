@@ -313,7 +313,7 @@ impl SourceControlAuthority<'_> {
     }
     fn validate_physical(&self) -> Result<(), ControlStateError> {
         if Instant::now() >= self.deadline
-            || !self.source.unchanged()
+            || !self.source.unchanged_in_place()
             || self
                 .actor
                 .0

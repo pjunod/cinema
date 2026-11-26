@@ -3232,8 +3232,22 @@ fn private_webhook_host(host: &str) -> bool {
 /// A non-owner node answering `None` is the common case and not a fault: the
 /// DVR root is a mount the owner writes to, and a node that does not have it
 /// has nothing honest to say about its free space.
+///
+/// The DVR root is usually network storage, so the query runs on the
+/// media-I/O pool: a hung mount parks the caller, not a runtime worker.
+pub(crate) async fn free_space_bytes(path: &str) -> Option<u64> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let path = path.to_owned();
+    plurx_core::media_io::blocking(move || free_space_bytes_blocking(&path))
+        .await
+        .ok()
+        .flatten()
+}
+
 #[cfg(unix)]
-pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
+fn free_space_bytes_blocking(path: &str) -> Option<u64> {
     if path.trim().is_empty() {
         return None;
     }
@@ -3251,7 +3265,7 @@ pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
 }
 
 #[cfg(windows)]
-pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
+fn free_space_bytes_blocking(path: &str) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt as _;
 
     let mut path = std::ffi::OsStr::new(path).encode_wide().collect::<Vec<_>>();

@@ -219,7 +219,7 @@ impl VodServe {
                     || rendition
                         .source
                         .as_ref()
-                        .is_some_and(|source| !source.unchanged())
+                        .is_some_and(|source| !source.unchanged_in_place())
             }) {
                 return Err("controlled source changed during admission".into());
             }

@@ -2533,6 +2533,7 @@ impl HiqliteAuthStore {
         store.install_adaptive_source_scope(None).await?;
         store.install_encoded_output_publications(None).await?;
         store.install_dv_refit_schema(None).await?;
+        store.install_analysis_source_scope_schema(None).await?;
         Ok(store)
     }
 
@@ -2754,7 +2755,8 @@ impl HiqliteAuthStore {
                         .await?;
                     self.install_adaptive_source_scope(admission).await?;
                     self.install_encoded_output_publications(admission).await?;
-                    return self.install_dv_refit_schema(admission).await;
+                    self.install_dv_refit_schema(admission).await?;
+                    return self.install_analysis_source_scope_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4754,7 +4756,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(6) {
+        if version == Some(7) {
             return Ok(());
         }
         if version.is_none() {
@@ -4821,7 +4823,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if !matches!(self.subtitle_managed_schema_version().await?, Some(4..=6)) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(4..=7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed prepared-artifact schema upgrade did not settle".into(),
@@ -4840,7 +4842,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if !matches!(self.subtitle_managed_schema_version().await?, Some(5 | 6)) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(5..=7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed targeted-probe schema upgrade did not settle".into(),
@@ -4859,7 +4861,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if self.subtitle_managed_schema_version().await? != Some(6) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(6 | 7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "fragment publisher resource upgrade did not settle".into(),
@@ -4867,6 +4869,25 @@ impl HiqliteAuthStore {
             }
         }
         if self.subtitle_managed_schema_version().await? == Some(6) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::FILE_ROOT_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::file_root_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::file_root_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(7) {
+                result?;
+                return Err(StoreError::Migration(
+                    "file-root resource upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(7) {
             return Ok(());
         }
         Err(StoreError::Migration(
@@ -5322,6 +5343,71 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "F+ curve schema install did not settle".into(),
+        ))
+    }
+
+    async fn analysis_source_scope_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed view shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "analysis_source_scope_schema_version",
+                super::analysis_source_scope::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::analysis_source_scope::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "analysis_source_scope_schema_version",
+                    super::analysis_source_scope::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "analysis source scope schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    /// Analysis reads only the library root that holds its file: the view
+    /// replaced under its own name. Older nodes neither read the marker nor
+    /// verify the view; they read the narrowed rows through the same triggers.
+    async fn install_analysis_source_scope_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.analysis_source_scope_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let mut statements = vec![(
+            super::analysis_source_scope::GUARD.to_owned(),
+            params!(super::analysis_source_scope::predecessor_view()),
+        )];
+        statements.extend(
+            super::analysis_source_scope::statements()
+                .into_iter()
+                .map(|sql| (sql, params!())),
+        );
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.analysis_source_scope_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "analysis source scope schema install did not settle".into(),
         ))
     }
 

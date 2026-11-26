@@ -273,17 +273,23 @@ pub(super) async fn with_current_processing_header(
                 }
             }
         }
-        if let Some(report) = state
-            .transcode
-            .dv_effective_report(&route.session_id, &route.incarnation_id)
-            .await
+        if let Some(report) =
+            current_dv_report(state, &route.session_id, &route.incarnation_id).await
         {
-            if let Ok(bytes) = serde_json::to_string(&report) {
-                if bytes.len() <= 4096 {
-                    if let Ok(header) = axum::http::HeaderValue::from_str(&bytes) {
-                        response
-                            .headers_mut()
-                            .insert("x-plurx-dv-processing", header);
+            let bytes = report.owner_wire_json();
+            if bytes.len() <= 4096 {
+                if let Ok(header) = axum::http::HeaderValue::from_str(&bytes) {
+                    response
+                        .headers_mut()
+                        .insert("x-plurx-dv-processing", header);
+                    // A separate header, so an older ingress, which parses the
+                    // report with `deny_unknown_fields`, still relays it.
+                    if let Some(rows) = report
+                        .rows()
+                        .and_then(super::processed_upgrade::ascii_header_json)
+                        .and_then(|rows| axum::http::HeaderValue::from_str(&rows).ok())
+                    {
+                        response.headers_mut().insert(DV_ROWS_HEADER, rows);
                     }
                 }
             }
@@ -292,10 +298,73 @@ pub(super) async fn with_current_processing_header(
     response
 }
 
+/// The owner-to-ingress relay of a processed delivery's Playback info rows.
+const DV_ROWS_HEADER: &str = "x-plurx-dv-rows";
+
+/// This node's current processing report for the session, with the Playback
+/// info rows that describe it attached for the client response. The rows are
+/// built from facts read with the report under the same fences, so no await
+/// separates the report's final allowance check from the rows.
+pub(crate) async fn current_dv_report(
+    state: &AppState,
+    session_id: &str,
+    incarnation_id: &str,
+) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+    if let Some((report, display)) = state
+        .transcode
+        .dv_effective_report_with_display(session_id, incarnation_id)
+        .await
+    {
+        let rows = processing_rows(&report, &display);
+        return Some(report.with_rows(rows));
+    }
+    state
+        .transcode
+        .dv_effective_report(session_id, incarnation_id)
+        .await
+}
+
+/// Both rows of a processed HDR10 or SDR delivery, from its report, the
+/// session's display-target facts and the title facts frozen beside its
+/// policy. Observation only: nothing here reaches a decision.
+fn processing_rows(
+    report: &plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+    display: &crate::vodserve::DvReportDisplay,
+) -> Option<plurx_core::playback::dv_provenance::DvProcessingRows> {
+    use plurx_core::playback::dv_provenance::{
+        display_target_rows, dv_metadata_rows, DisplayTargetFacts, DvProcessingRows,
+    };
+    use plurx_core::playback::enhancement::EnhancementRoute;
+    let route = report.enhancement_route();
+    let sdr = match route {
+        EnhancementRoute::ProcessedHdr10 { .. } => false,
+        EnhancementRoute::ProcessedSdr { .. } => true,
+        // A Dolby Vision carrier is never display targeted; its metadata row
+        // rides the enhancement.
+        _ => return None,
+    };
+    let facts = display.facts.clone().unwrap_or_default();
+    let caps = display.display.as_ref();
+    let rows = DvProcessingRows {
+        dv_metadata: dv_metadata_rows(&route, facts.levels.as_ref())?,
+        display_target: display_target_rows(&DisplayTargetFacts {
+            reported_peak_nits: caps.and_then(|caps| caps.max_nits),
+            peak_source: caps.and_then(|caps| caps.peak_source),
+            mapped_nits: report.display_target_nits(),
+            sdr,
+            title_fits_nits: facts.title_fits_nits,
+            decline_note: display.note.as_deref(),
+            title_peak_nits: facts.title_peak_nits,
+        }),
+    };
+    rows.is_well_formed().then_some(rows)
+}
+
 /// The internal relay retains its exact legacy JSON body. Only public ingress
 /// projects the bounded current-owner header onto the additive client field.
 pub(super) async fn public_control_processing(mut response: Response) -> Response {
     let header = response.headers_mut().remove("x-plurx-dv-processing");
+    let rows = response.headers_mut().remove(DV_ROWS_HEADER);
     let skip = response.headers_mut().remove("x-plurx-processing-skip");
     if header.is_none() && skip.is_none() {
         return response;
@@ -348,6 +417,10 @@ pub(super) async fn public_control_processing(mut response: Response) -> Respons
             )
         })
     }) {
+        // Rows are relayed only beside the report they describe.
+        let report = report.with_rows(rows.as_ref().and_then(|rows| {
+            plurx_core::playback::dv_provenance::DvProcessingRows::from_owner_wire(rows.as_bytes())
+        }));
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "effective_processing".into(),
@@ -434,6 +507,208 @@ mod dv_processing_wire_tests {
                 assert_eq!(public["effective_processing"]["generation"], incarnation);
             }
         }
+    }
+
+    /// The owner's rows come from the report plus the facts frozen beside the
+    /// session's policy: targeted, already fits and not targeted, and none for
+    /// a Profile 8.1 carrier.
+    #[test]
+    fn owner_rows_follow_the_report_and_the_frozen_policy_facts() {
+        use plurx_core::playback::dv_provenance::{DisplayTargetState, DvRowFacts};
+        let generation = "00000000-0000-0000-0000-000000000001";
+        let report = |operations: serde_json::Value| {
+            plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                serde_json::json!({"generation":generation,"hdr10_enhanced":true,"fel_contributed":false,
+                    "creative_trims_applied":false,"applied_operations":operations}).to_string().as_bytes(),
+                generation,
+                Some("hdr10"),
+            )
+            .expect("owner report")
+        };
+        let targeted = report(
+            serde_json::json!(["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1000}}]),
+        );
+        let master = report(serde_json::json!(["RpuColorConversion", "TargetMapping"]));
+        let display = |note: &str, facts: DvRowFacts| crate::vodserve::DvReportDisplay {
+            display: Some(plurx_core::playback::caps::DisplayCaps {
+                hdr: true,
+                max_nits: Some(1000),
+                ..Default::default()
+            }),
+            note: Some(note.to_owned()),
+            facts: Some(facts),
+        };
+        let levels = plurx_core::scan::dv_levels::DvTitleLevels {
+            levels: [1, 2, 8, 254].into(),
+            cm_v40: true,
+        };
+        let rows = processing_rows(
+            &targeted,
+            &display(
+                "HDR10-E: …",
+                DvRowFacts {
+                    levels: Some(levels.clone()),
+                    title_peak_nits: Some(1412),
+                    title_fits_nits: None,
+                },
+            ),
+        )
+        .expect("rows");
+        assert_eq!(
+            rows.display_target.state,
+            DisplayTargetState::Targeted { mapped_nits: 1000 }
+        );
+        assert_eq!(rows.dv_metadata.applied.text, "L1");
+        assert_eq!(rows.display_target.title_peak_text, "1412 nits");
+        let fits = processing_rows(
+            &master,
+            &display(
+                "this title already fits a 1000-nit display; master grade sent",
+                DvRowFacts {
+                    levels: Some(levels.clone()),
+                    title_peak_nits: Some(812),
+                    title_fits_nits: Some(1000),
+                },
+            ),
+        )
+        .expect("rows");
+        assert_eq!(
+            fits.display_target.state,
+            DisplayTargetState::AlreadyFits { bucket_nits: 1000 }
+        );
+        // A session that started before the scan says so, even if the title would fit now.
+        let unknown = processing_rows(
+            &master,
+            &display(
+                "complete-title Dolby Vision L1 scan unavailable; master grade sent",
+                DvRowFacts::default(),
+            ),
+        )
+        .expect("rows");
+        assert!(
+            matches!(unknown.display_target.state, DisplayTargetState::NotTargeted { ref reason } if reason.contains("scan unavailable"))
+        );
+        assert_eq!(unknown.dv_metadata.in_file.text, "Unavailable");
+        let p81 = plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+            serde_json::json!({"generation":generation,"hdr10_enhanced":false,"profile81_reconstructed":true,"fel_contributed":true,
+                "applied_operations":["RpuColorConversion","TargetMapping","LinearNlqResidual"]}).to_string().as_bytes(),
+            generation,
+            Some("dolby_vision"),
+        )
+        .expect("8.1 report");
+        assert!(processing_rows(&p81, &display("x", DvRowFacts::default())).is_none());
+    }
+
+    #[tokio::test]
+    async fn public_rows_ride_only_a_current_report_and_never_leak_as_a_header() {
+        use plurx_core::playback::dv_provenance::{
+            display_target_rows, dv_metadata_rows, DisplayTargetFacts, DvProcessingRows,
+        };
+        use plurx_core::playback::enhancement::{CreativeTrims, EnhancementRoute};
+        let incarnation = "00000000-0000-0000-0000-000000000001";
+        let other = "00000000-0000-0000-0000-000000000002";
+        let body = serde_json::json!({"generation": incarnation, "effective_selection": {"dynamic_range": "hdr10"}});
+        let report = |generation: &str| {
+            serde_json::json!({"generation":generation,"hdr10_enhanced":true,"creative_trims_applied":true,
+            "fel_contributed":false,
+            "applied_operations":["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1000}},"CreativeTrimApplication"]})
+            .to_string()
+        };
+        let levels = plurx_core::scan::dv_levels::DvTitleLevels {
+            levels: [1, 2, 5, 6, 8, 9, 11, 254].into(),
+            cm_v40: true,
+        };
+        let rows = DvProcessingRows {
+            dv_metadata: dv_metadata_rows(
+                &EnhancementRoute::ProcessedHdr10 {
+                    fel_contributed: false,
+                    display_target: Some(1000),
+                    creative_trims: CreativeTrims::All,
+                },
+                Some(&levels),
+            )
+            .expect("DV"),
+            display_target: display_target_rows(&DisplayTargetFacts {
+                reported_peak_nits: Some(1000),
+                peak_source: Some(plurx_core::playback::caps::DisplayPeakSource::Viewer),
+                mapped_nits: Some(1000),
+                title_peak_nits: Some(1412),
+                ..Default::default()
+            }),
+        };
+        let header = super::super::processed_upgrade::ascii_header_json(&rows).expect("bounded");
+        assert!(header.is_ascii(), "the row text's · and — travel escaped");
+        async fn project(
+            body: &serde_json::Value,
+            owner: Option<String>,
+            rows: Option<String>,
+        ) -> serde_json::Value {
+            let mut response = Json(body.clone()).into_response();
+            if let Some(owner) = owner {
+                response.headers_mut().insert(
+                    "x-plurx-dv-processing",
+                    axum::http::HeaderValue::from_str(&owner).expect("owner report"),
+                );
+            }
+            if let Some(rows) = rows {
+                response.headers_mut().insert(
+                    DV_ROWS_HEADER,
+                    axum::http::HeaderValue::from_str(&rows).expect("owner rows"),
+                );
+            }
+            let response = public_control_processing(response).await;
+            assert!(!response.headers().contains_key(DV_ROWS_HEADER));
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("public body");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("public JSON")
+        }
+        let public = project(&body, Some(report(incarnation)), Some(header.clone())).await;
+        let processing = &public["effective_processing"];
+        assert_eq!(processing["generation"], incarnation);
+        assert_eq!(processing["dv_metadata"]["applied"]["text"], "L1 · L8");
+        assert_eq!(
+            processing["dv_metadata"]["left_for_display"]["text"],
+            "None; delivered as HDR10"
+        );
+        assert_eq!(
+            processing["display_target"]["reported_peak_text"],
+            "1000 nits · your setting"
+        );
+        assert_eq!(processing["display_target"]["mapped_for_text"], "1000 nits");
+        assert_eq!(processing["display_target"]["title_peak_text"], "1412 nits");
+        // A stale report takes its rows with it; rows alone are never shown.
+        let stale = project(&body, Some(report(other)), Some(header.clone())).await;
+        assert!(stale.get("effective_processing").is_none());
+        let alone = project(&body, None, Some(header)).await;
+        assert!(alone.get("effective_processing").is_none());
+        // Out-of-shape rows are dropped whole; the report still relays.
+        let bad = project(
+            &body,
+            Some(report(incarnation)),
+            Some(r#"{"dv_metadata":1}"#.into()),
+        )
+        .await;
+        assert_eq!(bad["effective_processing"]["generation"], incarnation);
+        assert!(bad["effective_processing"].get("dv_metadata").is_none());
+        // The owner wire itself never carries rows an older ingress would refuse.
+        let parsed =
+            plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                report(incarnation).as_bytes(),
+                incarnation,
+                Some("hdr10"),
+            )
+            .expect("owner report");
+        let with_rows = parsed.clone().with_rows(Some(rows));
+        assert_eq!(with_rows.owner_wire_json(), parsed.owner_wire_json());
+        assert!(
+            plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                with_rows.owner_wire_json().as_bytes(),
+                incarnation,
+                Some("hdr10"),
+            )
+            .is_some()
+        );
     }
 }
 
@@ -2823,6 +3098,7 @@ pub(crate) async fn prepared_successor_enhancement(
     file_id: i64,
     delivered_range: Option<&str>,
     delivered_dolby_vision_profile: Option<u8>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     let (facts, _owner) = transcode
         .prepared_hls_facts(session_id, incarnation_id)
@@ -2841,7 +3117,7 @@ pub(crate) async fn prepared_successor_enhancement(
     if range != delivered_range || delivered_profile != delivered_dolby_vision_profile {
         return None;
     }
-    super::create::session_enhancement(
+    super::create::session_enhancement_with_title(
         Some(&facts.file),
         &kind,
         grade,
@@ -2850,6 +3126,7 @@ pub(crate) async fn prepared_successor_enhancement(
         None,
         None,
         None,
+        title,
     )
 }
 
@@ -3024,6 +3301,15 @@ async fn staged_successor_action(
         // original processed root before the incumbent could offer this slot.
         super::create::deferred_fel_stage_enhancement(&successor.response_json)
     } else {
+        let successor_probe = state
+            .store
+            .get_file_probe_json(recipe.request.file_id)
+            .await
+            .ok()
+            .flatten();
+        let successor_title = plurx_core::playback::enhancement::TitleScanFacts::from_probe(
+            successor_probe.as_deref(),
+        );
         prepared_successor_enhancement(
             &state.transcode,
             &successor.session_id,
@@ -3031,6 +3317,7 @@ async fn staged_successor_action(
             recipe.request.file_id,
             start.delivered_dynamic_range.as_deref(),
             start.delivered_dolby_vision_profile,
+            Some(&successor_title),
         )
         .await
     };

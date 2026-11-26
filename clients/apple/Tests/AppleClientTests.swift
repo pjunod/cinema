@@ -993,6 +993,21 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(DetailView.episodeMediaInfoRows(MediaFile(id: 1)).first { $0.label == "Dolby Vision" })
     }
 
+    func testIOSVersionRowsShowEachVersionsDolbyVisionLine() {
+        // An iOS menu shows only a row's first line, so the versions are rows
+        // on the page and each carries the server's Dolby Vision line.
+        let rows = VersionChoiceList.rows([
+            MediaFile(id: 1, filename: "Film.2160p.REMUX.DV.mkv", dvFacts: "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base"),
+            MediaFile(id: 2, filename: "Film.1080p.mkv"),
+            MediaFile(id: 3),
+        ], selectedID: 2)
+        XCTAssertEqual(rows, [
+            .init(id: 1, title: "Film.2160p.REMUX.DV.mkv", detail: "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base", selected: false),
+            .init(id: 2, title: "Film.1080p.mkv", detail: nil, selected: true),
+            .init(id: 3, title: "Version 3", detail: nil, selected: false),
+        ])
+    }
+
     func testReadingStateDecodesItsRevisionAndRendererNeutralLocator() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

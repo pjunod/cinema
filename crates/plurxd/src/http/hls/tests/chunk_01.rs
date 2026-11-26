@@ -372,8 +372,8 @@ fn the_create_runs_no_processed_work_before_the_first_frame() {
         .expect("the activation that follows dispatch")
         .0;
     assert!(
-        degraded.contains("(degraded_processing, processing_note)"),
-        "the worker result carries its degrade reason and processing note"
+        degraded.contains("local_serving_generation, degraded_processing)) = started"),
+        "the worker result carries its degrade reason"
     );
     assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
     for restored in [
@@ -1149,6 +1149,7 @@ async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -2374,6 +2375,7 @@ async fn terminal_control_cancellation_and_reaper_preserve_one_durable_reply() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -2664,6 +2666,7 @@ async fn settled_rolling_and_vod_routes_replay_the_durable_terminal_ack() {
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,

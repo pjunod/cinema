@@ -1097,7 +1097,7 @@
         for decline_before_deadline in [false, true] {
             let directory = crate::test_tempdir().expect("native FEL publication");
             let mut session = test_session(directory.path().to_path_buf());
-            let split = Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(100)
+            let split = Arc::new(crate::copyseg::NativeSplitInventory::with_budget(100, u64::MAX)
                 .compare_prepared_head());
             session.native_split = Some(split.clone());
             session.publication.lock().await.bind_startup_transport(Some("native"));

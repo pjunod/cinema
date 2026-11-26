@@ -974,7 +974,7 @@ pub(crate) async fn held_source_index_probe_json(
     source: &std::fs::File,
     budget: Duration,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, HeldMetadataProbeError> {
+) -> Result<String, HeldProbeError> {
     let document = held_source_probe_json_with_limits(
         source,
         Duration::from_secs(30).min(budget),
@@ -1066,9 +1066,10 @@ impl HeldPacketProbeError {
     }
 }
 
-/// Why the held-source metadata probe returned no document.
+/// Why a bounded held-source probe child (the metadata probe, the F+
+/// first-packet identity) returned no output.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum HeldMetadataProbeError {
+pub(crate) enum HeldProbeError {
     /// Its own deadline stopped it.
     Timeout(String),
     /// [`killed_externally`]: the probe was killed, not refused.
@@ -1076,7 +1077,7 @@ pub(crate) enum HeldMetadataProbeError {
     Failed(String),
 }
 
-impl HeldMetadataProbeError {
+impl HeldProbeError {
     pub(crate) fn reason(&self) -> &str {
         match self {
             Self::Timeout(reason) | Self::Interrupted(reason) | Self::Failed(reason) => reason,
@@ -1084,7 +1085,7 @@ impl HeldMetadataProbeError {
     }
 }
 
-impl From<String> for HeldMetadataProbeError {
+impl From<String> for HeldProbeError {
     /// The bounded runner reports its own deadline in words
     /// (`bounded_command_capture_cancellable`); every other text error is a
     /// failure. An external kill never arrives as text: it is an exit status.
@@ -1387,7 +1388,7 @@ async fn held_source_probe_json_with_limits(
     label: &'static str,
     work: crate::process_control::ChildWork,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, HeldMetadataProbeError> {
+) -> Result<String, HeldProbeError> {
     if let Some(budget) = crate::background_jobs::source_budget() {
         let input = crate::source_input::SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(source)?,
@@ -1493,16 +1494,51 @@ async fn metadata_probe_output(
     label: &'static str,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
-) -> Result<BoundedOutput, HeldMetadataProbeError> {
+) -> Result<BoundedOutput, HeldProbeError> {
     let outcome =
         bounded_command_capture_cancellable(command, timeout, max_bytes, label, cancel, work)
             .await?;
+    held_probe_outcome(label, outcome)
+}
+
+/// [`metadata_probe_output`] for an FFmpeg child that reads its source through
+/// inherited descriptors, as [`bounded_ffmpeg_output_descriptors_cancellable`]
+/// runs it.
+pub(crate) async fn held_ffmpeg_probe_output(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+    descriptors: crate::producer_spawn::Descriptors,
+) -> Result<BoundedOutput, HeldProbeError> {
+    let outcome = bounded_command_capture_descriptors_cancellable(
+        command,
+        timeout,
+        max_bytes,
+        label,
+        cancel,
+        work,
+        Some((
+            descriptors,
+            crate::producer_spawn::ArgumentProfile::Ffmpeg { drm_device: None },
+        )),
+    )
+    .await?;
+    held_probe_outcome(label, outcome)
+}
+
+fn held_probe_outcome(
+    label: &'static str,
+    outcome: BoundedCommandOutcome,
+) -> Result<BoundedOutput, HeldProbeError> {
     if !outcome.status.success() {
         let reason = format!("{label} exited {}", outcome.status);
         return Err(if killed_externally(outcome.status) {
-            HeldMetadataProbeError::Interrupted(reason)
+            HeldProbeError::Interrupted(reason)
         } else {
-            HeldMetadataProbeError::Failed(reason)
+            HeldProbeError::Failed(reason)
         });
     }
     Ok(outcome.output?)

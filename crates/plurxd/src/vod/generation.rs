@@ -1,4 +1,5 @@
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 #[path = "generation/owner.rs"]
 mod owner;
@@ -480,7 +481,7 @@ async fn spawn_generation_with_input(
                     drop(custody);
                 });
             }
-            if !runtime.source.unchanged() || !runtime.tools.is_current().await {
+            if !runtime.source.unchanged().await || !runtime.tools.is_current().await {
                 Err("DV source/backend changed before prepared publication".into())
             } else {
                 Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
@@ -667,7 +668,7 @@ async fn spawn_generation_with_input(
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged_in_place())
                 && manifest
                     .state(at)
                     .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
@@ -714,11 +715,11 @@ async fn spawn_generation_with_input(
     }
     let attested = attested_source_setup(rendition);
     let source_current = if rendition.key.starts_with("source-") {
-        let Some(held) = rendition
-            .source
-            .as_ref()
-            .filter(|source| source.unchanged())
-        else {
+        let held = match rendition.source.as_ref() {
+            Some(source) if source.unchanged().await => Some(source),
+            _ => None,
+        };
+        let Some(held) = held else {
             if !generation_current().await {
                 return;
             }
@@ -2503,11 +2504,7 @@ impl RenditionSink {
         // invalidate its successfully published bytes. The observer still
         // checks the original Sink epoch; mixed/repeated writes lose proof.
         if !self.rendition.closed.load(Relaxed)
-            && self
-                .rendition
-                .source
-                .as_ref()
-                .is_some_and(|source| source.unchanged())
+            && self.rendition.source.as_ref().held_unchanged().await
         {
             let mut measurement = self
                 .rendition
@@ -2610,12 +2607,7 @@ impl RenditionSink {
         // otherwise be classified `producer_write_failed` — a sink fault,
         // which is not what happened. `record_failure` is first-wins, so the
         // class recorded here survives the generation ending underneath it.
-        if let Some(drift) = self
-            .rendition
-            .source
-            .as_ref()
-            .and_then(|source| source.drift())
-        {
+        if let Some(drift) = self.rendition.source.as_ref().held_drift().await {
             // The sentence names what was observed, not what was concluded.
             // "source changed" alone was a confident claim about a thing that
             // may not have happened: the same refusal covers a rewritten
@@ -2693,12 +2685,7 @@ impl RenditionSink {
         } else {
             verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
         }
-        if self
-            .rendition
-            .source
-            .as_ref()
-            .is_some_and(|source| !source.unchanged())
-        {
+        if self.rendition.source.as_ref().held_and_changed().await {
             let cause = "source changed while verifying reserved media".to_owned();
             record_failure(
                 &self.shared,

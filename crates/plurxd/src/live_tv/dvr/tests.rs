@@ -2262,6 +2262,7 @@ async fn a_sidecar_says_what_the_capture_actually_got() {
     .await
     .expect("sidecar");
     let parsed = plurx_core::scan::recordings::read_sidecar(&final_path(&base))
+        .await
         .expect("the scan must be able to read what the engine wrote");
     let programme = parsed.programme.expect("programme");
     assert_eq!(programme.title.as_deref(), Some("Kitchen Table"));

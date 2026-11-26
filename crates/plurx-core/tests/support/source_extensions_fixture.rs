@@ -7,7 +7,7 @@ pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_
 
 pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     assert!(
-        matches!(version, 1..=6),
+        matches!(version, 1..=7),
         "only published managed fixture versions are recognized"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
@@ -43,12 +43,19 @@ pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
             ))
             .expect("published managed v5 objects");
     }
-    if version == 6 {
+    if version >= 6 {
         expected
             .execute_batch(include_str!(
                 "../../src/store/subtitle_managed_resources_v6.sql"
             ))
             .expect("published managed v6 objects");
+    }
+    if version == 7 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v7.sql"
+            ))
+            .expect("published managed v7 objects");
     }
     expected
 }
@@ -900,11 +907,91 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
     });
 }
 
+const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('analysis_required_resources','analysis_source_scope_schema') AND sql IS NOT NULL ORDER BY name";
+
+/// Rewind v138 (analysis reads only its file's root) and v137 (managed v7:
+/// a per-file job reads only its file's root) to v136. Each requires its exact
+/// published shape and marker, then restores the original analysis view and
+/// the managed v6 view with marker 6. Only views and markers change, so no
+/// queued work or reservation is discarded.
+fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
+    let ordinal = |conn: &rusqlite::Connection| {
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .expect("file-root scope ordinal")
+    };
+    let version = ordinal(conn);
+    if version <= 136 {
+        return;
+    }
+    assert!(
+        version <= 138,
+        "only the published file-root tail can rewind"
+    );
+    let shape = |db: &rusqlite::Connection, query: &str| {
+        db.prepare(query)
+            .expect("shape query")
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .expect("shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete shape")
+    };
+    let original_analysis = include_str!("../../src/store/background_jobs_viewer_analysis.sql")
+        .split("-- next statement")
+        .find(|sql| sql.contains("CREATE VIEW IF NOT EXISTS analysis_required_resources AS"))
+        .expect("published analysis resource view")
+        .trim()
+        .to_owned();
+    let mut plan = vec!["SAVEPOINT rewind_file_root_scope;".to_owned()];
+    if version == 138 {
+        let fixture = rusqlite::Connection::open_in_memory().expect("analysis scope witness");
+        fixture
+            .execute_batch(&original_analysis)
+            .expect("published analysis view");
+        fixture
+            .execute_batch(include_str!("../../src/store/analysis_source_scope.sql"))
+            .expect("published analysis scope");
+        assert_eq!(
+            shape(conn, ANALYSIS_SCOPE_SHAPE_SQL),
+            shape(&fixture, ANALYSIS_SCOPE_SHAPE_SQL),
+            "exact analysis source scope required"
+        );
+        let marker: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM analysis_source_scope_schema WHERE singleton=1 AND version=1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("analysis scope marker");
+        assert_eq!(marker, 1, "published analysis scope marker required");
+        plan.push("DROP VIEW analysis_required_resources;".to_owned());
+        plan.push(original_analysis);
+        plan.push("DROP TABLE analysis_source_scope_schema;".to_owned());
+    }
+    assert_eq!(
+        managed_fixture_rows(conn),
+        managed_fixture_rows(&managed_fixture_connection(7)),
+        "exact published managed v7 required"
+    );
+    let marker: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=7",
+            [],
+            |r| r.get(0),
+        )
+        .expect("managed v7 marker");
+    assert_eq!(marker, 1, "published managed v7 marker required");
+    plan.push(include_str!("../../src/store/subtitle_managed_resources_v6.sql").to_owned());
+    plan.push("PRAGMA user_version=136; RELEASE rewind_file_root_scope;".to_owned());
+    conn.execute_batch(&plan.join("\n"))
+        .expect("published file-root scope rewind");
+}
+
 /// Remove only the exact, entirely empty v135 curation extension (custom
 /// tags, rows, Home layouts, grants) before older tails. Validates the whole
 /// shape, the marker and that every table is empty before dropping anything.
 #[allow(dead_code)]
 pub(crate) fn rewind_empty_curation_to_v134(conn: &rusqlite::Connection) {
+    rewind_file_root_scope_to_v136(conn);
     if conn
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .expect("dispatch ordinal")

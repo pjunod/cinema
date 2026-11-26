@@ -23,7 +23,7 @@ pub(super) async fn regenerate_init_head(
             "the immutable media engine changed before head regeneration".to_owned(),
         ));
     }
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err(HeadRegenerationError::Failed(
             "source changed before head regeneration".to_owned(),
         ));
@@ -88,7 +88,7 @@ pub(super) async fn regenerate_init_head(
         tracing::warn!(target: "plurxd::vodserve", diagnostic = %diagnostic.actionable, "VOD head regeneration diagnostic");
     }
     let muxer = muxer?;
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err(HeadRegenerationError::Failed(
             "source changed during head regeneration".to_owned(),
         ));

@@ -142,9 +142,7 @@ impl SourceDirectFile {
         )
         .await
         .map_err(|error| LiveRefusal::from_fence(&error))?;
-        let length = fence
-            .handle
-            .metadata()
+        let length = plurx_core::media_io::fstat(&fence.handle)
             .map_err(|_| LiveRefusal::transient(SourceWorkerError::Unavailable))?
             .len();
         if length != self.length {
@@ -297,10 +295,7 @@ impl SourceViewerActor {
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    guard
-                        .source
-                        .as_ref()
-                        .is_none_or(|source| !source.unchanged())
+                    guard.source.as_ref().missing_or_changed().await
                 }
             }
         {
@@ -407,10 +402,7 @@ impl SourceViewerActor {
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    guard
-                        .source
-                        .as_ref()
-                        .is_none_or(|source| !source.unchanged())
+                    guard.source.as_ref().missing_or_changed().await
                 }
             }
         {
@@ -424,10 +416,7 @@ impl SourceViewerActor {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                guard
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                guard.source.as_ref().missing_or_changed().await
             }
         } {
             return Err(SourceWorkerError::Unavailable);

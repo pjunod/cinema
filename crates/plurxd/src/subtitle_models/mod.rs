@@ -1521,7 +1521,7 @@ pub(crate) async fn worker_pass(
                 if current.size != *source_size || current.mtime != *source_mtime {
                     return Err(StoreError::Task("source_changed".into()));
                 }
-                if !source.held.unchanged()
+                if !source.held.unchanged().await
                     || crate::fragment_index_cluster::open_source_playback_fence(
                         &source.file,
                         Some(source.held.object_version()),
@@ -2538,7 +2538,7 @@ mod tests {
         else {
             panic!("accessible source");
         };
-        assert!(prepared.held.unchanged());
+        assert!(prepared.held.unchanged().await);
         let result = state
             .store
             .claim_artifact_job(ClaimJob {

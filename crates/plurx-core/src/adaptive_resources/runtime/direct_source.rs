@@ -925,8 +925,9 @@ impl DirectSourceOwner {
                 state.object_version.clone().ok_or_else(invalid)?,
             )
         };
-        let metadata = file
-            .metadata()
+        // The held descriptor may be on network storage: its fstat runs
+        // through media_io so a hung mount never parks a runtime worker.
+        let metadata = crate::media_io::fstat(&file)
             .map_err(|error| DirectSourceError(OperationError::Physical(error)))?;
         if !metadata.is_file()
             || metadata.len() != length

@@ -210,4 +210,4 @@ fn normalize_fragment(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

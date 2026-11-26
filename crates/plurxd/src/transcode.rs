@@ -630,11 +630,13 @@ pub(crate) struct LiveReconstructionFacts {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
 
-/// Descriptive inputs to the one processed-upgrade planner. A shared copy
-/// has no Auto candidate context; its Source derives these from its accepted
-/// capabilities, selected rendition, and current planning snapshot instead.
+/// Descriptive inputs to the one processed-upgrade planner. An Auto start
+/// takes them from its candidate context. A start without one (a shared
+/// Source's copy, or a viewer who chose Original or a manual rung) derives
+/// them from its accepted capabilities, the rendition it runs and its
+/// selection catalog query: [`ProcessedUpgradeAsk::accepted`].
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ProcessedUpgradeAsk {
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) target_height: u32,
@@ -648,8 +650,44 @@ pub(crate) struct ProcessedUpgradeAsk {
     pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
 }
 impl ProcessedUpgradeAsk {
+    /// The ask of a start that has no Auto candidate. Nothing here is a
+    /// measurement: the rate fields stay empty and the recipe digest zero,
+    /// so the processed envelope is sized from the rendition's own rung and
+    /// the held source rate, exactly as for a shared Source's copy.
+    pub(crate) fn accepted(
+        caps: plurx_core::playback::DeviceCaps,
+        target_height: u32,
+        grade: plurx_core::transcode::OutputGrade,
+        copy: bool,
+        catalog_query: crate::media_pool::QualityCatalogRequest,
+    ) -> Self {
+        use plurx_core::playback::candidate::CandidateRoute;
+        Self {
+            canonical_caps: Some(caps),
+            target_height,
+            grade,
+            names_processed: false,
+            route: if copy {
+                CandidateRoute::Remux
+            } else {
+                CandidateRoute::Encode
+            },
+            average_bps: None,
+            peak_bps: None,
+            recipe_digest: [0; 32],
+            required_fel_qualification: None,
+            catalog_query: Some(catalog_query),
+            display_target: None,
+            display_target_note: None,
+            dv_row_facts: None,
+        }
+    }
+
     pub(crate) fn from_candidate(context: &CandidateExecutionContext) -> Self {
         Self {
             canonical_caps: context.canonical_caps.clone(),
@@ -664,6 +702,7 @@ impl ProcessedUpgradeAsk {
             catalog_query: context.catalog_query.clone(),
             display_target: context.display_target,
             display_target_note: context.display_target_note.clone(),
+            dv_row_facts: context.dv_row_facts.clone(),
         }
     }
 }

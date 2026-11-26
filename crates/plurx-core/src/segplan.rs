@@ -239,6 +239,9 @@ impl FragmentIndexOutcome {
     /// carries no exit category, and they may carry a retry deadline kept from
     /// an earlier transient failure. Budget failures are not reopened again:
     /// revision 2's budget is the one they still run under.
+    /// Revision 5 reopens the F+ first-packet identity's own deadline and
+    /// outside kills, which every earlier revision recorded as a terminal
+    /// `index_completion_unverified`. They too are known only by their words.
     ///
     /// The retry deadline alone never makes a row terminal. A retryable row
     /// past it is due: the window closes when an attempt after the deadline
@@ -256,6 +259,16 @@ impl FragmentIndexOutcome {
         let terminal_process_failure = self.typed_code
             == Some(IndexFailureCode::IndexProcessFailed)
             && self.typed_retryable == Some(false);
+        // The words the F+ first-packet identity recorded for its own deadline
+        // and for a SIGKILL status before revision 5 (`fragindex`).
+        let packet_identity_interrupted = self.typed_code
+            == Some(IndexFailureCode::IndexCompletionUnverified)
+            && self.typed_retryable == Some(false)
+            && (self.reason
+                == "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)"
+                || self.reason.starts_with(
+                    "F+ source packet identity: F+ first packet identity timed out after ",
+                ));
         if matches!(self.refusal, IndexRefusal::Truncated { .. })
             && ((self.policy_revision < 3
                 && (self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded)
@@ -264,7 +277,8 @@ impl FragmentIndexOutcome {
                         && self.diagnostic.as_ref().is_some_and(|diagnostic| {
                             diagnostic.exit_category.as_deref() == Some("signal: 9 (SIGKILL)")
                         }))))
-                || (self.policy_revision < 4 && terminal_process_failure && probe_killed))
+                || (self.policy_revision < 4 && terminal_process_failure && probe_killed)
+                || (self.policy_revision < 5 && packet_identity_interrupted))
         {
             return IndexOutcomeState::Due;
         }
@@ -1694,6 +1708,41 @@ mod tests {
         // A probe's stderr quoting a kill is not the probe being killed.
         refused.reason = "packet probe exited exit status: 1: signal: 9 (SIGKILL)".to_owned();
         assert_eq!(refused.state(1_000), IndexOutcomeState::Terminal);
+    }
+
+    #[test]
+    fn a_revision_four_packet_identity_interruption_is_due_once() {
+        for reason in [
+            "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)",
+            "F+ source packet identity: F+ first packet identity timed out after 30 seconds",
+        ] {
+            let mut row = outcome(Some(false), i64::MAX, 0);
+            row.typed_code = Some(IndexFailureCode::IndexCompletionUnverified);
+            row.policy_revision = 4;
+            row.reason = reason.to_owned();
+            assert_eq!(row.state(1_000), IndexOutcomeState::Due, "{reason}");
+            row.policy_revision = INDEX_FAILURE_POLICY_REVISION;
+            assert_eq!(row.state(1_000), IndexOutcomeState::Terminal, "{reason}");
+        }
+        // The media's own answers stay terminal.
+        for reason in [
+            "F+ source packet identity: F+ first packet identity exited exit status: 1",
+            "F+ source packet identity: F+ packet hash has no time base",
+            "F+ source packet identity: F+ packet hash does not identify the probed first source PTS",
+        ] {
+            let mut row = outcome(Some(false), i64::MAX, 0);
+            row.typed_code = Some(IndexFailureCode::IndexCompletionUnverified);
+            row.policy_revision = 4;
+            row.reason = reason.to_owned();
+            assert_eq!(row.state(1_000), IndexOutcomeState::Terminal, "{reason}");
+        }
+        // The words alone are not enough: the row must be the F+ refusal.
+        let mut other = outcome(Some(false), i64::MAX, 0);
+        other.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        other.policy_revision = 4;
+        other.reason =
+            "F+ source packet identity: F+ first packet identity timed out after 30 seconds".into();
+        assert_eq!(other.state(1_000), IndexOutcomeState::Terminal);
     }
 
     #[test]

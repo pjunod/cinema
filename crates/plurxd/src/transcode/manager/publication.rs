@@ -1834,7 +1834,7 @@ impl TranscodeManager {
             .ok_or("native splice has no FEL renderer")?;
         if !encoding.preserves_processed_dv()
             || encoding.processed_fel() != Some(true)
-            || !runtime.source.unchanged()
+            || !runtime.source.unchanged().await
         {
             return Ok(false);
         }
@@ -1909,7 +1909,7 @@ impl TranscodeManager {
                 || session.control.is_retired()
                 || session.failed.load(Relaxed)
                 || session.control.current_producer_attempt() != attempt
-                || !runtime.source.unchanged()
+                || !runtime.source.unchanged().await
             {
                 return Ok(had_commit);
             }
@@ -2055,7 +2055,7 @@ impl TranscodeManager {
                 && !session.replacing_child.load(Acquire)
                 && session.control.current_producer_attempt() == attempt
                 && !session.control.is_retired()
-                && runtime.source.unchanged()
+                && runtime.source.unchanged_in_place()
                 && clock.served.as_ref().is_some_and(|snapshot| {
                     snapshot.producer_attempt == attempt
                         && u64::try_from(snapshot.last_segment).is_ok_and(|last| last < index)

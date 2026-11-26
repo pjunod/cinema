@@ -64,7 +64,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // fragment publication (#1827) checks its trigger shape before startup.
     // The encoded-output publication record settles its catalogue: one more.
     // Device capabilities (Curator ADR 0031 §5) check their shape and marker: two more.
-    ("hiqlite.rs", 90),
+    // Analysis source scope checks its view shape and marker: two more.
+    ("hiqlite.rs", 92),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -566,6 +567,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     // on a membership change, outside a request's accounting.
     ("analysis_component_schema_is_current", STARTUP),
     ("analysis_coordination_shape", STARTUP),
+    ("analysis_source_scope_schema_version", STARTUP),
     ("bootstrap_with_clock", STARTUP),
     ("bridge_private_lineage_inner", STARTUP),
     ("custody_retention_schema_version", STARTUP),

@@ -472,6 +472,7 @@ paths = [
   "crates/plurx-core/src/store/analysis_coordination.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v7.sql",
   "tests/support/rust_source_inventory.rs",
   "crates/plurx-core/src/store/background_jobs/principal_tests.rs",
   "crates/plurx-core/src/store/background_jobs/subtitle_admission_tests.rs",
@@ -493,6 +494,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_resources_v4.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v7.sql",
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
@@ -508,7 +510,7 @@ paths = [
   # hot catalogue reads, captures the statements they trace, and records
   # each plan and its cold and warm timings on both backends' schemas.
   "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
-  "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
+  "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,media_io,testfixtures}.rs",
   "crates/plurx-core/src/fs_secure/**",
   "crates/plurx-core/src/source_identity.rs",
   "crates/plurx-core/src/config/**",
@@ -589,6 +591,8 @@ paths = [
   "crates/plurx-core/src/store/scan_request_v2.sql",
   "crates/plurx-core/src/store/custody_retention.rs",
   "crates/plurx-core/src/store/background_jobs_custody_retention.sql",
+  "crates/plurx-core/src/store/analysis_source_scope.rs",
+  "crates/plurx-core/src/store/analysis_source_scope.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
   "crates/plurx-core/src/store/source_checkpoints.sql",
@@ -690,6 +694,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_resources_v4.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v7.sql",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
@@ -972,6 +977,7 @@ paths = [
   "crates/plurxd/src/state/analysis_rate_tests.rs",
   "crates/plurxd/src/state/tests.rs",
   "crates/plurxd/src/admission.rs",
+  "crates/plurxd/src/node_memory.rs",
   "crates/plurxd/src/http/internal_activity.rs",
   "crates/plurxd/src/http/internal_media.rs",
   "crates/plurxd/src/http/transcode_copies.rs",
