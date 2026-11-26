@@ -275,7 +275,7 @@ async fn read_levels(state: &AppState, file: &MediaFile) -> Result<DvLevelsRecor
         .map_err(|error| TitleScanError::SourceInterrupted(error.to_string()))?
         .map_err(TitleScanError::SourceInterrupted)?;
     verdict(output, read)?;
-    if !source.unchanged() || source.reopen(file).await.is_err() {
+    if !source.unchanged().await || source.reopen(file).await.is_err() {
         return Err(TitleScanError::SourceInterrupted(
             "source changed during the DV levels read".into(),
         ));

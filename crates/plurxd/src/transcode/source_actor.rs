@@ -1,5 +1,6 @@
 //! Owned Source producer admission and lifetime. HTTP callers only wait.
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 #[cfg(unix)]
 #[path = "source_actor/growing.rs"]
 mod growing;
@@ -704,7 +705,7 @@ impl SourceResponseGuard {
         if self
             .source
             .as_ref()
-            .is_some_and(|source| !source.unchanged())
+            .is_some_and(|source| !source.unchanged_in_place())
         {
             crate::sharing_connection_custody::DriverCloseMode::Revoke
         } else {
@@ -724,11 +725,7 @@ impl SourceResponseGuard {
     }
     pub(crate) async fn cancelled(&self) {
         loop {
-            if self
-                .source
-                .as_ref()
-                .is_some_and(|source| !source.unchanged())
-            {
+            if self.source.as_ref().held_and_changed().await {
                 return;
             }
             let notification = self.owner.changed.notified();
@@ -1075,11 +1072,7 @@ impl SourceViewerActor {
                 Some("retirement_requested")
             } else if !backing.is_live() {
                 Some("growing_copy_not_live")
-            } else if guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
-            {
+            } else if guard.source.as_ref().missing_or_changed().await {
                 Some("source_changed")
             } else {
                 None
@@ -1137,11 +1130,7 @@ impl SourceViewerActor {
             .await
         {
             Some("vod_owner_not_live")
-        } else if guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        } else if guard.source.as_ref().missing_or_changed().await {
             Some("source_changed")
         } else {
             None
@@ -1507,11 +1496,7 @@ impl SourceViewerActor {
         {
             return Err(ended);
         }
-        if guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        if guard.source.as_ref().missing_or_changed().await {
             return Err(ended);
         }
         if Instant::now() >= deadline
@@ -1532,11 +1517,7 @@ impl SourceViewerActor {
         {
             return Err(ended);
         }
-        if guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        if guard.source.as_ref().missing_or_changed().await {
             return Err(ended);
         }
         drop(custody);
@@ -2072,7 +2053,7 @@ impl TranscodeManager {
             .put_fragment_index(file.id, &index)
             .await
             .map_err(|_| SourceWorkerError::Unresolved)?;
-        if !fence.unchanged() {
+        if !fence.unchanged().await {
             return Err(SourceWorkerError::Unavailable);
         }
         owner.gate.current_preparation(&owner.assignment).await?;

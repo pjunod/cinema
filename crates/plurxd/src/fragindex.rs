@@ -2636,7 +2636,7 @@ pub(crate) fn start_source_index(
         #[cfg(windows)]
         let (fd, handoff) = (None, Some((&source.handle, std::path::Path::new(&input))));
         let mut result = if Instant::now() >= deadline
-            || !source.unchanged()
+            || !source.unchanged_in_place()
             || authority
                 .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
                 .is_err()
@@ -2668,7 +2668,7 @@ pub(crate) fn start_source_index(
                 .await,
             )
         };
-        result.source_unchanged = source.unchanged();
+        result.source_unchanged = source.unchanged_in_place();
         *owned.result.lock().expect("Source index result") = Some(result);
         crate::transcode::source_preparation::close_source_before_settlement(source, |closed| {
             hooks.record_parent_closed(closed);
@@ -2819,7 +2819,7 @@ pub(crate) async fn build_riding_shared_with_store(
         store,
     )
     .await;
-    let unchanged = source.unchanged();
+    let unchanged = source.unchanged().await;
     for built in &mut builds {
         built.source_unchanged = unchanged;
     }

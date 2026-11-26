@@ -56,27 +56,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let permit = {
-        let _waiting = Waiting::enter();
-        Arc::clone(&PERMITS)
-            .acquire_owned()
-            .await
-            .expect("the media I/O semaphore is never closed")
-    };
-    let joined = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let value = work();
-        COMPLETED.fetch_add(1, Ordering::Relaxed);
-        value
-    })
-    .await;
-    match joined {
-        Ok(value) => Ok(value),
-        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => Err(std::io::Error::other(format!(
-            "media I/O did not run: {error}"
-        ))),
-    }
+    slot().await.run(work).await
 }
 
 /// A media slot held by code that is already on a blocking-pool thread.
@@ -86,6 +66,34 @@ where
 /// healthy mount's slots can all be pinned by waits that are not media I/O.
 pub struct MediaSlot {
     _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl MediaSlot {
+    /// Run `work` on the blocking pool under this slot, which is released
+    /// when `work` returns. For a caller that prepares something once it
+    /// holds the slot (such as duplicating a descriptor) so queued callers do
+    /// not hold it while they wait. Otherwise use [`blocking`].
+    ///
+    /// A panic in `work` is resumed in the caller. The only other failure is
+    /// the runtime shutting down underneath the call.
+    pub async fn run<T, F>(self, work: F) -> std::io::Result<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let joined = tokio::task::spawn_blocking(move || {
+            let _slot = self;
+            work()
+        })
+        .await;
+        match joined {
+            Ok(value) => Ok(value),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(std::io::Error::other(format!(
+                "media I/O did not run: {error}"
+            ))),
+        }
+    }
 }
 
 impl Drop for MediaSlot {

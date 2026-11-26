@@ -287,7 +287,7 @@ pub(super) async fn scan(
         if !tools.is_current().await {
             return Err("DV scanner identity changed".into());
         }
-        if !source.unchanged() || source.reopen(file).await.is_err() {
+        if !source.unchanged().await || source.reopen(file).await.is_err() {
             return Err("source changed during title scan".into());
         }
     }
@@ -462,7 +462,10 @@ pub(crate) async fn publish_title_with_tools_for_control(
         )
         .await
         .map_err(|error| error.to_string())?;
-        if !tools.is_current().await || !source.unchanged() || source.reopen(file).await.is_err() {
+        if !tools.is_current().await
+            || !source.unchanged().await
+            || source.reopen(file).await.is_err()
+        {
             return Err("title scanner or source changed before control publication".into());
         }
         if !fence

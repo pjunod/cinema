@@ -1805,13 +1805,13 @@ pub(crate) async fn file_body(
                 let read_activity = read_activity;
                 use std::io::{Read, Seek};
                 let mut source = work_reader.source.lock().expect("direct source read");
-                if !source.unchanged() {
+                if !source.unchanged_in_place() {
                     return Err(std::io::Error::other("source range changed"));
                 }
                 source.handle.seek(std::io::SeekFrom::Start(offset))?;
                 let mut bytes = vec![0; size];
                 let n = source.handle.read(&mut bytes)?;
-                if !source.unchanged() {
+                if !source.unchanged_in_place() {
                     return Err(std::io::Error::other("source range changed"));
                 }
                 bytes.truncate(n);

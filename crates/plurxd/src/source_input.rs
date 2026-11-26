@@ -547,7 +547,7 @@ impl SourceInput {
         budget: Arc<crate::background_jobs::SourceReadBudget>,
     ) -> Result<Self, String> {
         let holder = budget.source_holder()?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err("held source changed before input bridge".into());
         }
         let len = plurx_core::media_io::fstat(&source.handle)
@@ -755,7 +755,9 @@ impl SourceInput {
         // mount is hung. Wait for it off the scheduler, like the fstat after.
         plurx_core::media_io::in_place(|| {
             let state = self.state.source.lock().expect("source input fence");
-            let source = state.as_ref().filter(|source| source.unchanged())?;
+            let source = state
+                .as_ref()
+                .filter(|source| source.unchanged_in_place())?;
             Some(source.object_version().to_owned())
         })
     }
@@ -979,7 +981,7 @@ async fn read_source(
                 .lock()
                 .expect("source input")
                 .as_ref()
-                .is_some_and(|source| source.unchanged())
+                .is_some_and(|source| source.unchanged_in_place())
         })
         .await
         .map_err(std::io::Error::other)?;
@@ -1197,7 +1199,7 @@ async fn read_source(
         let source = source
             .as_mut()
             .ok_or_else(|| std::io::Error::other("source input closed"))?;
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         window.resize(size, 0);
@@ -1229,7 +1231,7 @@ async fn read_source(
         read_state
             .source_bytes
             .fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         if count > 0 {

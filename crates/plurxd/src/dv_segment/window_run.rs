@@ -977,7 +977,7 @@ impl WindowRun {
             frames,
             self.frame_cap,
             key == self.key,
-            same_admission && self.source.unchanged(),
+            same_admission && self.source.unchanged_in_place(),
         )
     }
     /// Arm the idle bound: the run is killed unless a window claims it first.
