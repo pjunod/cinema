@@ -1,6 +1,6 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
-**Status:** open — slice S1 of P62 (metrics and baseline) in progress ·
+**Status:** open — S1 of P62 (metrics, first copy-HLS baseline) built; S2–S8 not started ·
 **Owner:** Claude Opus 5.5 · **Effort:** `E-5F2C2E9EA4` ·
 **Written:** 2026-11-26 against `main` @ `8724851ba`
 
@@ -155,3 +155,19 @@ Representative titles:
 
 Results go under `docs/performance/evidence/` as JSON. The split default (S8)
 must meet or beat each figure, or the shortfall is a recorded decision.
+
+**First reading (2026-11-26).** The data is in
+[split-hls-baseline-20261126.json](../performance/evidence/split-hls-baseline-20261126.json).
+It is copy-HLS VOD in desktop Chrome on a debug build. Transcode is not
+measured yet, because the lab host lacks the pinned media runtime.
+
+| Same 1080p AVC title, steady 60 s | HLS requests | HLS bytes | Producers |
+|---|---|---|---|
+| Muxed copy | 8 (1 master, 1 playlist, 1 init, 5 segments) | 22.77 MB | 1 copy |
+| P49 split | 21 (1 master, 2 playlists, 2 inits, 5 video + 11 audio segments) | 22.73 MB | 1 copy + 2 AAC encodes |
+
+The bytes are equal. The split costs about 2.6× the requests, because its AAC
+segments are about 2 s against copy video segments of up to 6 s, and it adds
+an encoder per soundtrack. S2's contract should align audio segment
+boundaries with the video plan. S3's audio copy or projection removes the
+encoders. Both claims are checked against this reading.
