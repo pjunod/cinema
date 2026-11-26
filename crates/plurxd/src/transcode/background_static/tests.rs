@@ -77,6 +77,7 @@ fn fixture() -> (
         block_budget_secs: None,
         transport: None,
         source_telemetry: None,
+        accepted_processed_ask: None,
     };
     let recipe_digest = [7; 32];
     let candidate = QualityCandidate {

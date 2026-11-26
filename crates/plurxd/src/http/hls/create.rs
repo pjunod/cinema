@@ -9628,6 +9628,7 @@ mod funded_origin_response_tests {
                 presentation: crate::transcode::Presentation::Vod,
                 block_budget_secs: None,
                 transport: None,
+                accepted_processed_ask: None,
             },
         }
     }
