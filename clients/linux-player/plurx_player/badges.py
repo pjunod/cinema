@@ -4,7 +4,7 @@ The web player paints resolution, dynamic range (source → delivered), the
 Dolby Vision enhancement pills (FEL / RPU / DYN) and the audio format above
 its picture (crates/plurxd/src/web/detail/dynamic-range.js
 `playerFactBadges`). Cinema draws the same pills inside mpv. The Lua overlay
-observes what mpv decodes and renders; this module hands it the three facts
+observes what mpv decodes and renders; this module hands it the four facts
 only the launcher holds, whitelisted so no URL, path or credential reaches
 mpv's user-data:
 
@@ -17,6 +17,9 @@ mpv's user-data:
   report supersedes the provisional snapshot. ``processed`` names the
   processing ("HDR10-E", "SDR-E", "P81") the report proves, for the range pill.
   Direct play has no session and so no server enhancement;
+* ``provenance``: the server's "Dolby Vision metadata" and "Display target"
+  rows (``dv_metadata`` / ``display_target``), selected and validated as the
+  web's `playerDvRows` does, with the contract's sub-row labels;
 * ``renderer``: which Dolby Vision mapping the private mpv build reported
   for the current file (playback.py `on_log`), which is how the overlay knows
   the RPU and dynamic metadata were applied on this machine.
@@ -24,6 +27,11 @@ mpv's user-data:
 import re
 
 ENHANCEMENTS = ("FEL", "RPU", "DYN")
+# Sub-row labels of the server's two Playback info rows. The packaged player
+# cannot read tests/playback/playback-info-fields.json, so test_badges.py pins
+# these to that contract's `sub_rows`.
+DV_METADATA_LABELS = ("In the file", "Applied by Cinema", "Left for the display")
+DISPLAY_TARGET_LABELS = ("Reported peak", "Mapped for", "Title peak")
 NATIVE_MAPPER = "shared native Dolby renderer"
 _RPU_NAMES = {"PolynomialReshape": "polynomial reshaping", "MmrReshape": "MMR reshaping",
               "RpuColorConversion": "RPU color conversion"}
@@ -168,6 +176,60 @@ def server_enhancement(session):
     return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E")
 
 
+def _row_text(value):
+    """dynamic-range.js `dvRowText`: a non-blank, bounded, control-free string."""
+    if isinstance(value, str) and value.strip() and len(value) <= 512 \
+            and not re.search(r"[\x00-\x1f\x7f-\x9f]", value):
+        return value
+    return None
+
+
+def _provenance_row(labels, headline, texts):
+    """{"value", "rows"} when every text is valid, else None (the whole row is dropped)."""
+    texts = [_row_text(t) for t in texts]
+    if any(t is None for t in texts) or _row_text(headline) is None:
+        return None
+    return {"value": headline, "rows": [{"label": l, "text": t} for l, t in zip(labels, texts)]}
+
+
+def provenance_facts(session):
+    """The server's Dolby Vision metadata and display target rows, as the web's `playerDvRows` reads them.
+
+    A processed delivery's rows come only from its current, generation-matched
+    report; otherwise the metadata comes from the enhancement and there is no
+    display target. Each row is dropped whole when any of its texts is invalid.
+    """
+    session = session if isinstance(session, dict) else {}
+    enhancement = session.get("enhancement")
+    if not isinstance(enhancement, dict):
+        return {}
+    if enhancement.get("requires_effective_processing") is True:
+        report, _ = current_report(session)
+        metadata = report.get("dv_metadata") if report else None
+        target = report.get("display_target") if report else None
+    else:
+        metadata, target = enhancement.get("dv_metadata"), None
+
+    def part(value, key):
+        value = value.get(key) if isinstance(value, dict) else None
+        return value if isinstance(value, dict) else {}
+
+    facts = {}
+    if isinstance(metadata, dict):
+        applied = part(metadata, "applied").get("text")
+        row = _provenance_row(DV_METADATA_LABELS, applied, [
+            part(metadata, "in_file").get("text"), applied, part(metadata, "left_for_display").get("text")])
+        if row:
+            facts["dv_metadata"] = row
+    if isinstance(target, dict):
+        mapped = target.get("mapped_for_text")
+        row = _provenance_row(DISPLAY_TARGET_LABELS, mapped, [
+            target.get("reported_peak_text"), mapped, target.get("title_peak_text")])
+        if row:
+            facts["display_target"] = row
+    return facts
+
+
 def renderer_facts(mapper, target_nits=None):
     """Classify the private build's mapper line (mpv patch 0003, or the shared native renderer).
 
@@ -197,4 +259,4 @@ def renderer_facts(mapper, target_nits=None):
 
 def video_facts(decision, session, mapper, target_nits=None):
     return {"source": source_facts(decision), "enhancement": server_enhancement(session),
-            "renderer": renderer_facts(mapper, target_nits)}
+            "renderer": renderer_facts(mapper, target_nits), "provenance": provenance_facts(session)}

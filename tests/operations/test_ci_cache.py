@@ -482,6 +482,123 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertFalse(stale_target.exists())
             self.assertTrue(hot_target.is_dir())
 
+    def _shared_budget_fixture(self, directory, sizes_kb):
+        """A runner whose job container (uid0) and host executor (uid1000) keep
+        sibling roots; `du` reports each root's size from `sizes_kb` while its
+        stale lane exists, and 1 KiB once that lane is gone."""
+        tool_cache = Path(directory) / "tool"
+        fake_bin = tool_cache / "bin"
+        fake_bin.mkdir(parents=True)
+        (fake_bin / "df").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+            "'fixture 524288000 104857600 419430400 20% /fixture'\n",
+            encoding="utf-8",
+        )
+        cargo = tool_cache / "plurx-ci/cargo"
+        lines = ["#!/bin/sh", 'case "$2" in']
+        for name, size in sizes_kb.items():
+            (cargo / name / "rust-1.97.1/stale/target").mkdir(parents=True)
+            # The pruner measures canonical paths (macOS: /var -> /private/var).
+            root = (cargo / name).resolve()
+            lines.append(
+                f'  "{root}") if [ -d "{root}/rust-1.97.1/stale/target" ]; '
+                f"then echo \"{size} $2\"; else echo \"1 $2\"; fi ;;"
+            )
+        lines += ['  *) echo "1 $2" ;;', "esac", ""]
+        (fake_bin / "du").write_text("\n".join(lines), encoding="utf-8")
+        for tool in ("df", "du"):
+            (fake_bin / tool).chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "RUNNER_TOOL_CACHE": str(tool_cache),
+            }
+        )
+        return cargo, environment
+
+    def test_cache_pruner_shares_one_budget_across_executor_uids(self):
+        script = ROOT / "scripts/ci-cache-prune"
+        gib = 1024 * 1024
+        with tempfile.TemporaryDirectory() as raw_directory:
+            # Each root alone is inside the 30 GiB budget; together they are not.
+            cargo, environment = self._shared_budget_fixture(
+                raw_directory,
+                {"runner-01-uid0": 27 * gib, "runner-01-uid1000": 27 * gib},
+            )
+            own = cargo / "runner-01-uid1000"
+
+            result = subprocess.run(
+                [str(script), str(own / "rust-1.97.1"), "30"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((own / "rust-1.97.1/stale/target").exists())
+            # The other executor's root is counted, never deleted from here.
+            self.assertTrue(
+                (cargo / "runner-01-uid0/rust-1.97.1/stale/target").is_dir()
+            )
+            self.assertNotIn("::warning::", result.stdout)
+
+    def test_cache_pruner_reports_a_sibling_it_cannot_bring_under_budget(self):
+        script = ROOT / "scripts/ci-cache-prune"
+        gib = 1024 * 1024
+        with tempfile.TemporaryDirectory() as raw_directory:
+            cargo, environment = self._shared_budget_fixture(
+                raw_directory,
+                {"runner-01-uid0": 40 * gib, "runner-01-uid1000": 2 * gib},
+            )
+            own = cargo / "runner-01-uid1000"
+
+            result = subprocess.run(
+                [str(script), str(own / "rust-1.97.1"), "30"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            # This root gave up what it may delete; the reserve holds, so the
+            # job runs and the sibling's own next prune restores the total.
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((own / "rust-1.97.1/stale/target").exists())
+            self.assertTrue(
+                (cargo / "runner-01-uid0/rust-1.97.1/stale/target").is_dir()
+            )
+            self.assertIn("::warning::", result.stdout)
+            self.assertIn("other executors", result.stdout)
+
+    def test_cache_pruner_counts_only_its_own_runner_as_a_sibling(self):
+        script = ROOT / "scripts/ci-cache-prune"
+        gib = 1024 * 1024
+        with tempfile.TemporaryDirectory() as raw_directory:
+            cargo, environment = self._shared_budget_fixture(
+                raw_directory,
+                {
+                    "runner-01-uid1000": 2 * gib,
+                    "runner-010-uid0": 40 * gib,
+                    "runner-02-uid0": 40 * gib,
+                    "runner-01-uid0x": 40 * gib,
+                    "runner-01": 40 * gib,
+                },
+            )
+            own = cargo / "runner-01-uid1000"
+
+            result = subprocess.run(
+                [str(script), str(own / "rust-1.97.1"), "30"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((own / "rust-1.97.1/stale/target").is_dir())
+            self.assertNotIn("::warning::", result.stdout)
+
     def test_buildkit_state_is_named_bounded_and_registry_aware(self):
         action = (ROOT / ".github/actions/buildx-cache/action.yml").read_text(
             encoding="utf-8"

@@ -22,6 +22,21 @@ impl TranscodeManager {
         Some((facts, guard))
     }
 
+    /// The VOD rendition's report with its display-target facts. A native
+    /// split serves a reconstructed 8.1, which no display target applies to.
+    pub(crate) async fn dv_effective_report_with_display(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<(
+        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+        crate::vodserve::DvReportDisplay,
+    )> {
+        self.vod
+            .dv_effective_report_with_display(session_id, incarnation_id)
+            .await
+    }
+
     pub(crate) async fn dv_effective_report(
         &self,
         session_id: &str,
@@ -86,7 +101,6 @@ impl TranscodeManager {
                     .map(|_| 8),
                 processed_fel: encoding.and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
-                processing_note: None,
                 retained_output: facts.response_owner.retained_output_facts(),
                 audio_delivery: facts.audio_delivery,
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
@@ -121,7 +135,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

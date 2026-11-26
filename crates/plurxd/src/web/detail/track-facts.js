@@ -74,17 +74,6 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   }
   return `<dt>${label}</dt><dd>${chips}${note?`<div class="langnote">${esc(note)}</div>`:""}</dd>`;
 }
-// Dolby Vision, as the configuration record and the complete-title scan
-// measured it (Curator ADR 0031): "Profile 7 · FEL · level 6 · HDR10 base".
-const DV_BASE={0:"no base layer",1:"HDR10 base",2:"SDR base",4:"HLG base",6:"HDR10 base"};
-function dvFactsLine(f){
-  if(f.dv_profile==null) return "";
-  const el=f.dv_el_kind==="fel"?"FEL · full enhancement layer"
-    :f.dv_el_kind==="mel"?"MEL · minimal enhancement layer"
-    :f.dv_el_present?"enhancement layer, type not yet scanned":null;
-  return [`Profile ${f.dv_profile}`,el,f.dv_level!=null?`level ${f.dv_level}`:null,
-    f.dv_bl_compat_id!=null?(DV_BASE[f.dv_bl_compat_id]||`base ${f.dv_bl_compat_id}`):null].filter(Boolean).join(" · ");
-}
 // How this version plays on each of the account's devices, from what each
 // last reported and the decision Play makes. A fallback (base layer,
 // tone-map, dropped EL) reads as a caution rather than hiding it.
@@ -134,7 +123,7 @@ function specBlock(f){
   const analysis=analysisFileControl(f);
   const facts=`<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
-    ${dvFactsLine(f)?`<dt>Dolby Vision</dt><dd>${esc(dvFactsLine(f))}</dd>`:""}
+    ${f.dv_facts?`<dt>Dolby Vision</dt><dd>${esc(f.dv_facts)}</dd>`:""}
     ${playsOnRow(f)}
     ${audRow}
     ${subRow}

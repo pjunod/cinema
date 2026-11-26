@@ -83,7 +83,17 @@ pub fn sidecar_for(media: &Path) -> std::path::PathBuf {
     media.with_extension("json")
 }
 
-pub fn read_sidecar(media: &Path) -> Option<Sidecar> {
+/// The recording's sidecar, read on the media-I/O pool: it sits beside the
+/// recording on the DVR mount.
+pub async fn read_sidecar(media: &Path) -> Option<Sidecar> {
+    let media = media.to_owned();
+    crate::media_io::blocking(move || read_sidecar_blocking(&media))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn read_sidecar_blocking(media: &Path) -> Option<Sidecar> {
     let raw = std::fs::read(sidecar_for(media)).ok()?;
     let parsed = serde_json::from_slice::<Sidecar>(&raw).ok()?;
     // A document that does not claim to be ours is not ours. `.json` beside a
@@ -128,7 +138,8 @@ pub async fn place(
     library: &Library,
     path: &Path,
 ) -> Result<Option<home::Placed>, StoreError> {
-    let sidecar_id = read_sidecar(path).and_then(|s| s.recording_id);
+    let sidecar = read_sidecar(path).await;
+    let sidecar_id = sidecar.as_ref().and_then(|s| s.recording_id.clone());
     let epoch_output = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -158,7 +169,7 @@ pub async fn place(
             return Ok(None);
         }
     }
-    let Some(dirs) = home::relative_dirs(library, path) else {
+    let Some(dirs) = home::relative_dirs(library, path).await else {
         return Ok(None);
     };
     let mut parent: Option<i64> = None;
@@ -178,7 +189,7 @@ pub async fn place(
     // Season and episode are set at insert, not patched: `MetadataPatch`
     // carries no episode numbering, and these are facts the guide already
     // stated rather than anything an agent would revise.
-    let (season_number, episode_number) = read_sidecar(path)
+    let (season_number, episode_number) = sidecar
         .and_then(|sidecar| sidecar.programme?.episode)
         .and_then(|episode| parse_season_episode(&episode))
         .map(|(season, episode)| (Some(season), Some(episode)))
@@ -221,7 +232,7 @@ pub async fn after_record(
     mtime: i64,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
-    let Some(sidecar) = read_sidecar(path) else {
+    let Some(sidecar) = read_sidecar(path).await else {
         return Ok(false);
     };
     let programme = sidecar.programme.unwrap_or_default();
@@ -336,7 +347,7 @@ mod tests {
         std::fs::write(&media, b"x").expect("media");
         std::fs::write(sidecar_for(&media), br#"{"title":"someone else's"}"#).expect("json");
         assert!(
-            read_sidecar(&media).is_none(),
+            read_sidecar_blocking(&media).is_none(),
             "`.json` beside a video is a common convention; guessing would eventually \
              read a stranger's file as a recording"
         );
@@ -345,8 +356,37 @@ mod tests {
             br#"{"plurx_dvr":1,"recording_id":"r1","programme":{"title":"Kitchen Table"}}"#,
         )
         .expect("json");
-        let parsed = read_sidecar(&media).expect("ours");
+        let parsed = read_sidecar_blocking(&media).expect("ours");
         assert_eq!(parsed.recording_id.as_deref(), Some("r1"));
+    }
+
+    /// Voter-a, 2026-11-23: the NFS path to its media server went down and
+    /// the whole daemon stopped for 84 s, Raft and `/metrics` included,
+    /// because media reads ran on the async workers. A recording sidecar on a
+    /// hung mount must park only the scan that reads it.
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_recording_sidecar_does_not_stall_the_runtime() {
+        use crate::media_io::hung_path::{worst_heartbeat_lateness, HungPath};
+        let directory = tempfile::tempdir().expect("temp");
+        let media = directory.path().join("clip.ts");
+        let hung = HungPath::create(&sidecar_for(&media));
+        let verdict = worst_heartbeat_lateness(&hung, 4, move || {
+            let media = media.clone();
+            async move {
+                let _ = read_sidecar(&media).await;
+            }
+        });
+        // The reads must really be parked on the sidecar, or an on-time
+        // heartbeat says nothing.
+        assert_eq!(
+            verdict.parked, 4,
+            "the sidecar reads did not hang: {verdict:?}"
+        );
+        assert!(
+            verdict.worst < std::time::Duration::from_millis(500),
+            "the heartbeat was late while sidecar reads were hung: {verdict:?}"
+        );
     }
 
     #[test]

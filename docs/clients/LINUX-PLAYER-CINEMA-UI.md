@@ -33,8 +33,12 @@ presented instant was mapped with the enhancement layer composed in; off when
 that frame maps without it, after a failed or blank render, and after a
 frame-queue reset until a composed frame is presented again. mpv errs toward
 off next to a frame it read without mapping. The overlay
-reads the property itself and redraws on its notification, so the pill does
-not depend on catching the renderer's one-time success line. An mpv without
+takes the property from its own notification and redraws, so the pill does
+not depend on catching the renderer's one-time success line. It never reads
+the property while drawing: mpv answers such a read on its video-output
+thread, about a frame later. Cinema redraws on every frame, so those reads
+kept its event queue from draining, and mpv runs the hide timer only when it
+does; the controls then stayed on screen. An mpv without
 the field, or a non-native renderer, keeps the earlier inference: a Profile 7
 track whose source has an enhancement layer, with a renderer line present. FEL stays the server's claim, because no fact distinguishes a full
 from a minimal layer on this path. A carried route's server pills hold only
@@ -47,6 +51,14 @@ composed would let this player claim FEL itself.
 Packaged as 0.5.3 (the merged source was still versioned 0.5.2, which the
 installed 0.5.2-1 package does not contain); installed on the owner's Linux
 laptop for physical acceptance.
+
+The EL composition level and the AF_UNIX socket-path fix merged under 0.5.3,
+which the installed 0.5.3-1 package predates, so they are packaged as 0.5.4.
+The level needs mpv `+rogdv5.7` (patch 0011); with `+rogdv5.6` the pill keeps
+the earlier inference.
+
+0.5.4 read that level on every render, which kept Cinema's controls on screen
+during Dolby Vision playback; 0.5.5 takes it from the property's notification.
 
 ## Session control sequence repair (0.5.1)
 

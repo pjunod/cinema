@@ -5697,6 +5697,7 @@ pub mod status {
         crate::cluster::timing::serving::QUORUM_WATERMARK_REFRESH;
     const QUORUM_WATERMARK_TIMEOUT: Duration =
         crate::cluster::timing::serving::QUORUM_WATERMARK_TIMEOUT;
+    const LOCAL_APPLY_SETTLE: Duration = crate::cluster::timing::serving::LOCAL_APPLY_SETTLE;
     /// How long one quorum confirmation proves this node's authority to serve
     /// from its replica. The route cache of playback-start E1c holds a fact it
     /// observed directly (a row it committed, or a quorum read) for the same
@@ -7305,7 +7306,9 @@ pub mod status {
         wal_status: Option<hiqlite::WalStatusHandle>,
         passive_metrics: PassiveRaftMetrics,
         local_transport: Option<LocalSnapshotTransportStatus>,
-        previous: Arc<Mutex<Option<ReplicationStatus>>>,
+        /// The newest remembered status and the read sequence that produced it.
+        previous: Arc<Mutex<Option<(u64, ReplicationStatus)>>>,
+        reads: Arc<AtomicU64>,
     }
 
     impl ReplicationMonitor {
@@ -7320,6 +7323,7 @@ pub mod status {
                 passive_metrics: PassiveRaftMetrics::new(false),
                 local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
+                reads: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -7345,6 +7349,7 @@ pub mod status {
                 passive_metrics,
                 local_transport,
                 previous: Arc::new(Mutex::new(None)),
+                reads: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -7363,6 +7368,7 @@ pub mod status {
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
                 local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
+                reads: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -7481,6 +7487,7 @@ pub mod status {
                 };
             }
 
+            let read = self.reads.fetch_add(1, Ordering::Relaxed);
             let previous = self.previous();
             let client = self
                 .client
@@ -7488,6 +7495,9 @@ pub mod status {
                 .expect("replicated monitor must carry a client");
             let status = match client.metrics_db().await {
                 Ok(metrics) => {
+                    let metrics = settle_local_apply(client, metrics).await;
+                    // Date the observation after the settle it describes.
+                    let checked_at = unix_seconds();
                     let voter_ids = metrics
                         .membership_config
                         .voter_ids()
@@ -7524,7 +7534,7 @@ pub mod status {
                     unavailable(previous.as_ref(), checked_at)
                 }
             };
-            self.remember(status.clone());
+            self.remember(read, status.clone());
             status
         }
 
@@ -7532,14 +7542,59 @@ pub mod status {
             self.previous
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
+                .as_ref()
+                .map(|(_, status)| status.clone())
         }
 
-        fn remember(&self, status: ReplicationStatus) {
-            *self
+        /// Concurrent reads can finish out of order now that a read may wait
+        /// to settle; a read that started earlier never replaces a later one.
+        fn remember(&self, read: u64, status: ReplicationStatus) {
+            let mut previous = self
                 .previous
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if previous.as_ref().is_none_or(|(newer, _)| *newer < read) {
+                *previous = Some((read, status));
+            }
+        }
+    }
+
+    /// openraft answers a local write before it republishes `last_applied`,
+    /// so a snapshot read during or just after a local write can hold entries
+    /// the state machine is applying in that same Raft-core turn. In sync
+    /// therefore means: every entry the log held when the read began was
+    /// applied within `LOCAL_APPLY_SETTLE`. Entries appended while waiting are
+    /// not part of this observation: they neither extend the wait nor count as
+    /// lag, and the next read settles them the same way. A remote client, a
+    /// stopped Raft, or lag that outlasts the bound keeps the original
+    /// snapshot, so real lag is still reported.
+    async fn settle_local_apply(
+        client: &Client,
+        metrics: hiqlite::DbRaftMetrics,
+    ) -> hiqlite::DbRaftMetrics {
+        let Some(target) = metrics.last_log_index else {
+            return metrics;
+        };
+        let applied = |metrics: &hiqlite::DbRaftMetrics| {
+            metrics.last_applied.as_ref().map(|log| log.index) >= Some(target)
+        };
+        if metrics.running_state.is_err() || applied(&metrics) {
+            return metrics;
+        }
+        let deadline = tokio::time::Instant::now() + LOCAL_APPLY_SETTLE;
+        match client
+            .wait_local_db_metrics(deadline, move |current| {
+                current.running_state.is_err() || applied(current)
+            })
+            .await
+        {
+            Ok(mut settled) => {
+                if settled.running_state.is_ok() {
+                    settled.last_log_index = settled.last_applied.as_ref().map(|log| log.index);
+                }
+                settled
+            }
+            Err(_) => metrics,
         }
     }
 

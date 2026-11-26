@@ -427,6 +427,11 @@ pub struct FileDto {
     /// enhancement layer consistently one or the other.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dv_el_kind: Option<&'static str>,
+    /// The fields above as the one line every client shows ("Profile 7 ·
+    /// FEL · full enhancement layer · level 6 · HDR10 base"), so the web
+    /// page and the native version pickers never word it differently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_facts: Option<String>,
     /// How this version plays on each of the caller's signed-in devices,
     /// from the capabilities each last reported and the same decision Play
     /// makes. Empty when no device has reported yet.
@@ -672,6 +677,7 @@ impl FileDto {
             dv_bl_compat_id: f.dolby_vision.bl_compat_id,
             dv_el_present: f.dolby_vision.el_present,
             dv_el_kind: None,
+            dv_facts: plurx_core::playback::hdr_devices::dv_facts_line(&f.dolby_vision, None),
             plays_on: Vec::new(),
             bitrate: f.bitrate,
             audio_streams: f.audio_streams,

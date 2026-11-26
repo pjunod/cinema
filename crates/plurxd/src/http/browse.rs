@@ -859,8 +859,10 @@ pub async fn item_detail(
         } else {
             Vec::new()
         };
+        let dolby_vision = f.dolby_vision;
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.dv_el_kind = el_kind.map(super::dto::el_kind_str);
+        dto.dv_facts = plurx_core::playback::hdr_devices::dv_facts_line(&dolby_vision, el_kind);
         dto.plays_on = plays_on;
         dto.available = observation.available();
         dto.availability = observation.state.as_str();

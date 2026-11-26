@@ -991,7 +991,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | GET | `/api/v1/libraries/{id}/items` | bearer | Paged, sorted, optionally genre-filtered grid |
 | POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application; also the `probe_paths` connection test |
 | GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read`, or the creating `scan:trigger` key | Polls one targeted-scan request |
-| GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading. Each video file carries its Dolby Vision record (`dv_profile`, `dv_level`, `dv_bl_compat_id`, `dv_el_present`, and `dv_el_kind` `fel`/`mel` once the complete-title scan found it) and `plays_on[{id, device, client, label, method, el_dropped, full_quality}]`: how it plays on each of the caller's signed-in devices with no track chosen, from the same verdict function `POST /files/{id}/decision` uses (transport-narrowed conversion, learned limits still in force, decoder geometry, the language policy's audio track) |
+| GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading. Each video file carries its Dolby Vision record (`dv_profile`, `dv_level`, `dv_bl_compat_id`, `dv_el_present`, and `dv_el_kind` `fel`/`mel` once the complete-title scan found it), `dv_facts` (those facts as the one line every client shows as sent, e.g. "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base") and `plays_on[{id, device, client, label, method, el_dropped, full_quality}]`: how it plays on each of the caller's signed-in devices with no track chosen, from the same verdict function `POST /files/{id}/decision` uses (transport-narrowed conversion, learned limits still in force, decoder geometry, the language policy's audio track) |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
 | POST | `/api/v1/items/{id}/refresh-artwork` | admin | Forces an artwork re-fetch for the item and its ancestors |
@@ -2039,7 +2039,16 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
   current, generation-matching `effective_processing` report; they clear with
   it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources. A
   tone-mapped SDR play has no `active` badges, but its `details` still say what
-  the source carries and that none of it reaches an SDR picture. A replacement session never inherits its predecessor's; it
+  the source carries and that none of it reaches an SDR picture.
+  `dv_metadata` (omitted for a non-DV source, and for a processed HDR10 or
+  SDR delivery, whose rows ride `effective_processing`) is the Playback info
+  `Dolby Vision metadata` row: `{in_file: {levels, cm_version, text},
+  applied: {levels: [{level, partial?}], text}, left_for_display: {levels,
+  delivered?, text}}`. Clients render each sub-row's `text` in that order
+  (`tests/playback/playback-info-fields.json`). `in_file.levels` is `null`
+  and its text `Unavailable` until the title's levels are recorded
+  (`plurx_dv_levels_v1`); `left_for_display.delivered` is `hdr10` or `sdr`
+  when the delivery carries no Dolby Vision metadata. A replacement session never inherits its predecessor's; it
   carries its own, in its create response and in the `prepare` control action
   that announces it. The route comes from the selected processing plan, so a
   processed-HDR10 play is described as one before its first window report.
@@ -2349,6 +2358,21 @@ the same completed-processing report as Start. Its `generation` is the current
 playback incarnation, and the report applies only to the delivered HDR10
 selection. Clients clear a previous report when an accepted response omits it;
 saved Developer preferences alone do not establish applied processing.
+A processed HDR10 or SDR report also carries the Playback info rows that
+describe it, built by the session owner and cleared with the report:
+`dv_metadata` (as in `enhancement`, with `applied` naming L1 for a display
+mapping and the grade's trim level, L8 (with L10 when the title has it) on CM v4.0
+or L2 on CM v2.9, marked
+`partial` when only some shots were trimmed) and `display_target`:
+`{reported_peak: {nits, source}|null, reported_peak_text, state:
+{state: "targeted", mapped_nits} | {state: "already_fits", bucket_nits} |
+{state: "not_targeted", reason}, mapped_for_text, title_peak_nits,
+title_peak_text}`. The owner relays them in a second bounded private header
+(4096 bytes, ASCII with JSON escapes) beside the report, so an older
+ingress still parses the report; during a mixed-version upgrade such an
+ingress passes the extra header through to the client unread, and clients
+ignore it. A current ingress removes it and attaches the rows only to a
+report it accepted for the current generation.
 `gpu_decoded: true` says the window's source pictures were decoded on the GPU
 (VA-API); it is omitted for a software decode, including the helper's own
 fallback when the node's device cannot decode HEVC Main10 or the renderer

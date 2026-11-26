@@ -148,8 +148,8 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         // The title's FEL reconstruction recipe has no quality measurement
         // yet (queued or running). It is a wait, not a failure: the deferred
         // processed upgrade holds the viewer until the measurement lands, and
-        // ordinary delivery never sees the private continuation data
-        // (`ordinary_processing_decline`), so no fallback is wanted.
+        // only that upgrade's trial ever produces the private continuation
+        // data, so no fallback is wanted.
         ("fel_qualification_pending", Refuse),
         // ---- No engine would serve this request as asked: refuse. ----
         // Invalid or VOD-only service requests (passive retention, finite

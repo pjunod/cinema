@@ -88,8 +88,8 @@ Re-verify at build time.
 | Trigger | Workflow | Rust content |
 |---|---|---|
 | PR to `main`, ready (not draft) | `main-fast-lane.yml` `rust_compile`, `rust_units` | `rust_compile`: pinned Rust 1.97.1 / Ubuntu 24.04 / FFmpeg 6; `make fast-rust-gate` (formatting, locked all-target Clippy and vendored Clippy). Since 2026-11-13 `rust_units` also runs the affected crates' unit tests once per content key ([RUST-UNIT-FANOUT.md](RUST-UNIT-FANOUT.md)); the full suite stays in `ci.yml` |
-| `v*` tag, `workflow_dispatch` | `ci.yml` | `check`: `make ci-rust-gate` plus workspace Rust/SQLite tests and serial restart fixtures, on `ffmpeg-6` runners; cluster lanes; `publish_main` only on manual `main` dispatch without promotion inputs |
-| `v*` tag, dispatch | `lint.yml:3-6` | `make fmt-check lint` (workspace Clippy), badge |
+| `workflow_dispatch` | `ci.yml` | `check`: `make ci-rust-gate` plus workspace Rust/SQLite tests and serial restart fixtures, on `ffmpeg-6` runners; cluster lanes; `publish_main` only on manual `main` dispatch without promotion inputs |
+| dispatch | `lint.yml` | `make fmt-check lint` (workspace Clippy), badge |
 | weekly cron | `rust-audit.yml` | advisories only |
 | commit (local) | `scripts/pre-commit` → `precommit-check` (`Makefile:88-90`) | `validation-lint fmt-check lint` + `js-check` — Clippy, no tests |
 | push to `main`, manual retry | `coverage.yml` | configured coverage measures the source it checks out; a failed run retains the last successful badge/date, not a green current suite |
@@ -107,7 +107,7 @@ fixtures, serial). `make test-full` (`:50-54`) adds
 
 ### 2.2 The lint comment
 
-`lint.yml` now says that its badge workflow is release-tag/manual and that
+`lint.yml` now says that its badge workflow is manual only and that
 ready main pull requests run workspace Clippy in `main-fast-lane.yml` after
 the one adversarial review. The implementation makes that statement true.
 

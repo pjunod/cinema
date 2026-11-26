@@ -123,15 +123,9 @@ impl IndexFailure {
 }
 
 fn index_process_exit_failure(status: std::process::ExitStatus, rows: usize) -> IndexFailure {
-    #[cfg(unix)]
-    let interrupted = {
-        use std::os::unix::process::ExitStatusExt;
-        // Our deadline and cancellation are settled before this path. An
-        // external kill (for example an OOM) does not diagnose the media.
-        status.signal() == Some(libc::SIGKILL)
-    };
-    #[cfg(not(unix))]
-    let interrupted = false;
+    // Our deadline and cancellation are settled before this path. An
+    // external kill (for example an OOM) does not diagnose the media.
+    let interrupted = crate::ffmpeg::killed_externally(status);
     IndexFailure::new(
         IndexFailureCode::IndexProcessFailed,
         format!("index pipe exited with {status}"),
@@ -600,6 +594,18 @@ fn tail_packet_end(
         .map(|(minimum, maximum)| (minimum, maximum, count)))
 }
 
+/// A metadata probe that produced no document. Its deadline and an external
+/// kill are interruptions; anything else is the probe refusing this source.
+fn metadata_probe_failure(error: crate::ffmpeg::HeldProbeError) -> IndexFailure {
+    use crate::ffmpeg::HeldProbeError;
+    let (code, transient) = match &error {
+        HeldProbeError::Timeout(_) => (IndexFailureCode::IndexProbeTimeout, true),
+        HeldProbeError::Interrupted(_) => (IndexFailureCode::IndexProcessFailed, true),
+        HeldProbeError::Failed(_) => (IndexFailureCode::IndexProcessFailed, false),
+    };
+    IndexFailure::new(code, error.reason().to_owned(), 0).transient(transient)
+}
+
 fn packet_probe_failure(
     error: crate::ffmpeg::HeldPacketProbeError,
     stream_index: u32,
@@ -614,11 +620,70 @@ fn packet_probe_failure(
         crate::ffmpeg::HeldPacketProbeError::Process(_) => {
             (IndexFailureCode::IndexProcessFailed, false)
         }
+        crate::ffmpeg::HeldPacketProbeError::Interrupted(_) => {
+            (IndexFailureCode::IndexProcessFailed, true)
+        }
     };
     let mut failure = IndexFailure::new(code, error.reason(), 0).transient(transient);
     failure.diagnostic.selected_stream = Some(stream_index);
     failure.diagnostic.output_bytes = Some(output_bytes);
     failure
+}
+
+/// Why the F+ first source packet's identity could not be taken.
+#[derive(Debug, PartialEq, Eq)]
+enum PacketIdentityError {
+    /// The held source could not be read or handed to the child.
+    Source(String),
+    /// The child itself: its own deadline, an outside kill, or its exit.
+    Probe(crate::ffmpeg::HeldProbeError),
+    /// The child answered, but not with one hash of the probed packet.
+    Unverified(String),
+}
+
+impl From<String> for PacketIdentityError {
+    fn from(reason: String) -> Self {
+        Self::Unverified(reason)
+    }
+}
+
+/// A refusal or an unidentified packet after a failed bridge read is the
+/// read's failure. The child's own deadline and an outside kill keep their
+/// classes; they are transient either way.
+fn read_failure_is_the_source(
+    error: PacketIdentityError,
+    read_failed: bool,
+) -> PacketIdentityError {
+    match error {
+        PacketIdentityError::Probe(crate::ffmpeg::HeldProbeError::Failed(reason))
+        | PacketIdentityError::Unverified(reason)
+            if read_failed =>
+        {
+            PacketIdentityError::Source(format!("source read failed during the check: {reason}"))
+        }
+        other => other,
+    }
+}
+
+/// Only an answer about the media is terminal. The child's own deadline, an
+/// outside kill and a source read say nothing about the title, as for the
+/// metadata and packet probes.
+fn packet_identity_failure(error: PacketIdentityError) -> IndexFailure {
+    use crate::ffmpeg::HeldProbeError;
+    let (code, transient, reason) = match error {
+        PacketIdentityError::Source(reason) => (IndexFailureCode::IndexSourceIo, true, reason),
+        PacketIdentityError::Probe(HeldProbeError::Timeout(reason)) => {
+            (IndexFailureCode::IndexProbeTimeout, true, reason)
+        }
+        PacketIdentityError::Probe(HeldProbeError::Interrupted(reason)) => {
+            (IndexFailureCode::IndexProcessFailed, true, reason)
+        }
+        PacketIdentityError::Probe(HeldProbeError::Failed(reason))
+        | PacketIdentityError::Unverified(reason) => {
+            (IndexFailureCode::IndexCompletionUnverified, false, reason)
+        }
+    };
+    IndexFailure::new(code, format!("F+ source packet identity: {reason}"), 0).transient(transient)
 }
 
 async fn packet_probe_attempt(
@@ -966,20 +1031,24 @@ fn held_filtered_packet_hash<'a>(
     budget: Duration,
     cancel: Option<&'a tokio_util::sync::CancellationToken>,
     retain_parameter_sets: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<[u8; 32], String>> + Send + 'a>> {
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<[u8; 32], PacketIdentityError>> + Send + 'a>,
+> {
     Box::pin(async move {
         let (source, object_version, path, runtime_cache) = held;
         let mut view = source;
         view.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
         let input = match crate::background_jobs::source_budget() {
             Some(budget) => Some(
                 crate::source_input::SourceInput::open_background_held(
-                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)?,
+                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)
+                        .map_err(PacketIdentityError::Source)?,
                     crate::http::stream::file_content_type(path),
                     budget,
                 )
-                .await?,
+                .await
+                .map_err(PacketIdentityError::Source)?,
             ),
             None => None,
         };
@@ -998,8 +1067,10 @@ fn held_filtered_packet_hash<'a>(
             let input_url = if let Some(input) = &input {
                 input.url().to_owned()
             } else {
-                let path = crate::ffmpeg::windows_source_path(source)?;
-                crate::ffmpeg::verify_windows_source_path(source, &path)?;
+                let path = crate::ffmpeg::windows_source_path(source)
+                    .map_err(PacketIdentityError::Source)?;
+                crate::ffmpeg::verify_windows_source_path(source, &path)
+                    .map_err(PacketIdentityError::Source)?;
                 path.to_string_lossy().into_owned()
             };
             command.args(filtered_packet_hash_args(
@@ -1017,7 +1088,7 @@ fn held_filtered_packet_hash<'a>(
         );
         #[cfg(not(unix))]
         let descriptors = crate::producer_spawn::Descriptors::default();
-        let result = crate::ffmpeg::bounded_ffmpeg_output_descriptors_cancellable(
+        let result = crate::ffmpeg::held_ffmpeg_probe_output(
             command,
             budget.min(Duration::from_secs(30)),
             64 * 1024,
@@ -1031,15 +1102,23 @@ fn held_filtered_packet_hash<'a>(
         } else {
             result.await
         };
+        // FFmpeg reads through the bridge: a failed source read reaches it as
+        // truncated input, so its refusal is then not the media's answer.
+        let read_failed = input
+            .as_ref()
+            .is_some_and(|input| input.source_read_failed());
         if let Some(input) = input {
             input
                 .close_and_wait()
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
         }
         view.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
-        filtered_packet_hash(&result?.stdout, pts, time_base)
+            .map_err(|error| PacketIdentityError::Source(error.to_string()))?;
+        let hash = result
+            .map_err(PacketIdentityError::Probe)
+            .and_then(|output| Ok(filtered_packet_hash(&output.stdout, pts, time_base)?));
+        hash.map_err(|error| read_failure_is_the_source(error, read_failed))
     })
 }
 
@@ -2153,19 +2232,7 @@ async fn probe_completion_expectation_inner(
                 | std::io::ErrorKind::WouldBlock
         )));
     }
-    let raw = result.map_err(|reason| {
-        let timeout = reason.contains("timed out after");
-        IndexFailure::new(
-            if timeout {
-                IndexFailureCode::IndexProbeTimeout
-            } else {
-                IndexFailureCode::IndexProcessFailed
-            },
-            reason,
-            0,
-        )
-        .transient(timeout)
-    })?;
+    let raw = result.map_err(metadata_probe_failure)?;
     // The ride-along's ordinals come from this document — the probe of the
     // very descriptor the pass reads — and never from scan-time facts.
     let subtitle_tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
@@ -3118,14 +3185,11 @@ async fn build_attested_pass(
                                 .await
                                 {
                                     Ok(hash) => pending.first_sample_sha256 = Some(hash),
-                                    Err(reason) => {
-                                        builds[slot] = Some(IndexBuild::plain(
-                                            IndexOutcome::Failed(Box::new(IndexFailure::new(
-                                                IndexFailureCode::IndexCompletionUnverified,
-                                                format!("F+ source packet identity: {reason}"),
-                                                0,
-                                            ))),
-                                        ));
+                                    Err(error) => {
+                                        builds[slot] =
+                                            Some(IndexBuild::plain(IndexOutcome::Failed(
+                                                Box::new(packet_identity_failure(error)),
+                                            )));
                                         continue;
                                     }
                                 }

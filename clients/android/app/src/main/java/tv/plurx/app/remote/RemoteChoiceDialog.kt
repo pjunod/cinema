@@ -18,7 +18,8 @@ import tv.plurx.app.ui.components.TvTextButton
 import tv.plurx.app.ui.components.RequestInitialFocus
 import java.util.UUID
 
-internal data class RemoteChoice(val key: String, val label: String, val selected: Boolean = false, val activate: () -> RemoteOutcome)
+/** [detail] is a second, quieter line under the label (a version's Dolby Vision facts, say). */
+internal data class RemoteChoice(val key: String, val label: String, val selected: Boolean = false, val detail: String? = null, val activate: () -> RemoteOutcome)
 @Composable
 internal fun RemoteChoiceDialog(title: String, choices: List<RemoteChoice>, onClose: () -> Unit) {
     val navigation = LocalRemoteNavigation.current
@@ -52,7 +53,12 @@ internal fun RemoteChoiceDialog(title: String, choices: List<RemoteChoice>, onCl
                     TvTextButton(onClick = { navigation?.physicalInput(); choice.activate(); navigation?.closeMenu(token); onClose() },
                         modifier = Modifier.fillMaxWidth().semantics { selected = choice.selected }
                             .then(if (owned) Modifier.remoteAction(key, choice.label) { val result = choice.activate(); if (result == RemoteOutcome.Applied) { navigation?.closeMenu(token); close() }; result } else Modifier)
-                            .then(if (index == 0) Modifier.focusRequester(first) else Modifier)) { Text(choice.label) }
+                            .then(if (index == 0) Modifier.focusRequester(first) else Modifier)) {
+                        Column(Modifier.fillMaxWidth()) {
+                            Text(choice.label)
+                            choice.detail?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                    }
                 }
                 TextButton(modifier = if (owned) Modifier.remoteAction(closeKey, "Close") { if (navigation?.menuOwned(token) != true) RemoteOutcome.StaleContext else { navigation.closeMenu(token); close(); RemoteOutcome.Applied } } else Modifier, onClick = { navigation?.physicalInput(); navigation?.closeMenu(token); onClose() }) { Text("Close") }
             }

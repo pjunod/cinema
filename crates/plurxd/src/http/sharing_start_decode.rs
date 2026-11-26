@@ -174,8 +174,9 @@ fn relayed_enhancement(
     else {
         return Ok(None);
     };
-    let enhancement: plurx_core::playback::enhancement::PlaybackEnhancement =
+    let mut enhancement: plurx_core::playback::enhancement::PlaybackEnhancement =
         serde_json::from_value(raw.clone()).map_err(|_| SharingResourceUnsupported)?;
+    enhancement.drop_ill_formed_rows();
     if !enhancement.is_well_formed() {
         return Err(SharingResourceUnsupported);
     }

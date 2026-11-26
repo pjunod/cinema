@@ -10719,7 +10719,15 @@ impl JobManager {
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        let raw = raw.map_err(|error| match error {
+            // Killed by someone else (an OOM, say): the probe has not said
+            // anything about this source yet.
+            crate::ffmpeg::HeldProbeError::Interrupted(_) => AnalysisResolutionError::Retry {
+                code: "index_process_failed",
+                charge_attempt: true,
+            },
+            _ => AnalysisResolutionError::Terminal("stored_probe_invalid"),
+        })?;
         self.store
             .record_fragment_index_source(&attested.observation)
             .await

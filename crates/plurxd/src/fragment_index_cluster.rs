@@ -188,8 +188,7 @@ impl SourceFence {
     pub(crate) fn clone_current_held(source: &std::fs::File) -> Result<Self, String> {
         #[cfg(unix)]
         let version = object_version(
-            &source
-                .metadata()
+            &plurx_core::media_io::fstat(source)
                 .map_err(|error| format!("checking held source: {error}"))?,
         )?;
         #[cfg(windows)]
@@ -208,8 +207,7 @@ impl SourceFence {
             .map_err(|error| format!("duplicating held source: {error}"))?;
         #[cfg(unix)]
         let version = object_version(
-            &handle
-                .metadata()
+            &plurx_core::media_io::fstat(&handle)
                 .map_err(|error| format!("checking held source: {error}"))?,
         )?;
         #[cfg(windows)]
@@ -261,9 +259,13 @@ impl SourceFence {
     /// Naming the component makes the refusal a diagnosis. Sizes and times
     /// come from the same `fstat` the object version is built from, so this
     /// adds no syscall to the hot path beyond the one already there.
+    ///
+    /// That `fstat` revalidates against the media server on NFS, so it runs
+    /// through `media_io::fstat`: a hung mount parks this caller, and the
+    /// runtime worker it was on hands its scheduler to another thread.
     pub(crate) fn drift(&self) -> Option<String> {
         #[cfg(unix)]
-        let metadata = match self.handle.metadata() {
+        let metadata = match plurx_core::media_io::fstat(&self.handle) {
             Ok(metadata) => metadata,
             // A fence whose own descriptor cannot be stated is not evidence
             // that the source changed. It is refused just the same, because
@@ -477,7 +479,7 @@ pub(crate) async fn open_source_fence_classified(
         .map_err(|error| {
             SourceFenceError::from_open(format!("opening {}: {error}", file.path.display()), &error)
         })?;
-        let metadata = source.metadata().map_err(|error| {
+        let metadata = plurx_core::media_io::fstat(&source).map_err(|error| {
             SourceFenceError::Unreachable(format!("stating {}: {error}", file.path.display()))
         })?;
         scanner_identity_matches(&metadata, file).map_err(SourceFenceError::Changed)?;
@@ -513,7 +515,7 @@ pub(crate) async fn open_source_playback_fence_classified(
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, SourceFenceError> {
     let path = file.path.clone();
-    let source = tokio::task::spawn_blocking(move || {
+    let source = plurx_core::media_io::blocking(move || {
         opened(
             &path,
             plurx_core::fs_secure::open_read_nofollow_blocking(&path),
@@ -527,8 +529,7 @@ pub(crate) async fn open_source_playback_fence_classified(
             &error,
         )
     })?;
-    let metadata = source
-        .metadata()
+    let metadata = plurx_core::media_io::fstat(&source)
         .map_err(|_| SourceFenceError::Unreachable("Source file cannot be stated".to_owned()))?;
     if !metadata.is_file() || file.size < 0 {
         return Err(SourceFenceError::Changed(

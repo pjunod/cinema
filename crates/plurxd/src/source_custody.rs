@@ -1789,7 +1789,7 @@ pub(crate) async fn file_body(
             }
             let work_reader = Arc::clone(&reader);
             let read_activity = observer.begin_read().await.map_err(std::io::Error::other)?;
-            let bytes = tokio::task::spawn_blocking(move || {
+            let bytes = plurx_core::media_io::blocking(move || {
                 let read_activity = read_activity;
                 use std::io::{Read, Seek};
                 let mut source = work_reader.source.lock().expect("direct source read");
