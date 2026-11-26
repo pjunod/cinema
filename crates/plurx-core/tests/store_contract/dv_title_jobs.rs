@@ -2657,10 +2657,7 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
         let scanner = "a".repeat(64);
         let mut domains = Vec::new();
         let mut libraries = Vec::new();
-        for (name, roots) in [
-            ("Two disks", ["/scope-a", "/scope-b"]),
-            ("Two analysis disks", ["/scope-c", "/scope-d"]),
-        ] {
+        for (name, roots) in [("Two disks", ["/scope-a", "/scope-b"])] {
             let library = store
                 .create_library(&NewLibrary {
                     name: name.into(),
@@ -2688,7 +2685,7 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
             (libraries[0], "/scope-b/b.mkv"),
             (libraries[0], "/scope-b/c.mkv"),
             (libraries[0], "/scope-x/z.mkv"),
-            (libraries[1], "/scope-d/d.mkv"),
+            (libraries[0], "/scope-a/e.mkv"),
         ] {
             let item = store
                 .insert_item(&NewItem {
@@ -2718,11 +2715,11 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
             keys
         };
 
-        // Analysis hashes only its own file, on the second library's disk-d.
+        // Analysis hashes only its own file, on disk-a of the same library.
         let analysis = store
             .enqueue_analysis_request(&NewAnalysisRequest {
                 request_id: format!("scope-analysis-{backend}"),
-                file_id: files["/scope-d/d.mkv"],
+                file_id: files["/scope-a/e.mkv"],
                 source_size: 10_000,
                 source_mtime: 1,
                 component: "fragment_index".to_owned(),
@@ -2747,7 +2744,7 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
         let holders = store.source_io_holders(1_001).await.expect("holders");
         assert_eq!(
             held(&holders, &analysis.request_id),
-            ["source_io:disk-d"],
+            ["source_io:disk-a"],
             "{backend}: analysis reserves only the disk holding its file"
         );
 
@@ -2792,7 +2789,8 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
             }
         };
 
-        // One maintenance reader occupies disk-b.
+        // The production starvation: with disk-a's analysis running, a title
+        // scan on disk-b of the same library still claims (v6 refused it).
         let (_, busy) = active(&store, files["/scope-b/b.mkv"], &scanner, 1_002).await;
         let holders = store.source_io_holders(1_002).await.expect("holders");
         assert_eq!(
@@ -2807,16 +2805,14 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
             Some(ClaimBlock::MaintenanceReader),
             "{backend}: a file under no root keeps every root"
         );
-        // Disk-a is free: its title scan claims beside disk-b's reader.
-        let other_disk = queued("/scope-a/a.mkv", 1_004).await;
+        // Disk-a's analysis is its one maintenance reader, so a title scan
+        // there waits.
+        let analysis_disk = queued("/scope-a/a.mkv", 1_004).await;
         assert_eq!(
-            admission(other_disk.clone(), 1_004).await,
-            None,
-            "{backend}"
+            admission(analysis_disk, 1_004).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: disk-a keeps one maintenance reader"
         );
-        let other = claim(&store, &other_disk, 1_004).await;
-        let holders = store.source_io_holders(1_004).await.expect("holders");
-        assert_eq!(held(&holders, &other.id), ["source_io:disk-a"], "{backend}");
         // A second reader on disk-b is still refused.
         let same_disk = queued("/scope-b/c.mkv", 1_005).await;
         assert_eq!(
