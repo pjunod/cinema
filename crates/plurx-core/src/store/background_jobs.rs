@@ -46,6 +46,14 @@ pub const SQLITE_INTRODUCED_SCHEMA: i64 = 71;
 
 pub const JOB_LEASE_MS: i64 = 30_000;
 pub const JOB_RENEW_INTERVAL_MS: i64 = 10_000;
+/// How long past its lease expiry a running job stays untouched by the
+/// expired-lease sweep. Each node sweeps with its own clock, so the margin
+/// absorbs clock skew between the owner and the sweeper and store latency
+/// on a renewal: six renewal intervals and twice the lease beyond the
+/// moment a healthy owner would have renewed. It equals
+/// `SOURCE_AUTHORITY_REAP_GRACE_MS`, the custody reap's grace, so a job whose
+/// lapsed custody the reap just released is swept on the same tick.
+pub const EXPIRED_LEASE_SWEEP_GRACE_MS: i64 = 60_000;
 pub const CLAIM_RESOLUTION_WINDOW_MS: i64 = 120_000;
 pub const REQUEST_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 pub const MAX_ACTIVE_JOBS: usize = 4_096;
@@ -849,25 +857,28 @@ WHERE "#,
 /// row a claim could take over except for the claimant's own admission
 /// (placement, demand, not-before, source capacity), oldest lease first.
 ///
+/// - Only a lease expired at least `EXPIRED_LEASE_SWEEP_GRACE_MS` ago on the
+///   sweeper's clock (`swept_before_ms`). A claim may take over at expiry
+///   because its claimant is about to run the work; the sweep only revokes,
+///   so it must not revoke a live owner whose clock or renewal lags.
 /// - The budget is the takeover's own (`claim_attempt_budget`), per waiter
 ///   for `fragment_index_build`. A row without it is the maintenance
 ///   command's: `maintain_jobs` settles an expired running job with no
-///   attempt left terminally (`execution_abandoned`, attempt outcome
-///   `lease_expired`), so the sweep never races it for the same row. The
-///   waiter clause is the exact negation of that command's fragment test.
+///   attempt left terminally (`execution_abandoned`; the settlement trigger
+///   records that attempt as `failed`), so the sweep never races it for the
+///   same row. The waiter clause is the exact negation of that command's
+///   fragment test.
 /// - A lapsed index retry window is the maintenance command's as well.
 /// - `cancelling` is never swept: its expiry settles to `cancelled` there.
 /// - A job whose previous reader may still be charged waits, as a takeover
 ///   does (`claim_previous_reader`), until its custody settles or the custody
 ///   reap releases it `SOURCE_AUTHORITY_REAP_GRACE_MS` after the lease; the
-///   daemon runs that reap first on the same tick. Without custody the lease
-///   is the whole authority, renewal already refuses it, and a claim may take
-///   it over at once, so the sweep adds no grace of its own.
+///   daemon runs that reap earlier on the same tick.
 macro_rules! expired_lease_candidates {
     () => {
         concat!(
             r#"SELECT id FROM background_jobs WHERE state = 'running'
-    AND lease_expires_ms <= json_extract($1, '$.now_ms')
+    AND lease_expires_ms <= json_extract($1, '$.swept_before_ms')
     AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
     AND "#,
             claim_attempt_budget!(),
@@ -932,7 +943,10 @@ async fn requeue_expired_running_jobs<T: QueueSql>(
     if now_ms < 0 {
         return Err(invalid("invalid expired-lease sweep time"));
     }
-    let body = encode(&serde_json::json!({ "now_ms": now_ms }))?;
+    let body = encode(&serde_json::json!({
+        "now_ms": now_ms,
+        "swept_before_ms": now_ms.saturating_sub(EXPIRED_LEASE_SWEEP_GRACE_MS),
+    }))?;
     if store
         .queue_sql(
             EXPIRED_LEASE_PENDING_SQL.to_owned(),
@@ -3529,12 +3543,13 @@ pub trait BackgroundJobStore: Send + Sync {
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<bool, StoreError>;
     async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError>;
-    /// Return every running job whose lease expired at `now_ms` to the queue
-    /// with the claim takeover's fenced bookkeeping: one charged attempt,
+    /// Return every running job whose lease expired at least
+    /// [`EXPIRED_LEASE_SWEEP_GRACE_MS`] before `now_ms` to the queue with the
+    /// claim takeover's fenced bookkeeping: one charged attempt,
     /// `lease_expired` appended, fence and revision bumped, owner cleared and
     /// the attempt ended `lease_expired`. A job whose previous reader still
     /// holds custody waits for the custody reap; a job with no attempt left
-    /// is settled by [`Self::maintain_jobs`]. Any node may run it; idempotent.
+    /// is settled by [`Self::maintain_jobs`]. Idempotent and CAS-safe.
     async fn requeue_expired_running_jobs(&self, now_ms: i64) -> Result<(), StoreError>;
     async fn settled_foreground_source_custody(
         &self,

@@ -7289,12 +7289,6 @@ impl JobManager {
         if let Err(error) = self.store.reap_settled_source_custody(clock_ms()).await {
             tracing::warn!(%error, "replaying settled source custody");
         }
-        // After the reap, so a job whose lapsed custody it just released is
-        // requeued on this tick. A dead worker's job otherwise stays `running`
-        // until a claimer happens to reach it in candidate order.
-        if let Err(error) = self.store.requeue_expired_running_jobs(clock_ms()).await {
-            tracing::warn!(%error, "requeueing expired-lease background jobs");
-        }
         crate::source_custody::source_pressure_changed().notify_waiters();
     }
 
@@ -7322,6 +7316,16 @@ impl JobManager {
         let _guard = BackgroundUpkeepGuard(Arc::clone(&self));
         if !self.may_run_cluster_jobs().await {
             return;
+        }
+        // A dead worker's job otherwise stays `running` until a claimer
+        // happens to reach it in candidate order. The sweep revokes leases on
+        // this node's clock, so it runs only where the rest of queue upkeep
+        // does (committed voters, behind `may_run_cluster_jobs`), not on
+        // every node the way the custody reap must. It runs after that reap,
+        // which `schedule_tick` performs first on the same tick, so a job
+        // whose lapsed custody was just released is requeued now.
+        if let Err(error) = self.store.requeue_expired_running_jobs(clock_ms()).await {
+            tracing::warn!(%error, "requeueing expired-lease background jobs");
         }
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");

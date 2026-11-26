@@ -22,7 +22,11 @@ attempt budget, `lease_expired` attempt-error and previous-reader custody
 fragments are now macros shared with the sweep; `CLAIM_SQL` expands to the
 same statement text, and the trait, adapter, `claim_state`,
 `claim_source_holders` and `CLAIM_SQL` pins are refreshed with the new
-sweep and fragment rows. Model `a992eb158a07`: all 18 registered
+sweep and fragment rows. Review fixes add the sweep grace, move the caller
+behind the voter gate, and pin `background_job_settlement_effects`,
+`background_fragment_interest_failed`, the grace constant and
+`maintain_background_queue`; the model is unchanged and the smoke profile
+was rerun. Model `a992eb158a07`: all 18 registered
 configurations returned their expected verdicts in one local `full` run
 (clean governed inputs at `9e25e97b9`; baseline 33,608,489 distinct states
 in 477 s, lifecycle 11,754,965 in 139 s). This is development evidence;
@@ -1012,7 +1016,7 @@ in README and the model; finite safety exhaustion is never liveness evidence.
 |---|---|
 | `InitFresh`, `InitRecovery`, `Next`, `ModelView`, `Symm` | Constructed reachable-shape seeds and explicit finite exploration machinery; not production operations |
 | `Cancel`, `Remove`, `LoseResource`, `Takeover`, `Outage`, `Restart` | Queue cancellation; membership removal; reservation loss; environment takeover abstraction of expired `CLAIM_SQL` plus triggers; unreachable authority; crash/reboot transport abstraction |
-| `ExpireSweep` | `background_jobs.rs::requeue_expired_running_jobs` (`EXPIRED_LEASE_ATTEMPTS_SQL`, `EXPIRED_LEASE_REQUEUE_SQL` and the settlement trigger): an expired running row returns to `queued` unowned with fence and revision advanced, its attempts finished and its reservations released; attempt budget, retry window and charged-custody guards are not modelled (they only narrow it) |
+| `ExpireSweep` | `background_jobs.rs::requeue_expired_running_jobs` (`EXPIRED_LEASE_ATTEMPTS_SQL`, `EXPIRED_LEASE_REQUEUE_SQL` and the settlement trigger): an expired running row returns to `queued` unowned with fence and revision advanced, its attempts finished and its reservations released; `EXPIRED_LEASE_SWEEP_GRACE_MS` grace, attempt budget, retry window, charged-custody guard and voter-only caller (`maintain_background_queue`) are not modelled; each only narrows the action. The model fires it at any `exp <= sample` and has no clock skew, so it does not show that the grace tolerates a skewed sweeper clock |
 | `PauseSource`, `ResumeSource` | `background_jobs_resources.rs::pause_background` / `resume_background` plus foreground SQL triggers; exact stable owner and one source reservation; physical stop/join and extra admission veto external |
 | `SendRenew`, `ApplyRenew`, `DeliverRenew` | Caller queue heartbeat; atomic `RENEW_SQL`/renew trigger; worker adoption of returned exact token |
 | `DomainChange`, `AcquireDomain` | Exact domain renewal/release and expired-lease acquisition in both coordination backends |
@@ -1052,6 +1056,8 @@ recovery action. The normal dispatch/CAS path retains those predicates.
 
 `ExpireSweep` is the same revocation with no successor: it never installs a
 token, so it can only make old authority inexact earlier than a claim would.
+Its source grace (`EXPIRED_LEASE_SWEEP_GRACE_MS`, 60 s past expiry on the
+sweeper's clock) is a skew margin outside the model, not a modelled guard.
 
 Recovery Init has time0, a running old-boot claim expiring at2 and not-before2
 or3. Fair time reaches the applicable barriers; a delay2 claim may occur at2,
