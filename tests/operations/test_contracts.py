@@ -5107,15 +5107,24 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertEqual(re.findall(r"(?m)^ +runs-on: (.+)$", block),
                                      [declaration])
                     ephemeral_declarations.append(declaration)
-                    self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
-                    # A job is either pinned to one commit or routed by an
-                    # explicit switch while CI Fleet checks its reviewed content.
-                    self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
-                    route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
-                             else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
-                    expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
-                                f" && {route}")
-                    self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
+                    main_only = "github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
+                    if profile.get("trust") == "same_repository":
+                        # Trusted as this repository's own branches are: a dispatch on
+                        # main that takes inputs, with no content pin or switch.
+                        self.assertFalse({"commit_variable", "switch_variable"} & set(profile))
+                        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n    inputs:\n")
+                        self.assertNotRegex(workflow, r"(?m)^  (push|pull_request|pull_request_target|schedule|workflow_call):")
+                        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {main_only} }}}}"])
+                    else:
+                        self.assertNotIn("trust", profile)
+                        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
+                        # A job is either pinned to one commit or routed by an
+                        # explicit switch while CI Fleet checks its reviewed content.
+                        self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
+                        route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
+                                 else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
+                        expected = f"{main_only} && {route}"
+                        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
                 for labels in self_hosted_label_sets(block):
                     parsed.append(labels)
                     selections += 1
@@ -5235,6 +5244,9 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_root_job_containers_restore_persistent_workspace_ownership(self):
         workflow_root = ROOT / ".github/workflows"
+        # A CI Fleet job's VM is fresh, but its Cargo cache disk is not.
+        ephemeral = {(profile["workflow"], profile["job"]): f"    runs-on: [{profile['label']}]"
+                     for profile in runner_fleet().get("ephemeral_jobs", [])}
         for path in sorted(workflow_root.glob("*.y*ml")):
             relative = path.relative_to(ROOT).as_posix()
             for name, block in workflow_job_blocks(relative).items():
@@ -5242,7 +5254,8 @@ assert.equal(context.ACT_TIMER, null);
                     continue
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
-                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n"))
+                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n")
+                                or ephemeral.get((relative, name)) == runs_on.group(0))
                 self.assertIn(
                     "Restore persistent runner workspace ownership",
                     block,
