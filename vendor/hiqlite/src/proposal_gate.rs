@@ -97,11 +97,11 @@ impl MembershipHold {
 
 impl Drop for MembershipHold {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.stop.signal.state.lock() {
-            if state.generation == self.stop.generation {
-                state.active = false;
-                self.stop.signal.changed.notify_waiters();
-            }
+        if let Ok(mut state) = self.stop.signal.state.lock()
+            && state.generation == self.stop.generation
+        {
+            state.active = false;
+            self.stop.signal.changed.notify_waiters();
         }
     }
 }
