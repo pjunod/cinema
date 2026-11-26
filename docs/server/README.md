@@ -10,6 +10,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 | File | Answers | |
 |---|---|---|
+| [COPY-MEMORY-BUDGET.md](COPY-MEMORY-BUDGET.md) | How `PLURX_COPY_MEMORY_BUDGET` admits, grows, pauses and refuses verified copies against node memory. | built |
 | [MEDIA-IO-ISOLATION-PLAN.md](MEDIA-IO-ISOLATION-PLAN.md) | Plan: a hung NFS media mount must not freeze the daemon — the 2026-11-23 84 s stall, its root cause, `plurx_core::media_io`, and the hung-FIFO regression test. | built |
 | [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | open |
 | [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) | P42 physical recovery: same-kernel macOS/Linux reader witnesses, legacy evidence limits, and validation ledger. | open |
