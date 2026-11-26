@@ -2021,6 +2021,71 @@ mod tests {
         );
     }
 
+    /// M7 bounds its fitted copy and its sink refuses every entry after
+    /// `last`. A fragment that cannot match its proof (FFmpeg's `-t` cut)
+    /// is harmless after the fragment whose push closes entry `last + 1`,
+    /// and fatal when it is that fragment.
+    #[tokio::test]
+    async fn a_bounded_fitted_window_ends_before_its_cut_fragment() {
+        let (film, table) = fitted_film().await;
+        assert!(film.plan.len() >= 4, "{} plan entries", film.plan.len());
+        let last = 0u32;
+        let origin = film.index.rows[0].dts;
+        let first_row_of = |entry: u32| {
+            let start = film.plan.entry(entry).expect("plan entry").start_ticks;
+            film.index
+                .rows
+                .iter()
+                .position(|row| row.dts - origin == start)
+                .expect("entry starts on an indexed row")
+        };
+        let bounded = |closing_row: usize| {
+            // Every fragment through `closing_row`, then a contradicting
+            // fragment (an earlier one again) and the real trailer.
+            let cut = fragment_boundary_cut(&film.feed, closing_row + 1);
+            let first_end = fragment_boundary_cut(&film.feed, 1);
+            let init_end = muxer_init(&film.feed).bytes.len();
+            let mut feed = film.feed[..cut].to_vec();
+            feed.extend_from_slice(&film.feed[init_end..first_end]);
+            box_walk(&film.feed, |name, body| {
+                if name == b"mfra" {
+                    feed.extend_from_slice(
+                        &u32::try_from(body.len() + 8)
+                            .expect("small trailer")
+                            .to_be_bytes(),
+                    );
+                    feed.extend_from_slice(name);
+                    feed.extend_from_slice(body);
+                }
+            });
+            feed
+        };
+        let request = || {
+            let mut request = generation(&film, 0);
+            request.convert_dolby_vision = true;
+            request.dv_refit = Some(std::sync::Arc::clone(&table));
+            request
+        };
+        let window = (last + 1) as usize;
+
+        let ended = bounded(first_row_of(last + 2));
+        let sink = MemSink::refusing(window, std::io::ErrorKind::NotFound);
+        let outcome = run(&ended[..], request(), &sink, "bounded-fitted").await;
+        assert!(
+            matches!(outcome, Outcome::Ran { produced_through: Some(through) } if through == last),
+            "{outcome:?}"
+        );
+        assert_eq!(sink.taken().len(), window);
+
+        let closing_cut = bounded(first_row_of(last + 2) - 1);
+        let sink = MemSink::refusing(window, std::io::ErrorKind::NotFound);
+        let outcome = run(&closing_cut[..], request(), &sink, "bounded-fitted-cut").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(_))),
+            "{outcome:?}"
+        );
+    }
+
     #[tokio::test]
     async fn fitted_copy_rejects_a_complete_trailer_that_omits_a_later_indexed_row() {
         let (film, table) = fitted_film().await;

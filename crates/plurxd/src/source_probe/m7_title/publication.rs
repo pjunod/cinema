@@ -286,18 +286,10 @@ impl FittedPublication {
                 .ok_or("M7 independent generation has no exact seek probe")?,
             )
         };
-        let end = self
-            .plan
+        self.plan
             .entry(last)
             .ok_or("M7 retained end entry is absent")?;
-        // Leave enough complete following source fragments for the production
-        // segmenter to materialize earlier entries. The reader still requires
-        // all requested entries and rejects truncated or missing pictures.
-        if self.plan.entry(last.saturating_add(1)).is_some() {
-            let end_ticks = end
-                .start_ticks
-                .saturating_add(end.duration_ticks)
-                .saturating_add(self.policy.max_ticks);
+        if let Some(end_ticks) = bounded_copy_end_ticks(&self.plan, last, self.policy.max_ticks) {
             let seconds =
                 end_ticks.saturating_sub(entry.start_ticks) as f64 / f64::from(self.plan.timescale);
             let insertion = args
@@ -688,6 +680,24 @@ fn copy_failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
 /// like every other declared M7 and F+ child. Without one it inherits the
 /// daemon's working directory, which the source-access verifier refuses
 /// (`cwd_outside_daemon_roots`), and debug builds panic on that refusal.
+/// Where a bounded fitted copy may stop. The run ends when the sink refuses
+/// entry `last + 1`, which the segmenter emits only once the first fragment
+/// of entry `last + 2` is pushed, and every pushed fitted fragment must first
+/// match its canonical proof. FFmpeg's final fragment under `-t` is cut short
+/// and its last duration is guessed at EOF, so it can never match: the copy
+/// covers all of entry `last + 2` plus a fragment margin, keeping that cut
+/// fragment after the run has ended. Without entry `last + 2` the copy runs
+/// to the title's end, whose final fragment the index measured the same way.
+fn bounded_copy_end_ticks(plan: &SegmentPlan, last: u32, margin_ticks: u64) -> Option<u64> {
+    let closing = plan.entry(last.checked_add(2)?)?;
+    Some(
+        closing
+            .start_ticks
+            .saturating_add(closing.duration_ticks)
+            .saturating_add(margin_ticks),
+    )
+}
+
 /// The fitted rendition is picture-only: its plan carries no audio track and
 /// its comparison reads only video. Source audio is never mapped, so a
 /// soundtrack MP4 cannot carry (TrueHD) cannot fail the copy.
@@ -752,6 +762,40 @@ mod tests {
         let long = copy_failure(status, "é".repeat(2 * MAX_COPY_FAILURE_BYTES).as_bytes());
         assert!(long.len() <= 64 + MAX_COPY_FAILURE_BYTES, "{}", long.len());
         assert!(long.ends_with('é'));
+    }
+
+    /// Eclipse's bounded copy ended inside the fragment that closes entry
+    /// `last + 1`; FFmpeg cut that fragment short, so its proof failed and
+    /// the window never completed.
+    #[test]
+    fn a_bounded_fitted_copy_ends_past_the_fragment_that_closes_its_window() {
+        use plurx_core::segplan::{PlanCut, PlanEntry, PlanEntryKind};
+        let entries = [(0, 96), (96, 48), (144, 120), (264, 72)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (start_ticks, duration_ticks))| PlanEntry {
+                index: index as u32,
+                kind: PlanEntryKind::Video,
+                start_ticks,
+                duration_ticks,
+                est_bytes: 1,
+                cut: PlanCut::Clean,
+                fragments: 1,
+            })
+            .collect();
+        let plan = SegmentPlan {
+            version: 1,
+            timescale: 24,
+            entries,
+            target_duration: 5,
+        };
+        // Entry 2 (144..264) holds the fragment whose push emits entry 1.
+        assert_eq!(bounded_copy_end_ticks(&plan, 0, 30), Some(294));
+        assert_eq!(bounded_copy_end_ticks(&plan, 1, 30), Some(366));
+        // No entry after the closing one's predecessor: copy to the end.
+        assert_eq!(bounded_copy_end_ticks(&plan, 2, 30), None);
+        assert_eq!(bounded_copy_end_ticks(&plan, 3, 30), None);
+        assert_eq!(bounded_copy_end_ticks(&plan, u32::MAX, 30), None);
     }
 
     /// Eclipse's fitted copy mapped its TrueHD soundtrack into the
