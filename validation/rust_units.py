@@ -31,6 +31,7 @@ import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -949,11 +950,39 @@ def require_test_disk(directory=None, statvfs=os.statvfs):
     print(f"test disk: {free / 2**30:.1f} GiB free at {directory} (need {needed / 2**30:.1f} GiB)")
 
 
+TEST_TMP = STATE / "tmp"
+
+
+def use_checkout_test_tmp(directory=None):
+    """Point the tests' temp directory at the checkout's filesystem.
+
+    The shard container's own /tmp is its overlay filesystem, which resource
+    custody refuses because it is not local durable storage; every fixture
+    that opens a real journal there fails before its test starts. The
+    checkout is the runner's workspace on the host disk. Returns the
+    directory, emptied, so the shard can remove it when it finishes.
+    """
+    directory = Path(directory or TEST_TMP).resolve()
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    os.environ["TMPDIR"] = str(directory)
+    tempfile.tempdir = None
+    return directory
+
+
 def run_shard(plan_path, archive, index, threads):
     plan = read_json(plan_path)
     count = plan["shards"]
     require(1 <= index <= count, f"shard {index} is outside 1..{count}")
-    require_test_disk()
+    test_tmp = use_checkout_test_tmp()
+    try:
+        return run_shard_tests(plan, archive, index, count, threads, test_tmp)
+    finally:
+        shutil.rmtree(test_tmp, ignore_errors=True)
+
+
+def run_shard_tests(plan, archive, index, count, threads, test_tmp):
+    require_test_disk(test_tmp)
     bound_cpus()
     outcomes = {}
     runs = []

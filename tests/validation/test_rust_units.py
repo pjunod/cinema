@@ -594,13 +594,43 @@ class TestDiskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             plan = Path(directory) / "plan.json"
             plan.write_text(json.dumps({"shards": 1, "filters": ["all()"], "serial_filters": []}))
-            with mock.patch.object(ru, "require_test_disk",
-                                   side_effect=ru.UnitsError("full")) as check, \
+            test_tmp = Path(directory) / "tmp"
+            with mock.patch.object(ru, "TEST_TMP", test_tmp), \
+                    mock.patch.dict(os.environ), \
+                    mock.patch.object(ru, "require_test_disk",
+                                      side_effect=ru.UnitsError("full")) as check, \
                     mock.patch.object(ru, "run_nextest") as nextest:
                 with self.assertRaises(ru.UnitsError):
                     ru.run_shard(plan, "archive.tar.zst", 1, 2)
-            check.assert_called_once_with()
+            tempfile.tempdir = None
+            check.assert_called_once_with(test_tmp.resolve())
             nextest.assert_not_called()
+            self.assertFalse(test_tmp.exists())
+
+    def test_the_shard_runs_its_tests_under_an_empty_checkout_temp_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "plan.json"
+            plan.write_text(json.dumps({"shards": 1, "filters": ["all()"], "serial_filters": []}))
+            test_tmp = (Path(directory) / "checkout" / "tmp").resolve()
+            test_tmp.mkdir(parents=True)
+            (test_tmp / "left-by-an-earlier-shard").write_text("stale")
+            seen = {}
+
+            def disk(path):
+                seen["tmpdir"] = os.environ["TMPDIR"]
+                seen["gettempdir"] = tempfile.gettempdir()
+                seen["entries"] = sorted(p.name for p in Path(path).iterdir())
+                raise ru.UnitsError("stop after the temp directory is chosen")
+
+            with mock.patch.object(ru, "TEST_TMP", test_tmp), \
+                    mock.patch.dict(os.environ), \
+                    mock.patch.object(ru, "require_test_disk", side_effect=disk):
+                with self.assertRaises(ru.UnitsError):
+                    ru.run_shard(plan, "archive.tar.zst", 1, 2)
+            tempfile.tempdir = None
+            self.assertEqual(seen, {"tmpdir": str(test_tmp), "gettempdir": str(test_tmp),
+                                    "entries": []})
+            self.assertFalse(test_tmp.exists())
 
 
 if __name__ == "__main__":
