@@ -1096,6 +1096,34 @@ struct TaskAdmission<'a> {
 }
 
 impl AttemptEntry {
+    /// The Adopt has committed its route; the original worker attaches next.
+    /// Production has nothing to do here.
+    #[cfg(not(test))]
+    async fn after_adopt_commit(&self, _deadline: std::time::Instant) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    /// A race fixture may hold the original worker at this point, bounded
+    /// by the same original deadline.
+    #[cfg(test)]
+    async fn after_adopt_commit(&self, deadline: std::time::Instant) -> Result<(), &'static str> {
+        let pause = self
+            .adopt_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.committed.send(());
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), pause.resume)
+                .await
+                .map_err(|_| "adaptive commit pause exceeded the original deadline")?
+                .map_err(|_| "adaptive commit pause lost its original waiter")?;
+        }
+        Ok(())
+    }
+}
+
+impl AttemptEntry {
     fn admit_coordinator(&self) -> Result<TaskAdmission<'_>, &'static str> {
         let admission = self.admit_task(true)?;
         if self
@@ -2969,21 +2997,7 @@ impl super::TranscodeManager {
         {
             return Err("adaptive Adopt committed a different route".into());
         }
-        #[cfg(test)]
-        {
-            let pause = entry
-                .adopt_commit_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                let _ = pause.committed.send(());
-                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), pause.resume)
-                    .await
-                    .map_err(|_| "adaptive commit pause exceeded the original deadline")?
-                    .map_err(|_| "adaptive commit pause lost its original waiter")?;
-            }
-        }
+        entry.after_adopt_commit(deadline).await?;
         let publication_authority = authority.clone();
         let start = match &mut rich.pending {
             PreparedWorkerProduct::Finite(pending) => {
