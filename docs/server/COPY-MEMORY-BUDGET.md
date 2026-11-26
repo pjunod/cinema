@@ -31,6 +31,8 @@ A copy's charge follows what it holds:
   stream.
 - A gap fill pauses until there is room.
 - Every copy shrinks back after each segment.
+- A copy's canonical (video-only) twin is held without its slice data, so
+  it is charged only for what is kept of it.
 
 ## Scope
 
