@@ -433,6 +433,11 @@ mod tests {
             "the local proposal hold is inside the shutdown deadline",
         );
         shorter(
+            serving::LOCAL_APPLY_SETTLE + operations::PEER_STATUS_TIMEOUT,
+            operations::AGGREGATE_TIMEOUT,
+            "a settled topology read must leave the aggregate time for its peer probes",
+        );
+        shorter(
             jobs::JOB_LEASE_HEARTBEAT
                 + store::STORE_TIMEOUT * jobs::RELEASE_ATTEMPTS as u32
                 + jobs::RELEASE_RETRY_DELAY * jobs::RELEASE_ATTEMPTS.saturating_sub(1) as u32,
