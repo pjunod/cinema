@@ -267,8 +267,8 @@ struct PlaysOnList: View {
 }
 
 /// The versions of a title as rows on the page rather than a menu: an iOS
-/// menu shows only a row's first line and cuts long release names, so each
-/// version's Dolby Vision line from the server would never be seen there.
+/// menu shows only the first line of a row, truncated after three lines, so
+/// each version's Dolby Vision line from the server was never seen there.
 struct VersionChoiceList: View {
     struct Row: Identifiable, Equatable {
         let id: Int
@@ -287,12 +287,13 @@ struct VersionChoiceList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Version").font(.caption).foregroundStyle(Palette.muted)
+            Text("Version").font(.caption).foregroundStyle(Palette.muted).accessibilityAddTraits(.isHeader)
             ForEach(Self.rows(files, selectedID: selectedID)) { row in
                 Button { choose(row.id) } label: {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: row.selected ? "checkmark.circle.fill" : "circle")
                             .foregroundStyle(row.selected ? Palette.accent : Palette.muted)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.title).font(.callout).fixedSize(horizontal: false, vertical: true)
                             if let detail = row.detail {
@@ -304,6 +305,7 @@ struct VersionChoiceList: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
+                    .accessibilityElement(children: .combine)
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(row.selected ? .isSelected : [])
