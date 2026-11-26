@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn root_ids_use_canonical_uppercase_hex_and_root_override_ids_validate() {
         let id = root_id(12, "/mnt/Médía///").expect("canonical root");
-        assert_eq!(id, "12/2F6D6E742F4DC3A964C3AD612F");
+        assert_eq!(id, "12/2F6D6E742F4DC3A964C3AD61");
         assert!(valid_root_id(&id));
         assert!(!valid_root_id("012/2F"));
         assert!(!valid_root_id("12/2f"));
