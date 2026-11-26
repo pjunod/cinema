@@ -1287,6 +1287,20 @@ async fn vod_stream_finalizer_commits_only_exact_live_response_bodies() {
     tokio::fs::create_dir(&error_path)
         .await
         .expect("unreadable VOD object");
+    // The open object must be at least as long as its one advertised byte to
+    // reach the body's read. An empty directory's size is filesystem-defined
+    // (btrfs reports 0); one entry makes it nonzero everywhere.
+    tokio::fs::write(error_path.join("entry"), b"x")
+        .await
+        .expect("unreadable VOD object entry");
+    assert!(
+        tokio::fs::metadata(&error_path)
+            .await
+            .expect("unreadable VOD object metadata")
+            .len()
+            >= 1,
+        "the unreadable object covers its advertised byte"
+    );
     let error_touch = fixture
         .state
         .transcode
