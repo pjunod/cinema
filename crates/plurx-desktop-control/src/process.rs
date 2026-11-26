@@ -81,6 +81,70 @@ pub fn inspect(_pid: u32) -> Result<KernelProcess> {
     ))
 }
 
+/// Executable images of every live process the caller may inspect. Processes
+/// that exit or deny inspection mid-scan are skipped; failing to enumerate at
+/// all is an error so callers never mistake "unknown" for "nothing running".
+#[cfg(target_os = "macos")]
+pub fn executables() -> Result<Vec<std::path::PathBuf>> {
+    use std::os::unix::ffi::OsStringExt;
+    let unavailable = || Error::new(ErrorCode::Unavailable, "cannot enumerate live processes");
+    // SAFETY: a null buffer asks libproc only for the current PID count.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Err(unavailable());
+    }
+    let mut capacity = count as usize + 256;
+    let pids = loop {
+        let mut pids = vec![0 as libc::pid_t; capacity];
+        let bytes = (capacity * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: caller-owned buffer of exactly `bytes` bytes.
+        let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        if n <= 0 {
+            return Err(unavailable());
+        }
+        if (n as usize) < capacity {
+            pids.truncate(n as usize);
+            break pids;
+        }
+        capacity *= 2;
+    };
+    let mut out = Vec::with_capacity(pids.len());
+    for pid in pids.into_iter().filter(|pid| *pid > 0) {
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: caller-owned buffer; size passed to libproc.
+        let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        if len > 0 {
+            buf.truncate(len as usize);
+            out.push(std::ffi::OsString::from_vec(buf).into());
+        }
+    }
+    Ok(out)
+}
+#[cfg(target_os = "linux")]
+pub fn executables() -> Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        {
+            if let Ok(exe) = std::fs::read_link(entry.path().join("exe")) {
+                out.push(exe);
+            }
+        }
+    }
+    Ok(out)
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn executables() -> Result<Vec<std::path::PathBuf>> {
+    Err(Error::new(
+        ErrorCode::Unsupported,
+        "native control requires macOS or Linux",
+    ))
+}
+
 #[cfg(target_os = "linux")]
 pub fn socket_peer(stream: &UnixStream) -> Result<KernelProcess> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
