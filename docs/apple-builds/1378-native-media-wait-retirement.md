@@ -1,6 +1,5 @@
 # Retire native media waits with their destination intent
 
-Build: 289
 Issue: #1378
 
 **Status:** built; focused native tests passed; full CI and device acceptance pending.

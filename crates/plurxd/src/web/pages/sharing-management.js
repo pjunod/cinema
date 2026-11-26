@@ -399,7 +399,7 @@ async function sharingLoadLog(){
 function sharingManagementHTML(){
   const s=SHARING_MANAGEMENT;if(!s)return "";
   const connection=`<div id="sharing-connection">${sharingConnectionHTML(s.status)}</div>`;
-  const advanced=`<details class="sharing-advanced"><summary>Connection details and advanced options</summary>${sharingRequirementsHTML(s.status)}${sharingButton("Edit this Cinema’s gateway addresses","sharingOpen('manifest')",s.busy)}${sharingRecoveryHTML(s.status)}<p><a href="#/settings/developer/cinema-sharing-settings">Sharing settings in Developer</a></p></details>`;
+  const advanced=`<details class="sharing-advanced"><summary>Connection details and advanced options</summary>${sharingRequirementsHTML(s.status)}${sharingButton("Edit this Cinema’s gateway addresses","sharingOpen('manifest')",s.busy)}${sharingRecoveryHTML(s.status)}<p><a href="#/settings/sharing/cinema-sharing-settings">Sharing settings in Developer</a></p></details>`;
   if(s.editor)return connection+sharingEditorHTML(s.editor)+advanced;
   const disabled=s.busy;
   const imports=s.imports.map((row,i)=>{
@@ -785,4 +785,24 @@ function sharingScheduleConnection(){
     }
     sharingScheduleConnection();
   },3000);
+}
+// The shared-libraries switch, graduated from Developer on 2026-11-18.
+function cinemaSharingCard(settings,readiness){
+  return setCard(`${cardHead("Cinema shared libraries","Invite another Cinema to selected libraries through your private Tailscale connection.")}
+    ${togRow("cinema-sharing-enabled","Enable shared libraries","Cinema prepares its private Tailscale connection automatically. Setup status is in Settings → Sharing. Your choice is saved even when setup needs attention.",!!settings.sharing_enabled)}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    ${devReq(readiness,"cinema_sharing","source_activation","Current Source activation","Source activation is pending during the rolling upgrade. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Readiness never changes your saved choice.")}
+    ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests inside this process or container. Listening here does not prove the host private network path is configured.")}
+    ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
+    ${devReq(readiness,"cinema_sharing","endpoints","Configured private Sharing endpoints","Cinema discovers this host’s private addresses and certificate automatically. Review status or Advanced addresses in <a href=\"#/settings/sharing\">Settings → Sharing</a>. Saved endpoints do not prove connectivity.")}
+    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Native managed installations configure the private connection automatically. Docker uses its installed host component. Settings → Sharing reports sign-in, permission and setup problems. Pairing still verifies the other Cinema and its access policy.")}
+    </div></details>
+    <div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
+}
+async function saveCinemaSharing(btn){
+  const err=document.getElementById("cinema-sharing-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{sharing_enabled:/** @type {HTMLInputElement} */(document.getElementById("cinema-sharing-enabled")).checked}}));
+    const card=document.getElementById("cinema-sharing-settings");if(card)card.outerHTML=cinemaSharingCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }

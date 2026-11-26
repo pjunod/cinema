@@ -32,6 +32,22 @@ pub(crate) struct VodResponsePublication<T> {
 }
 
 impl MediaResponseOwner {
+    /// Structural identity of the exact attached presentation, not a request hint.
+    pub(crate) fn is_scalar_vod(&self) -> bool {
+        match &self.0 {
+            MediaResponseOwnerKind::Vod(owner) => owner.is_scalar_playlist(),
+            MediaResponseOwnerKind::Rolling { .. } => false,
+        }
+    }
+
+    /// Conservative timing from this attachment's immutable media evidence.
+    pub(crate) fn prepared_frame_rate(&self) -> Option<f64> {
+        match &self.0 {
+            MediaResponseOwnerKind::Vod(owner) => owner.prepared_frame_rate(),
+            MediaResponseOwnerKind::Rolling { .. } => None,
+        }
+    }
+
     /// Which kind of owner this is, and the exact producer attempt a rolling
     /// owner is bound to, for correlating a failed response in the log.
     pub(crate) fn log_identity(&self) -> (&'static str, Option<u64>) {
@@ -244,10 +260,14 @@ impl MediaResponsePublication {
             "subtitle-playlist" => Object::SubtitleMediaPlaylist,
             "subtitle-segment" => Object::SubtitleSegment,
             "init-segment" => Object::InitializationSegment,
-            "media-segment" => Object::MediaSegment,
-            "segment-not-modified" => Object::NotModified,
+            "media-segment" | "audio-media-segment" | "split-video-media-segment" => {
+                Object::MediaSegment
+            }
+            "segment-not-modified" | "audio-segment-not-modified" => Object::NotModified,
             "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
-            "segment-range" => Object::ByteRange,
+            "segment-range" | "audio-segment-range" | "split-video-segment-range" => {
+                Object::ByteRange
+            }
             "status" => Object::SessionStatus,
             _ => Object::ProtocolResponse,
         }
@@ -781,10 +801,8 @@ impl Drop for SegmentDelivery {
 /// Subtitle child requests resolve this instead of accepting a file id from
 /// the URL, so one session capability can never be used to read another file.
 ///
-/// HDR retains its established diagnostic declaration. SDR declarations
-/// require complete frozen component facts, not a guessed codec string, and
-/// the session's frozen `playback.sdr_master_codecs` choice (see
-/// `FrozenHlsCodecFacts::sdr_master_codecs`).
+/// HDR retains its established diagnostic declaration. SDR master variants
+/// carry no `CODECS`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HlsContext {
     /// A versioned resolved output budget; absence preserves legacy metadata.
@@ -803,26 +821,16 @@ pub struct HlsContext {
     pub frame_rate: Option<f64>,
 }
 
-/// Authority for SDR CODECS, separate from the legacy diagnostic string.
-/// Missing audio is not evidence of a video-only rendition.
+/// The frozen component facts of a session's output, separate from the
+/// legacy diagnostic string. They are part of the producer identity and carry
+/// the retained-output bandwidth. Missing audio is not evidence of a
+/// video-only rendition.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct FrozenHlsCodecFacts {
     video: Option<(String, CodecVideoOrigin)>,
     audio: CodecAudioFact,
     #[serde(skip_serializing_if = "Option::is_none")]
     retained_output: Option<RetainedOutputFacts>,
-    /// Settings → Developer `playback.sdr_master_codecs`, read once when the
-    /// session was created and never again. Off (the default) is the pre-S-10
-    /// master: complete SDR facts are still recorded, but not printed, because
-    /// AVPlayer drops a variant whose `CODECS` it dislikes before fetching a
-    /// byte and no device has re-qualified the SDR string.
-    ///
-    /// Serialized only when on, so the presentation fingerprint of every
-    /// session created with the switch off is byte-for-byte what it was
-    /// before the switch existed, and a session that prints `CODECS` seals a
-    /// different master contract from one that does not.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    sdr_master_codecs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -902,20 +910,11 @@ impl FrozenHlsCodecFacts {
             video: None,
             audio,
             retained_output: None,
-            sdr_master_codecs: false,
         }
     }
 
     pub(crate) fn with_retained_output(mut self, facts: Option<RetainedOutputFacts>) -> Self {
         self.retained_output = facts;
-        self
-    }
-
-    /// Bind the session's frozen `playback.sdr_master_codecs` choice. Called
-    /// only where a session is created (or, for VOD, from the value the
-    /// session recorded at create), never from a per-request settings read.
-    pub(crate) fn with_sdr_master_codecs(mut self, enabled: bool) -> Self {
-        self.sdr_master_codecs = enabled;
         self
     }
 
@@ -934,170 +933,6 @@ impl FrozenHlsCodecFacts {
 
     pub(crate) fn bind_output_hevc_init(&mut self, codec: String) {
         self.video = Some((codec, CodecVideoOrigin::OutputInit));
-    }
-
-    pub(crate) fn complete_sdr_codecs(&self) -> Option<String> {
-        let (video, _) = self.video.as_ref()?;
-        match &self.audio {
-            CodecAudioFact::Unknown => None,
-            CodecAudioFact::Absent => Some(video.clone()),
-            CodecAudioFact::ResolvedOutput(audio) => Some(format!("{video},{audio}")),
-            CodecAudioFact::LegacyAacEncode => Some(format!("{video},mp4a.40.2")),
-        }
-    }
-
-    /// What an SDR master variant prints: the complete component string, and
-    /// only when this session was created with `playback.sdr_master_codecs`
-    /// on. `None` keeps the pre-S-10 master, which carried no SDR `CODECS`.
-    pub(crate) fn sdr_master_codecs(&self) -> Option<String> {
-        if !self.sdr_master_codecs {
-            return None;
-        }
-        self.complete_sdr_codecs()
-    }
-}
-
-#[cfg(test)]
-mod frozen_codec_tests {
-    use super::*;
-    use plurx_core::playback::audio::{AudioAction, AudioDelivery};
-
-    #[test]
-    fn copied_aac_name_cannot_claim_an_unobserved_audio_object_type() {
-        let copied = AudioDelivery {
-            action: AudioAction::Copy {
-                codec: "aac".to_owned(),
-                channels: 2,
-            },
-            downmix: None,
-            reason: "profile not retained".to_owned(),
-        };
-        let mut facts = FrozenHlsCodecFacts::audio(Some(&copied), true, false);
-        facts.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(facts.complete_sdr_codecs(), None);
-        let encoded = AudioDelivery {
-            action: AudioAction::Encode {
-                codec: "aac".to_owned(),
-                channels: 2,
-                layout: None,
-                bitrate_kbps: 160,
-                sample_rate: 48_000,
-            },
-            ..copied
-        };
-        let mut facts = FrozenHlsCodecFacts::audio(Some(&encoded), true, false);
-        facts.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(
-            facts.complete_sdr_codecs().as_deref(),
-            Some("avc1.64001F,mp4a.40.2")
-        );
-    }
-
-    #[test]
-    fn frozen_codec_components_refuse_unknown_audio_and_preserve_output_provenance() {
-        let mut unknown = FrozenHlsCodecFacts::audio(None, true, false);
-        assert_eq!(unknown.complete_sdr_codecs(), None);
-        unknown.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(unknown.complete_sdr_codecs(), None);
-        let mut absent = FrozenHlsCodecFacts::audio(None, false, false);
-        assert_eq!(absent.complete_sdr_codecs(), None);
-        absent.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(absent.complete_sdr_codecs().as_deref(), Some("avc1.64001F"));
-        for (codec, expected) in [
-            ("aac", "mp4a.40.2"),
-            ("ac3", "ac-3"),
-            ("eac3", "ec-3"),
-            ("flac", "fLaC"),
-        ] {
-            let delivery = AudioDelivery {
-                action: if codec == "aac" {
-                    AudioAction::Encode {
-                        codec: codec.to_owned(),
-                        channels: 2,
-                        layout: None,
-                        bitrate_kbps: 160,
-                        sample_rate: 48_000,
-                    }
-                } else {
-                    AudioAction::Copy {
-                        codec: codec.to_owned(),
-                        channels: 2,
-                    }
-                },
-                downmix: None,
-                reason: "resolved output".to_owned(),
-            };
-            let mut facts = FrozenHlsCodecFacts::audio(Some(&delivery), true, false);
-            facts.bind_output_avc_init("avc1.64001F".to_owned());
-            assert_eq!(
-                facts.complete_sdr_codecs(),
-                Some(format!("avc1.64001F,{expected}"))
-            );
-            assert!(serde_json::to_string(&facts)
-                .expect("serializable component facts")
-                .contains("ResolvedOutput"));
-        }
-        let mut refused = FrozenHlsCodecFacts::audio(
-            Some(&AudioDelivery {
-                action: AudioAction::Copy {
-                    codec: "unknown".to_owned(),
-                    channels: 2,
-                },
-                downmix: None,
-                reason: String::new(),
-            }),
-            true,
-            true,
-        );
-        refused.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(refused.complete_sdr_codecs(), None);
-        let mut legacy = FrozenHlsCodecFacts::audio(None, true, true);
-        legacy.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(
-            legacy.complete_sdr_codecs().as_deref(),
-            Some("avc1.64001F,mp4a.40.2")
-        );
-        assert_ne!(
-            serde_json::to_string(&legacy).expect("serializable legacy facts"),
-            serde_json::to_string(&absent).expect("serializable absent audio")
-        );
-    }
-
-    /// `playback.sdr_master_codecs` decides whether complete SDR facts are
-    /// printed, never whether they are complete. Off must also leave the
-    /// serialized facts — and so every off session's presentation
-    /// fingerprint — exactly as they were before the switch existed.
-    #[test]
-    fn sdr_master_codecs_switch_gates_printing_and_only_moves_the_fingerprint_when_on() {
-        let mut facts = FrozenHlsCodecFacts::audio(None, false, false);
-        facts.bind_output_avc_init("avc1.64001F".to_owned());
-        let before = serde_json::to_string(&facts).expect("serializable facts");
-        assert!(!before.contains("sdr_master_codecs"), "{before}");
-        assert_eq!(facts.complete_sdr_codecs().as_deref(), Some("avc1.64001F"));
-        assert_eq!(
-            facts.sdr_master_codecs(),
-            None,
-            "off is the pre-S-10 master"
-        );
-
-        let off = facts.clone().with_sdr_master_codecs(false);
-        assert_eq!(
-            serde_json::to_string(&off).expect("serializable facts"),
-            before
-        );
-        let on = facts.with_sdr_master_codecs(true);
-        assert_eq!(on.sdr_master_codecs().as_deref(), Some("avc1.64001F"));
-        assert_ne!(
-            serde_json::to_string(&on).expect("serializable facts"),
-            before,
-            "a session that prints CODECS seals a different master contract"
-        );
-
-        // On never invents a component: incomplete facts still print nothing.
-        let mut unknown_audio =
-            FrozenHlsCodecFacts::audio(None, true, false).with_sdr_master_codecs(true);
-        unknown_audio.bind_output_avc_init("avc1.64001F".to_owned());
-        assert_eq!(unknown_audio.sdr_master_codecs(), None);
     }
 }
 
@@ -1203,4 +1038,52 @@ pub(super) fn first_media_settlement_slots() -> &'static Arc<tokio::sync::Semaph
             MAX_FIRST_MEDIA_SETTLEMENT_OWNERS,
         ))
     })
+}
+
+/// HLS FRAME-RATE is an upper bound. Round toward a shorter interval, including
+/// the Android parser's Float conversion; never widen a decoded-frame proof.
+pub(crate) fn prepared_frame_rate_bound(timescale: u32, interval_ticks: u64) -> Option<f64> {
+    if timescale == 0 || interval_ticks == 0 || interval_ticks > u64::from(timescale) {
+        return None;
+    }
+    let required = f64::from(timescale) / interval_ticks as f64;
+    let mut milli = (u64::from(timescale) * 1_000).div_ceil(interval_ticks);
+    let parsed = (milli as f64 / 1_000.0) as f32;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return None;
+    }
+    if f64::from(parsed) < required {
+        // A three-decimal value can round down at a Float boundary. Move to
+        // the next representable Float before formatting the decimal again.
+        milli =
+            (f64::from(f32::from_bits(parsed.to_bits().checked_add(1)?)) * 1_000.0).ceil() as u64;
+    }
+    let rate = milli as f64 / 1_000.0;
+    let reparsed: f32 = format!("{rate:.3}").parse().ok()?;
+    (reparsed.is_finite() && f64::from(reparsed) >= required).then_some(rate)
+}
+
+#[cfg(test)]
+mod prepared_timing_tests {
+    use super::prepared_frame_rate_bound;
+
+    #[test]
+    fn playlist_float_roundtrip_never_widens_the_verified_interval() {
+        for (scale, ticks) in [
+            (1_000, 41),
+            (24_000, 1_001),
+            (90_000, 3_003),
+            (u32::MAX, 1),
+            (u32::MAX, 16_777_217),
+            (1, 1),
+        ] {
+            let rate = prepared_frame_rate_bound(scale, ticks).expect("bounded rate");
+            let parsed: f32 = format!("{rate:.3}").parse().expect("Media3 Float");
+            assert!(1.0 / f64::from(parsed) <= ticks as f64 / f64::from(scale));
+        }
+        assert_eq!(prepared_frame_rate_bound(1_000, 41), Some(24.391));
+        assert!(prepared_frame_rate_bound(0, 1).is_none());
+        assert!(prepared_frame_rate_bound(1_000, 0).is_none());
+        assert!(prepared_frame_rate_bound(1_000, 1_001).is_none());
+    }
 }

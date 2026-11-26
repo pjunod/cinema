@@ -1554,6 +1554,9 @@ pub(super) fn reconciliation_parameters(
     new: &NewAnalysisRequest,
 ) -> Result<(String, String), StoreError> {
     if old.component != "fragment_index"
+        || old
+            .pipeline_version
+            .starts_with(super::analysis_coordination::PIPELINE_PREFIX)
         || old.requested_generation.starts_with("predict:")
         || new.component != old.component
         || new.file_id != old.file_id
@@ -1996,6 +1999,9 @@ impl LiveAnalysisEngines {
     #[must_use]
     pub fn is_stranded(&self, request: &AnalysisRequest) -> bool {
         request.component == "fragment_index"
+            && !request
+                .pipeline_version
+                .starts_with(super::analysis_coordination::PIPELINE_PREFIX)
             && request.state == "queued"
             && request.result_cache_key.is_empty()
             && !self
@@ -2029,13 +2035,67 @@ impl LiveAnalysisEngines {
 /// of [`LiveAnalysisEngines::digests`], or NULL when the inventory is
 /// unknown — then nothing is stranded, every row counts as before.
 pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
+    let coordinator = super::analysis_coordination::PIPELINE_PREFIX;
     format!(
         "({live} IS NOT NULL AND component = 'fragment_index' AND state = 'queued' \
+          AND pipeline_version NOT GLOB '{coordinator}*' \
           AND COALESCE(result_cache_key, '') = '' \
           AND (pipeline_version NOT IN (SELECT value FROM json_each({live})) \
             OR EXISTS (SELECT 1 FROM settings \
               WHERE key = '{REMOVED_TARGET_FENCE_PREFIX}' || target_node_id)))"
     )
+}
+
+/// Diagnose an insert refusal within the transaction that took the admission
+/// decision. Both stores return a matching generation before any refusal.
+/// A reused ID without a matching generation cannot succeed when capacity returns.
+pub(crate) fn analysis_admission_refusal_sql() -> String {
+    let stranded = analysis_request_stranded_sql("input.engines");
+    format!(
+        "WITH input AS (SELECT $1 AS req, $2 AS engines, $3 AS headroom, $4 AS inserted)
+         SELECT CASE WHEN inserted THEN 0
+           WHEN NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(req,'$.file_id')
+               AND size = json_extract(req,'$.source_size') AND mtime = json_extract(req,'$.source_mtime'))
+             THEN 1
+           WHEN json_extract(req,'$.requested_generation') LIKE 'predict:%' AND NOT EXISTS (
+             SELECT 1 FROM background_predictions WHERE request_id = json_extract(req,'$.request_id')
+               AND state = 'pending' AND expires_ms > json_extract(req,'$.created_at_ms')
+               AND file_id = json_extract(req,'$.file_id')
+               AND json_extract(request_json,'$.source_size') = json_extract(req,'$.source_size')
+               AND json_extract(request_json,'$.source_mtime') = json_extract(req,'$.source_mtime')
+               AND json_extract(request_json,'$.component') = json_extract(req,'$.component')
+               AND json_extract(request_json,'$.pipeline_version') = json_extract(req,'$.pipeline_version')
+               AND json_extract(request_json,'$.target_node_id') = json_extract(req,'$.target_node_id'))
+             THEN 2
+           WHEN EXISTS (SELECT 1 FROM analysis_requests WHERE request_id = json_extract(req,'$.request_id'))
+             THEN 5
+           WHEN (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted'))
+                  >= {MAX_ACTIVE_ANALYSIS_REQUESTS} * {ANALYSIS_BACKLOG_BOUND_FACTOR} + headroom THEN 3
+           WHEN (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')
+                  AND NOT {stranded}) >= {MAX_ACTIVE_ANALYSIS_REQUESTS} + headroom THEN 4
+           ELSE 5 END AS value FROM input"
+    )
+}
+
+pub(crate) fn analysis_headroom(request: &NewAnalysisRequest) -> i64 {
+    if request.priority == "foreground" && request.trigger == "playback" {
+        PLAYBACK_ANALYSIS_HEADROOM
+    } else {
+        0
+    }
+}
+
+pub(crate) fn analysis_admission_error(reason: usize) -> StoreError {
+    use crate::error::AnalysisAdmissionRefusal::*;
+    StoreError::AnalysisAdmission(match reason {
+        1 => SourceChanged,
+        2 => PredictionExpired,
+        3 => BacklogFull,
+        4 => QueueFull,
+        0 => StateChanged,
+        5 => GenerationConflict,
+        _ => return StoreError::Database(format!("unknown analysis admission result {reason}")),
+    })
 }
 
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
@@ -2155,6 +2215,22 @@ pub struct ClusterFragmentIndexLocation {
     pub bytes: i64,
     pub verified_at_ms: i64,
     pub last_seen_at_ms: i64,
+}
+
+/// Components that the current analysis worker can execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnalysisClaimMode {
+    All,
+    SkipMarkersOnly,
+}
+
+impl AnalysisClaimMode {
+    pub(crate) fn component_clause(self) -> &'static str {
+        match self {
+            Self::All => "component <> 'subtitle_source'",
+            Self::SkipMarkersOnly => "component = 'skip_markers'",
+        }
+    }
 }
 
 #[async_trait]
@@ -2335,6 +2411,34 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         targeted_only: bool,
         cross_node: bool,
         excluded_video_identities: &[String],
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_for_capacity_in_mode(
+            node_id,
+            pipeline_version,
+            now_ms,
+            lease_expires_ms,
+            viewer_only,
+            targeted_only,
+            cross_node,
+            excluded_video_identities,
+            AnalysisClaimMode::All,
+        )
+        .await
+    }
+
+    /// Apply the component restriction to claim selection, fencing and expiry.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_analysis_request_for_capacity_in_mode(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
+        viewer_only: bool,
+        targeted_only: bool,
+        cross_node: bool,
+        excluded_video_identities: &[String],
+        mode: AnalysisClaimMode,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at
@@ -2738,6 +2842,14 @@ struct BlobHeader {
     init_sha256: String,
     promotion: PromotionInputs,
     parameter_sets_constant: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_cadence: Option<crate::segplan::DvRefitCadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing_composition_offsets: Option<Vec<i64>>,
     source_sha256: String,
     pipeline_sha256: String,
     rows: usize,
@@ -2751,6 +2863,11 @@ pub fn encode_cluster_fragment_index_blob(
     if index.version != SEGPLAN_VERSION
         || index.timescale == 0
         || index.rows.is_empty()
+        || index
+            .dv_refit_proofs
+            .as_ref()
+            .is_some_and(|proofs| proofs.len() != index.rows.len())
+        || (index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none())
         || !is_sha256(source_sha256)
         || !is_sha256(pipeline_sha256)
     {
@@ -2776,6 +2893,12 @@ pub fn encode_cluster_fragment_index_blob(
         init_sha256: index.init_sha256.clone(),
         promotion,
         parameter_sets_constant: index.parameter_sets_constant,
+        dv_refit_origin: index.dv_refit_origin,
+        dv_refit_proofs: index.dv_refit_proofs.clone(),
+        dv_refit_cadence: index.dv_refit_cadence,
+        landing_composition_offsets: index
+            .landing_composition_offsets()
+            .map_err(|error| StoreError::Task(error.into()))?,
         source_sha256: source_sha256.to_ascii_lowercase(),
         pipeline_sha256: pipeline_sha256.to_ascii_lowercase(),
         rows: index.rows.len(),
@@ -2875,6 +2998,7 @@ pub fn decode_cluster_fragment_index_blob(
         })?;
         rows.push(IndexRow {
             dts: u64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes")),
+            first_cto: None,
             duration: u64::from(u32::from_le_bytes(
                 chunk[8..12].try_into().expect("four bytes"),
             )),
@@ -2894,6 +3018,22 @@ pub fn decode_cluster_fragment_index_blob(
         FragmentIndex::new(header.timescale, rows, header.init_sha256, canonical_source);
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
+    index.dv_refit_origin = header.dv_refit_origin;
+    if header
+        .dv_refit_proofs
+        .as_ref()
+        .is_some_and(|proofs| proofs.len() != index.rows.len())
+    {
+        return Err(StoreError::Task("fitted proof row count mismatch".into()));
+    }
+    index.dv_refit_proofs = header.dv_refit_proofs;
+    index.dv_refit_cadence = header.dv_refit_cadence;
+    index
+        .restore_landing_composition_offsets(header.landing_composition_offsets)
+        .map_err(|error| StoreError::Task(error.into()))?;
+    if index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none() {
+        return Err(StoreError::Task("invalid fitted cadence summary".into()));
+    }
     Ok(index)
 }
 
@@ -2958,6 +3098,14 @@ struct V3BlobHeader {
     init_contract_sha256: String,
     promotion: PromotionInputs,
     parameter_sets_constant: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_cadence: Option<crate::segplan::DvRefitCadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing_composition_offsets: Option<Vec<i64>>,
     source_sha256: String,
     output_identity: FragmentIndexOutputIdentity,
     engine: FragmentIndexEngineProvenance,
@@ -3065,6 +3213,38 @@ pub fn cluster_fragment_index_output_identity(
         init_contract_sha256.to_ascii_lowercase().as_bytes(),
     );
     digest.update([u8::from(index.parameter_sets_constant)]);
+    if let Some(origin) = index.dv_refit_origin {
+        digest.update([1]);
+        digest.update(origin.first_dts.to_be_bytes());
+        digest.update(origin.first_pts.to_be_bytes());
+        digest.update(origin.time_base_num.to_be_bytes());
+        digest.update(origin.time_base_den.to_be_bytes());
+    }
+    if let Some(proofs) = &index.dv_refit_proofs {
+        if proofs.len() != index.rows.len() {
+            return Err(v3_error("fitted proof row count mismatch"));
+        }
+        digest.update(b"plurx/fitted-copy/ordered-coded-cadence/v4\0");
+        digest.update((proofs.len() as u64).to_be_bytes());
+        for proof in proofs {
+            digest.update(proof.as_bytes());
+        }
+    }
+    if index.dv_refit_cadence.is_some() {
+        let cadence = index
+            .verified_refit_cadence()
+            .ok_or_else(|| v3_error("has invalid fitted cadence summary"))?;
+        digest.update(b"plurx/fitted-copy/presentation-interval/v1\0");
+        digest.update(cadence.minimum_interval_ticks.to_be_bytes());
+        digest.update(cadence.sample_count.to_be_bytes());
+    }
+    if let Some(offsets) = index.landing_composition_offsets().map_err(v3_error)? {
+        digest.update(b"plurx/copy-landing/first-composition-offset/v1\0");
+        digest.update((offsets.len() as u64).to_be_bytes());
+        for offset in offsets {
+            digest.update(offset.to_be_bytes());
+        }
+    }
     let value = serde_json::to_value(&promotion)
         .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
     hash_v3_promotion_value(&mut digest, &value)?;
@@ -3133,6 +3313,12 @@ pub fn encode_cluster_fragment_index_blob_v3(
         init_contract_sha256: init_contract_sha256.to_ascii_lowercase(),
         promotion: v3_portable_promotion(index, source_sha256)?,
         parameter_sets_constant: index.parameter_sets_constant,
+        dv_refit_origin: index.dv_refit_origin,
+        dv_refit_proofs: index.dv_refit_proofs.clone(),
+        dv_refit_cadence: index.dv_refit_cadence,
+        landing_composition_offsets: index
+            .landing_composition_offsets()
+            .map_err(|error| StoreError::Task(error.into()))?,
         source_sha256: source_sha256.to_ascii_lowercase(),
         output_identity,
         engine: FragmentIndexEngineProvenance {
@@ -3244,6 +3430,7 @@ pub fn decode_cluster_fragment_index_blob_v3(
         }
         rows.push(IndexRow {
             dts: u64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes")),
+            first_cto: None,
             duration: u64::from_le_bytes(chunk[8..16].try_into().expect("eight bytes")),
             bytes: u32::from_le_bytes(chunk[16..20].try_into().expect("four bytes")),
             video_bytes: u32::from_le_bytes(chunk[20..24].try_into().expect("four bytes")),
@@ -3258,6 +3445,19 @@ pub fn decode_cluster_fragment_index_blob_v3(
     );
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
+    index.dv_refit_origin = header.dv_refit_origin;
+    if header
+        .dv_refit_proofs
+        .as_ref()
+        .is_some_and(|proofs| proofs.len() != index.rows.len())
+    {
+        return Err(StoreError::Task("fitted proof row count mismatch".into()));
+    }
+    index.dv_refit_proofs = header.dv_refit_proofs;
+    index.dv_refit_cadence = header.dv_refit_cadence;
+    index
+        .restore_landing_composition_offsets(header.landing_composition_offsets)
+        .map_err(|error| StoreError::Task(error.into()))?;
     let observed = cluster_fragment_index_output_identity(
         &index,
         &header.source_sha256,
@@ -3500,6 +3700,7 @@ mod tests {
             90_000,
             vec![IndexRow {
                 dts: 12,
+                first_cto: None,
                 duration: 3_003,
                 bytes: 45,
                 video_bytes: 31,
@@ -3543,6 +3744,7 @@ mod tests {
             90_000,
             vec![IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 90000,
                 bytes: 100,
                 video_bytes: 90,
@@ -3597,6 +3799,7 @@ mod tests {
     fn blob_bytes_ignore_file_specific_legacy_identity() {
         let row = IndexRow {
             dts: 12,
+            first_cto: None,
             duration: 3_003,
             bytes: 45,
             video_bytes: 31,
@@ -3627,6 +3830,7 @@ mod tests {
             90_000,
             vec![IndexRow {
                 dts: 12,
+                first_cto: None,
                 duration: 3_003,
                 bytes: 45,
                 video_bytes: 31,
@@ -3670,6 +3874,140 @@ mod tests {
                 pipeline_sha256: digest('b'),
             }
         );
+    }
+
+    #[test]
+    fn fitted_clock_and_proofs_roundtrip_both_blob_formats_and_bind_output_identity() {
+        use crate::segplan::{refit_proof::FittedFragmentProof, DvRefitCadence, DvRefitOrigin};
+        let source = digest('a');
+        let semantic = digest('9');
+        let engine = codec_engine();
+        let mut index = codec_index();
+        let mut second = index.rows[0].clone();
+        second.dts += second.duration;
+        second.class = CutClass::Dirty;
+        index.rows.push(second);
+        index.dv_refit_origin = Some(DvRefitOrigin {
+            first_dts: -83,
+            first_pts: 0,
+            time_base_num: 1,
+            time_base_den: 1000,
+        });
+        let proof = |digit: char| {
+            serde_json::from_value::<FittedFragmentProof>(serde_json::json!(digit
+                .to_string()
+                .repeat(144)))
+            .expect("typed v4 coded/cadence proof")
+        };
+        index.dv_refit_proofs = Some(vec![proof('e'), proof('f')]);
+        index.dv_refit_cadence = Some(DvRefitCadence {
+            minimum_interval_ticks: 41,
+            sample_count: 24,
+        });
+        let output = cluster_fragment_index_output_identity(&index, &source, &semantic)
+            .expect("fitted output identity");
+
+        let legacy = encode_cluster_fragment_index_blob(&index, &source, &engine.pipeline_sha256)
+            .expect("v2 preserves optional fitted metadata");
+        let current = encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &engine)
+            .expect("v3 preserves optional fitted metadata");
+        let decoded = [
+            decode_cluster_fragment_index_blob(&legacy, &source, &engine.pipeline_sha256)
+                .expect("v2 fitted roundtrip"),
+            decode_cluster_fragment_index_blob_v3(&current, &source, &output)
+                .expect("v3 fitted roundtrip")
+                .index,
+        ];
+        let mut without_cadence = index.clone();
+        without_cadence.dv_refit_cadence = None;
+        let legacy_output =
+            cluster_fragment_index_output_identity(&without_cadence, &source, &semantic)
+                .expect("v3 output identity without cadence");
+        assert_ne!(legacy_output, output);
+        let legacy_v3 =
+            encode_cluster_fragment_index_blob_v3(&without_cadence, &source, &semantic, &engine)
+                .expect("v3 encoding without cadence");
+        assert!(
+            decode_cluster_fragment_index_blob_v3(&legacy_v3, &source, &legacy_output)
+                .expect("legacy v3 roundtrip")
+                .index
+                .dv_refit_cadence
+                .is_none()
+        );
+        assert!(decode_cluster_fragment_index_blob_v3(&current, &source, &legacy_output).is_err());
+        for restored in decoded {
+            assert_eq!(restored.rows, index.rows);
+            assert_eq!(restored.dv_refit_origin, index.dv_refit_origin);
+            assert_eq!(restored.dv_refit_proofs, index.dv_refit_proofs);
+            assert_eq!(restored.verified_refit_cadence(), index.dv_refit_cadence);
+            assert_eq!(
+                cluster_fragment_index_output_identity(&restored, &source, &semantic)
+                    .expect("restored fitted identity"),
+                output
+            );
+        }
+
+        let mut invalid_cadence = index.clone();
+        invalid_cadence
+            .dv_refit_cadence
+            .as_mut()
+            .expect("portable cadence fixture")
+            .minimum_interval_ticks = 0;
+        assert!(encode_cluster_fragment_index_blob(
+            &invalid_cadence,
+            &source,
+            &engine.pipeline_sha256
+        )
+        .is_err());
+
+        assert!(encode_cluster_fragment_index_blob_v3(
+            &invalid_cadence,
+            &source,
+            &semantic,
+            &engine
+        )
+        .is_err());
+
+        let mut changed = index.clone();
+        changed.dv_refit_proofs.as_mut().expect("fitted proofs")[0] = proof('8');
+        assert_ne!(
+            cluster_fragment_index_output_identity(&changed, &source, &semantic)
+                .expect("changed proof identity"),
+            output
+        );
+        let changed_blob =
+            encode_cluster_fragment_index_blob_v3(&changed, &source, &semantic, &engine)
+                .expect("changed fitted metadata");
+        assert!(
+            decode_cluster_fragment_index_blob_v3(&changed_blob, &source, &output).is_err(),
+            "the prior output identity cannot authorize different fitted proofs"
+        );
+    }
+
+    #[test]
+    fn cluster_copy_composition_offsets_round_trip_and_bind_v3_identity() {
+        let source = digest('a');
+        let semantic = digest('9');
+        let engine = codec_engine();
+        let mut index = codec_index();
+        let without_clock = cluster_fragment_index_output_identity(&index, &source, &semantic)
+            .expect("proofless identity");
+        index.rows[0].first_cto = Some(-3_328);
+        let v2 = encode_cluster_fragment_index_blob(&index, &source, &engine.pipeline_sha256)
+            .expect("v2 clock encode");
+        let copy = decode_cluster_fragment_index_blob(&v2, &source, &engine.pipeline_sha256)
+            .expect("v2 clock decode");
+        assert_eq!(copy.rows, index.rows);
+
+        let output = cluster_fragment_index_output_identity(&index, &source, &semantic)
+            .expect("clock identity");
+        assert_ne!(output, without_clock);
+        let v3 = encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &engine)
+            .expect("v3 clock encode");
+        let copy =
+            decode_cluster_fragment_index_blob_v3(&v3, &source, &output).expect("v3 clock decode");
+        assert_eq!(copy.index.rows, index.rows);
+        assert!(decode_cluster_fragment_index_blob_v3(&v3, &source, &without_clock).is_err());
     }
 
     #[test]

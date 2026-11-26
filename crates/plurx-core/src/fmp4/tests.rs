@@ -372,6 +372,69 @@ fn length_prefixed_hevc_nals(nals: &[&[u8]]) -> Vec<u8> {
     sample
 }
 
+#[test]
+fn base_layer_witness_matches_across_el_and_rpu_transformation() {
+    let picture = [38, 1, 0x80, 0x27];
+    let next_slice = [38, 1, 0, 0x15];
+    let changed_picture = [38, 1, 0x80, 0x2a];
+    let source = length_prefixed_hevc_nals(&[
+        &[70, 1, 0x50],
+        &picture,
+        &next_slice,
+        &[124, 1, 1, 2],
+        &[126, 1, 38, 1, 0x80],
+    ]);
+    let copy = length_prefixed_hevc_nals(&[&picture, &[124, 1, 3, 4], &next_slice]);
+    let changed = length_prefixed_hevc_nals(&[&changed_picture, &next_slice]);
+    let observed = hevc_base_layer_vcl_sha256(&source).expect("source picture witness");
+    assert_eq!(
+        observed,
+        hevc_base_layer_vcl_sha256(&copy).expect("copy picture witness")
+    );
+    assert_ne!(
+        observed,
+        hevc_base_layer_vcl_sha256(&changed).expect("different picture witness")
+    );
+    assert!(hevc_base_layer_vcl_sha256(&length_prefixed_hevc_nals(&[&next_slice])).is_err());
+    assert!(
+        hevc_base_layer_vcl_sha256(&length_prefixed_hevc_nals(&[&picture, &changed_picture]))
+            .is_err()
+    );
+}
+
+#[test]
+fn base_layer_clock_witness_matches_vcl_only_cbs_output() {
+    use sha2::{Digest, Sha256};
+    let first = [38, 1, 0x80, 0x27];
+    let next = [38, 1, 0, 0x15];
+    let source = length_prefixed_hevc_nals(&[
+        &[64, 1, 0x50],
+        &first,
+        &[124, 1, 1, 2],
+        &next,
+        &[126, 1, 38, 1, 0x80],
+    ]);
+    let expected = [&[0, 0, 0, 1][..], &first, &[0, 0, 1], &next].concat();
+    let digest: [u8; 32] = Sha256::digest(&expected).into();
+    assert_eq!(
+        hevc_cbs_base_layer_vcl_identity(&source).expect("complete picture"),
+        (digest, expected.len())
+    );
+    assert!(hevc_cbs_base_layer_vcl_identity(&length_prefixed_hevc_nals(&[&next])).is_err());
+    assert!(hevc_base_layer_vcl_sha256(&length_prefixed_hevc_nals(&[&next, &first])).is_err());
+    for invalid in [[36, 1, 0, 0x15], [38, 2, 0, 0x15]] {
+        assert!(
+            hevc_base_layer_vcl_sha256(&length_prefixed_hevc_nals(&[&first, &invalid])).is_err()
+        );
+    }
+    assert!(
+        hevc_cbs_base_layer_vcl_identity(&length_prefixed_hevc_nals(&[&[
+            38, 1, 0x80, 0, 0, 1, 0x27
+        ],]))
+        .is_err()
+    );
+}
+
 fn fragment_with_first_video_sample(track_id: u32, sample: Vec<u8>) -> Fragment {
     let size = sample.len() as u32;
     Fragment {

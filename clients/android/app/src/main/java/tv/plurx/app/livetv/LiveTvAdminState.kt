@@ -13,8 +13,8 @@ import tv.plurx.app.data.DeveloperReadiness
 import tv.plurx.app.data.Session
 
 /**
- * The server's Live TV settings as Settings → Live TV and Settings → Developer
- * both edit them. Load, save and the advisory reads have one owner, so moving a
+ * The server's Live TV settings as Settings → Live TV and the Playback
+ * display-cadence switch both edit them. Load, save and the advisory reads have one owner, so moving a
  * card from one screen to the other moves where it is drawn and nothing else:
  * the same requests, the same generation CAS, the same messages.
  *
@@ -38,7 +38,7 @@ enum class LiveTvAdminSurface(
         readyMessage = "The saved configuration is ready. Live TV is switched on or off under Enable Live TV on this screen (Settings → Live TV).",
         needsAttentionMessage = "Some checks need attention. They are advisory and never block the Enable Live TV switch on this screen (Settings → Live TV).",
     ),
-    Developer(
+    Playback(
         readsGuide = false,
         readsEnablePrerequisites = false,
         loadedMessage = "Settings loaded. The readiness rows are advisory and never change a switch.",

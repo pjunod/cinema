@@ -1029,7 +1029,8 @@ async fn cluster_vtt_into(
     use crate::subtitle_source::{Consumer, Live, Lookup, RepresentationFormat};
     use plurx_core::store::SubtitleSourceStamp;
 
-    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_enabled().await {
+    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_sources_enabled().await
+    {
         return Ok(false);
     }
     let (Some(store), Some(jobs)) = (access.store(), access.jobs()) else {
@@ -1826,7 +1827,7 @@ async fn ensure_burn_source_with(
                             MAX_BURN_BYTES,
                         )
                         .await
-                            && source.unchanged()
+                            && source.unchanged().await
                         {
                             #[cfg(test)]
                             note_burn_route(file.id, "store");
@@ -1848,7 +1849,7 @@ async fn ensure_burn_source_with(
                         {
                             #[cfg(test)]
                             note_burn_route(file.id, "store");
-                            if !source.unchanged() {
+                            if !source.unchanged().await {
                                 return Err("source changed during burn-track derivation".into());
                             }
                             return Ok(());
@@ -1878,7 +1879,7 @@ async fn ensure_burn_source_with(
             other => other?,
         }
     };
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err("source changed before burn sidecar attachment".into());
     }
     tokio::task::spawn_blocking(move || {
@@ -1948,7 +1949,8 @@ async fn cluster_wait_burn(
     use crate::subtitle_source::RepresentationFormat;
     use plurx_core::store::SubtitleSourceStamp;
 
-    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_enabled().await {
+    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_sources_enabled().await
+    {
         return Ok(StoredBurn::Extract);
     }
     let (Some(store), Some(jobs)) = (access.store(), access.jobs()) else {
@@ -2348,7 +2350,7 @@ async fn extract_burn_from_source(
             diagnostics.trim()
         ));
     }
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return Err("source changed during burn-track extraction".into());
     }
     Ok(())
@@ -2703,7 +2705,7 @@ async fn sparse_subtitle_input_optional(
             return None;
         }
     };
-    if !source.unchanged() {
+    if !source.unchanged().await {
         return None;
     }
     let mut input_args = vec!["-copyts".to_owned()];
@@ -3457,7 +3459,7 @@ pub(crate) async fn extract_vtt_window(
             diagnostics.trim()
         ));
     }
-    if !source.unchanged() || source.reopen(file).await.is_err() {
+    if !source.unchanged().await || source.reopen(file).await.is_err() {
         return Err("subtitle window source changed during extraction".to_owned());
     }
     if !diagnostics.trim().is_empty() {

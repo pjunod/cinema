@@ -1,5 +1,8 @@
 // Production children go through `process_control::spawn_job_owned`; see
 // clippy.toml.
+// Typed cluster capabilities deepen the existing source-worker Send proof.
+// Keep the proof enforced; allow the compiler to traverse the full type graph.
+#![recursion_limit = "256"]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 #![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
 
@@ -37,9 +40,12 @@ mod delivery;
 mod desktop_control;
 mod diagnostics;
 mod diagnostics_delivery;
+mod discovery;
 mod dv_disk;
+mod dv_refit_serving;
 #[cfg(unix)]
 mod dv_segment;
+mod dv_tools;
 mod dvpipe;
 mod ffmpeg;
 mod ffmpeg_support;
@@ -142,7 +148,7 @@ use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
-    connect_activated_store, select_daemon_store_observing, SelectedBackend, StartupClockObserver,
+    connect_activated_store, select_daemon_store_observing, SelectedBackend,
 };
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
@@ -166,6 +172,35 @@ use crate::state::{AppState, SystemInfo};
 pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     let root = std::fs::canonicalize(std::env::temp_dir())?;
     tempfile::tempdir_in(root)
+}
+
+/// A loopback node config for an in-process daemon test, and the HTTP socket
+/// its `server.bind` names.
+///
+/// Reading a port from a bound listener and dropping it lets any other socket
+/// on the host take that port before the server binds it again. Here nothing
+/// is dropped: the Raft and API sockets live in `config.cluster.listeners`,
+/// which lends them to every voter start, and the HTTP socket is returned for
+/// the test to serve on, through [`StartupObservationHttp::from_std_listener`]
+/// or by converting it for `axum::serve`. The join and artwork origins name
+/// the HTTP socket.
+#[cfg(test)]
+pub(crate) fn owned_loopback_config(
+    data_dir: &std::path::Path,
+) -> (plurx_core::config::Config, std::net::TcpListener) {
+    let http = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP port");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = data_dir.into();
+    config.server.bind = http.local_addr().expect("owned HTTP address");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    config.cluster.advertise_host = "localhost".into();
+    config.cluster.join_url = format!("http://{}", config.server.bind);
+    config.cluster.artwork_url = config.cluster.join_url.clone();
+    (config, http)
 }
 
 /// Create an executable test fixture (a script standing in for FFmpeg, a
@@ -442,7 +477,7 @@ enum Command {
     /// does and print its identity; exit 1 when this binary would refuse it or
     /// none is installed. The image build runs this, so an image cannot ship a
     /// bundle its own daemon rejects.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
@@ -715,7 +750,7 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
@@ -772,21 +807,16 @@ async fn dispatch(
             );
             Ok(())
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::DvHelperIdentity => {
-            #[cfg(target_os = "linux")]
-            {
-                match crate::vodencode::dv_runtime::installed_helper_identity().await {
-                    Ok(identity) => println!("{identity}"),
-                    Err(error) => {
-                        eprintln!("DV helper bundle refused: {error}");
-                        std::process::exit(1);
-                    }
+            match crate::dv_tools::installed_helper_identity().await {
+                Ok(identity) => println!("{identity}"),
+                Err(error) => {
+                    eprintln!("DV helper bundle refused: {error}");
+                    std::process::exit(1);
                 }
-                Ok(())
             }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("DV helper bundles are supported only on Linux")
+            Ok(())
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {
@@ -1933,16 +1963,16 @@ async fn run(config: Config) -> anyhow::Result<()> {
     let desktop = desktop_control::DesktopControl::from_environment()?;
 
     let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
-    let mut selected =
-        match select_daemon_store_observing(&config, Some(observation.as_ref())).await {
-            Ok(selected) => selected,
-            Err(error) => {
-                observation.stop_and_drain().await;
-                return Err(error).with_context(|| {
-                    format!("selecting store in {}", config.storage.data_dir.display())
-                });
-            }
-        };
+    let clock_observer = cluster::StartupClockAdapter(observation.as_ref());
+    let mut selected = match select_daemon_store_observing(&config, Some(&clock_observer)).await {
+        Ok(selected) => selected,
+        Err(error) => {
+            observation.stop_and_drain().await;
+            return Err(error).with_context(|| {
+                format!("selecting store in {}", config.storage.data_dir.display())
+            });
+        }
+    };
     // Which backend is serving is not otherwise observable. A recovery boot
     // binds and serves normally on unreplicated SQLite, so a persistently
     // failing activation otherwise looks only like a flapping container, with
@@ -1975,8 +2005,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
         let store = Arc::clone(&selected.store);
-        let replication = selected.replication_monitor();
-        let membership = selected.membership_manager();
+        let cluster_parts = cluster::ClusterParts::of(&selected);
         let catalogue = selected.catalogue_reader();
         let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
@@ -1999,13 +2028,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let parts = Boot {
             source_activation_at_boot: Some(source_layout_ready),
             store,
-            replication,
-            membership,
+            cluster_parts,
             catalogue,
             applied,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
-            backup_client: selected.local_client(),
+            backup_source: selected.local_client().map(crate::cluster::backup_source),
             dirs,
             encoder_caps,
             system,
@@ -2060,13 +2088,12 @@ struct Boot {
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
     applied: plurx_core::store::AppliedView,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    cluster_parts: cluster::ClusterParts,
     identity: plurx_core::cluster::ClusterIdentity,
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    backup_source: Option<crate::cluster::BackupSource>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
     system: SystemInfo,
@@ -2109,6 +2136,15 @@ impl StartupObservationHttp {
         let mut owner = Self::new(listener.local_addr()?);
         owner.prebound = tokio::sync::Mutex::new(Some(listener));
         Ok(owner)
+    }
+
+    /// [`Self::from_listener`] for a socket bound outside a runtime, such as
+    /// the one [`owned_loopback_config`] returns. Call it inside the runtime
+    /// that will serve the socket.
+    #[cfg(test)]
+    fn from_std_listener(listener: std::net::TcpListener) -> std::io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        Self::from_listener(tokio::net::TcpListener::from_std(listener)?)
     }
 
     async fn stop_probe(&self) {
@@ -2277,10 +2313,10 @@ impl Drop for StartupObservationHttp {
     }
 }
 
-impl StartupClockObserver for StartupObservationHttp {
+impl cluster::StartupClock for StartupObservationHttp {
     fn start(
         &self,
-        membership: plurx_core::cluster::membership::MembershipManager,
+        clock: cluster::ClockOperations,
         node_id: String,
     ) -> std::pin::Pin<
         Box<
@@ -2304,7 +2340,7 @@ impl StartupClockObserver for StartupObservationHttp {
                     .await
                     .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?,
             };
-            let observer = crate::clock_offset::ClockObserver::new(membership.clone());
+            let observer = crate::clock_offset::ClockObserver::new(clock.clone());
             let pending = axum::Router::new()
                 .route(
                     http::internal_clock::PATH,
@@ -2312,11 +2348,14 @@ impl StartupClockObserver for StartupObservationHttp {
                 )
                 .route("/readyz", axum::routing::get(startup_pending_readyz))
                 .with_state(http::internal_clock::ObservationContext {
-                    membership: membership.clone(),
+                    clock,
                     node_id,
                     observer: observer.clone(),
                 })
-                .fallback(startup_pending);
+                .fallback(startup_pending)
+                .layer(axum::middleware::from_fn(
+                    crate::cluster::calls::auth_refusal_response,
+                ));
             *self.router.write().map_err(|_| {
                 plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
             })? = pending;
@@ -2411,13 +2450,12 @@ async fn boot_observing(
     let Boot {
         source_activation_at_boot,
         store,
-        replication,
-        membership,
+        cluster_parts,
         catalogue,
         applied,
         identity,
         credential_key,
-        backup_client,
+        backup_source,
         dirs,
         encoder_caps,
         system,
@@ -2448,9 +2486,8 @@ async fn boot_observing(
         node_id.clone(),
         instance_id.clone(),
         credential_key,
-        backup_client,
-        replication,
-        membership,
+        backup_source,
+        cluster_parts,
         catalogue,
         applied,
         store,
@@ -2474,30 +2511,22 @@ async fn boot_observing(
             anyhow::anyhow!("startup observation owner disappeared before activation")
         })?;
         anyhow::ensure!(
-            observer.belongs_to(&state.membership),
+            observer.belongs_to(&state.cluster.operations().clock()),
             "foreign startup clock owner"
         );
         state.clock_observer = observer;
     }
-    state
-        .membership
-        .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
-    state
-        .membership
-        .publish_ingress_custody_boot()
+    let sharing_boot = state.cluster.sharing_boot();
+    sharing_boot.record_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
+    sharing_boot
+        .announce_custody_boot()
         .await
         .context("publishing actual accepted-driver custody boot")?;
-    state
-        .membership
-        .prepare_purpose_master(purpose_master)
+    sharing_boot
+        .qualify_purpose_master(purpose_master)
         .await
         .context("qualifying coordinated sharing purpose master")?;
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        state.membership.coordinate_purpose_keys(),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(5), sharing_boot.coordinate_purposes()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(code = error.code(), "sharing purpose factory is pending"),
         Err(_) => tracing::warn!(code = "deadline", "sharing purpose factory is pending"),
@@ -2554,8 +2583,7 @@ async fn boot_observing(
     let telemetry_store = Arc::clone(&state.store);
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
-    let serving_shutdown = state.serving.clone();
-    let membership_shutdown = state.membership.clone();
+    let operations_shutdown = state.cluster.operations();
     // The database Raft core's own terminal state. A core that quit on a
     // fatal error (a full disk, a storage error, a panic) never serves again
     // in this process, so it resolves the same drain a signal does and the
@@ -2563,6 +2591,7 @@ async fn boot_observing(
     let raft_core_failure = state.cluster.core_failure();
     let raft_core_fatal = Arc::new(std::sync::OnceLock::<String>::new());
     let raft_core_fatal_drain = Arc::clone(&raft_core_fatal);
+    let discovery_standing = state.cluster.standing_watch();
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2610,7 +2639,13 @@ async fn boot_observing(
     trigger_shutdown_registration_failpoint("after-listener-bind");
     let discovery_node_id =
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
-    let mdns = start_discovery(&config, &instance_id, discovery_node_id, advertiser);
+    let mdns = start_discovery(
+        &config,
+        &instance_id,
+        discovery_node_id,
+        advertiser,
+        discovery_standing,
+    );
     let jellyfin = JellyfinStandardListener::open(
         config.server.jellyfin_bind(),
         &app,
@@ -2646,7 +2681,7 @@ async fn boot_observing(
         // (bounded at 10 s), and every replicated node stops campaigning, so
         // the drain's own writes go to the successor and the survivors never
         // wait out a timeout election. It never fails; the drain continues.
-        membership_shutdown.handoff_for_shutdown().await;
+        operations_shutdown.hand_off_leadership_for_stop().await;
         // One drain token for both causes: owners that must hand work back
         // before exit (shared session retirement) observe `state.shutdown`,
         // and a signal is as much a drain as a committed leave.
@@ -2658,9 +2693,7 @@ async fn boot_observing(
             .saturating_add(10_000)
             .try_into()
             .unwrap_or(u64::MAX);
-        let _ = serving_shutdown
-            .begin_restart_preparation_until(expires)
-            .await;
+        let _ = operations_shutdown.prepare_restart_fence(expires).await;
         crate::telemetry::drain_for_shutdown(&telemetry_store).await;
         if let Err(error) = live_tv_shutdown.shutdown().await {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2725,16 +2758,25 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    served?;
-    exit_after_drain(raft_core_fatal.get())
+    exit_after_drain(raft_core_fatal.get(), served.map(drop))
 }
 
-/// How a drained daemon ends: cleanly after a signal or a leave, with an
-/// error, and so a non-zero exit status, after its database Raft core died.
-fn exit_after_drain(raft_core_fatal: Option<&String>) -> anyhow::Result<()> {
+/// How a drained daemon ends: as serving ended after a signal or a leave,
+/// and with the dead core's verdict, so a non-zero exit status and a bounded
+/// store close, after its database Raft core died. The verdict wins over a
+/// serving error during that drain, which is logged: the core is the cause.
+fn exit_after_drain(
+    raft_core_fatal: Option<&String>,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
     match raft_core_fatal {
-        None => Ok(()),
-        Some(error) => Err(RaftCoreFatal(error.clone()).into()),
+        None => served,
+        Some(error) => {
+            if let Err(serving) = served {
+                tracing::error!(error = %format!("{serving:#}"), "serving also failed while a dead Raft core drained");
+            }
+            Err(RaftCoreFatal(error.clone()).into())
+        }
     }
 }
 
@@ -2976,24 +3018,32 @@ async fn bind_listener(bind: SocketAddr) -> anyhow::Result<tokio::net::TcpListen
 /// never connect — so nothing is advertised at all in that case. Both
 /// protocols are best-effort past that point: failing to join multicast must
 /// not take down the HTTP server.
-fn start_discovery(
+fn start_discovery<S: discovery::StandingSource>(
     config: &Config,
     instance_id: &str,
     node_id: Option<&str>,
     advertiser: MdnsAdvertiser,
-) -> Option<mdns_sd::ServiceDaemon> {
-    let lan_discovery = !config.server.bind.ip().is_loopback();
-    if let Some(gdm_port) = gdm_responder_port(lan_discovery, config.server.bind) {
-        // GDM keeps direct-connect Plex clients working. Bonjour is the native
-        // plurx contract used by the Apple apps.
-        spawn_gdm_responder(
-            config,
-            instance_id.to_owned(),
-            node_id.map(str::to_owned),
-            gdm_port,
-        );
+    standing: S,
+) -> Option<discovery::Owner> {
+    let lan = !config.server.bind.ip().is_loopback();
+    let gdm = gdm_responder_port(lan, config.server.bind).map(|port| discovery::Gdm {
+        instance_id: instance_id.to_owned(),
+        node_id: node_id.map(str::to_owned),
+        name: config.server.name.clone(),
+        http_port: config.server.bind.port(),
+        port,
+    });
+    if gdm.is_none() && (!lan || !mdns_advertising_enabled()) {
+        return None;
     }
-    start_bonjour(config, instance_id, node_id, advertiser, lan_discovery)
+    let config = config.clone();
+    let instance_id = instance_id.to_owned();
+    let node_id = node_id.map(str::to_owned);
+    Some(discovery::Owner::start(
+        standing,
+        move || start_bonjour(&config, &instance_id, node_id.as_deref(), advertiser, lan),
+        gdm,
+    ))
 }
 
 /// The native plurx discovery contract, which the Apple clients browse for.
@@ -3036,25 +3086,6 @@ fn start_bonjour(
             None
         }
     }
-}
-
-/// Answer Plex clients' GDM searches for as long as the server runs.
-///
-/// Best-effort by construction: a box where the multicast join is refused
-/// still serves HTTP, and the only trace is one warning.
-fn spawn_gdm_responder(
-    config: &Config,
-    instance_id: String,
-    node_id: Option<String>,
-    gdm_port: u16,
-) {
-    let name = config.server.name.clone();
-    let http_port = config.server.bind.port();
-    tokio::spawn(async move {
-        if let Err(e) = gdm_responder(instance_id, node_id, name, http_port, gdm_port).await {
-            tracing::warn!(error = %e, "GDM discovery responder unavailable");
-        }
-    });
 }
 
 /// Lay out the configured storage roots, and clear exactly the one directory
@@ -3300,6 +3331,7 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
+    seed_always_on_playback_settings(store).await?;
     // Representative comparisons run only on an explicit idle-node request.
     // A saved receipt is reusable only for this executable/fixture/driver set.
     let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
@@ -3344,6 +3376,7 @@ async fn probe_system(
         pacing: crate::ffmpeg::pacing_caps().await,
         dovi_rpu: crate::ffmpeg::has_dovi_rpu().await,
         dovi_reshape: crate::ffmpeg::has_dovi_reshape().await,
+        dovi_reshape_hardware: crate::ffmpeg::measure_dovi_reshape_hardware(&encoder_caps).await,
         dovi_passthrough: crate::ffmpeg::has_dovi_passthrough().await,
         hdr10_passthrough: crate::ffmpeg::has_hdr10_passthrough().await,
         hdr10_passthrough_qsv: if encoder_caps.qsv {
@@ -3399,6 +3432,7 @@ struct Measured {
     pacing: crate::ffmpeg::PacingCaps,
     dovi_rpu: bool,
     dovi_reshape: bool,
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     dovi_passthrough: bool,
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
@@ -3443,6 +3477,7 @@ fn system_info(
         pacing: measured.pacing,
         dovi_rpu: measured.dovi_rpu,
         dovi_reshape: measured.dovi_reshape,
+        dovi_reshape_hardware: measured.dovi_reshape_hardware,
         dovi_passthrough: measured.dovi_passthrough,
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
@@ -3520,6 +3555,48 @@ async fn seed_switch_settings(store: &Arc<dyn plurx_core::store::Store>) -> anyh
     Ok(())
 }
 
+/// The switches this build always treats as on, and nothing in it reads.
+/// Binaries from before 2026-11-18 still read them (and refuse display-aware
+/// control while `playback.display_aware_auto` is absent or `0`), so during a
+/// rolling deploy the stored value has to say on for both builds to agree.
+const ALWAYS_ON_PLAYBACK_SETTINGS: [&str; 5] = [
+    "playback.display_aware_auto",
+    "playback.auto_abr",
+    "playback.network_priors",
+    "transcode.content_aware_encoding",
+    keys::VOD_ROLLING_RETENTION,
+];
+
+/// Marks that [`seed_always_on_playback_settings`] has committed. Written in
+/// the same batch as the switches, so a node that dies between the two
+/// leaves nothing half-done.
+const ALWAYS_ON_PLAYBACK_SETTINGS_SEEDED: &str = "migrations.always_on_playback_2026_11_18";
+
+/// Write `1` to every [`ALWAYS_ON_PLAYBACK_SETTINGS`] key once per cluster,
+/// overwriting an operator's old `0`: the switch it named no longer exists.
+/// Idempotent: the marker commits with the values in one batch, and every
+/// later boot (any node) sees it and writes nothing. Two nodes booting at
+/// once both write the same values, which is harmless, so this needs no
+/// leader.
+async fn seed_always_on_playback_settings(
+    store: &Arc<dyn plurx_core::store::Store>,
+) -> anyhow::Result<()> {
+    if store
+        .get_setting(ALWAYS_ON_PLAYBACK_SETTINGS_SEEDED)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let mut values = ALWAYS_ON_PLAYBACK_SETTINGS
+        .iter()
+        .map(|key| (*key, "1"))
+        .collect::<Vec<_>>();
+    values.push((ALWAYS_ON_PLAYBACK_SETTINGS_SEEDED, "1"));
+    store.put_settings(&values).await?;
+    Ok(())
+}
+
 /// The encoder preference this boot runs under.
 ///
 /// `PLURX_HWACCEL` (documented since Phase 2, previously read by nothing) seeds
@@ -3564,9 +3641,8 @@ fn build_state(
     node_id: String,
     cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    backup_source: Option<crate::cluster::BackupSource>,
+    cluster_parts: cluster::ClusterParts,
     catalogue: plurx_core::store::CatalogueReader,
     applied: plurx_core::store::AppliedView,
     store: Arc<dyn plurx_core::store::Store>,
@@ -3584,8 +3660,7 @@ fn build_state(
             trusted_proxies: config.server.trusted_proxies.clone(),
             scan_prune_percent: config.storage.scan_prune_percent,
             credential_key,
-            replication,
-            membership,
+            cluster_parts,
             cluster_id,
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
@@ -3598,7 +3673,7 @@ fn build_state(
             },
             data_dir: config.storage.data_dir.clone(),
             credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
-            backup_client,
+            backup_source,
         },
         store,
         dirs,
@@ -3734,19 +3809,14 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
-    let replication = state.replication.clone();
-    tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
+    state
+        .cluster
+        .spawn_fence_and_metrics(background_shutdown.clone());
     tokio::spawn(
-        state
-            .serving
-            .clone()
-            .monitor_loop(background_shutdown.clone()),
+        std::sync::Arc::clone(&state.transcode)
+            .serving_fence_loop(state.cluster.subscribe_authority()),
     );
-    tokio::spawn(
-        std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
-    );
-    state.membership.register_media_relay_acquisition();
-    tokio::spawn(state.membership.clone().heartbeat_loop());
+    state.cluster.start_heartbeat_with_relay();
     tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
     tokio::spawn(
         std::sync::Arc::clone(&state.media_pool)
@@ -3799,7 +3869,7 @@ fn spawn_background_loops(
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be
     // possible, so this runs whether or not a removal is in progress.
-    tokio::spawn(state.membership.clone().offline_source_probe_loop());
+    state.cluster.spawn_source_probe_answers();
     // Artwork filenames are replicated facts, but their bytes are node-local.
     // Reconcile them independently of traffic so every voter is ready to
     // become the public leader before a failover actually happens.
@@ -3821,10 +3891,10 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).settings_observer_loop(background_shutdown.clone()),
     );
-    tokio::spawn(
-        std::sync::Arc::clone(&state.live_tv)
-            .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
-    );
+    tokio::spawn(std::sync::Arc::clone(&state.live_tv).guide_refresh_loop(
+        state.cluster.subscribe_authority(),
+        background_shutdown.clone(),
+    ));
     // Running Live TV survives a loss of serving authority inside the session
     // grace, as rolling and progressive playback do; this loop decides when a
     // loss has outlasted it.
@@ -3832,7 +3902,7 @@ fn spawn_background_loops(
         state
             .live_tv
             .authority()
-            .serving_fence_loop(state.serving.subscribe()),
+            .serving_fence_loop(state.cluster.subscribe_authority()),
     );
     // One queue, one worker: the recording and reminder loops enqueue and
     // never await the network, so an unreachable endpoint cannot delay a
@@ -3873,7 +3943,8 @@ fn spawn_background_loops(
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.
     tokio::spawn(
-        std::sync::Arc::clone(&state.offline).run(std::sync::Arc::new(state.membership.clone())),
+        std::sync::Arc::clone(&state.offline)
+            .run(std::sync::Arc::new(state.cluster.jobs().clone())),
     );
 
     // What the libraries' storage reads at. Deliberately after the listener
@@ -3902,7 +3973,7 @@ fn spawn_background_loops(
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)
-            .sync_loop(std::sync::Arc::new(state.membership.clone())),
+            .sync_loop(std::sync::Arc::new(state.cluster.jobs().clone())),
     );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
@@ -3916,7 +3987,7 @@ fn spawn_background_loops(
             tokio::spawn(std::sync::Arc::clone(&state.watched).run(
                 crate::watched::DrainAuthority {
                     coordinator,
-                    authority: std::sync::Arc::new(state.membership.clone()),
+                    authority: std::sync::Arc::new(state.cluster.jobs().clone()),
                     policy: crate::watched::WatchedLeasePolicy::PRODUCTION,
                 },
             ));
@@ -3961,7 +4032,7 @@ async fn serve(
     jellyfin: JellyfinStandardListener,
     https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
-    mdns: Option<mdns_sd::ServiceDaemon>,
+    mdns: Option<discovery::Owner>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
@@ -3982,7 +4053,7 @@ async fn serve_observed(
     jellyfin: JellyfinStandardListener,
     https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
-    mdns: Option<mdns_sd::ServiceDaemon>,
+    mdns: Option<discovery::Owner>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     let main = owner.serve_normal(app, shutdown).await;
@@ -4105,9 +4176,20 @@ impl Drop for JellyfinStandardListener {
 
 async fn drain_serving_state(
     progress: Arc<crate::progress::ProgressCoalescer>,
-    mdns: Option<mdns_sd::ServiceDaemon>,
+    mdns: Option<discovery::Owner>,
 ) -> anyhow::Result<()> {
-    match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
+    // The progress flush and the Bonjour withdrawal are independent, so they
+    // drain together and the stop takes the longer of the two, not the sum.
+    let withdrawn = async {
+        if let Some(discovery) = mdns {
+            discovery.shutdown().await;
+        }
+    };
+    let ((), flushed) = tokio::join!(
+        withdrawn,
+        tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain())
+    );
+    match flushed {
         Ok(Ok(flushed)) if flushed > 0 => {
             tracing::info!(
                 flushed,
@@ -4123,11 +4205,6 @@ async fn drain_serving_state(
                 after = ?PROGRESS_DRAIN_TIMEOUT,
                 "timed out flushing coalesced playback progress during shutdown"
             );
-        }
-    }
-    if let Some(mdns) = mdns {
-        if let Err(error) = mdns.shutdown() {
-            tracing::warn!(%error, "Bonjour discovery shutdown failed");
         }
     }
     Ok(())
@@ -4608,35 +4685,7 @@ async fn advertise_with(
     retry_after: Duration,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    let (base, port, info_url) = discovery_endpoints(server)?;
-    let client = discovery_client()?;
-    tokio::pin!(shutdown);
-
-    let Some(info) =
-        await_discovery_identity(&client, &base, info_url, retry_after, &mut shutdown).await
-    else {
-        return Ok(());
-    };
-
-    let host_name = system_hostname();
-    let lan_address = primary_lan_address();
-    let node_id = info.cluster_advertisement.then_some(info.node_id.as_str());
-    let name = discovery_name(&info.name, host_name.as_deref(), lan_address.as_ref());
-    let instance_name = instance_label(&name, node_id);
-    let daemon = advertiser(
-        &info.instance_id,
-        &name.label,
-        &instance_name,
-        node_id,
-        SocketAddr::from(([0, 0, 0, 0], port)),
-        &info.version,
-    )?;
-    tracing::info!(server = %base, "host Bonjour discovery companion ready");
-    (&mut shutdown).await;
-    daemon
-        .shutdown()
-        .context("shutting down host Bonjour advertiser")?;
-    Ok(())
+    discovery::companion(server, advertiser, retry_after, shutdown).await
 }
 
 /// Console logging for the discovery companion. It has no admin UI behind it,
@@ -4654,10 +4703,13 @@ fn init_companion_logging() {
 ///
 /// Bounded, because the companion's whole loop is "ask again in two seconds":
 /// a request with no timeout against a half-open connection would hang the
-/// retry loop forever and the server would never be advertised.
+/// retry loop forever and the server would never be advertised. It follows
+/// no redirect: the companion asks the server's own HTTP port directly, so a
+/// redirect is a misconfiguration to report, not a hop to take.
 fn discovery_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("building discovery HTTP client")
 }
@@ -4700,22 +4752,30 @@ async fn await_discovery_identity(
 ) -> Option<DiscoveryServerInfo> {
     let mut failed_attempts = 0_u64;
     loop {
-        match fetch_discovery_server_info(client, info_url.clone()).await {
-            Ok(info) => return Some(info),
-            Err(error) => {
-                failed_attempts += 1;
-                if should_log_wait(failed_attempts) {
-                    tracing::warn!(
-                        %error,
-                        server = %base,
-                        "waiting for server before advertising Bonjour"
-                    );
+        let observed = tokio::select! {
+            biased;
+            () = &mut *shutdown => return None,
+            observed = async {
+                if !discovery::eligibility(client, base).await?.advertise {
+                    return Ok::<_, anyhow::Error>(None);
                 }
-                tokio::select! {
-                    _ = &mut *shutdown => return None,
-                    _ = tokio::time::sleep(retry_after) => {}
+                fetch_discovery_server_info(client, info_url.clone()).await.map(Some)
+            } => observed,
+        };
+        match observed {
+            Ok(Some(info)) => return Some(info),
+            Ok(None) => failed_attempts = 0,
+            Err(error) => {
+                failed_attempts = failed_attempts.saturating_add(1);
+                if should_log_wait(failed_attempts) {
+                    tracing::warn!(%error, server = %base, "waiting for server before advertising Bonjour");
                 }
             }
+        }
+        tokio::select! {
+            biased;
+            () = &mut *shutdown => return None,
+            () = tokio::time::sleep(retry_after) => {}
         }
     }
 }
@@ -4996,15 +5056,24 @@ fn first_version_line(stdout: &[u8]) -> Option<String> {
 /// GDM discovery responder: answers Plex clients' multicast `M-SEARCH` on the
 /// LAN (docs/CLIENTS.md §3). Multicast is TTL-scoped to the local network, so
 /// this never answers WAN queries (avoids GDM/SSDP reflection abuse).
-async fn gdm_responder(
+async fn gdm_responder<S: discovery::StandingSource>(
     instance_id: String,
     node_id: Option<String>,
     name: String,
     http_port: u16,
     gdm_port: u16,
+    standing: S,
 ) -> anyhow::Result<()> {
     let socket = gdm_socket(gdm_port).await?;
-    gdm_serve(&socket, &instance_id, node_id.as_deref(), &name, http_port).await
+    gdm_serve(
+        &socket,
+        &instance_id,
+        node_id.as_deref(),
+        &name,
+        http_port,
+        &standing,
+    )
+    .await
 }
 
 /// Bind the GDM port and join the group Plex clients search on.
@@ -5034,12 +5103,13 @@ async fn gdm_socket(gdm_port: u16) -> anyhow::Result<tokio::net::UdpSocket> {
 /// joining a multicast group: what matters here is that only a real `M-SEARCH`
 /// draws a reply. Answering anything else would turn the server into an
 /// amplification reflector for whatever else arrives on the port.
-async fn gdm_serve(
+async fn gdm_serve<S: discovery::StandingSource>(
     socket: &tokio::net::UdpSocket,
     instance_id: &str,
     node_id: Option<&str>,
     name: &str,
     http_port: u16,
+    standing: &S,
 ) -> anyhow::Result<()> {
     // Plex clients parse what GDM advertises, so this stays bare semver — the
     // git build stamp would not survive their version comparisons.
@@ -5047,7 +5117,7 @@ async fn gdm_serve(
     let mut buf = [0u8; 1024];
     loop {
         let (n, addr) = socket.recv_from(&mut buf).await?;
-        if plurx_compat_plex::gdm::is_search(&buf[..n]) {
+        if discovery::visible(standing.current()) && plurx_compat_plex::gdm::is_search(&buf[..n]) {
             let resp = plurx_compat_plex::gdm::response_for(
                 &plurx_compat_plex::gdm::Advertisement {
                     instance_id,

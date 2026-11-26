@@ -1,6 +1,5 @@
 # Every class in the surface contract now has a way to be drawn
 
-Build: 151
 Issue: #278
 
 Build 147 landed the Apple presenter; an audit found that parts of it could

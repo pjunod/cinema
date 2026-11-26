@@ -379,8 +379,33 @@ impl SourceOwnedRouteAuthority {
 }
 pub enum SourceOwnedRouteAuthorityRead {
     Ready(Box<SourceOwnedRouteAuthority>),
-    Unavailable,
+    Unavailable(SourceRouteUnavailable),
     Capacity,
+}
+
+/// Why a Source owned-route or publication authority could not be read now.
+/// Decided where each refusal is, in the Store: a caller that answers a live
+/// viewer retries the ones that pass and ends the session over the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceRouteUnavailable {
+    /// The binding, route, lease, grant or intent does not authorize this
+    /// owner: the session is over for it.
+    Refused,
+    /// This node's membership write guard is stale; the next observation
+    /// refreshes it.
+    MembershipStale,
+    /// Every attempt lost the lease-revision race to this same owner's other
+    /// renewals: contention, not a change of authority.
+    RaceExhausted,
+    /// The route exists and is this owner's but is not published yet.
+    NotPublished,
+}
+impl SourceRouteUnavailable {
+    /// Whether a caller may expect the same read to succeed shortly.
+    #[must_use]
+    pub fn passes(self) -> bool {
+        !matches!(self, Self::Refused)
+    }
 }
 
 #[cfg(all(test, feature = "hiqlite-store"))]
@@ -487,6 +512,6 @@ impl SourcePublicationAuthority {
 }
 pub enum SourcePublicationAuthorityRead {
     Ready(Box<SourcePublicationAuthority>),
-    Unavailable,
+    Unavailable(SourceRouteUnavailable),
     Capacity,
 }

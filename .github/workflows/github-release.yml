@@ -404,7 +404,13 @@ jobs:
           run_in() {
             local image=$1 script=$2
             echo "::group::$image"
+            # plurxd refuses to serve on Linux without the actual host's
+            # identity bound read-only (source_custody/recovery.rs). The
+            # packaged unit supplies it with BindReadOnlyPaths; this smoke
+            # starts plurxd without systemd, so it binds the same two files.
             docker run --rm --volume "$PWD/dist:/dist:ro" \
+              --mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly \
+              --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly \
               --env EXPECT_VERSION --env DEB --env RPM \
               "$image" bash -euo pipefail -c "$package_manager"$'\n'"$script"
             echo "::endgroup::"
@@ -496,7 +502,7 @@ jobs:
         # Built natively and run on Apple Silicon; the archive job packages it.
         include:
           - arch: arm64
-            runner: macos-15
+            runner: macos-latest
             target: aarch64-apple-darwin
     env:
       PLURX_BUILD_REF: ${{ needs.resolve.outputs.build_ref }}
@@ -562,7 +568,7 @@ jobs:
     name: macOS arm64 archive
     needs: [resolve, macos_build]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
@@ -632,7 +638,7 @@ jobs:
     name: sign and notarize the macOS install archive
     needs: [resolve, macos]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 60
     environment: macos-release-signing
     env:

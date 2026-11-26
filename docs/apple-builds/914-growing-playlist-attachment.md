@@ -1,6 +1,5 @@
 # Prepare growing playlists before native attachment
 
-Build: 238
 Issue: #914
 
 Growing playback now waits for the first successful playlist response before

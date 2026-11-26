@@ -312,9 +312,9 @@ primary and the M3 Max MacBook Pro is standby, as described in
 [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md).
 Every Apple job verifies Xcode 27.2 build 27B52 and XcodeGen 2.46.0 before it
 builds. The full `ci.yml` lane also verifies the iOS 27.2 and tvOS 27.2 SDKs,
-the iOS 26.5 runtime build 23F77 and the tvOS 26.5 runtime build 23L470, before
-it boots a simulator. That makes
-toolchain drift fail in seconds instead of paying for a partial build. The
+then resolves the available standard simulator for each active SDK before
+booting any simulator. The tvOS journey runner uses the same selection and
+records the runtime in its receipt. The
 runner creates uniquely named iPhone, iPad, and Apple TV devices for each run
 and deletes them in an `always()` cleanup step; persistent runner state is not
 part of the test contract.

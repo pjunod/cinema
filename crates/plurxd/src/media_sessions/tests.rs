@@ -315,12 +315,15 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         typeless_playlist: true,
         library_channel: None,
         request: SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1336,6 +1339,7 @@ fn terminal_relay_response(
             owner_epoch: 1,
         },
         effective_selection: crate::playback_control::EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 1080,
@@ -1627,10 +1631,12 @@ fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
     vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
         request: SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1784,10 +1790,12 @@ fn the_takeover_recipe_validator_refuses_vod() {
     let vod = RemoteStartRequest {
         request: SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,

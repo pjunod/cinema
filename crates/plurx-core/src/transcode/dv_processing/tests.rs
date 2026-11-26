@@ -833,6 +833,7 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
         max_l1_pq: Some(4095),
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
+        el_kind: crate::scan::dv_title::TitleConstant::Unknown,
     };
     let mut master = plan(DvDestination::Hdr10);
     let master_export = DvExportPolicy::PqBilinearYuv420p10V1 { raster: (64, 64) };
@@ -890,6 +891,7 @@ fn resolved_source_floor_is_the_completed_plan_black_level_and_semantic_identity
             index: 0,
             custom_xy: None,
         }),
+        el_kind: crate::scan::dv_title::TitleConstant::Unknown,
     };
     let DvDisplayTargetChoice::Target(proposal) =
         DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
@@ -1509,6 +1511,7 @@ fn completed_base_window_receipt_keeps_display_mapping_and_source_operations() {
                     max_l1_pq: Some(4095),
                     mastering_luminance: TitleConstant::Unknown,
                     mastering_primaries: TitleConstant::Unknown,
+                    el_kind: crate::scan::dv_title::TitleConstant::Unknown,
                 }),
             )
             .expect("title")
@@ -1654,6 +1657,43 @@ fn common_source_origin_preserves_absolute_keys_across_film_windows() {
             );
         }
     }
+}
+
+#[test]
+fn observed_resume_clock_recovers_the_actual_first_frame_and_requires_a_complete_grid() {
+    let grid = super::super::VodFrameGrid::new(24_000, 1_001).expect("NTSC");
+    let origin = DvSourceOrigin::observed_common(
+        DvTimestamp::new(125, 1000).expect("source timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(125_000),
+    )
+    .expect("held source origin");
+    let first_frame = 14_177;
+    let keys: Vec<_> = (first_frame..first_frame + 92)
+        .map(|frame| DvFrameKey {
+            absolute_video_index: 2,
+            continuity_epoch: 11,
+            pts: DvTimestamp::new(125 + (frame * 1001 + 12) / 24, 1000)
+                .expect("quantized source PTS"),
+            display_ordinal: 0,
+        })
+        .collect();
+
+    assert_eq!(
+        dv_observed_source_grid_start(&keys, (1, 1000), origin, grid).expect("resume landing"),
+        u64::try_from(first_frame).expect("positive absolute frame")
+    );
+    let mut incorrect = keys.clone();
+    incorrect.remove(DV_MAX_CONTROL_FRAMES);
+    assert!(dv_observed_source_grid_start(&incorrect, (1, 1000), origin, grid).is_err());
+    let mut duplicate = keys.clone();
+    duplicate[DV_MAX_CONTROL_FRAMES] = duplicate[DV_MAX_CONTROL_FRAMES - 1].clone();
+    assert!(dv_observed_source_grid_start(&duplicate, (1, 1000), origin, grid).is_err());
+    let mut stale = keys.clone();
+    stale[DV_MAX_CONTROL_FRAMES..]
+        .iter_mut()
+        .for_each(|key| key.continuity_epoch += 1);
+    assert!(dv_observed_source_grid_start(&stale, (1, 1000), origin, grid).is_err());
+    assert!(dv_observed_source_grid_start(&keys, (1, 24), origin, grid).is_err());
 }
 
 #[test]
@@ -2018,6 +2058,7 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: crate::scan::dv_title::TitleConstant::Unknown,
         }))
         .expect("SDR target")
     else {

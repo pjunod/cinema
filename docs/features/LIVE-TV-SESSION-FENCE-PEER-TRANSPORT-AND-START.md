@@ -55,6 +55,15 @@ it.
   would drop `LiveTvProcess` (child + job + encoder admission) with the
   session. Planned against the assessment's version instead.
 
+
+> **Superseded in part (cluster facade slice 5, 2026-11).** `LiveTvPeers`,
+> its five-second per-owner address memory and the
+> `plurx_live_tv_owner_peer_total` metric no longer exist in source or on
+> `/metrics`. Live TV owner calls now go through the cluster facade's shared
+> peer transport (`crates/plurxd/src/cluster.rs`, `cluster::calls`). The
+> sections below that describe them are history. See
+> [CLUSTER-FACADE-SLICE-5-BUILD.md](../cluster/CLUSTER-FACADE-SLICE-5-BUILD.md).
+
 ## 1. Objective
 
 1. **Fence (L2).** On the tuner owner, live sessions share one bounded,
@@ -531,6 +540,8 @@ Acceptance: `cargo test -p plurxd fence` green; `make unit` green;
 (feature-gated, not in the fast lane — name the host in the PR body).
 
 ### 5.2 M2 — `LiveTvPeers` in `AppState` (L3)
+
+*Removed by cluster facade slice 5; see the note at the top.*
 
 Files: `state.rs`, `http/live_tv.rs` (nine sites, `owner_peer`), metrics.
 

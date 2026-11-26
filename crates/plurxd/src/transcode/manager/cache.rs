@@ -874,10 +874,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
-                codec_facts: Some(
-                    FrozenHlsCodecFacts::encoded(plan)
-                        .with_sdr_master_codecs(owner.sdr_master_codecs),
-                ),
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(plan)),
                 bandwidth: None,
                 file_id: file.id,
                 start_seconds: 0.0,
@@ -946,6 +943,7 @@ impl TranscodeManager {
             cache_location: Some(cache_location),
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: None,
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id: file.id,
@@ -1039,7 +1037,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

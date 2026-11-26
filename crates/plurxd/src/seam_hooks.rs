@@ -131,6 +131,7 @@ pub(crate) const ASYNC_PAUSE_BOUND: std::time::Duration = std::time::Duration::f
 #[cfg(test)]
 pub(crate) struct AsyncPause {
     point: &'static str,
+    held_since: std::sync::OnceLock<std::time::Instant>,
     bound: std::time::Duration,
     arrival: std::sync::Arc<tokio::sync::watch::Sender<Arrival>>,
     released: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
@@ -163,6 +164,7 @@ impl AsyncPause {
         std::sync::Arc::new(Self {
             point,
             bound,
+            held_since: std::sync::OnceLock::new(),
             arrival: std::sync::Arc::new(tokio::sync::watch::Sender::new(Arrival::Waiting)),
             released: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
         })
@@ -171,6 +173,7 @@ impl AsyncPause {
     /// The owner's side: announce the point, then wait to be released. Returns
     /// whether the test released it, as opposed to the bound running out.
     pub(crate) async fn hold(&self) -> bool {
+        self.held_since.get_or_init(std::time::Instant::now);
         self.arrival.send_replace(Arrival::Reached);
         let mut released = self.released.subscribe();
         if *released.borrow_and_update() {
@@ -246,6 +249,17 @@ impl AsyncPause {
 
 #[cfg(test)]
 impl AsyncPauseHeld<'_> {
+    /// Observe the existing hold without releasing it. Expiry fails closed
+    /// even if its auto-release helper thread has not run yet.
+    pub(crate) fn is_held(&self) -> bool {
+        self.0.was_reached()
+            && !*self.0.released.borrow()
+            && self
+                .0
+                .held_since
+                .get()
+                .is_some_and(|since| since.elapsed() < self.0.bound)
+    }
     /// Let the owner go now.
     pub(crate) fn release(self) {}
 }

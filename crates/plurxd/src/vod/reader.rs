@@ -11,7 +11,14 @@ pub(super) struct Recipe {
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
     pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    /// The shared video of a split copy presentation: no audio track at all.
+    /// The audio fields above then describe nothing this rendition carries,
+    /// and `rendition_key` omits them so every soundtrack shares one video.
+    pub(super) audio_excluded: bool,
     pub(super) video: CopyVideoOptions,
+    /// Read with the exact pinned curve table when this recipe was resolved.
+    /// Status only: `rendition_key` and every media identity omit it.
+    pub(super) dv_refit_gain: Option<crate::dv_refit_serving::PinnedRefitGain>,
     /// Exact object version whose complete digest selected the cluster blob.
     /// None on the legacy node-local index path.
     pub(super) source_object_version: Option<String>,
@@ -27,9 +34,34 @@ pub(super) struct Recipe {
     pub(super) encoding: Option<Arc<crate::vodencode::Encoding>>,
 }
 
+impl Recipe {
+    /// Report only the gain belonging to this attached rendition's actual
+    /// digest. An incoming request may be superseded or share another recipe.
+    pub(super) fn fitted_refit_report(&self) -> Option<crate::transcode::RefitPlaybackReport> {
+        let digest = self.video.dolby_vision_refit()?;
+        let fact = self.dv_refit_gain?;
+        (fact.digest == digest).then(|| crate::transcode::RefitPlaybackReport::fitted(fact.gain))
+    }
+
+    pub(super) fn refit_report(&self) -> Option<crate::transcode::RefitPlaybackReport> {
+        if let Some(report) = self.fitted_refit_report() {
+            return Some(report);
+        }
+        (self.video.converts_dolby_vision() && self.video.dolby_vision_refit().is_none()).then(
+            || {
+                crate::transcode::RefitPlaybackReport::identity(
+                    "No F+ curve table is pinned to this rendition".to_owned(),
+                )
+            },
+        )
+    }
+}
+
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Keeps a replaced attachment distinct even if it uses the same reader ID.
+    pub(super) attachment: Arc<()>,
     /// Exact controlled companion attachment. The source-purpose bridge must
     /// survive quality selection, supersession and later producer generations.
     pub(super) companion_bootstrap: bool,
@@ -80,6 +112,7 @@ impl Reader {
         admission_priority: crate::admission::Priority,
     ) -> Self {
         Self {
+            attachment: Arc::new(()),
             companion_bootstrap: false,
             control_required: false,
             quality_required: false,

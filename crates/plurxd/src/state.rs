@@ -8,7 +8,7 @@ pub use library_work::ScanAdmission;
 #[path = "subtitle_work.rs"]
 mod subtitle_work;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -108,6 +108,14 @@ pub(crate) fn node_hwaccel_key(node_id: &str) -> String {
     format!("node.{node_id}.transcode.hwaccel")
 }
 
+/// Encoders as their labels, for the settings page.
+fn encoder_labels<S: serde::Serializer>(
+    encoders: &[plurx_core::transcode::Encoder],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(encoders.iter().map(|encoder| encoder.label()))
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -162,6 +170,11 @@ pub struct SystemInfo {
     /// Whether this exact ffmpeg can run the software-decode → tonemapx
     /// Dolby Vision reshape → software-encode graph.
     pub dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape graph with, by label.
+    /// Every detected hardware encoder is probed once at boot, so a Profile 5
+    /// session never starts a capability probe of its own.
+    #[serde(serialize_with = "encoder_labels")]
+    pub dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this exact ffmpeg can run the HDR10 rung: the same software
     /// decode into `tonemapx`'s HDR *passthrough* mode at 10 bit, into
     /// libx265 Main10. Separate from `dovi_reshape` because it is a separate
@@ -836,14 +849,9 @@ pub struct AppState {
     /// (playback-start E1). E1a builds and observes it; no call site reads
     /// through it yet.
     pub applied: plurx_core::store::AppliedView,
-    /// Read-only projection of the selected backend's watch-state convergence.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    /// Monotonic, Store-free authority for mutable media and readiness.
-    pub(crate) serving: crate::serving_fence::ServingFence,
-    /// Join/add/remove lifecycle and privacy-safe per-node health.
-    pub membership: plurx_core::cluster::membership::MembershipManager,
-    /// The cluster facade (`crate::cluster`): authority, role and peers.
-    /// Feature code asks it; the three raw handles above stay until slice 7.
+    /// The cluster facade (`crate::cluster`): authority, role and peers. It
+    /// alone owns the fence, the membership manager and the replication
+    /// monitor; feature code asks it.
     pub(crate) cluster: crate::cluster::Cluster,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
@@ -873,7 +881,7 @@ pub struct AppState {
     /// five-second memory of the owner's address. Signing, expected-node
     /// binding and response verification stay per request inside the
     /// transport; nothing about a credential is held here.
-    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
+    pub(crate) live_tv_peers: crate::cluster::calls::PeerTransport,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
     /// Items whose review-site scores this node is fetching right now.
@@ -1110,7 +1118,7 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
-        .with_membership(self.membership.clone())
+        .with_cluster(self.cluster.calls(), self.cluster.directory())
         .with_jobs(Arc::clone(&self.jobs))
     }
 
@@ -1184,8 +1192,7 @@ impl AppState {
                 // data directory to resolve it from, so nothing sealed under
                 // it is expected to outlive the process.
                 credential_key: Arc::new(CredentialKey::generate()),
-                replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-                membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_parts: crate::cluster::ClusterParts::standalone(),
                 cluster_id: String::new(),
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
@@ -1194,7 +1201,7 @@ impl AppState {
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
                 credential_key_path: PathBuf::new(),
-                backup_client: None,
+                backup_source: None,
             },
             store,
             dirs,
@@ -1224,8 +1231,7 @@ impl AppState {
             trusted_proxies,
             scan_prune_percent,
             credential_key,
-            replication,
-            membership,
+            cluster_parts,
             cluster_id,
             shared_cache_dir,
             shared_cache_id,
@@ -1234,16 +1240,13 @@ impl AppState {
             snapshot_recovery_budgets,
             data_dir,
             credential_key_path,
-            backup_client,
+            backup_source,
         } = config;
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
-        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
-        let cluster = crate::cluster::Cluster::new(
-            serving.clone(),
-            membership.clone(),
-            applied.applied_mark(),
-        );
+        let cluster = crate::cluster::Cluster::compose(cluster_parts, applied.applied_mark());
+        let node_hostname = cluster.own_hostname();
+        let clock_observer = crate::clock_offset::ClockObserver::new(cluster.operations().clock());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1268,15 +1271,17 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
-        let peer_activity =
-            crate::http::internal_activity::PeerActivityClient::new(membership.clone());
+        let peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            cluster.calls(),
+            cluster.directory(),
+        );
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
                 artwork_dir.clone(),
                 scan_prune_percent,
                 node_id.clone(),
-                Arc::new(membership.clone()),
+                Arc::new(cluster.jobs().clone()),
             )
             .with_source_checkpoint_dir(
                 (!data_dir.as_os_str().is_empty())
@@ -1284,7 +1289,7 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_applied_view(applied.clone())
-            .with_membership(membership.clone())
+            .with_cluster(cluster.jobs().clone(), cluster.calls(), cluster.directory())
             .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -1295,12 +1300,12 @@ impl AppState {
         // A replicated daemon applies the Raft log in this process; that watch
         // is how an idle settings reader (the Live TV observer, the takeover
         // gate, the clock-enforcement follower) learns of a save elsewhere.
-        let settings_changes = match backup_client
+        let settings_changes = match backup_source
             .as_ref()
-            .and_then(|client| client.local_db_raft_metrics().ok())
+            .and_then(crate::cluster::BackupSource::applied_changes)
         {
             Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => {
+            None if cluster.jobs().clustered() => {
                 crate::settings_changes::SettingsChangeSource::Polled
             }
             None => crate::settings_changes::SettingsChangeSource::LocalOnly,
@@ -1309,7 +1314,7 @@ impl AppState {
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
-            backup_client,
+            backup_source,
             data_dir,
             credential_key_path,
             node_id.clone(),
@@ -1325,7 +1330,7 @@ impl AppState {
             shared_cache_id,
             &cluster_id,
             node_id.clone(),
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
         );
@@ -1351,6 +1356,7 @@ impl AppState {
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
+            .with_dovi_reshape_hardware(system.dovi_reshape_hardware.clone())
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
@@ -1368,10 +1374,11 @@ impl AppState {
                 renditions,
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-                Some(membership.clone()),
+                Some(cluster.calls()),
+                Some(cluster.directory()),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
-            .with_serving_authority(serving.authority())
+            .with_serving_authority(cluster.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
         transcode.register_playback_cache(&playback_cache);
@@ -1414,23 +1421,23 @@ impl AppState {
             Arc::clone(&store),
             Arc::clone(&transcode),
             node_id.clone(),
-            serving.clone(),
+            cluster.restart_admissions(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_pool = crate::media_pool::MediaPool::new(cluster.calls(), cluster.directory());
         let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
             Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
-            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
-        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
+            crate::http::CacheOnlyAdminProofCache::new(cluster.role().is_clustered());
+        let live_tv_peers = cluster.calls();
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
             Arc::clone(&transcode),
-            serving.authority(),
+            cluster.authority(),
             node_id.clone(),
             live_tv_scratch,
             runtime_cache.join("live-tv"),
@@ -1452,16 +1459,13 @@ impl AppState {
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             applied,
-            replication,
             peer_activity,
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
-            serving,
-            clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            clock_observer,
             copy_analysis,
             copy_observation_dir,
-            node_hostname: membership.local_hostname(),
-            membership,
+            node_hostname,
             cluster,
             media_pool,
             media_sessions,
@@ -1516,6 +1520,16 @@ impl AppState {
         }
     }
 
+    /// Point this state at another replication monitor, and the cluster
+    /// facade with it.
+    #[cfg(test)]
+    pub(crate) fn replace_replication(
+        &mut self,
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    ) {
+        self.cluster = self.cluster.with_replication(replication);
+    }
+
     /// Point this state at another membership manager, and the cluster
     /// facade with it, so a fixture can never leave the two disagreeing.
     #[cfg(test)]
@@ -1523,12 +1537,14 @@ impl AppState {
         &mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
     ) {
-        self.cluster = crate::cluster::Cluster::new(
-            self.serving.clone(),
-            membership.clone(),
-            self.applied.applied_mark(),
+        self.cluster = self
+            .cluster
+            .with_membership(membership, self.applied.applied_mark());
+        self.live_tv_peers = self.cluster.calls();
+        self.peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            self.cluster.calls(),
+            self.cluster.directory(),
         );
-        self.membership = membership;
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1674,9 +1690,9 @@ pub struct AppConfig {
     /// verifies. Resolved by `open_store` so a boot that cannot open the
     /// existing Trakt rows fails before any subsystem starts.
     pub credential_key: Arc<CredentialKey>,
-    /// Actual backend selected before HTTP starts; tests default to SQLite.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Actual backend's cluster handles, selected before HTTP starts and
+    /// composed into the facade; tests default to SQLite.
+    pub cluster_parts: crate::cluster::ClusterParts,
     pub cluster_id: String,
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
@@ -1685,7 +1701,7 @@ pub struct AppConfig {
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
     pub credential_key_path: PathBuf,
-    pub backup_client: Option<hiqlite::Client>,
+    pub(crate) backup_source: Option<crate::cluster::BackupSource>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -1876,9 +1892,11 @@ pub struct JobManager {
     /// than sampled once, because committed membership moves under a running
     /// daemon: a learner may be promoted, and a voter may be removed.
     job_authority: Arc<dyn ClusterJobAuthority>,
-    /// Exact committed membership and internal addressing for optional peer
-    /// hydration. Tests and recovery-only construction deliberately omit it.
-    membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// Existing membership evidence for analysis reconciliation. Hydration
+    /// separately owns bounded peer calls and the stamped directory.
+    reconciliation: Option<crate::cluster::Jobs>,
+    peer_calls: Option<crate::cluster::calls::PeerTransport>,
+    directory: Option<crate::cluster::Directory>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -1888,6 +1906,9 @@ pub struct JobManager {
     statuses: Mutex<HashMap<i64, ScanStatus>>,
     /// Live counters for in-flight scans, sampled by `all_statuses`.
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
+    /// Coalesced hint for the local title worker after a durable viewer admission.
+    #[cfg(target_os = "linux")]
+    pub(crate) title_viewer_wake: tokio::sync::Notify,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
     /// Per-request completion signals for a `POST /scan` that waits
@@ -1911,6 +1932,7 @@ pub struct JobManager {
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
     cluster_analysis_working: std::sync::atomic::AtomicBool,
+    playback_chapter_admissions: std::sync::Mutex<BTreeSet<(i64, i64, i64)>>,
     background_upkeep_running: std::sync::atomic::AtomicBool,
     /// Permanent-media conversion is a bounded queue, but one slow disc may
     /// outlive many scheduler ticks. Keep exactly one local drain loop.
@@ -2581,27 +2603,25 @@ fn index_file_budget(
         .div_ceil(INDEX_EXPECTED_MIN_READ_BYTES_PER_SEC)
         .saturating_add(INDEX_FILE_HEADROOM_SECS)
         .min(INDEX_MEASURED_BUDGET_CEILING_SECS);
-    let measured = measured_index_budget_secs(duration_ms, previous).unwrap_or(0);
+    let measured = previous
+        .filter(|outcome| {
+            outcome.typed_code
+                == Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded)
+        })
+        .and_then(|outcome| outcome.diagnostic.as_ref())
+        .and_then(|diagnostic| measured_index_budget_secs(duration_ms, diagnostic))
+        .unwrap_or(0);
     Duration::from_secs(estimated.max(by_size).max(measured))
 }
 
 /// What an attempt that ran out of budget measured: the time it would have
 /// needed for the whole film at the rate it actually read, plus a quarter.
 ///
-/// `None` unless the previous attempt is a typed `index_budget_exceeded` with
-/// the elapsed time and the coverage it reached, which is what every budget
-/// failure records.
+/// Budget failures report their elapsed time and the coverage they reached.
 fn measured_index_budget_secs(
     duration_ms: Option<i64>,
-    previous: Option<&plurx_core::segplan::FragmentIndexOutcome>,
+    diagnostic: &plurx_core::content_analysis::IndexDiagnostic,
 ) -> Option<u64> {
-    let previous = previous?;
-    if previous.typed_code
-        != Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded)
-    {
-        return None;
-    }
-    let diagnostic = previous.diagnostic.as_ref()?;
     let elapsed = u128::from(diagnostic.elapsed_ms.filter(|value| *value > 0)?);
     let covered = u128::try_from(diagnostic.covered_ms.filter(|value| *value > 0)?).ok()?;
     let expected = diagnostic
@@ -2619,6 +2639,26 @@ fn measured_index_budget_secs(
         secs.saturating_add(INDEX_FILE_HEADROOM_SECS)
             .min(INDEX_MEASURED_BUDGET_CEILING_SECS),
     )
+}
+
+/// Siblings still retry separately to get their own verdict. They share the
+/// elapsed time and coverage from the read that just timed out.
+fn index_file_budget_after_shared_pass(
+    duration_ms: Option<i64>,
+    size_bytes: i64,
+    previous: Option<&plurx_core::segplan::FragmentIndexOutcome>,
+    shared_outcome: &crate::fragindex::IndexOutcome,
+) -> Duration {
+    let measured = match shared_outcome {
+        crate::fragindex::IndexOutcome::Failed(failure)
+            if failure.code
+                == plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded =>
+        {
+            measured_index_budget_secs(duration_ms, &failure.diagnostic).unwrap_or(0)
+        }
+        _ => 0,
+    };
+    index_file_budget(duration_ms, size_bytes, previous).max(Duration::from_secs(measured))
 }
 
 /// A local whole-file read owes viewers the same preemption as a queued
@@ -2658,6 +2698,18 @@ pub(crate) async fn local_index_until_foreground<T>(
             None
         },
         result = &mut build => Some(result),
+    }
+}
+
+async fn admit_local_fragment_work(
+    transcode: &TranscodeManager,
+    took_queued_turn: &mut bool,
+) -> Option<crate::transcode::FragmentAdmission> {
+    if *took_queued_turn {
+        transcode.admit_fragment().await
+    } else {
+        *took_queued_turn = true;
+        transcode.admit_fragment_queued().await
     }
 }
 
@@ -2926,6 +2978,11 @@ impl AnalysisRetryPolicy {
 /// `fragment_index_cluster`: this token reopens the request, and that one
 /// invalidates the memo the reopened request would otherwise short-circuit to.
 const ANALYSIS_ATTESTATION_GENERATION: &str = "source-attestation/sampled-v1";
+
+/// A census request has no copy recipe yet. Its versioned identity gives it
+/// a stable generation independent of both provisional and canonical recipes.
+/// Advance this when a new census regime must reopen historical requests.
+const HEVC_CENSUS_ANALYSIS_IDENTITY: &str = "hevc-census/v1";
 
 /// Why a cluster-job attestation did not produce a usable source.
 ///
@@ -3875,10 +3932,6 @@ async fn run_subtitle_source_pass_owned(
     ))
 }
 
-pub(crate) async fn wait_analysis_deadline(duration: Duration) {
-    tokio::time::sleep(duration).await;
-}
-
 /// Read the probe once and ask [`crate::fragindex::video_identities`] which
 /// copy pipelines this file has to be indexed for.
 async fn fragment_index_video_identities(
@@ -3888,11 +3941,15 @@ async fn fragment_index_video_identities(
     convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(crate::fragindex::video_identities(
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
+    Ok(crate::fragindex::video_identities_with_refit(
         file,
         probe_json.as_deref(),
         have_dovi,
         convert,
+        refit,
     ))
 }
 
@@ -3920,15 +3977,22 @@ pub(crate) async fn fragment_index_video_identity_options(
     convert: bool,
 ) -> Result<Vec<(plurx_core::transcode::CopyVideoOptions, String)>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(
-        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert)
-            .into_iter()
-            .map(|video| {
-                let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
-                (video, fingerprint)
-            })
-            .collect(),
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
+    Ok(crate::fragindex::video_identities_with_refit(
+        file,
+        probe_json.as_deref(),
+        have_dovi,
+        convert,
+        refit,
     )
+    .into_iter()
+    .map(|video| {
+        let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
+        (video, fingerprint)
+    })
+    .collect())
 }
 
 /// Which identity a request is asking for.
@@ -4102,13 +4166,17 @@ impl JobManager {
             identity_repairs: Default::default(),
             coordinator,
             job_authority,
-            membership: None,
+            reconciliation: None,
+            peer_calls: None,
+            directory: None,
             artwork_dir,
             scan_prune_percent,
             #[cfg(test)]
             tmdb_base: None,
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            title_viewer_wake: tokio::sync::Notify::new(),
             library_wake: tokio::sync::Notify::new(),
             scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),
@@ -4118,6 +4186,7 @@ impl JobManager {
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
             cluster_analysis_working: std::sync::atomic::AtomicBool::new(false),
+            playback_chapter_admissions: Default::default(),
             background_upkeep_running: std::sync::atomic::AtomicBool::new(false),
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
@@ -4157,11 +4226,15 @@ impl JobManager {
         self
     }
 
-    fn with_membership(
+    fn with_cluster(
         mut self,
-        membership: plurx_core::cluster::membership::MembershipManager,
+        reconciliation: crate::cluster::Jobs,
+        peer_calls: crate::cluster::calls::PeerTransport,
+        directory: crate::cluster::Directory,
     ) -> Self {
-        self.membership = Some(membership);
+        self.reconciliation = Some(reconciliation);
+        self.peer_calls = Some(peer_calls);
+        self.directory = Some(directory);
         self
     }
 
@@ -4196,7 +4269,7 @@ impl JobManager {
         let ctx = crate::background_jobs::analysis_reconcile::ReconcileContext {
             store: &*self.store,
             node_id: self.coordinator.node_id(),
-            membership: self.membership.as_ref(),
+            jobs: self.reconciliation.as_ref(),
             peers: self.peer_activity.as_ref(),
         };
         let report = match crate::background_jobs::analysis_reconcile::reconcile_retired(
@@ -4242,6 +4315,22 @@ impl JobManager {
         resource: String,
     ) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
+    }
+
+    /// [`Self::acquire_job`], reporting why a lease was not taken, for a caller
+    /// that answers a person rather than skipping quietly.
+    pub(crate) async fn claim_job(
+        &self,
+        resource: String,
+    ) -> Result<crate::job_lease::ClusterJobClaim, StoreError> {
+        crate::job_lease::claim_cluster_job(
+            &self.coordinator,
+            self.job_authority.as_ref(),
+            resource,
+            crate::job_lease::JOB_LEASE_TTL,
+            crate::job_lease::JOB_LEASE_HEARTBEAT,
+        )
+        .await
     }
 
     /// [`Self::acquire_job`] with an explicit TTL and heartbeat: the same gate
@@ -4963,6 +5052,125 @@ impl JobManager {
         }
     }
 
+    /// Read-only queue explanation from stored title facts and fit rows. The
+    /// status API never captures a helper or probes media on a poll.
+    pub(crate) async fn disk_refit_waiting_reason(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<&'static str>, StoreError> {
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        let Some(document) = self.store.get_file_probe_json(file_id).await? else {
+            return Ok(Some("Waiting for complete-title Dolby Vision scan"));
+        };
+        let Some(stats) = DvTitleStats::from_probe_json(&document).filter(|s| s.complete) else {
+            return Ok(Some("Waiting for complete-title Dolby Vision scan"));
+        };
+        match stats.el_kind {
+            TitleConstant::Consistent(TitleElKind::Mel) => Ok(None),
+            TitleConstant::Consistent(TitleElKind::Fel) => {
+                if self.store.dv_refit_curves(file_id).await?.is_some() {
+                    Ok(Some(
+                        "Waiting for conversion slot and current F+ fit verification",
+                    ))
+                } else {
+                    Ok(Some(
+                        "Waiting for F+ fit or recorded content refusal before EL discard",
+                    ))
+                }
+            }
+            _ => Ok(Some(
+                "Waiting for consistent FEL or MEL title classification",
+            )),
+        }
+    }
+
+    // A queued disk request is itself a fitting consumer. The title scanner
+    // must first identify every displayed RPU as FEL or MEL; a legacy recipe
+    // fact cannot authorize deletion of the enhancement layer.
+    async fn disk_refit_title(
+        &self,
+        file_id: i64,
+    ) -> Result<(String, plurx_core::scan::dv_title::DvTitleStats), String> {
+        use plurx_core::scan::dv_title::DvTitleStats;
+        let document = self
+            .store
+            .get_file_probe_json(file_id)
+            .await
+            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
+            .ok_or("complete title facts are not yet available")?;
+        let stats = DvTitleStats::from_probe_json(&document)
+            .filter(|stats| stats.complete)
+            .ok_or("complete title facts are not yet available")?;
+        Ok((document, stats))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn disk_refit_ready(
+        &self,
+        file: &MediaFile,
+    ) -> Result<
+        Option<(
+            plurx_core::store::dv_refit_jobs::RefitCurveTable,
+            std::sync::Arc<crate::dv_tools::ToolSet>,
+        )>,
+        String,
+    > {
+        use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
+        use plurx_core::store::dv_refit_jobs::RefitVerdict;
+        let (document, stats) = self.disk_refit_title(file.id).await?;
+        match stats.el_kind {
+            TitleConstant::Consistent(TitleElKind::Mel) => return Ok(None),
+            TitleConstant::Consistent(TitleElKind::Fel) => {}
+            _ => return Err("waiting for a complete, consistent FEL or MEL title scan".into()),
+        }
+        let probe: serde_json::Value =
+            serde_json::from_str(&document).map_err(|_| "invalid title probe document")?;
+        let video_index = probe
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|streams| {
+                streams.iter().find(|stream| {
+                    stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                        && stream
+                            .get("disposition")
+                            .and_then(|value| value.get("attached_pic"))
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or(0)
+                            == 0
+                })
+            })
+            .and_then(|stream| stream.get("index"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| i64::try_from(index).ok())
+            .ok_or("waiting for selected FEL video stream")?;
+        let table = self
+            .store
+            .dv_refit_curves(file.id)
+            .await
+            .map_err(|e| format!("reading F+ curves for disk conversion: {e}"))?
+            .ok_or("waiting for a current F+ fit or recorded content refusal")?;
+        let tools = crate::dv_tools::ToolSet::capture()
+            .await
+            .map_err(|e| format!("waiting for F+ helper: {e}"))?
+            .ok_or("waiting for F+ helper installation")?;
+        if table.superseded_at_ms.is_some()
+            || table.title.source_size != file.size
+            || table.title.source_mtime != file.mtime
+            || table.title.video_index != video_index
+            || table.title.helper_identity != tools.refit_helper_identity()
+            || table.title.fit_version != plurx_core::transcode::dv_refit::FIT_VERSION
+        {
+            return Err("waiting for a current F+ fit for this source, stream and helper".into());
+        }
+        if table.title.verdict == RefitVerdict::Fitted {
+            Ok(Some((table, tools)))
+        } else {
+            // Identity and content refusal are terminal fit outcomes. The
+            // existing dovi_tool conversion stays correct for both.
+            Ok(None)
+        }
+    }
+
     async fn process_dv_candidate(
         &self,
         file_id: i64,
@@ -5086,6 +5294,38 @@ impl JobManager {
                     return;
                 }
             };
+            #[cfg(target_os = "linux")]
+            let fitted = match self.disk_refit_ready(&file).await {
+                Ok(fitted) => fitted,
+                Err(waiting) => {
+                    tracing::info!(file_id, %waiting, "Dolby Vision disk conversion remains queued");
+                    return;
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            {
+                use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
+                let ready = self
+                    .disk_refit_title(file.id)
+                    .await
+                    .and_then(|(_, stats)| match stats.el_kind {
+                        TitleConstant::Consistent(TitleElKind::Mel) => Ok(()),
+                        TitleConstant::Consistent(TitleElKind::Fel) => {
+                            Err("waiting for a Linux host with the F+ helper".into())
+                        }
+                        _ => Err("waiting for a complete, consistent FEL or MEL title scan".into()),
+                    });
+                if let Err(waiting) = ready {
+                    tracing::info!(file_id, %waiting, "Dolby Vision disk conversion remains queued");
+                    return;
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let fitted_input = fitted
+                .as_ref()
+                .map(|(table, tools)| (table, tools.scanner.as_path()));
+            #[cfg(not(target_os = "linux"))]
+            let fitted_input = None;
             match publisher
                 .mark_dv_conversion_running(file_id, file.size)
                 .await
@@ -5104,6 +5344,7 @@ impl JobManager {
                 self.coordinator.node_id(),
                 loss,
                 keep_original,
+                fitted_input,
             )
             .await
             {
@@ -5116,6 +5357,31 @@ impl JobManager {
             };
             if loss.is_cancelled() {
                 return;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some((table, tools)) = &fitted {
+                let still_current = tools.is_current().await
+                    && self
+                        .store
+                        .dv_refit_curves(file.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|current| {
+                            current.superseded_at_ms.is_none()
+                                && current.title.curve_digest == table.title.curve_digest
+                                && current.title.helper_identity == table.title.helper_identity
+                        });
+                if !still_current {
+                    self.fail_dv_conversion(
+                        &publisher,
+                        &file,
+                        loss,
+                        "F+ fit or helper changed before disk publication",
+                    )
+                    .await;
+                    return;
+                }
             }
             match publisher
                 .mark_dv_conversion_verified(file_id, verified.el_type, verified.bytes_after)
@@ -5452,6 +5718,51 @@ impl JobManager {
             .get_file(file_id)
             .await?
             .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
+        self.enqueue_source_analysis(&file, force_rebuild, component, trigger, video_identity)
+            .await
+    }
+
+    pub(crate) fn request_playback_chapters(&self, file: &MediaFile) {
+        const MAX_PENDING: usize = 8;
+        if let Ok(mut pending) = self.playback_chapter_admissions.try_lock() {
+            if pending.len() < MAX_PENDING && pending.insert((file.id, file.size, file.mtime)) {
+                let _ = fragment_analysis_wake().send(());
+            }
+        }
+    }
+
+    async fn admit_playback_chapters(&self) {
+        let requests = self
+            .playback_chapter_admissions
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
+        for (file_id, size, mtime) in requests {
+            match self.store.get_file(file_id).await {
+                Ok(Some(file)) if file.size == size && file.mtime == mtime => {
+                    if let Err(error) = self
+                        .enqueue_source_analysis(&file, false, "skip_markers", "background", "")
+                        .await
+                    {
+                        tracing::debug!(file_id, %error, "could not enqueue legacy chapter analysis");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(file_id, %error, "could not read source for chapter analysis")
+                }
+            }
+        }
+    }
+
+    async fn enqueue_source_analysis(
+        &self,
+        file: &MediaFile,
+        force_rebuild: bool,
+        component: &str,
+        trigger: &str,
+        video_identity: &str,
+    ) -> Result<(AnalysisRequest, bool), StoreError> {
         let now = clock_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let pipeline_version = if component == "fragment_index" {
@@ -5460,7 +5771,7 @@ impl JobManager {
             crate::http::stream::CHAPTER_ANNOTATION_VERSION.to_owned()
         };
         let requested_generation = analysis_request_generation(
-            &file,
+            file,
             component,
             &pipeline_version,
             video_identity,
@@ -6311,19 +6622,27 @@ impl JobManager {
     pub async fn reanalyze_files(
         &self,
         files: &[plurx_core::domain::MediaFile],
-    ) -> Result<plurx_core::scan::ReprobeReport, StoreError> {
-        let Some(lease) = self.acquire_job("repair:probe".to_owned()).await? else {
-            return Err(StoreError::Task(
-                "probe repair pass is active on another cluster node".to_owned(),
-            ));
+    ) -> Result<plurx_core::scan::ReprobeReport, ReprobeError> {
+        let lease = match self.claim_job("repair:probe".to_owned()).await? {
+            crate::job_lease::ClusterJobClaim::Acquired(lease) => lease,
+            crate::job_lease::ClusterJobClaim::NotEligible => {
+                return Err(ReprobeError::NotEligible)
+            }
+            crate::job_lease::ClusterJobClaim::Held { owner_node_id } => {
+                let held_here = owner_node_id == self.coordinator.node_id();
+                return Err(ReprobeError::Busy {
+                    owner_node_id,
+                    held_here,
+                });
+            }
         };
         let lost = lease.loss_token();
         let publisher = lease.publisher(self.store.as_ref());
         let result = tokio::select! {
-            result = scan::reprobe_files_with_publication(&publisher, files) => result,
-            () = lost.cancelled() => Err(StoreError::Task(
-                "cluster probe-repair lease was lost".to_owned(),
-            )),
+            result = scan::reprobe_files_with_publication(&publisher, files) => {
+                result.map_err(ReprobeError::Store)
+            }
+            () = lost.cancelled() => Err(ReprobeError::LeaseLost),
         };
         drop(publisher);
         let _ = lease.release().await;
@@ -6936,13 +7255,19 @@ impl JobManager {
                         .await;
                     });
                 }
-                if self
+                let may_build = self
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)
-                    .await
-                    && lane_cluster_fragment_index_enabled(&self.applied).await
-                    && (!self.cluster_analysis_working.load(Ordering::Acquire)
-                        || !self.cluster_index_working.load(Ordering::Acquire))
+                    .await;
+                let pending_chapters = self
+                    .playback_chapter_admissions
+                    .lock()
+                    .is_ok_and(|pending| !pending.is_empty());
+                if ((may_build || pending_chapters)
+                    && !self.cluster_analysis_working.load(Ordering::Acquire))
+                    || (may_build
+                        && !self.cluster_index_working.load(Ordering::Acquire)
+                        && lane_cluster_fragment_index_enabled(&self.applied).await)
                 {
                     // Keep listening for viewer wakeups while a source read or
                     // artifact build owns its own fenced pass. The independent
@@ -7054,17 +7379,6 @@ impl JobManager {
             last_transcode_cleanup: self
                 .job_stamp(&self.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP))
                 .await,
-            telemetry_retain_days: self
-                .job_interval_or(
-                    keys::TELEMETRY_RETAIN_DAYS,
-                    keys::TELEMETRY_RETAIN_DEFAULT_DAYS,
-                )
-                .await,
-            network_priors: self
-                .store
-                .get_setting(keys::PLAYBACK_NETWORK_PRIORS)
-                .await?
-                .is_some_and(|value| value.trim() == "1"),
             last_telemetry_prune: self
                 .job_stamp(&self.local_job_key(keys::JOB_LAST_TELEMETRY_PRUNE))
                 .await,
@@ -9112,6 +9426,34 @@ impl JobManager {
                 self.settle_index_priority(&transcode, file_id);
                 continue;
             }
+            let mut admission = None;
+            if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    self.settle_index_priority(&transcode, file_id);
+                    continue;
+                };
+                if plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref()) {
+                    let Some(held) =
+                        admit_local_fragment_work(&transcode, &mut took_queued_turn).await
+                    else {
+                        return;
+                    };
+                    let established = local_index_until_foreground(
+                        &transcode,
+                        &held,
+                        crate::hevc_census::ensure_index_census(self.store.as_ref(), &file),
+                    )
+                    .await;
+                    match established {
+                        Some(Ok(crate::hevc_census::IndexCensus::Ready)) => admission = Some(held),
+                        Some(Ok(_) | Err(_)) => {
+                            attempted += 1;
+                            continue;
+                        }
+                        None => return,
+                    }
+                }
+            }
             let videos = match fragment_index_video_identities(
                 self.store.as_ref(),
                 &file,
@@ -9211,11 +9553,9 @@ impl JobManager {
             // (a speech pass waiting goes first). Either is still refused when
             // foreground work holds the pool. Deliberately a return: it skips
             // the cursor stamp, so the file stays due rather than half done.
-            let admission = if took_queued_turn {
-                transcode.admit_fragment().await
-            } else {
-                took_queued_turn = true;
-                transcode.admit_fragment_queued().await
+            let admission = match admission {
+                Some(held) => Some(held),
+                None => admit_local_fragment_work(&transcode, &mut took_queued_turn).await,
             };
             let Some(admission) = admission else {
                 tracing::info!(
@@ -9271,7 +9611,7 @@ impl JobManager {
             let Some(mut builds) = local_index_until_foreground(
                 &transcode,
                 &admission,
-                crate::fragindex::build_riding_shared(
+                crate::fragindex::build_riding_shared_with_store(
                     &file,
                     &missing
                         .iter()
@@ -9287,6 +9627,7 @@ impl JobManager {
                         .unwrap_or_else(|| index_file_budget(file.duration_ms, file.size, None)),
                     ride_along.as_ref(),
                     Some(reporter),
+                    Some(self.store.as_ref()),
                 ),
             )
             .await
@@ -9312,12 +9653,18 @@ impl JobManager {
                     "a shared index read failed as a pass; building its identities one at a time"
                 );
                 for (slot, (video, _, previous)) in missing.iter().enumerate() {
-                    if !builds
+                    let Some(shared) = builds
                         .get(slot)
-                        .is_some_and(|build| failed_as_a_shared_pass(&build.outcome))
-                    {
+                        .filter(|build| failed_as_a_shared_pass(&build.outcome))
+                    else {
                         continue;
-                    }
+                    };
+                    let budget = index_file_budget_after_shared_pass(
+                        file.duration_ms,
+                        file.size,
+                        previous.as_ref(),
+                        &shared.outcome,
+                    );
                     if transcode.fragment_must_yield(&admission) {
                         // As above: no cursor stamp, the file stays due.
                         return;
@@ -9326,13 +9673,14 @@ impl JobManager {
                     let Some(build) = local_index_until_foreground(
                         &transcode,
                         &admission,
-                        crate::fragindex::build_riding(
+                        crate::fragindex::build_riding_with_store(
                             &file,
                             *video,
                             &runtime_cache,
-                            index_file_budget(file.duration_ms, file.size, previous.as_ref()),
+                            budget,
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                            Some(self.store.as_ref()),
                         ),
                     )
                     .await
@@ -9747,6 +10095,30 @@ impl JobManager {
                 continue;
             }
             attempted += 1;
+            if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    continue;
+                };
+                if plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref()) {
+                    match self
+                        .request_file_analysis_for_identity(
+                            file_id,
+                            false,
+                            "fragment_index",
+                            "background",
+                            HEVC_CENSUS_ANALYSIS_IDENTITY,
+                        )
+                        .await
+                    {
+                        Ok((_, false)) => enqueued += 1,
+                        Ok((_, true)) => {}
+                        Err(error) => {
+                            tracing::warn!(file_id, %error, "queueing background HEVC census");
+                        }
+                    }
+                    continue;
+                }
+            }
             // One request per copy-video identity this file lacks, rather
             // than one request for whichever identity happened to be first.
             //
@@ -9828,45 +10200,47 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
     ) {
-        if !self
+        let may_build = self
             .job_authority
             .may_execute_job(plurx_core::store::background_jobs::JobKind::FragmentIndexBuild)
-            .await
-        {
-            return;
-        }
+            .await;
         // A source attestation can take minutes. It owns its own single-consumer
         // fence, leaving the artifact and delivery pass available to another
         // wake while the analysis reader is active. Store claims retain their
         // durable owner/fence and do not depend on this local pass guard.
         // Settling, pruning and artifact delivery are cluster-wide duties
         // and stay with the voters. Resolving is not: a learner allowed to
-        // execute this job (above) resolves the requests targeted at itself,
+        // execute this job resolves the requests targeted at itself,
         // and, while idle, other nodes' fragment-index requests too.
-        let may_produce = self.may_run_cluster_jobs().await;
         let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
             let analysis_state = Arc::clone(&self);
             let analysis_transcode = Arc::clone(&transcode);
             Some(tokio::spawn(async move {
                 let _analysis_guard = ClusterAnalysisWorkingGuard(Arc::clone(&analysis_state));
-                analysis_state
-                    .resolve_analysis_requests(analysis_transcode)
-                    .await;
+                analysis_state.admit_playback_chapters().await;
+                if may_build {
+                    analysis_state
+                        .resolve_analysis_requests(analysis_transcode)
+                        .await;
+                }
             }))
         } else {
             None
         };
-        if self.cluster_index_working.swap(true, Ordering::AcqRel) {
+        if !may_build || self.cluster_index_working.swap(true, Ordering::AcqRel) {
             if let Some(analysis) = analysis {
                 let _ = analysis.await;
             }
             return;
         }
         let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-        let fragment_engine_current = crate::ffmpeg::fragment_index_engine_is_current().await;
+        let may_produce = self.may_run_cluster_jobs().await;
+        let fragment_index_enabled = self.cluster_fragment_index_enabled().await;
+        let fragment_engine_current =
+            fragment_index_enabled && crate::ffmpeg::fragment_index_engine_is_current().await;
 
         let now = clock_ms();
-        if may_produce {
+        if may_produce && fragment_index_enabled {
             if let Err(error) = self.store.settle_analysis_requests(now).await {
                 tracing::warn!(%error, "settling analysis requests");
             }
@@ -9991,23 +10365,31 @@ impl JobManager {
     /// and only an idle node (`pretranscode_worker_idle`) that may execute
     /// fragment-index work takes another node's fragment-index rows.
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
-        if !self.cluster_fragment_index_enabled().await {
-            return;
-        }
+        use plurx_core::store::AnalysisClaimMode;
+
         let node_id = self.coordinator.node_id().to_owned();
-        let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         loop {
-            if !self.cluster_fragment_index_enabled().await
-                || !crate::ffmpeg::fragment_index_engine_is_current().await
-                || !self
-                    .job_authority
-                    .may_execute_job(
-                        plurx_core::store::background_jobs::JobKind::FragmentIndexBuild,
-                    )
-                    .await
+            if !self
+                .job_authority
+                .may_execute_job(plurx_core::store::background_jobs::JobKind::FragmentIndexBuild)
+                .await
             {
                 break;
             }
+            // Chapter work requires neither the optional index cache nor
+            // compatibility with the fragment-index engine.
+            let engine = if self.cluster_fragment_index_enabled().await
+                && crate::ffmpeg::fragment_index_engine_is_current().await
+            {
+                Some(crate::ffmpeg::fragment_index_engine_digest().await)
+            } else {
+                None
+            };
+            let mode = if engine.is_some() {
+                AnalysisClaimMode::All
+            } else {
+                AnalysisClaimMode::SkipMarkersOnly
+            };
             let retry_policy = self.analysis_retry_policy().await;
             // A learner takes only what names it; untargeted requests any node
             // may take stay with the voters.
@@ -10019,15 +10401,16 @@ impl JobManager {
             let excluded = self.analysis_executor_exclusions(now);
             let request = match self
                 .store
-                .claim_analysis_request_for_capacity(
+                .claim_analysis_request_for_capacity_in_mode(
                     &node_id,
-                    Some(&engine_sha256),
+                    engine.as_deref(),
                     now,
                     now.saturating_add(retry_policy.lease_ms),
                     transcode.admissions().live_is_waiting(),
                     targeted_only,
                     cross_node,
                     &excluded,
+                    mode,
                 )
                 .await
             {
@@ -10041,7 +10424,7 @@ impl JobManager {
             self.work_claimed_analysis_request(
                 &request,
                 &node_id,
-                &engine_sha256,
+                engine.as_deref().unwrap_or_default(),
                 &transcode,
                 retry_policy,
             )
@@ -10358,7 +10741,15 @@ impl JobManager {
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        let raw = raw.map_err(|error| match error {
+            // Killed by someone else (an OOM, say): the probe has not said
+            // anything about this source yet.
+            crate::ffmpeg::HeldProbeError::Interrupted(_) => AnalysisResolutionError::Retry {
+                code: "index_process_failed",
+                charge_attempt: true,
+            },
+            _ => AnalysisResolutionError::Terminal("stored_probe_invalid"),
+        })?;
         self.store
             .record_fragment_index_source(&attested.observation)
             .await
@@ -10846,7 +11237,7 @@ impl JobManager {
             }
             let stored = self
                 .store
-                .get_file_probe_chapters_json(file.id)
+                .get_file_probe_chapters_json(file.id, file.size, file.mtime)
                 .await
                 .map_err(|_| AnalysisResolutionError::Retry {
                     code: "source_catalog_read_failed",
@@ -10859,14 +11250,27 @@ impl JobManager {
                 ),
                 None => None,
             };
-            let chapters = match stored_chapters {
-                Some(chapters) => chapters,
+            let (chapters, probed_live) = match stored_chapters {
+                Some(chapters) => (chapters, false),
                 None => {
                     self.admit_background_source(request, lost).await?;
+                    let unavailable = || AnalysisResolutionError::Retry {
+                        code: "source_unavailable",
+                        charge_attempt: true,
+                    };
+                    let revision = crate::fragment_index_cluster::inspect_source(&file)
+                        .await
+                        .map_err(|_| unavailable())?;
+                    let source =
+                        crate::fragment_index_cluster::open_source_fence(&file, Some(&revision))
+                            .await
+                            .map_err(|_| unavailable())?;
                     let chapters = match crate::http::stream::probe_chapters_until(
+                        #[cfg(test)]
                         &file.path,
+                        &source.handle,
                         lost,
-                        attest_timeout,
+                        Duration::from_secs(30).min(attest_timeout),
                     )
                     .await
                     {
@@ -10887,16 +11291,15 @@ impl JobManager {
                             })
                         }
                     };
-                    if let Ok(json) = serde_json::to_string(&chapters) {
-                        // Lost work: these discovered chapters are otherwise
-                        // discarded when this analysis attempt completes.
-                        crate::store_result::observe(
-                            crate::store_result::Operation::MergeProbeChapters,
-                            crate::store_result::Discard::LostWork,
-                            self.store.merge_file_probe_chapters(file.id, &json).await,
-                        );
+                    if !source.unchanged().await
+                        || crate::fragment_index_cluster::inspect_source(&file)
+                            .await
+                            .map_err(|_| unavailable())?
+                            != revision
+                    {
+                        return Err(unavailable());
                     }
-                    chapters
+                    (chapters, true)
                 }
             };
             if lost.is_cancelled() {
@@ -10918,6 +11321,7 @@ impl JobManager {
             );
             let mut set = crate::http::stream::annotation_set_from_markers(source, &markers);
             set.generation_id = request.requested_generation.clone();
+            set.version = crate::http::stream::CHAPTER_EVIDENCE_VERSION;
             if !self
                 .store
                 .record_analysis_request_phase(request, "publishing", None, clock_ms())
@@ -10939,6 +11343,22 @@ impl JobManager {
                 })?;
             if !published {
                 return Err(AnalysisResolutionError::ClaimLost);
+            }
+            if probed_live {
+                if let Ok(json) = serde_json::to_string(&chapters) {
+                    // Raw chapter consumers (including audiobook detail) also
+                    // use the successful reading. A scanner that won after the
+                    // probe retains its own document and chapter array.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::MergeProbeChapters,
+                        crate::store_result::Discard::LostWork,
+                        self.store
+                            .merge_file_probe_chapters_if_missing(
+                                file.id, file.size, file.mtime, &json,
+                            )
+                            .await,
+                    );
+                }
             }
             self.analysis_metrics
                 .publication("skip_markers", request.force_rebuild);
@@ -10963,6 +11383,47 @@ impl JobManager {
             return Err(AnalysisResolutionError::Terminal(
                 "pipeline_version_unavailable",
             ));
+        }
+        // An analysis request can predate the source census. Resolve it under
+        // the existing analysis read reservation before handing any recipe to
+        // the artifact queue. A foreground viewer can preempt this work.
+        self.admit_background_source(request, lost).await?;
+        let census_cancel = lost.child_token();
+        let census = plurx_core::process::bounded::cancellable(
+            census_cancel.clone(),
+            crate::hevc_census::ensure_index_census(self.store.as_ref(), &file),
+        );
+        tokio::pin!(census);
+        let census_admission = AnalysisAttestationBudget::default();
+        let census = tokio::select! {
+            result = &mut census => result.map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                charge_attempt: true,
+            })?,
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &census_admission) => {
+                census_cancel.cancel();
+                let _ = census.await;
+                if lost.is_cancelled() {
+                    return Err(AnalysisResolutionError::ClaimLost);
+                }
+                return Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                });
+            }
+        };
+        if !matches!(census, crate::hevc_census::IndexCensus::Ready) {
+            return Err(AnalysisResolutionError::Retry {
+                code: "hevc_census_pending",
+                charge_attempt: matches!(census, crate::hevc_census::IndexCensus::Failed),
+            });
+        }
+        if request.video_identity == HEVC_CENSUS_ANALYSIS_IDENTITY
+            && request.target_node_id != node_id
+        {
+            // The verdict is shared. Discovery on the target can now derive
+            // recipes from its own capabilities.
+            return Err(AnalysisResolutionError::Terminal("pipeline_superseded"));
         }
         let video = match fragment_index_requested_video_options(
             self.store.as_ref(),
@@ -10990,7 +11451,47 @@ impl JobManager {
                 });
             }
             Err(StoreError::Task(_)) => {
-                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
+                // A census request has no recipe, and a persisted verdict can
+                // supersede historical recipes. Queue missing canonical variants
+                // with their ordinary generations.
+                self.note_fresh_index_files(vec![file.id]);
+                let identities = fragment_index_video_identity_options(
+                    self.store.as_ref(),
+                    &file,
+                    have_dovi,
+                    transcode.dv_convert_enabled().await,
+                )
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                })?;
+                for (video, identity) in identities {
+                    if self
+                        .store
+                        .fragment_index(file.id, &crate::fragindex::identity_for(&file, video))
+                        .await
+                        .map_err(|_| AnalysisResolutionError::Retry {
+                            code: "source_catalog_read_failed",
+                            charge_attempt: true,
+                        })?
+                        .is_none()
+                    {
+                        self.request_file_analysis_for_identity(
+                            file.id,
+                            false,
+                            "fragment_index",
+                            &request.trigger,
+                            &identity,
+                        )
+                        .await
+                        .map_err(|_| AnalysisResolutionError::Retry {
+                            code: "queue_write_failed",
+                            charge_attempt: true,
+                        })?;
+                    }
+                }
+                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"));
             }
             Err(_) => {
                 return Err(AnalysisResolutionError::Retry {
@@ -11793,7 +12294,7 @@ impl JobManager {
             .flatten();
         if let Some(artifact) = &published {
             let hydrated = tokio::select! {
-                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(),
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.peer_calls.as_ref(), self.directory.as_ref(),
                     &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
                 () = lost.cancelled() => false,
             };
@@ -12174,7 +12675,7 @@ impl JobManager {
             },
             async {
                 Ok::<_, String>(
-                    crate::fragindex::build_shared_from_attested_file_with_progress(
+                    crate::fragindex::build_shared_from_attested_file_with_progress_and_store(
                         &file,
                         &attested.handle,
                         &attested.observation.object_version,
@@ -12184,6 +12685,7 @@ impl JobManager {
                         report_progress,
                         ride_along.as_ref(),
                         &cancel,
+                        Some(self.store.as_ref()),
                     )
                     .await,
                 )
@@ -12912,7 +13414,7 @@ impl JobManager {
                             ?kind,
                             state = ?cancelled.state,
                             reason = "output_preparation_disabled",
-                            "cancelled queued output preparation the Developer switch no longer admits"
+                            "cancelled queued output preparation the output-preparation setting no longer admits"
                         );
                     }
                     // Another node cancelled it first, or it settled.
@@ -13872,3 +14374,31 @@ mod tests;
 #[cfg(test)]
 #[path = "state/backfill_tests.rs"]
 mod backfill_tests;
+
+/// Why an admin probe repair (`POST /items/{id}/reanalyze`) produced no
+/// report. The first three are the cluster's ordinary rules, not faults, so
+/// the HTTP layer answers each with a typed refusal rather than a 500.
+#[derive(Debug)]
+pub enum ReprobeError {
+    /// This node cannot take cluster-wide leases right now: it is not a
+    /// committed voter, is entering maintenance, or cannot read committed
+    /// membership this moment. A learner is refused before the handler, so
+    /// what reaches here is usually transient.
+    NotEligible,
+    /// A node holds the cluster-wide probe-repair lease: another one, or this
+    /// one (`held_here`) for a scheduled pass or a concurrent request.
+    Busy {
+        owner_node_id: String,
+        held_here: bool,
+    },
+    /// This node lost the lease before the pass finished. Files already
+    /// re-probed stay published; the report for the rest was not produced.
+    LeaseLost,
+    Store(StoreError),
+}
+
+impl From<StoreError> for ReprobeError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}

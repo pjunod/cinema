@@ -88,7 +88,7 @@ const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 fn admit_remote_start_serving_authority(
     state: &AppState,
 ) -> Result<(crate::serving_fence::ServingAuthority, u64), RemoteStartError> {
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let generation = authority.admit().ok_or(RemoteStartError::ServingFence)?;
     Ok((authority, generation))
 }
@@ -142,8 +142,9 @@ async fn authorize(
 ) -> Result<(), StatusCode> {
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", path, body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
     {
@@ -161,8 +162,9 @@ async fn authorize_read(
 ) -> Result<(), StatusCode> {
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
-        .membership
-        .authorize_internal_peer_read_request(&auth, "POST", path, body)
+        .cluster
+        .authentication()
+        .authorize_read_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
     {
@@ -180,7 +182,7 @@ pub(crate) async fn start(
     let start_deadline = tokio::time::Instant::now() + START_DEADLINE;
     authorize(&state, &headers, START_PATH, &body).await?;
     let restart_admission = state
-        .serving
+        .cluster
         .try_restart_admission()
         .await
         .ok_or(RemoteStartError::RestartDrain)?;
@@ -515,10 +517,14 @@ pub(crate) async fn activate(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let Some(restart_admission) = state.serving.try_restart_admission().await else {
+    // Exact-auth validation and the owner check precede translation. The
+    // target uses the same local expiry basis as its route predicate, and
+    // captures this once before admission/ownership awaits can consume it.
+    let activation_deadline = super::hls::activation_lease_deadline(&request.activation);
+    let Some(restart_admission) = state.cluster.try_restart_admission().await else {
         return RemoteStartError::RestartDrain.into_response();
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     if authority.admit() != Some(request.target_generation) {
         return RemoteStartError::ServingFence.into_response();
     }
@@ -533,10 +539,6 @@ pub(crate) async fn activate(
     {
         return StatusCode::CONFLICT.into_response();
     }
-    let predecessor_incarnation = request
-        .activation
-        .expected_predecessor_incarnation_id
-        .clone();
     let activation = request.activation.clone();
     let activation_state = state.clone();
     let mut activation_task = tokio::spawn(async move {
@@ -545,23 +547,25 @@ pub(crate) async fn activate(
             activation_state,
             request.activation,
             None,
-            predecessor_incarnation,
             authority,
             request.target_generation,
             None,
+            activation_deadline,
         )
         .await
     });
-    match tokio::time::timeout(
-        crate::media_sessions::ACTIVATION_STORE_DEADLINE,
+    match tokio::time::timeout_at(
+        activation_deadline
+            .min(tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE),
         &mut activation_task,
     )
     .await
     {
         Ok(Ok(Ok(_))) => StatusCode::NO_CONTENT.into_response(),
         Ok(Ok(Err(error))) => {
-            let confirmation_deadline =
-                tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE;
+            let confirmation_deadline = activation_deadline.min(
+                tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE,
+            );
             if super::hls::wait_for_confirmed_activation(&state, &activation, confirmation_deadline)
                 .await
                 .is_some()
@@ -675,10 +679,10 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         };
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return RemoteStartError::RestartDrain.into_response();
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return RemoteStartError::ServingFence.into_response();
     };
@@ -1251,6 +1255,20 @@ pub(crate) async fn quality_schedule(
     .await
 }
 
+pub(crate) async fn retain_output(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::RETAIN_OUTPUT_PATH, &body).await {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::RetainOutputRelayRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    super::hls::retain_output_relayed(&state, request).await
+}
+
 #[cfg(test)]
 pub(crate) fn output_capture_test_state() -> AppState {
     super::tests::test_app_with_state().1
@@ -1334,6 +1352,7 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -1350,6 +1369,7 @@ mod tests {
             height: 720,
             encoder: "software".to_owned(),
             vod: false,
+            startup_seek_ready_ms: None,
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
@@ -1623,6 +1643,7 @@ mod tests {
                 owner_epoch: 1,
             },
             effective_selection: crate::playback_control::EffectiveSelection {
+                audio_alternates: false,
                 candidate_id: None,
                 quality_auto: true,
                 height: 720,
@@ -1694,7 +1715,7 @@ mod tests {
         let (_, first_generation) = admit_remote_start_serving_authority(&state)
             .unwrap_or_else(|_| panic!("initial serving authority"));
 
-        state.serving.validation_set_ready(false).await;
+        state.cluster.test_fence().validation_set_ready(false).await;
         assert!(matches!(
             admit_remote_start_serving_authority(&state),
             Err(RemoteStartError::ServingFence)
@@ -1706,7 +1727,7 @@ mod tests {
             Some(&HeaderValue::from_static("1"))
         );
 
-        state.serving.validation_set_ready(true).await;
+        state.cluster.test_fence().validation_set_ready(true).await;
         let (authority, recovered_generation) = admit_remote_start_serving_authority(&state)
             .unwrap_or_else(|_| panic!("recovered serving authority"));
         assert_ne!(recovered_generation, first_generation);

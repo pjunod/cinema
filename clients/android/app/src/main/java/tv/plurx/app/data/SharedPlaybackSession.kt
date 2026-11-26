@@ -131,6 +131,12 @@ internal fun sharedPlaybackPlan(
     val track = selection.subtitle?.let { index -> presentation.subtitles.firstOrNull { it.index == index.toLong() } }
     val burn = selection.burn || track?.isNativeHls == false
     val start = subject.resumeMs.toDouble() / 1000
+    val copy = !burn && decision.method != "transcode"
+    // The same ask Local makes (`PlayerScreen` / `hlsSessionRequest`): the
+    // decision's own preservation verdict, sent only for a copy. The Source's
+    // planner clamps the plan to this ask, so without it a Dolby Vision
+    // capable player gets the HDR10 base.
+    val preserveDolbyVision = presentation.delivery?.preserve_dolby_vision ?: presentation.preserve_dolby_vision
     val body = if (direct) CreateSessionReq(
         playback_id = playbackId, request_id = requestId, start = start,
         quality_auto = selection.quality == PlaybackQuality.Auto, caps = result.caps, presentation = "direct",
@@ -139,7 +145,8 @@ internal fun sharedPlaybackPlan(
         quality_auto = selection.quality == PlaybackQuality.Auto, start = start, audio = audio,
         native_subtitles = selection.subtitle?.takeUnless { burn }?.let { true }, subtitle = selection.subtitle?.takeUnless { burn },
         subtitle_burn = selection.subtitle?.takeIf { burn },
-        copy = !burn && decision.method != "transcode", aac = presentation.transcode_audio,
+        copy = copy, aac = presentation.transcode_audio,
+        preserve_dolby_vision = true.takeIf { copy && preserveDolbyVision },
         hdr10 = if (decision.method == "transcode" && presentation.delivered_dynamic_range == "hdr10") true else null, caps = result.caps,
     )
     return SharedPlaybackPlan(subject, decision, result.caps, body)

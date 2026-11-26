@@ -105,6 +105,93 @@ test('same-target forced repair retains the dispatched command measurement',asyn
   h.c.markPlaybackControlSeekExecuted(h.p,30,h.video);h.present();
   assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
 });
+function nativeRetryHarness(){
+  const h=harness(),{c,p,video,clock}=h,reopens=[],recoveries=[];
+  const localSeekRoute=c.PlaybackPolicy.seekRoute;
+  c.PlaybackPolicy={...require('../../crates/plurxd/src/web/playback-policy.js'),
+    seekRoute:args=>args.forceReopen?{route:'reopen'}:localSeekRoute(args)};
+  Object.assign(c,{play:()=>{},raisePlaybackSurface:()=>{},pbPosSec:()=>video.currentTime,
+    PLAYBACK_SAMPLING_PERIOD_MS:500,PERSISTENT_STALL_MS:8000,
+    samplePreparedSwitchFrames:()=>{},streamHasVideo:()=>true,reportTtff:()=>{},
+    playbackSurfaceGeneration:()=>p.mediaAttachment.id,
+    playbackCaptionAttachmentPositionReady:()=>{},clearStall:()=>{},finishStallRecovery:()=>{},
+    bufferRunway:()=>12,persistentWait:(...args)=>{recoveries.push(args);return Promise.resolve();},
+    requestPlaybackMediaChange:(owner,change)=>{
+      owner.pendingMediaChange=change;
+      reopens.push({change,position:c.positionForPlaybackIntent(video,owner)});
+    }});
+  for(const name of ['retryPlayback','positionForPlaybackIntent','applyPlaybackAttachmentPosition',
+    'playbackProgressTick','completeHlsStartup']) vm.runInContext(source(name),c);
+  p.controlIntentGeneration=0;
+  p.copyHls=true;p.stallFrom=0;p.hlsStartup={transport:'native',state:'exhausted'};
+  const predecessor=p.mediaAttachment;
+  function attach(){
+    const {position}=reopens.at(-1);
+    const token={id:2,nativePositionPending:true};
+    const attachment={token,current:()=>p.mediaAttachment===token};
+    p.mediaAttachment=token;p.pendingMediaChange=null;
+    p.hlsStartup={transport:'native',state:'active',attachment,native:{},retry:{},startedAt:clock.ms};
+    c.markPlaybackControlSeekExecuted(p,position,video);
+    c.applyPlaybackAttachmentPosition(video,p,attachment,position);
+  }
+  function tick(at,seconds,frames){
+    clock.ms=at;video.currentTime=seconds;p.controlPresentedFrames=frames;
+    c.playbackProgressTick(video,p);
+  }
+  async function finishCoalescing(promise){
+    const at=h.timers.findIndex(timer=>timer.ms===100);
+    if(at>=0) h.timers.splice(at,1)[0].fn();
+    await promise;
+  }
+  return {...h,predecessor,reopens,recoveries,attach,tick,finishCoalescing};
+}
+
+test('native startup retry requests the file origin and does not restart advancing playback',async()=>{
+  for(const automatic of [false,true]){
+    const h=nativeRetryHarness(),{c,p,video}=h;
+    video.currentTime=17;
+    p.transportPresentation={attachment:h.predecessor,element:video};
+    p.progressWatch={attachment:h.predecessor,element:video,clock:17,frames:100,at:0};
+    if(automatic){
+      p.recoveringStall={kind:'supply'};
+      await h.finishCoalescing(c.seekTo(0.000001,true,720,false,p.recoveringStall));
+      assert.equal(h.reopens[0].change.height,720);
+      assert.equal(h.reopens[0].change.recoveryCause,'network');
+      assert.equal(p.recoveringStall.kind,'supply');
+    }else await h.finishCoalescing(c.retryPlayback());
+    assert.equal(h.reopens.length,1);
+    assert.equal(h.reopens[0].position,0,'the old media clock cannot move the origin create');
+    assert.equal(p.controlSeek,undefined);
+    h.attach();
+    assert.equal(video.currentTime,0,'the replacement explicitly positions at its file opening');
+    h.tick(100,4.004,1);
+    assert.equal(p.hlsStartup.state,'active','old attachment proof cannot satisfy the new startup');
+    h.tick(600,4.50,13);
+    assert.equal(p.hlsStartup.state,'presenting');
+    for(let t=1100;t<=20_100;t+=500) h.tick(t,4.50+(t-600)/1000,13+(t-600)*.024);
+    assert.equal(h.recoveries.length,0,'the old synthetic seek deadline cannot interrupt moving frames');
+    assert.equal(h.posts.filter(x=>x.event==='hls_startup_presenting').length,1);
+    h.tick(28_101,video.currentTime,p.controlPresentedFrames);
+    assert.equal(h.recoveries.length,1,'a physically frozen successor still reaches stall recovery');
+  }
+});
+
+test('native retry preserves a viewer seek to zero and requires its target frame',async()=>{
+  const h=nativeRetryHarness(),{c,p,video}=h;
+  const pending=await h.dispatch(0);
+  p.stallFrom=45;
+  await h.finishCoalescing(c.retryPlayback());
+  assert.equal(h.reopens[0].position,0,'retry the requested seek, even with a stale stall position');
+  assert.equal(p.controlSeek.seekTelemetry,pending.seekTelemetry);
+  h.attach();
+  const observation={attachment:p.mediaAttachment,epoch:p.controlPresentationEpoch,intent:p.controlSeek.sequence};
+  assert.equal(c.settlePlaybackControlSeek(video,p,0,1,{...observation,attachment:h.predecessor}),false);
+  assert.equal(c.settlePlaybackControlSeek(video,p,4.004,1,observation),false);
+  assert.equal(c.completeHlsStartup(p),false,'playing elsewhere cannot settle the viewer seek');
+  assert.equal(c.settlePlaybackControlSeek(video,p,0,2,observation),true);
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
+});
+
 test('a cloned successor shares the one-shot outcome with its predecessor',async()=>{
   const h=harness();const pending=await h.dispatch(30);
   const successor=Object.assign({},h.p,{controlSeek:Object.assign({},pending),mediaAttachment:{id:2}});
@@ -450,4 +537,24 @@ test('expired-session Play reopens at the saved destination and its later wait e
   assert.equal(h.present(),true);assert.equal(h.faults().length,0);
   h.step({presenting:false,attached:'a2'});h.video.paused=true;h.p.wantsPlayback=false;
   h.wait();assert.equal(h.surface().kind,'none','a later pause has no surviving buffering overlay');
+});
+
+// Stall beacons carry the buffered ranges. Past 10 000 s, eight ranges no
+// longer fit the server's cap, which drops a longer value whole; the client
+// keeps the ranges nearest the playhead within it, in time order.
+test('stall beacons keep the buffered ranges nearest the playhead within the server cap',()=>{
+  const context=vm.createContext({});
+  vm.runInContext(html.match(/const BUFFERED_RANGES_MAX=\d+;/)[0]+'\n'+source('bufferedRanges')
+    +'\nthis.bufferedRanges=bufferedRanges;this.cap=BUFFERED_RANGES_MAX;',context);
+  const spans=Array.from({length:12},(_,i)=>[10000+i*100,10050+i*100]);
+  const video={currentTime:10620,buffered:{length:spans.length,
+    start:i=>spans[i][0],end:i=>spans[i][1]}};
+  const text=context.bufferedRanges(video);
+  assert.ok(text.length<=context.cap,text);
+  const kept=text.split(',');
+  assert.ok(kept.includes('10600.00-10650.00'),'the range holding the playhead survives');
+  assert.ok(!kept.includes('10000.00-10050.00')&&!kept.includes('11100.00-11150.00'),'the farthest go first');
+  const starts=kept.map(range=>Number(range.split('-')[0]));
+  assert.deepEqual(starts,[...starts].sort((a,b)=>a-b),'listed in time order');
+  assert.equal(context.bufferedRanges({currentTime:1,buffered:{length:1,start:()=>0,end:()=>20.4}}),'0.00-20.40');
 });

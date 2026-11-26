@@ -290,7 +290,7 @@ impl DesktopControl {
             build: crate::version::SOURCE_COMMIT.into(),
             browser_origin,
             supervisor: self.supervisor.clone(),
-            ready: state.serving.is_ready(),
+            ready: state.cluster.operations().ready(),
         };
         let context = Arc::new(ContextState {
             control: Arc::clone(self),
@@ -441,7 +441,7 @@ async fn identity(
     Extension(context): Extension<Arc<ContextState>>,
 ) -> Json<DaemonIdentityV1> {
     let mut identity = context.identity.clone();
-    identity.ready = state.serving.is_ready();
+    identity.ready = state.cluster.operations().ready();
     Json(identity)
 }
 async fn status(Extension(context): Extension<Arc<ContextState>>) -> LocalResult<ShutdownStatusV1> {
@@ -476,8 +476,9 @@ async fn prepare(
 ) -> LocalResult<ShutdownPreparedV1> {
     let Json(request) = request.map_err(|_| invalid("invalid shutdown preparation JSON"))?;
     let operation_guard = state
-        .serving
-        .try_planned_outage_operation_guard()
+        .cluster
+        .operations()
+        .claim_outage_operation()
         .map_err(|_| unsafe_shutdown("another planned outage operation is resolving"))?;
     tokio::spawn(async move {
         let _operation_guard = operation_guard;
@@ -529,14 +530,21 @@ async fn prepare_owned(
             lease.release().await;
         } else {
             state
-                .serving
-                .cancel_planned_outage_preparation(old.token, 0)
+                .cluster
+                .operations()
+                .cancel_outage_fence(old.token, 0)
                 .await;
         }
     }
     current_topology(&state).await?;
     let active = cluster_operations::local_owned_media_sessions(&state).await;
-    if !state.serving.restart_drain_status(active).await.drained {
+    if !state
+        .cluster
+        .operations()
+        .drain_status(active)
+        .await
+        .drained
+    {
         return Err(unsafe_shutdown(
             "playback, recordings or response delivery remain active; wait for idle and try again",
         ));
@@ -578,7 +586,12 @@ async fn prepare_owned(
             .preparation_expiry_unix_ms(Duration::from_millis(PREPARATION_MS))
             .unwrap_or(0),
     );
-    let Some(token) = state.serving.begin_desktop_preparation_until(expires).await else {
+    let Some(token) = state
+        .cluster
+        .operations()
+        .prepare_desktop_fence(expires)
+        .await
+    else {
         lease.release().await;
         return Err(unsafe_shutdown(
             "another local planned outage already owns admissions",
@@ -595,8 +608,9 @@ async fn prepare_owned(
         tokio::time::timeout(
             Duration::from_secs(3),
             state
-                .serving
-                .wait_for_restart_admissions_until(token, &state.shutdown)
+                .cluster
+                .operations()
+                .settle_outage_admissions(token, &state.shutdown)
         )
         .await,
         Ok(true)
@@ -607,7 +621,7 @@ async fn prepare_owned(
         ));
     }
     let active = cluster_operations::local_owned_media_sessions(&state).await;
-    if active != 0 || !state.serving.planned_outage_is_current(token).await {
+    if active != 0 || !state.cluster.operations().outage_is_current(token).await {
         lease.release().await;
         return Err(unsafe_shutdown(
             "playback or recordings remain active; wait for idle and try again",
@@ -646,8 +660,9 @@ async fn commit(
     // Continue through a disconnected HTTP waiter: after atomic commitment,
     // cancellation belongs to the daemon, not to the controller connection.
     let operation_guard = state
-        .serving
-        .try_planned_outage_operation_guard()
+        .cluster
+        .operations()
+        .claim_outage_operation()
         .map_err(|_| unsafe_shutdown("another planned outage operation is resolving"))?;
     tokio::spawn(async move {
         let _operation_guard = operation_guard;
@@ -676,8 +691,9 @@ async fn commit_owned(
         .as_ref()
         .ok_or_else(|| unsafe_shutdown("the replicated preparation owner is missing"))?;
     state
-        .membership
-        .commit_cluster_operation_lease(lease.claim())
+        .cluster
+        .operations()
+        .commit_outage_claim(lease.claim())
         .await
         .map_err(|_| {
             unsafe_shutdown("the exact replicated preparation was cancelled or superseded")
@@ -701,8 +717,9 @@ async fn commit_owned(
     let active = cluster_operations::local_owned_media_sessions(&state).await;
     binding(&context.control, &peer, &request.process_nonce)?;
     if !state
-        .serving
-        .commit_desktop_shutdown(prepared.token, active)
+        .cluster
+        .operations()
+        .commit_desktop_fence(prepared.token, active)
         .await
     {
         return Err(unsafe_shutdown(
@@ -740,8 +757,9 @@ async fn cancel(
         lease.release().await;
     } else {
         state
-            .serving
-            .cancel_planned_outage_preparation(prepared.token, 0)
+            .cluster
+            .operations()
+            .cancel_outage_fence(prepared.token, 0)
             .await;
     }
     Ok(Json(
@@ -781,12 +799,12 @@ fn validate_preparation<'a>(
     Ok(prepared)
 }
 async fn current_topology(state: &AppState) -> Result<MembershipStatus, LocalError> {
-    if !state.serving.is_ready() {
+    if !state.cluster.operations().ready() {
         return Err(unsafe_shutdown(
             "local serving authority is unavailable; use administrator maintenance",
         ));
     }
-    let status = tokio::time::timeout(Duration::from_secs(5), state.membership.status())
+    let status = tokio::time::timeout(Duration::from_secs(5), state.cluster.membership_status())
         .await
         .map_err(|_| unsafe_shutdown("topology observation timed out"))?
         .map_err(|_| unsafe_shutdown("topology is unknown; use administrator maintenance"))?;
@@ -1309,39 +1327,41 @@ mod tests {
         assert!(!state.shutdown.is_cancelled());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn native_uninitialized_and_configured_sole_voter_commit_real_replicated_store() {
-        for configured in [false, true] {
+    /// A real one-voter replicated store with its passive metrics sampler
+    /// and serving monitor running, proven ready to serve.
+    struct RealSoleVoter {
+        root: tempfile::TempDir,
+        state: AppState,
+        selected: plurx_core::cluster::migration::SelectedStore,
+        observation: Arc<crate::StartupObservationHttp>,
+        stop: CancellationToken,
+        metrics: tokio::task::JoinHandle<()>,
+        serving: tokio::task::JoinHandle<()>,
+    }
+
+    impl RealSoleVoter {
+        async fn start(configured: bool) -> Self {
             let root =
                 tempfile::tempdir_in(std::env::current_dir().expect("desktop control fixture"))
                     .expect("desktop control fixture");
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("desktop control fixture");
-            let listeners: Vec<_> = (0..3)
-                .map(|_| {
-                    std::net::TcpListener::bind("127.0.0.1:0").expect("desktop control fixture")
-                })
-                .collect();
-            let addresses: Vec<_> = listeners
-                .iter()
-                .map(|listener| listener.local_addr().expect("desktop control fixture"))
-                .collect();
-            let mut config = plurx_core::config::Config::default();
-            config.storage.data_dir = root.path().join("data");
-            std::fs::create_dir_all(&config.storage.data_dir).expect("desktop control fixture");
-            config.server.bind = addresses[0];
-            config.cluster.raft_bind = addresses[1];
-            config.cluster.api_bind = addresses[2];
-            config.cluster.advertise_host = "localhost".into();
-            drop(listeners);
+            let data_dir = root.path().join("data");
+            std::fs::create_dir_all(&data_dir).expect("desktop control fixture");
+            let (config, http) = crate::owned_loopback_config(&data_dir);
             drop(
                 plurx_core::store::SqliteStore::open(&config.storage.data_dir.join("plurx.db"))
                     .expect("desktop control fixture"),
             );
-            let observation = Arc::new(crate::StartupObservationHttp::new(config.server.bind));
-            let selected = plurx_core::cluster::migration::select_daemon_store_observing(
-                &config,
-                Some(observation.as_ref()),
+            let observation = Arc::new(
+                crate::StartupObservationHttp::from_std_listener(http)
+                    .expect("desktop control fixture"),
+            );
+            let selected = Box::pin(
+                plurx_core::cluster::migration::select_daemon_store_observing(
+                    &config,
+                    Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
+                ),
             )
             .await
             .expect("desktop control fixture");
@@ -1361,9 +1381,8 @@ mod tests {
                 selected.identity.node_id.clone(),
                 selected.identity.cluster_id.clone(),
                 Arc::clone(&selected.credential_key),
-                selected.local_client(),
-                selected.replication_monitor(),
-                selected.membership_manager(),
+                selected.local_client().map(crate::cluster::backup_source),
+                crate::cluster::ClusterParts::of(&selected),
                 selected.catalogue_reader(),
                 selected.applied_view(),
                 store,
@@ -1378,26 +1397,64 @@ mod tests {
             );
             state.clock_observer = observation.observer().await.expect("startup clock owner");
             state
-                .membership
+                .cluster
+                .test_membership()
                 .heartbeat()
                 .await
                 .expect("desktop control fixture");
             let stop = CancellationToken::new();
             let metrics = tokio::spawn(
                 state
-                    .replication
+                    .cluster
+                    .test_replication()
                     .clone()
                     .passive_metrics_loop(stop.clone().cancelled_owned()),
             );
-            let serving = tokio::spawn(state.serving.clone().monitor_loop(stop.clone()));
+            let serving = tokio::spawn(
+                state
+                    .cluster
+                    .test_fence()
+                    .clone()
+                    .monitor_loop(stop.clone()),
+            );
             tokio::time::timeout(Duration::from_secs(8), async {
-                while !state.serving.is_ready() {
+                while !state.cluster.test_fence().is_ready() {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
             .await
             .expect("fresh sole-voter serving proof");
-            let control = control(root.path().to_owned());
+            Self {
+                root,
+                state,
+                selected,
+                observation,
+                stop,
+                metrics,
+                serving,
+            }
+        }
+
+        async fn close(self) -> tempfile::TempDir {
+            self.stop.cancel();
+            self.metrics.await.expect("desktop control fixture");
+            self.serving.await.expect("desktop control fixture");
+            self.observation.stop_and_drain().await;
+            self.selected
+                .shutdown()
+                .await
+                .expect("desktop control fixture");
+            self.root
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_uninitialized_and_configured_sole_voter_commit_real_replicated_store() {
+        for configured in [false, true] {
+            // The real activation future exceeds the default test stack.
+            let voter = Box::pin(RealSoleVoter::start(configured)).await;
+            let state = voter.state.clone();
+            let control = control(voter.root.path().to_owned());
             let context = context(Arc::clone(&control));
             #[cfg(target_os = "linux")]
             let native_peer = Peer { uid: 0, ..peer() };
@@ -1411,12 +1468,12 @@ mod tests {
                 confirm_interruption: true,
                 target_version: None,
             };
-            let prepared = match prepare_owned(
+            let prepared = match Box::pin(prepare_owned(
                 state.clone(),
                 Arc::clone(&context),
                 native_peer.clone(),
                 request,
-            )
+            ))
             .await
             {
                 Ok(Json(prepared)) => prepared,
@@ -1430,19 +1487,21 @@ mod tests {
                 owner_capability: prepared.owner_capability,
             };
             let operation_id = commit.operation_id.clone();
-            let committed = match commit_owned(state.clone(), context, native_peer, commit).await {
-                Ok(Json(committed)) => committed,
-                Err(error) => panic!("real sole-voter commit: {}", error.2),
-            };
+            let committed =
+                match Box::pin(commit_owned(state.clone(), context, native_peer, commit)).await {
+                    Ok(Json(committed)) => committed,
+                    Err(error) => panic!("real sole-voter commit: {}", error.2),
+                };
             assert!(committed.committed);
             assert!(state.shutdown.is_cancelled());
-            assert!(state.serving.try_restart_admission().await.is_none());
+            assert!(state
+                .cluster
+                .test_fence()
+                .try_restart_admission()
+                .await
+                .is_none());
             // Closing the controller leaves the committed daemon owner alive.
-            stop.cancel();
-            metrics.await.expect("desktop control fixture");
-            serving.await.expect("desktop control fixture");
-            observation.stop_and_drain().await;
-            selected.shutdown().await.expect("desktop control fixture");
+            let root = Box::pin(voter.close()).await;
             control.record_http_drain(true);
             control.finish(true).await.expect("desktop control fixture");
             let receipt: ShutdownReceiptV1 = serde_json::from_slice(
@@ -1452,6 +1511,55 @@ mod tests {
             .expect("desktop control fixture");
             assert_eq!(receipt.exit_class, ExitClass::Clean);
         }
+    }
+
+    /// openraft answers a write before it republishes `last_applied`. A
+    /// sole voter read straight after its own write (the order `commit_owned`
+    /// uses after reasserting its lease) or during its writes must still be
+    /// in sync: entries the state machine is applying are not replication lag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sole_voter_stays_in_sync_through_its_own_replicated_writes() {
+        const WRITES: usize = 200;
+        let voter = Box::pin(RealSoleVoter::start(true)).await;
+        let state = &voter.state;
+        let done = CancellationToken::new();
+        // One task: while the writer awaits each Raft write, the reader samples
+        // with that entry in flight; the Raft core runs on the other worker.
+        let writes = async {
+            let _done = done.clone().drop_guard();
+            for round in 0..WRITES {
+                state
+                    .store
+                    .put_setting("desktop-control-in-sync-regression", &round.to_string())
+                    .await
+                    .expect("real replicated write");
+                let status = state.cluster.replication_status().await;
+                assert_eq!(
+                    status.health,
+                    ReplicationHealth::InSync,
+                    "read after write {round}: {}",
+                    status.explanation
+                );
+            }
+        };
+        let reads = async {
+            let mut concurrent_reads = 0_usize;
+            while !done.is_cancelled() {
+                let status = state.cluster.replication_status().await;
+                assert_eq!(
+                    status.health,
+                    ReplicationHealth::InSync,
+                    "read during writes: {}",
+                    status.explanation
+                );
+                concurrent_reads += 1;
+                tokio::task::yield_now().await;
+            }
+            concurrent_reads
+        };
+        let ((), concurrent_reads) = tokio::join!(writes, reads);
+        assert!(concurrent_reads > 0);
+        voter.close().await;
     }
 
     #[test]

@@ -129,7 +129,7 @@ struct RemoteCompanionView: View {
                             .disabled(!device.available)
                         }
                         if !remote.unavailableNodes.isEmpty { Text("Some server nodes did not answer discovery.").font(.caption) }
-                        if remote.devices.isEmpty { Text("Enable Cinema remotes in Developer settings on the phone and TV, and enable the server's remote feature.") }
+                        if remote.devices.isEmpty { Text("Enable Cinema remotes in Remotes & devices settings on the phone and TV, and enable the server's remote feature.") }
                     }
                     Text(remote.commandStatus).font(.caption).accessibilityIdentifier("cinema-remote-outcome")
                 }

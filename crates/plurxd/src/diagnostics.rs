@@ -2,7 +2,7 @@
 use crate::{
     http::{
         extract::AuthUser,
-        peer_transport::{deadline_after, PeerAuthMode, PeerTransport},
+        peer_transport::{deadline_after, PeerAuthMode},
     },
     state::AppState,
 };
@@ -527,8 +527,8 @@ async fn collect(
         .cloned()
         .collect::<BTreeSet<_>>();
     let omitted = nodes.len() > 8;
-    let peers = state.membership.activity_peers().await.unwrap_or_default();
-    let transport = PeerTransport::new(state.membership.clone());
+    let peers = state.cluster.voter_targets().await.unwrap_or_default();
+    let transport = state.cluster.calls();
     let requests: Vec<_> = remote
         .iter()
         .cloned()
@@ -624,7 +624,7 @@ async fn collect(
         facts.insert("app_version".into(), crate::version::SEMVER.into());
         facts.insert("build".into(), crate::version::BUILD.into());
         facts.insert("phase".into(), "readiness".into());
-        facts.insert("observed".into(), state.serving.is_ready().into());
+        facts.insert("observed".into(), state.cluster.ready().into());
         result.events.push(Event {
             run_id: recorder.run.clone(),
             sequence: recorder
@@ -748,8 +748,9 @@ async fn peer(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let payload = crate::http::peer_transport::signed_response_payload(200, &bytes);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = private(bytes);
     response.headers_mut().insert(

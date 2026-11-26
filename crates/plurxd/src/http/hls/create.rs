@@ -196,8 +196,11 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct CreateSession {
+    /// Receiver-affirmed shared upgrade: false is ordinary support, true requests the prepared successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_upgrade: Option<bool>,
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
     pub playback_id: String,
@@ -263,6 +266,11 @@ pub struct CreateSession {
     pub copy: Option<bool>,
     /// With `copy`: re-encode the audio the client can't take.
     pub aac: Option<bool>,
+    /// With `copy`: this client selects soundtracks itself (hls.js alternate
+    /// audio). The server may answer with one shared video-only rendition and
+    /// every soundtrack as an alternate audio rendition; the session response
+    /// says which presentation it chose. Absent keeps the muxed copy.
+    pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
     pub preserve_dolby_vision: Option<bool>,
@@ -325,6 +333,10 @@ pub struct CreateSession {
     /// retired objects can be dropped a segment after the DELETE instead of
     /// a whole advertised playlist later. `"native"`, an unrecognized value
     /// and an absent field all keep the original promise.
+    ///
+    /// `"mpv"` selects a bounded producer/reload startup window while retaining
+    /// conservative retirement. Native/Safari keeps its fixed-target startup
+    /// window; an unknown or omitted transport remains conservative.
     ///
     /// The client must send what it actually selected, not a guess from the
     /// user agent, and must choose the conservative class whenever its
@@ -631,7 +643,17 @@ impl CreateSession {
             audio_delivery: None,
             copy_contract: copy_scope.map(|(preserve, convert)| {
                 (
-                    copy_audio.map_or(self.aac == Some(true), |delivery| delivery.transcodes()),
+                    copy_audio.map_or_else(
+                        || {
+                            claimless_copy_converts_audio(
+                                source,
+                                &plurx_core::playback::DeviceProfile::from_caps_v2(caps),
+                                self.audio,
+                                self.aac == Some(true),
+                            )
+                        },
+                        |delivery| delivery.transcodes(),
+                    ),
                     preserve,
                     convert,
                 )
@@ -694,11 +716,16 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            // The player's per-playback choice; `SessionRequest` never
+            // serializes it.
+            retain_output: self.overrides.as_ref().and_then(|o| o.retain_output),
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -809,6 +836,14 @@ pub struct CreateOverrides {
     /// badge deserves to see the two facts next to each other.
     #[serde(default)]
     pub force: Option<String>,
+    /// The player's per-playback output-retention choice. `Some(false)`
+    /// turns it off for this playback only: no complete-output preparation
+    /// is queued and the rolling producer retains nothing. `None` or
+    /// `Some(true)` follows the server's settings. Read from the create body
+    /// only: never serialized into the durable planning overrides, so a
+    /// takeover or resurrected session falls back to the server setting.
+    #[serde(default, skip_serializing)]
+    pub retain_output: Option<bool>,
 }
 
 /// What create decided about the plan the client echoed, and what to say
@@ -973,6 +1008,56 @@ pub(crate) fn reconcile_request_audio(
             request.audio_delivery = Some(delivery);
         }
     }
+}
+
+/// Whether a copy for caps that name no audio sinks converts its audio. With
+/// no claim for [`reconcile_request_audio`] to resolve, the client's `aac` ask
+/// stood alone; the caps' decoder list still bounds what the copy may pass
+/// through, as the plan derived from the same caps says, and the copy's MP4
+/// output must be able to carry the track at all. Either refusal converts.
+/// This only raises the conversion; a client may always ask for it. The
+/// quality catalog's copy contract and the built request both answer here, so
+/// the candidate a selection names is the recipe the copy runs.
+pub(crate) fn claimless_copy_converts_audio(
+    source: &MediaFile,
+    caps: &plurx_core::playback::DeviceProfile,
+    audio_index: Option<i64>,
+    asked: bool,
+) -> bool {
+    // The track the copy's `-map 0:a:N?` takes: the selected one, else the first.
+    let selected = audio_index.map_or_else(
+        || source.audio_streams.first(),
+        |index| {
+            source
+                .audio_streams
+                .iter()
+                .find(|stream| stream.index == index)
+        },
+    );
+    asked
+        || selected.is_some_and(|stream| {
+            !caps.allows_audio_stream(stream)
+                || !plurx_core::transcode::copy_mp4_carries_audio_codec(&stream.codec)
+        })
+}
+
+/// [`claimless_copy_converts_audio`] applied to a built Copy request that has
+/// no audio claim.
+pub(crate) fn reconcile_claimless_copy_audio(
+    source: Option<&MediaFile>,
+    caps: Option<&plurx_core::playback::DeviceProfile>,
+    request: &mut crate::transcode::SessionRequest,
+) {
+    if request.audio_claim.is_some() {
+        return;
+    }
+    let (Some(file), Some(caps)) = (source, caps) else {
+        return;
+    };
+    let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind else {
+        return;
+    };
+    *aac = claimless_copy_converts_audio(file, caps, request.audio_index, *aac);
 }
 
 /// The plan for a build that sends no caps document: its echo, plus the one
@@ -1475,6 +1560,39 @@ pub(super) async fn burn_would_discard_this_session_hdr(
     .await
 }
 
+/// The grade an ordinary start delivers, by the same rule its Start reports
+/// as `delivered_dynamic_range`: HDR10 only when that is what it sends.
+fn ordinary_delivered_grade(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> plurx_core::transcode::OutputGrade {
+    use plurx_core::transcode::OutputGrade;
+    let requested = if request.hdr10 {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    };
+    if session_delivered_dynamic_range(source, &request.kind, requested) == Some("hdr10") {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    }
+}
+
+/// The height of the rendition an ordinary start runs. A copy runs the
+/// source raster, whatever fallback rung planning resolved for it; a
+/// transcode runs its rung.
+fn ordinary_rendition_height(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> Option<u32> {
+    let height = match request.kind {
+        crate::transcode::SessionKind::Copy { .. } => source?.height?,
+        crate::transcode::SessionKind::Transcode { height } => height,
+    };
+    u32::try_from(height).ok().filter(|height| *height > 0)
+}
+
 /// The dynamic range this session puts on the wire, read off the session it
 /// actually built rather than the decision that suggested it — a burn or a
 /// forced rung produces a transcode `/decision` never promised, and the
@@ -1536,6 +1654,7 @@ pub(super) fn session_delivered_processing_shape(
     clippy::too_many_arguments,
     reason = "each is an independent fact of the session being described"
 )]
+#[cfg(test)]
 pub(super) fn session_enhancement(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
@@ -1545,6 +1664,52 @@ pub(super) fn session_enhancement(
     effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     decline: Option<&str>,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    session_enhancement_with_title(
+        source,
+        kind,
+        grade,
+        processed_dv_profile,
+        processed_fel,
+        effective,
+        snapshot,
+        decline,
+        None,
+    )
+}
+
+/// The title scans' recorded facts — display-metadata levels for the
+/// Playback info `Dolby Vision metadata` row, and whether the enhancement
+/// layer is full or minimal. A read of the stored probe document; `None` for
+/// a non-DV source.
+pub(crate) async fn session_title_scan(
+    state: &AppState,
+    source: Option<&MediaFile>,
+) -> Option<plurx_core::playback::enhancement::TitleScanFacts> {
+    let file = source.filter(|file| file.dolby_vision.profile.is_some())?;
+    let probe = state
+        .store
+        .get_file_probe_json(file.id)
+        .await
+        .ok()
+        .flatten();
+    Some(plurx_core::playback::enhancement::TitleScanFacts::from_probe(probe.as_deref()))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is an independent fact of the session being described"
+)]
+pub(crate) fn session_enhancement_with_title(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+    grade: plurx_core::transcode::OutputGrade,
+    processed_dv_profile: Option<u8>,
+    processed_fel: Option<bool>,
+    effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    decline: Option<&str>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
     let file = source?;
@@ -1603,10 +1768,12 @@ pub(super) fn session_enhancement(
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
         source_profile: profile,
         source_el_present: file.dolby_vision.el_present,
+        el_kind: title.and_then(|title| title.el_kind),
         route,
         hdr_processing_enabled: setting(plurx_core::store::keys::DV_HDR_PROCESSING),
         fel_reencode_enabled: setting(plurx_core::store::keys::DV_FEL_REENCODE),
         decline_reason: decline,
+        levels: title.and_then(|title| title.levels.as_ref()),
     })
 }
 
@@ -1842,12 +2009,13 @@ pub(crate) struct PlanInputs<'a> {
 /// will never be built has none — which is why M6 reads the grade axis off the
 /// request instead, as `GradeIntent`. See §3.2.1 of the caller handoff for the
 /// claim that was withdrawn here.
+#[cfg(test)]
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
     body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
-    resolve_plan_with_continuous(inputs, review, body, None).await
+    resolve_plan_with_scope(inputs, review, body, PlanScope::default()).await
 }
 
 /// Preserve ordinary initial Auto's local incomplete-sweep fallback. A bounded
@@ -1882,6 +2050,10 @@ struct PlanScope<'a> {
     /// predecessor's own. A create resolves the ordinary plan and leaves
     /// processing to the upgrade after its first frame (plan ruling 3).
     processed_selectable: bool,
+    // The passive compatibility facade offers its own fixed media contract
+    // and applies the client's finite bitrate ceiling to that native recipe.
+    passive_compatibility: bool,
+    stored_catalogue_only: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -1911,25 +2083,7 @@ pub(super) async fn resolve_plan_for_preparation(
             continuous: None,
             auto_bootstrap_ceiling,
             processed_selectable: processed_predecessor,
-        },
-    )
-    .await
-}
-
-async fn resolve_plan_with_continuous(
-    inputs: PlanInputs<'_>,
-    review: Option<PlanReview>,
-    body: CreateSession,
-    continuous: Option<&ContinuousFamilyStart>,
-) -> Result<ResolvedPlan, ApiError> {
-    resolve_plan_with_scope(
-        inputs,
-        review,
-        body,
-        PlanScope {
-            continuous,
-            auto_bootstrap_ceiling: None,
-            processed_selectable: false,
+            ..PlanScope::default()
         },
     )
     .await
@@ -2010,7 +2164,12 @@ async fn resolve_plan_for_principal_with_local_evidence(
         continuous,
         auto_bootstrap_ceiling,
         processed_selectable,
+        passive_compatibility,
+        stored_catalogue_only,
     } = scope;
+    // A detail preview owns no incumbent. In particular, a replayed link
+    // receipt must not take this stored-only plan into measured qualification.
+    let incumbent_receipt = incumbent_receipt.filter(|_| !stored_catalogue_only);
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
             && (body.quality_auto != Some(true)
@@ -2106,20 +2265,6 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let prefer_hevc = continuous.is_none()
             && state.transcode.macos_hevc_output_enabled()
             && explicit_hls_hevc_claim(caps);
-        let enabled = continuous.is_some()
-            || prefer_hevc
-            || if let Some(snapshot) = snapshot {
-                snapshot
-                    .settings
-                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                    .is_some_and(|value| value.trim() == "1")
-            } else {
-                state
-                    .applied
-                    .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                    .await?
-                    .is_some_and(|value| value.trim() == "1")
-            };
         let intent_candidate =
             body.intent
                 .as_ref()
@@ -2137,10 +2282,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let requested = continuous
             .map(|family| family.primary_candidate_id)
             .or(intent_candidate);
-        if requested.is_some() && !enabled {
-            return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
-        }
-        if enabled
+        if !passive_compatibility
             && (auto_bootstrap_ceiling.is_some()
                 || requested.is_some()
                 || body.height == Some(1440)
@@ -2170,10 +2312,17 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .await
             };
             let catalog_request = body.selection_catalog_request(source, caps, original_copy_scope);
-            let catalogue_result = state
-                .media_pool
-                .quality_catalog(state, catalog_request.clone())
-                .await;
+            let catalogue_result = if stored_catalogue_only {
+                state
+                    .media_pool
+                    .stored_quality_catalog(state, &catalog_request)
+                    .await
+            } else {
+                state
+                    .media_pool
+                    .quality_catalog(state, catalog_request.clone())
+                    .await
+            };
             tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
             if let Some(crate::media_pool::CatalogCause::RequestInvalid(error)) =
@@ -2528,7 +2677,25 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
-    let candidate_auto_policy = body.candidate_auto_policy();
+    let caps_profile = body
+        .caps
+        .as_ref()
+        .map(plurx_core::playback::DeviceProfile::from_caps_v2);
+    let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
+    // A start without an Auto candidate (Original, or a manual rung) still
+    // reaches the post-first-frame processed upgrade. Its ask is what it was
+    // accepted with: these capabilities and the catalog query a candidate
+    // would have carried, frozen before the body is consumed.
+    let accepted_processed = if candidate_context.is_none() {
+        source.zip(body.caps.as_ref()).map(|(file, caps)| {
+            (
+                caps.clone(),
+                body.selection_catalog_request(file, caps, original_copy_scope),
+            )
+        })
+    } else {
+        None
+    };
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2541,18 +2708,6 @@ async fn resolve_plan_for_principal_with_local_evidence(
     request.quality_catalog = retained_catalog
         .as_ref()
         .map(|catalog| Arc::new(catalog.clone()));
-    // Frozen here, from the planning snapshot this create already holds, so
-    // the rolling start pays no extra Store read for it. Without a snapshot
-    // the start reads the switch itself.
-    request.sdr_master_codecs = snapshot.map(|snapshot| {
-        plurx_core::store::stored_switch(
-            snapshot
-                .settings
-                .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
-                .map(String::as_str),
-            false,
-        )
-    });
     if request
         .request_id
         .as_ref()
@@ -2580,12 +2735,52 @@ async fn resolve_plan_for_principal_with_local_evidence(
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(principal);
-    let plan_notes = match review {
+    let mut plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
+    reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
+    // Described after plan review, so the grade and route are the ones this
+    // start will actually run.
+    if accepted_processed.is_some()
+        && request.reopen_reason == Some(crate::transcode::ReopenReason::Stall)
+        && request.automatic
+    {
+        // The manager steps this recovery down a rung after create
+        // (`normalize_claimed_request`), so no ask frozen here can describe
+        // the rendition it will run; an upgrade from it would restore the
+        // rung that stalled. Its processing waits for the next start.
+        plan_notes.push(processing_declined_note(
+            "a stall recovery may step this start down a rung; its processed upgrade waits for the next start",
+        ));
+    } else if let Some((caps, query)) = accepted_processed {
+        request.accepted_processed_ask =
+            ordinary_rendition_height(source, &request).map(|target_height| {
+                Box::new(crate::transcode::ProcessedUpgradeAsk::accepted(
+                    caps,
+                    target_height,
+                    ordinary_delivered_grade(source, &request),
+                    matches!(request.kind, crate::transcode::SessionKind::Copy { .. }),
+                    query,
+                ))
+            });
+    }
+    if let Some(file) = source {
+        let platform = match request.previous_session_id.as_deref() {
+            Some(previous) => state.transcode.refit_platform_for_session(previous).await,
+            None => None,
+        };
+        crate::dv_refit_serving::pin_for_session(
+            state.store.as_ref(),
+            file,
+            &mut request,
+            platform,
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+    }
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
     let candidate_cost_proof = if candidate_auto_policy && incumbent_receipt.is_some() {
@@ -2731,6 +2926,23 @@ pub async fn create(
     headers: HeaderMap,
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
+) -> Result<Json<StartResponse>, ApiError> {
+    let user_id = user.id;
+    let transcode = Arc::clone(&state.transcode);
+    let created = create_native(user, state, id, headers, remote, req).await?;
+    if created.vod {
+        transcode.remember_resume_candidate(user_id, id, &created.session_id);
+    }
+    Ok(created)
+}
+
+pub(in crate::http) async fn create_native(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
 ) -> Result<Json<StartResponse>, ApiError> {
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
     let created = create_with_purpose(
@@ -2909,8 +3121,167 @@ pub(crate) fn bind_compatibility_vod_policy(
         "plurx/jellyfin/vod-only/passive/v1:{fingerprint}"
     )))
 }
-/// Resolve compatibility negotiation through the same native plan and prerequisites as create.
-/// This does not claim a session, attach a reader, or reserve a producer.
+/// Warm the ordinary native recipe without creating or admitting a viewer session.
+pub async fn prepare_startup(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(file_id): AxPath<i64>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
+    Json(body): Json<CreateSession>,
+) -> Result<StatusCode, ApiError> {
+    let Some(caps) = body.caps.as_ref() else {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires capabilities".into(),
+        ));
+    };
+    super::super::stream::validate_device_caps(caps)?;
+    let caps = caps.clone();
+    if !valid_playback_id(&body.playback_id)
+        || body.previous_session_id.is_some()
+        || body.reopen_reason.is_some()
+        || body.control_sequence.is_some()
+        || body
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires a fresh VOD request".into(),
+        ));
+    }
+    if let Some(intent) = body.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+    }
+    let position_ms = body.start.unwrap_or_default() * 1_000.0;
+    if !position_ms.is_finite() || position_ms < 0.0 || position_ms >= i64::MAX as f64 {
+        return Err(ApiError::BadRequest("invalid startup position".into()));
+    }
+    let position_ms = position_ms.round() as i64;
+    let Some(slot) = state
+        .subtitle_models
+        .translation
+        .try_borrow_read_preparation_slot()
+    else {
+        return Ok(StatusCode::ACCEPTED);
+    };
+    tokio::spawn(async move {
+        let budget = crate::media_pool::CreateStartupBudget::new(2_000);
+        let plan = budget.scope(async {
+            let authority = state.cluster.authority();
+            let serving_generation = authority.admit()?;
+            let start_plan = super::start_plan::ingress_plan(&state.applied, file_id)
+                .await
+                .ok()??;
+            let _captured_plan = crate::media_pool::capture_create_plan(&start_plan);
+            let snapshot = &start_plan.snapshot;
+            let file = &snapshot.file;
+            let client_build = client_build_label(body.caps.as_ref(), &headers);
+            let review =
+                native_create_review(&state, &body, file, Some(snapshot), user.id, &client_build)
+                    .await;
+            let identity = native_create_network_identity(&user, &headers, remote);
+            let network_prior =
+                super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+                    .await
+                    .ok()?;
+            let resolved = resolve_plan_with_scope(
+                PlanInputs {
+                    snapshot: Some(snapshot),
+                    state: &state,
+                    user_id: user.id,
+                    file_id,
+                    source: Some(file),
+                    network_prior: network_prior.as_ref(),
+                    network_identity: identity.as_ref(),
+                    incumbent_receipt: link_receipts::requested_receipt(&headers),
+                },
+                review,
+                body,
+                PlanScope {
+                    stored_catalogue_only: true,
+                    ..PlanScope::default()
+                },
+            )
+            .await
+            .ok()?;
+            validate_hevc_copy_transport_from_probe(
+                file,
+                &caps,
+                &resolved.request,
+                snapshot.probe_json.as_deref(),
+            )
+            .ok()?;
+            authority
+                .is_current(serving_generation)
+                .then(|| (resolved.request, file.clone()))
+        });
+        let Some((request, file)) = (tokio::select! {
+            _ = state.shutdown.cancelled() => None,
+            result = tokio::time::timeout(std::time::Duration::from_secs(2), plan) => result.ok().flatten(),
+        }) else {
+            return;
+        };
+        state
+            .transcode
+            .prepare_selected_copy(
+                &request,
+                file,
+                user.id,
+                position_ms,
+                state.shutdown.clone(),
+                slot,
+            )
+            .await;
+    });
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn native_create_review(
+    state: &AppState,
+    body: &CreateSession,
+    file: &MediaFile,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    user_id: i64,
+    client_build: &str,
+) -> Option<PlanReview> {
+    let render_caps = match snapshot {
+        Some(snapshot) => super::super::stream::render_caps_from_snapshot(state, snapshot),
+        None => super::super::stream::render_caps(state).await,
+    };
+    plan_review_for(
+        body.caps.as_ref(),
+        body.overrides.as_ref(),
+        file,
+        &render_caps,
+        body.preserve_dolby_vision == Some(true),
+        body.hdr10 == Some(true),
+        unix_ms(),
+        &ReviewContext {
+            file_id: file.id,
+            user_id,
+            client_build,
+        },
+    )
+}
+
+fn native_create_network_identity(
+    user: &plurx_core::domain::User,
+    headers: &HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+) -> Option<crate::telemetry::NetworkIdentity> {
+    let mut identity = super::super::network::identity(headers, remote)?;
+    identity.user_id = Some(user.id);
+    identity.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+        user.id,
+        user.created_at,
+        &user.password_hash,
+    ));
+    Some(identity)
+}
+
 pub(crate) async fn preview_for_compatibility(
     state: &AppState,
     user_id: i64,
@@ -2939,7 +3310,7 @@ pub(crate) async fn preview_for_compatibility(
         false,
         unix_ms(),
     );
-    let mut resolved = resolve_plan(
+    let mut resolved = resolve_plan_with_scope(
         PlanInputs {
             network_identity: None,
             incumbent_receipt: None,
@@ -2952,6 +3323,10 @@ pub(crate) async fn preview_for_compatibility(
         },
         Some(review),
         body,
+        PlanScope {
+            passive_compatibility: true,
+            ..PlanScope::default()
+        },
     )
     .await?;
     validate_hevc_copy_transport(state, file, &caps, &resolved.request, None).await?;
@@ -3326,6 +3701,8 @@ async fn create_with_purpose_attempt(
         ServiceCreatePurpose::Continuous(family) => Some(family),
         _ => None,
     };
+    let passive_compatibility =
+        matches!(purpose, ServiceCreatePurpose::PassiveCompatibility { .. });
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -3384,7 +3761,7 @@ async fn create_with_purpose_attempt(
         }
         None => None,
     };
-    let ingress_serving_authority = state.serving.authority();
+    let ingress_serving_authority = state.cluster.authority();
     let ingress_serving_generation = ingress_serving_authority
         .admit()
         .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
@@ -3434,24 +3811,28 @@ async fn create_with_purpose_attempt(
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
     // exactly the population these lines exist to count down to zero.
-    let candidate_decoder_caps = req.caps.as_ref().and_then(|caps| {
-        crate::playback_control::DecoderCapsSnapshot::from_device_caps(
-            caps,
-            caps.display
-                .as_ref()
-                .and_then(|display| display.presentation_target)
-                .map_or(1, |target| target.revision),
-        )
-        .map_err(|cause| {
-            tracing::warn!(target: "plurxd::http::hls",
-                file_id = id,
-                video_entries = caps.video.len(),
-                cause,
-                "optional decoder snapshot unavailable; legacy playback admission preserved"
-            );
-        })
-        .ok()
-    });
+    let candidate_decoder_caps = req
+        .caps
+        .as_ref()
+        .filter(|_| !passive_compatibility)
+        .and_then(|caps| {
+            crate::playback_control::DecoderCapsSnapshot::from_device_caps(
+                caps,
+                caps.display
+                    .as_ref()
+                    .and_then(|display| display.presentation_target)
+                    .map_or(1, |target| target.revision),
+            )
+            .map_err(|cause| {
+                tracing::warn!(target: "plurxd::http::hls",
+                    file_id = id,
+                    video_entries = caps.video.len(),
+                    cause,
+                    "optional decoder snapshot unavailable; legacy playback admission preserved"
+                );
+            })
+            .ok()
+        });
     let candidate_target = req.caps.as_ref().and_then(|caps| {
         caps.display
             .as_ref()
@@ -3475,23 +3856,17 @@ async fn create_with_purpose_attempt(
         // This is the one arm that stays here, because it is the only one that
         // must not ask the node what it can render.
         None => None,
-        Some(file) => plan_review_for(
-            req.caps.as_ref(),
-            req.overrides.as_ref(),
-            file,
-            &match planning_snapshot {
-                Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
-                None => super::super::stream::render_caps(&state).await,
-            },
-            req.preserve_dolby_vision == Some(true),
-            req.hdr10 == Some(true),
-            unix_ms(),
-            &ReviewContext {
-                file_id: id,
-                user_id: user.id,
-                client_build: &client_build,
-            },
-        ),
+        Some(file) => {
+            native_create_review(
+                &state,
+                &req,
+                file,
+                planning_snapshot,
+                user.id,
+                &client_build,
+            )
+            .await
+        }
     };
     let hdr10_requested = review
         .as_ref()
@@ -3518,26 +3893,15 @@ async fn create_with_purpose_attempt(
                 .await
         }
     };
-    let mut identity = super::super::network::identity(&headers, remote);
-    if let Some(ref mut id) = identity {
-        id.user_id = Some(user.id);
-        id.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
-            user.id,
-            user.created_at,
-            &user.password_hash,
-        ));
-    }
-    let network_prior = super::super::network::stored_prior(
-        state.store.as_ref(),
-        &state.applied,
-        identity.as_ref(),
-    )
-    .await
-    .map_err(|error| {
-        ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
-    })?;
+    let identity = native_create_network_identity(&user, &headers, remote);
+    let network_prior =
+        super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+            .await
+            .map_err(|error| {
+                ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+            })?;
     crate::media_pool::mark_create_phase("settings");
-    let resolved = resolve_plan_with_continuous(
+    let resolved = resolve_plan_with_scope(
         PlanInputs {
             snapshot: planning_snapshot,
             state: &state,
@@ -3550,7 +3914,11 @@ async fn create_with_purpose_attempt(
         },
         review,
         req,
-        continuous,
+        PlanScope {
+            continuous,
+            passive_compatibility,
+            ..PlanScope::default()
+        },
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
@@ -4139,15 +4507,7 @@ async fn create_with_purpose_attempt(
         request.source_telemetry = None;
     }
 
-    let quality_enabled = continuous.is_some()
-        || planning_snapshot
-            .and_then(|snapshot| {
-                snapshot
-                    .settings
-                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-            })
-            .is_some_and(|value| value.trim() == "1");
-    if quality_enabled && candidate_decoder_caps.is_some() && quality_catalog.is_none() {
+    if candidate_decoder_caps.is_some() && quality_catalog.is_none() {
         if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
             quality_catalog = Some(
                 state
@@ -4384,8 +4744,7 @@ async fn create_with_purpose_attempt(
                     replacement,
                     created,
                 } = started;
-                let degraded_processing =
-                    (info.degraded_processing.take(), info.processing_note.take());
+                let degraded_processing = info.degraded_processing.take();
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -4509,7 +4868,7 @@ async fn create_with_purpose_attempt(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation), (None, None)))
+                    Ok((started.info, guard, Some(target_generation), None))
                 }
                 // The worker cannot take this start now. Every 503 its start
                 // route answers is one a retry can outlive, so it is the
@@ -4575,13 +4934,7 @@ async fn create_with_purpose_attempt(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((
-        owner_node_id,
-        info,
-        guard,
-        local_serving_generation,
-        (degraded_processing, processing_note),
-    )) = started
+    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
     else {
         return Err(last_error
             .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
@@ -4625,13 +4978,6 @@ async fn create_with_purpose_attempt(
         let mut worker_request = request.clone();
         worker_request.request_id = Some(incarnation_id.clone());
         remote_request.request = worker_request;
-    }
-    if let Some(reason) = processing_note {
-        // This start's own processing was declined inside the worker (its
-        // FEL verdict, a busy reconstruction slot, a refused window): the
-        // enhancement detail names that reason, not a generic fallback.
-        processing_decline.get_or_insert_with(|| reason.clone());
-        plan_notes.push(processing_declined_note(&reason));
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
@@ -4723,24 +5069,32 @@ async fn create_with_purpose_attempt(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
-    let playlist_url = if request.continuous_media.is_some() || native_subtitles {
-        // Give the multivariant playlist its own path. AVPlayer caches HLS
-        // resources by URL and can otherwise conflate `index.m3u8?native=1`
-        // with the child `index.m3u8` media playlist referenced by that
-        // master. Keep the query form in `playlist` for clients holding an
-        // older session response, but new sessions use the unambiguous path.
-        let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
-        match native_subtitle {
-            Some(index) => format!("{master}?subtitle={index}"),
-            None => master,
-        }
-    } else {
-        info.playlist_url
-    };
+    let native_split_master = request.transport.as_deref() == Some("native")
+        && request
+            .candidate_context
+            .as_deref()
+            .and_then(|context| context.canonical_caps.as_ref())
+            .and_then(|caps| caps.hls_hevc_sample_entries.as_ref())
+            .is_some_and(|entries| entries.iter().any(|entry| entry == "hev1"));
+    let playlist_url =
+        if request.continuous_media.is_some() || native_subtitles || native_split_master {
+            // Give the multivariant playlist its own path. AVPlayer caches HLS
+            // resources by URL and can otherwise conflate `index.m3u8?native=1`
+            // with the child `index.m3u8` media playlist referenced by that
+            // master. Keep the query form in `playlist` for clients holding an
+            // older session response, but new sessions use the unambiguous path.
+            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
+            match native_subtitle {
+                Some(index) => format!("{master}?subtitle={index}"),
+                None => master,
+            }
+        } else {
+            info.playlist_url
+        };
     remote_request.retained_output = info.retained_output.clone();
     recipe_json = serde_json::to_string(&remote_request)?;
     let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
-        quality_enabled && quality_negotiated,
+        quality_negotiated,
         source.as_ref(),
         candidate_decoder_caps.as_ref(),
         quality_catalog.as_ref(),
@@ -4779,11 +5133,10 @@ async fn create_with_purpose_attempt(
     } else {
         None
     };
-    let effective_processing = state
-        .transcode
-        .dv_effective_report(&info.session_id, &incarnation_id)
-        .await;
-    let enhancement = session_enhancement(
+    let effective_processing =
+        super::control::current_dv_report(&state, &info.session_id, &incarnation_id).await;
+    let title_scan = session_title_scan(&state, source.as_ref()).await;
+    let enhancement = session_enhancement_with_title(
         source.as_ref(),
         &info.kind,
         info.grade,
@@ -4792,8 +5145,10 @@ async fn create_with_purpose_attempt(
         effective_processing.as_ref(),
         planning_snapshot,
         processing_decline.as_deref(),
+        title_scan.as_ref(),
     );
     let response = StartResponse {
+        processed_upgrade: None,
         enhancement,
         effective_processing,
         delivered_audio: info.audio_delivery.clone(),
@@ -4825,6 +5180,14 @@ async fn create_with_purpose_attempt(
         height: info.target_height,
         encoder: info.encoder.clone(),
         vod: info.vod,
+        startup_seek_ready_ms: if owner_node_id == state.node_id && info.vod {
+            state.transcode.vod_startup_seek_ready_ms(
+                &info.session_id,
+                (request.start_seconds * 1_000.0).round() as i64,
+            )
+        } else {
+            None
+        },
         // Capped at what this node can actually serve for this file, not just
         // at the source height: an advertised rung is a promise, and the web
         // ABR controller upgrades into any rung the ladder lists. See
@@ -4938,6 +5301,7 @@ async fn create_with_purpose_attempt(
     // read-budget line) even though the task is detached so it can outlive a
     // cancelled caller.
     let activation_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    let activation_deadline = activation_lease_deadline(&publication_activation);
     let mut activation_task = if owner_node_id == state.node_id {
         let activation_state = state.clone();
         let activation_authority = ingress_serving_authority.clone();
@@ -4948,10 +5312,10 @@ async fn create_with_purpose_attempt(
                     activation_state,
                     activation,
                     activation_predecessor,
-                    expected_predecessor_incarnation_id,
                     activation_authority,
                     owner_activation_generation,
                     guard,
+                    activation_deadline,
                 )
                 .await
                 .map(|_| ())
@@ -4960,6 +5324,11 @@ async fn create_with_purpose_attempt(
     } else {
         let activation_state = state.clone();
         let activation_owner = owner_node_id.clone();
+        // `SessionRequest::retain_output` never crosses the worker wire, so a
+        // playback that opted out at create tells its remote owner once the
+        // session is confirmed, over the same relay the mid-playback switch
+        // uses.
+        let retain_output_off = request.retain_output == Some(false);
         tokio::spawn(plurx_core::store::scope_http_store_operations(
             activation_counts,
             async move {
@@ -4967,8 +5336,6 @@ async fn create_with_purpose_attempt(
                     target_generation: owner_activation_generation,
                     activation,
                 };
-                let activation_deadline = tokio::time::Instant::now()
-                    + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
                 activation_state
                     .media_sessions
                     .activate_remote(&activation_owner, &request, activation_deadline)
@@ -5005,11 +5372,18 @@ async fn create_with_purpose_attempt(
                 if let Some(guard) = guard.as_mut() {
                     guard.disarm();
                 }
+                if retain_output_off {
+                    relay_retain_output_off(
+                        &activation_state,
+                        &activation_owner,
+                        &request.activation.session_id,
+                    )
+                    .await;
+                }
                 Ok(())
             },
         ))
     };
-    let activation_deadline = activation_lease_deadline(&publication_activation);
     match tokio::time::timeout_at(activation_deadline, &mut activation_task).await {
         Ok(Ok(Ok(_))) => crate::media_pool::mark_create_phase("activation"),
         Ok(Ok(Err(error))) => {
@@ -5286,13 +5660,26 @@ fn activation_confirmation_deadline(lease_deadline: tokio::time::Instant) -> tok
     lease_deadline - ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.min(remaining / 2)
 }
 
-fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
-    let remaining_ms = activation
-        .lease_expires_at_ms
-        .saturating_sub(activation.now_ms)
+/// Translate the validated absolute route expiry on the same local clock
+/// basis as `route_matches_activation`, once per owner. Pass the resulting
+/// monotonic deadline through every await; the foreign request timestamp is
+/// not the current time and must not mint another full lease on late entry.
+pub(in crate::http) fn activation_lease_deadline(
+    activation: &MediaSessionActivation,
+) -> tokio::time::Instant {
+    let monotonic_sample = tokio::time::Instant::now();
+    activation_lease_deadline_at(activation.lease_expires_at_ms, unix_ms(), monotonic_sample)
+}
+
+pub(super) fn activation_lease_deadline_at(
+    lease_expires_at_ms: i64,
+    now_ms: i64,
+    monotonic_sample: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let remaining_ms = lease_expires_at_ms
+        .saturating_sub(now_ms)
         .clamp(0, LEASE_TTL_MS);
-    tokio::time::Instant::now()
-        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
+    monotonic_sample + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
 }
 
 fn spawn_activation_abandonment(state: AppState, activation: MediaSessionActivation) {
@@ -5393,12 +5780,15 @@ pub(in crate::http) async fn activate_session_under_authority(
     state: AppState,
     activation: MediaSessionActivation,
     reconciled_predecessor: Option<MediaSessionRoute>,
-    predecessor_incarnation: Option<String>,
     authority: crate::serving_fence::ServingAuthority,
     admitted_generation: u64,
     guard: Option<StartedSessionGuard>,
+    lease_deadline: tokio::time::Instant,
 ) -> Result<MediaSessionActivationOutcome, ApiError> {
-    let lease_deadline = activation_lease_deadline(&activation);
+    // Both ingress paths already carry this exact identity in the validated
+    // activation. Derive it here so settlement cannot receive a second,
+    // potentially divergent predecessor while retaining the captured deadline.
+    let predecessor_incarnation = activation.expected_predecessor_incarnation_id.clone();
     let serving_transition = authority
         .commit_guard_before(admitted_generation, lease_deadline.into_std())
         .await
@@ -5742,10 +6132,10 @@ pub(in crate::http) async fn prime_live_prepared_session(
     {
         return false;
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return false;
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return false;
     };
@@ -6457,10 +6847,27 @@ pub(crate) struct PreparedSourcePlayback {
     source_invocation_fingerprint: Option<String>,
     source_presentation: Option<SourceCopyPresentation>,
     copy_head_caps: plurx_core::playback::DeviceCaps,
+    processed_upgrade_requested: bool,
+    processed_upgrade_offered: bool,
+    processed_upgrade_ask: crate::transcode::ProcessedUpgradeAsk,
     decision: super::super::stream::DecisionResponse,
+    /// The receiver affirmed Dolby Vision relay, and with it that its Start
+    /// decoder relays the enhancement rows.
+    relays_enhancement: bool,
 }
 #[allow(dead_code)]
 impl PreparedSourcePlayback {
+    pub(crate) fn processed_upgrade_requested(&self) -> bool {
+        self.processed_upgrade_requested
+    }
+    pub(crate) fn processed_upgrade_ask(&self) -> &crate::transcode::ProcessedUpgradeAsk {
+        &self.processed_upgrade_ask
+    }
+    /// The rung this plan resolved; a copy's output is still the source's.
+    #[cfg(test)]
+    pub(crate) fn resolved_height(&self) -> i64 {
+        self.resolved.height
+    }
     pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
         &self.resolved.request
     }
@@ -6475,6 +6882,15 @@ impl PreparedSourcePlayback {
     }
     pub(crate) fn plan_notes(&self) -> &[String] {
         &self.resolved.plan_notes
+    }
+    /// The receiver affirmed Dolby Vision relay: the Start carries the
+    /// enhancement rows.
+    pub(crate) fn relay_enhancement(&mut self) {
+        self.relays_enhancement = true;
+    }
+    /// A note the Source's own start policy adds to what this plan says.
+    pub(crate) fn add_plan_note(&mut self, note: &str) {
+        self.resolved.plan_notes.push(note.to_owned());
     }
     pub(crate) fn native_subtitles(&self) -> (bool, Option<i64>) {
         (
@@ -6517,27 +6933,29 @@ impl PreparedSourcePlayback {
     /// against the exact prepared recipe and client. This does not certify
     /// the whole elementary stream; the common kernel/Trace check each range.
     pub(crate) fn validate_copy_head(&self, init: &plurx_core::fmp4::Init) -> Result<(), ApiError> {
-        let refused = || {
-            ApiError::typed(
-                StatusCode::CONFLICT,
-                "vod_source_rescan_required",
-                "The held Source copy head differs from its prepared playback facts",
-            )
-        };
+        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init)
+            .map_err(|_| copy_head_rescan_required())?;
+        self.validate_copy_head_facts(&facts)
+    }
+    /// [`Self::validate_copy_head`] over the head's parsed sample-entry facts.
+    pub(crate) fn validate_copy_head_facts(
+        &self,
+        facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
+    ) -> Result<(), ApiError> {
+        let refused = copy_head_rescan_required;
         let crate::transcode::SessionKind::Copy {
             preserve_dolby_vision,
+            convert_dolby_vision,
             ..
         } = self.resolved.request.kind
         else {
             return Err(refused());
         };
-        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init).map_err(|_| refused())?;
         validate_prepared_copy_head(
             &self.file,
-            self.resolved.height,
             &self.copy_head_caps,
-            preserve_dolby_vision,
-            &facts,
+            (preserve_dolby_vision, convert_dolby_vision),
+            facts,
         )
         .map_err(|()| refused())
     }
@@ -6583,6 +7001,8 @@ impl PreparedSourcePlayback {
             || info.start_seconds < 0.0
             || info.duration_ms.is_some_and(|duration| duration < 0)
             || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
+                && !(self.resolved.request.split_audio
+                    && info.playlist_url == format!("/api/v1/hls/{}/master.m3u8", info.session_id))
         {
             return Err(refused());
         }
@@ -6598,26 +7018,47 @@ impl PreparedSourcePlayback {
             .capability_height_ceiling_for_request(Some(&self.file), self.resolved.request.hdr10)
             .await;
         let quality_negotiated = self.resolved.request.candidate_context.is_some();
-        let playlist_url = if self.resolved.native_subtitles {
-            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
-            match self.resolved.native_subtitle {
-                Some(index) => format!("{master}?subtitle={index}"),
-                None => master,
-            }
-        } else {
-            info.playlist_url.clone()
-        };
-        Ok(StartResponse {
-            enhancement: session_enhancement(
+        let (delivered_dynamic_range, delivered_dolby_vision_profile) =
+            session_delivered_processing_shape(
                 Some(&self.file),
                 &info.kind,
                 info.grade,
                 info.processed_dv_profile,
-                info.processed_fel,
-                None,
-                None,
-                None,
-            ),
+            );
+        let playlist_url = source_start_playlist_url(
+            &info.session_id,
+            &info.playlist_url,
+            self.resolved.native_subtitles,
+            self.resolved.native_subtitle,
+            delivered_dynamic_range,
+        );
+        let title_scan = if self.relays_enhancement {
+            session_title_scan(state, Some(&self.file)).await
+        } else {
+            None
+        };
+        Ok(StartResponse {
+            processed_upgrade: self.processed_upgrade_offered.then(|| "offered".to_owned()),
+            // The FEL / RPU / DYN rows local playback shows. A receiver that
+            // affirmed Dolby Vision relay decodes and relays them; an older
+            // one round-trips the Start through a `StartResponse` that never
+            // deserializes them and would refuse it, so it gets none.
+            enhancement: self
+                .relays_enhancement
+                .then(|| {
+                    session_enhancement_with_title(
+                        Some(&self.file),
+                        &info.kind,
+                        info.grade,
+                        info.processed_dv_profile,
+                        info.processed_fel,
+                        None,
+                        None,
+                        None,
+                        title_scan.as_ref(),
+                    )
+                })
+                .flatten(),
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
@@ -6652,23 +7093,11 @@ impl PreparedSourcePlayback {
             height: info.target_height,
             encoder: info.encoder.to_owned(),
             vod: info.vod,
+            startup_seek_ready_ms: None,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
-            delivered_dynamic_range: session_delivered_processing_shape(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-            )
-            .0
-            .map(str::to_owned),
-            delivered_dolby_vision_profile: session_delivered_processing_shape(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-            )
-            .1,
+            delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
+            delivered_dolby_vision_profile,
             control: Some(control),
             plan_notes: self.resolved.plan_notes.clone(),
         })
@@ -6689,6 +7118,34 @@ impl PreparedSourcePlayback {
             && binding.playback_id() == self.resolved.request.playback_id
             && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
             && self.source_invocation_fingerprint.as_deref() == Some(binding.request_fingerprint())
+    }
+}
+
+/// The URL a shared Start opens on. Native subtitles need the master for
+/// their media group; an HDR or Dolby Vision session needs it for
+/// `VIDEO-RANGE` and `SUPPLEMENTAL-CODECS`, which a bare media playlist cannot
+/// say (a Profile 8.1 copy is `hvc1`, so without the master nothing tells the
+/// player it is Dolby Vision). Local Apple playback always asks for native
+/// subtitles and so always opens on the master; a shared client asks only
+/// when a subtitle is selected, so the Source decides here, from what the
+/// session delivers. Without prepared tracks the master admits none.
+pub(crate) fn source_start_playlist_url(
+    session_id: &str,
+    index_url: &str,
+    native_subtitles: bool,
+    native_subtitle: Option<i64>,
+    delivered_dynamic_range: Option<&str>,
+) -> String {
+    let master = format!("/api/v1/hls/{session_id}/master.m3u8");
+    if native_subtitles {
+        return match native_subtitle {
+            Some(index) => format!("{master}?subtitle={index}"),
+            None => master,
+        };
+    }
+    match delivered_dynamic_range {
+        Some("hdr10" | "hlg" | "dolby_vision") => master,
+        _ => index_url.to_owned(),
     }
 }
 
@@ -6814,7 +7271,10 @@ pub(crate) async fn prepare_source_playback<
         unix_ms(),
     );
     let hdr10_requested = review.hdr10;
-    let resolved = resolve_plan_for_principal(
+    let processed_upgrade = body.processed_upgrade;
+    let processed_query =
+        body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(Some(&review)));
+    let mut resolved = resolve_plan_for_principal(
         FilePlanInputs {
             snapshot: Some(&snapshot),
             state,
@@ -6827,6 +7287,70 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
+    // A shared copy has no Auto candidate context, so its ask is the one any
+    // start without a candidate derives — except that a Source's local Auto
+    // candidate, when it has one, still names the route it runs.
+    let mut processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk::accepted(
+        caps.clone(),
+        ordinary_rendition_height(Some(&file), &resolved.request)
+            .ok_or_else(|| refused("processed_height"))?,
+        ordinary_delivered_grade(Some(&file), &resolved.request),
+        matches!(
+            resolved.request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ),
+        processed_query,
+    );
+    if let Some(context) = resolved.request.candidate_context.as_ref() {
+        processed_upgrade_ask.route = context.selected_candidate.route;
+    }
+    let destination = if processed_upgrade.is_some() {
+        match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(
+            &resolved.request,
+            &snapshot,
+            hdr10_requested,
+            Some(&processed_upgrade_ask),
+        ) {
+            Ok(destination) => destination,
+            Err(reason) if processed_upgrade == Some(true) => {
+                return Err(ApiError::Conflict(reason))
+            }
+            Err(reason) => {
+                resolved
+                    .plan_notes
+                    .push(format!("Processed upgrade: {reason}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if processed_upgrade == Some(true) {
+        #[cfg(target_os = "linux")]
+        {
+            if destination.is_none() {
+                return Err(ApiError::Conflict(
+                    "processed upgrade no longer applies".into(),
+                ));
+            }
+            let (mut trial, _) =
+                crate::transcode::TranscodeManager::processed_qualification_input_with_ask(
+                    &snapshot,
+                    &resolved.request,
+                    resolved.height,
+                    &processed_upgrade_ask,
+                )
+                .map_err(ApiError::Conflict)?;
+            // Source has its own held probe and current assignment. A local Auto
+            // candidate's dispatch context is not its processed-trial authority.
+            trial.candidate_context = None;
+            resolved.request = trial;
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(ApiError::Conflict(
+            "processed upgrades require a processing Source".into(),
+        ));
+    }
     // Source preparation must not run the local census, which can change
     // the revision being authorized and starts children outside its owner.
     let probe_json = snapshot.probe_json.as_deref();
@@ -6872,21 +7396,42 @@ pub(crate) async fn prepare_source_playback<
         source_invocation_fingerprint: None,
         source_presentation: None,
         copy_head_caps: caps,
+        processed_upgrade_requested: processed_upgrade == Some(true),
+        processed_upgrade_offered: processed_upgrade == Some(false) && destination.is_some(),
+        processed_upgrade_ask,
         target,
         principal,
         file,
         resolved,
         decision,
+        relays_enhancement: false,
     })
 }
 
 /// Checks only declared decoder configuration/raster/color. Missing facts do
 /// not acquire an optimistic source or decoder qualification.
+///
+/// A Dolby Vision delivery (a preserve, or the Profile 7 → 8.1 conversion,
+/// which also preserves) is checked against the client's Dolby Vision claim
+/// rather than its HDR presentation list: some video entry must enumerate the
+/// delivered profile (8 for a conversion). The head's transfer must be its
+/// compatible base's (PQ for an HDR10 base, HLG for an HLG base, SDR for an
+/// SDR base); a Profile 5 head has no compatible base, so its declared
+/// transfer is accepted as is. A `dvh1`/`dvhe` sample entry is admitted by
+/// that same Dolby Vision claim: `hls_hevc_sample_entries` can only name the
+/// plain `hvc1`/`hev1` entries.
+fn copy_head_rescan_required() -> ApiError {
+    ApiError::typed(
+        StatusCode::CONFLICT,
+        "vod_source_rescan_required",
+        "The held Source copy head differs from its prepared playback facts",
+    )
+}
+
 fn validate_prepared_copy_head(
     file: &MediaFile,
-    resolved_height: i64,
     caps: &plurx_core::playback::DeviceCaps,
-    preserve_dolby_vision: bool,
+    (preserve_dolby_vision, convert_dolby_vision): (bool, bool),
     facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
 ) -> Result<(), ()> {
     use plurx_core::{
@@ -6917,11 +7462,16 @@ fn validate_prepared_copy_head(
     let profile_matches = normalized_profile.as_deref().is_some_and(|value| {
         value == profile || (profile == "baseline" && value == "constrainedbaseline")
     });
+    // A copy delivers the source's own pictures, and the Start reports the
+    // scanned source height as its output, so the geometry checked here is
+    // the source's. The plan's resolved height is a rung (an explicit ask
+    // snapped, or Auto under this node's transcode ceiling, which a Dolby
+    // Vision reshape keeps below 2160) that a processed upgrade encodes to;
+    // it never names a copy's geometry and is not an input here.
     if file.video_codec.as_deref() != Some(codec)
         || !profile_matches
         || file.width != Some(i64::from(facts.width))
         || file.height != Some(i64::from(facts.height))
-        || resolved_height != i64::from(facts.height)
         || file.bit_depth != Some(i64::from(facts.bit_depth))
         || facts.chroma_format_idc != 1
         || facts.width == 0
@@ -6931,40 +7481,83 @@ fn validate_prepared_copy_head(
     {
         return Err(());
     }
-    let (_, transfer, _, _) = facts.color.ok_or(())?;
+    // `None`: the copied sample entry carries no `colr` box. A stream copy
+    // writes one only when the source's colour is specified; otherwise the
+    // colour stays in the original SPS (see the Source copy tests).
+    let transfer = facts.color.map(|(_, transfer, _, _)| transfer);
     let range = plurx_core::playback::delivered_dynamic_range(
         file,
         PlaybackMethod::Remux,
         preserve_dolby_vision,
         OutputGrade::Sdr,
     );
-    let expected_transfer = match range {
-        "hdr10" => Transfer::Pq,
-        "hlg" => Transfer::Hlg,
-        "sdr" => Transfer::Sdr,
-        _ => return Err(()),
-    };
     let actual_transfer = match transfer {
-        16 => Transfer::Pq,
-        18 => Transfer::Hlg,
-        1 | 6 | 13 | 14 | 15 => Transfer::Sdr,
+        Some(16) => Some(Transfer::Pq),
+        Some(18) => Some(Transfer::Hlg),
+        Some(1 | 6 | 13 | 14 | 15) => Some(Transfer::Sdr),
+        _ => None,
+    };
+    // The Dolby Vision profile the delivered bytes carry; `None` for every
+    // non-Dolby delivery (a strip, an HDR10/HLG/SDR copy).
+    let dolby_vision_profile = match range {
+        "dolby_vision" => Some(
+            plurx_core::playback::delivered_dolby_vision_profile(
+                file,
+                PlaybackMethod::Remux,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            )
+            .ok_or(())?,
+        ),
+        _ => None,
+    };
+    let expected_transfer = match range {
+        "hdr10" => Some(Transfer::Pq),
+        "hlg" => Some(Transfer::Hlg),
+        "sdr" => Some(Transfer::Sdr),
+        "dolby_vision" => dolby_vision_base_transfer(file),
         _ => return Err(()),
     };
-    if actual_transfer != expected_transfer {
-        return Err(());
+    // A head that makes no transfer claim: no `colr` box at all, or H.273
+    // code 2 ("unspecified"). Many SDR encodes ship this way (an HDTV H.264
+    // with only a BT.709 matrix copies with no `colr`). When the scan found
+    // no HDR or Dolby Vision signalling, the prepared delivery is SDR, and the
+    // copied bytes are exactly what Local plays as SDR. An HDR, HLG or Dolby
+    // Vision expectation still needs its explicit code, and a reserved or
+    // unknown code still refuses.
+    let actual_transfer = match (actual_transfer, transfer) {
+        (None, None | Some(2)) if expected_transfer == Some(Transfer::Sdr) => Some(Transfer::Sdr),
+        (actual, _) => actual,
+    };
+    match (expected_transfer, actual_transfer) {
+        (Some(expected), Some(actual)) if expected == actual => {}
+        // Profile 5 alone has no compatible base; its head declares the
+        // transfer. Every other Dolby Vision head must carry its known base.
+        (None, _) if dolby_vision_profile == Some(5) => {}
+        _ => return Err(()),
     }
     if !caps.video.iter().any(|entry| {
         entry.codec == codec
             && (entry.profiles.is_empty() || entry.profiles.iter().any(|claim| claim == profile))
             && entry.geometry_admission(u32::from(facts.width), u32::from(facts.height), None)
                 != Some(false)
-            && entry.present.contains(&actual_transfer)
+            && match dolby_vision_profile {
+                Some(delivered) => entry.dv_profiles.contains(&delivered),
+                None => actual_transfer.is_some_and(|actual| entry.present.contains(&actual)),
+            }
     }) {
         return Err(());
     }
     if codec == "hevc" {
         let tag = std::str::from_utf8(&facts.sample_entry).map_err(|_| ())?;
-        if caps
+        let dolby_vision_entry = matches!(tag, "dvh1" | "dvhe");
+        if dolby_vision_entry {
+            // Only a Dolby Vision delivery may carry a Dolby Vision sample
+            // entry, and the profile claim checked above is what admits it.
+            if dolby_vision_profile.is_none() {
+                return Err(());
+            }
+        } else if caps
             .hls_hevc_sample_entries
             .as_ref()
             .is_some_and(|entries| !entries.iter().any(|entry| entry == tag))
@@ -6973,6 +7566,29 @@ fn validate_prepared_copy_head(
         }
     }
     Ok(())
+}
+
+/// The transfer a Dolby Vision copy's base layer declares, from the scan's
+/// base-layer compatibility id (1 and 6 are HDR10, 4 is HLG, 2 is SDR), or
+/// from its label for a row without the column. `None` for a source with no
+/// compatible base (Profile 5), whose head declares its own transfer.
+fn dolby_vision_base_transfer(file: &MediaFile) -> Option<plurx_core::playback::Transfer> {
+    use plurx_core::playback::Transfer;
+    match file.dolby_vision.bl_compat_id {
+        Some(1 | 6) => return Some(Transfer::Pq),
+        Some(4) => return Some(Transfer::Hlg),
+        Some(2) => return Some(Transfer::Sdr),
+        Some(_) => return None,
+        None => {}
+    }
+    let label = file.hdr_format.as_deref()?;
+    if label.contains("HLG-compatible") {
+        Some(Transfer::Hlg)
+    } else if label.contains("HDR10-compatible") {
+        Some(Transfer::Pq)
+    } else {
+        None
+    }
 }
 
 fn source_media_origin_ms(
@@ -7063,6 +7679,40 @@ mod source_presentation_origin_tests {
 }
 
 #[cfg(test)]
+mod source_start_playlist_tests {
+    use super::source_start_playlist_url;
+    const SESSION: &str = "7d4f3c7e-6f5b-4a39-9a43-0f4f1d3f3a11";
+    #[test]
+    fn source_start_response_opens_hdr_and_dolby_vision_sessions_on_the_master() {
+        let index = format!("/api/v1/hls/{SESSION}/index.m3u8");
+        let master = format!("/api/v1/hls/{SESSION}/master.m3u8");
+        for range in ["hdr10", "hlg", "dolby_vision"] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, false, None, Some(range)),
+                master,
+                "{range} without a subtitle opens on the master"
+            );
+        }
+        for range in [Some("sdr"), None] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, false, None, range),
+                index,
+                "{range:?} keeps the media playlist"
+            );
+        }
+        for range in [Some("sdr"), Some("hdr10"), Some("dolby_vision")] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, true, Some(2), range),
+                format!("{master}?subtitle=2")
+            );
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, true, None, range),
+                master
+            );
+        }
+    }
+}
+#[cfg(test)]
 mod source_copy_head_tests {
     use super::*;
     fn file() -> MediaFile {
@@ -7119,23 +7769,49 @@ mod source_copy_head_tests {
         let source = file();
         let caps = caps();
         let good = facts();
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_ok());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_ok());
         let mut changed = good.clone();
         changed.width = 1280;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
+        let mut changed = good.clone();
+        changed.height = 720;
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.profile_idc = 77;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.bit_depth = 10;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
         let mut changed = good.clone();
         changed.color = Some((9, 16, 9, false));
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
-        let mut changed = good.clone();
-        changed.color = None;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
-        assert!(validate_prepared_copy_head(&source, 720, &caps, false, &good).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &changed).is_err());
+    }
+    /// Production 2026-11-22: an HDTV-720p H.264 ("Kiss Kiss, Cam Cam", M6
+    /// file 3057) declares a BT.709 matrix but transfer and primaries 2
+    /// ("unspecified"), and its stream copy writes no `colr` box. Every shared
+    /// growing start refused it as `vod_source_rescan_required` at
+    /// `growing.copy_head_caps`.
+    #[test]
+    fn prepared_copy_head_accepts_an_unspecified_transfer_for_an_sdr_delivery() {
+        let source = file();
+        let caps = caps();
+        let mut unspecified = facts();
+        unspecified.color = Some((2, 2, 1, false));
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &unspecified).is_ok());
+        // The real copy of that file writes no `colr` box at all.
+        let mut absent = facts();
+        absent.color = None;
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &absent).is_ok());
+        // A reserved or unknown code still makes no admissible claim.
+        let mut reserved = facts();
+        reserved.color = Some((1, 3, 1, false));
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &reserved).is_err());
+        // An SDR head is not admitted to an HDR-only decoder claim.
+        let mut hdr_only = caps.clone();
+        hdr_only.video[0].present = vec![plurx_core::playback::Transfer::Pq];
+        assert!(
+            validate_prepared_copy_head(&source, &hdr_only, (false, false), &unspecified).is_err()
+        );
     }
     #[test]
     fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {
@@ -7143,9 +7819,180 @@ mod source_copy_head_tests {
         let good = facts();
         let mut caps = caps();
         caps.video[0].max_width = Some(1280);
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_err());
         caps.video[0].max_width = Some(1920);
         caps.video[0].profiles = vec!["main".into()];
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &good).is_err());
+    }
+
+    /// A 4K HEVC Main10 Dolby Vision source with the given profile, base
+    /// compatibility id and label.
+    fn dolby_vision_file(profile: i64, compat: i64, label: &str) -> MediaFile {
+        MediaFile {
+            container: Some("matroska".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: Some("hvc1".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: Some("dolby_vision".into()),
+            hdr_format: Some(label.into()),
+            dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                profile: Some(profile),
+                level: Some(6),
+                bl_compat_id: Some(compat),
+                el_present: Some(profile == 7),
+                rpu_present: Some(true),
+            },
+            ..file()
+        }
+    }
+    fn dolby_vision_head(
+        sample_entry: [u8; 4],
+        transfer: u16,
+    ) -> plurx_core::fmp4::CopyVideoSampleEntryFacts {
+        plurx_core::fmp4::CopyVideoSampleEntryFacts {
+            codec: plurx_core::fmp4::VideoCodec::Hevc,
+            sample_entry,
+            width: 3840,
+            height: 2160,
+            profile_idc: 2,
+            level_idc: 153,
+            bit_depth: 10,
+            chroma_format_idc: 1,
+            color: Some((9, transfer, 9, false)),
+            dolby_vision_config: true,
+        }
+    }
+    /// An Apple TV-shaped claim: HEVC Main10 4K presenting SDR and PQ, with
+    /// the given Dolby Vision profiles enumerated.
+    fn dolby_vision_caps(profiles: &[u8]) -> plurx_core::playback::DeviceCaps {
+        serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"max_width":3840,"present":["sdr","pq"],"dv_profiles":profiles}],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls"})).expect("Dolby Vision capabilities fixture")
+    }
+    #[test]
+    fn source_copy_head_admits_profile8_preserve_for_a_client_that_enumerates_8() {
+        let source = dolby_vision_file(8, 1, "Dolby Vision · Profile 8.1 (HDR10-compatible)");
+        let head = dolby_vision_head(*b"hvc1", 16);
+        let caps = dolby_vision_caps(&[8]);
+        assert!(validate_prepared_copy_head(&source, &caps, (true, false), &head).is_ok());
+        // An HLG-compatible 8.4 carries an HLG base.
+        let hlg = dolby_vision_file(8, 4, "Dolby Vision · Profile 8.4 (HLG-compatible)");
+        assert!(validate_prepared_copy_head(
+            &hlg,
+            &caps,
+            (true, false),
+            &dolby_vision_head(*b"hvc1", 18)
+        )
+        .is_ok());
+        assert!(
+            validate_prepared_copy_head(&hlg, &caps, (true, false), &head).is_err(),
+            "a PQ head is not the HLG base the scan recorded"
+        );
+        // The strip of the same source is an HDR10 head with no record.
+        let mut stripped = head.clone();
+        stripped.dolby_vision_config = false;
+        assert!(validate_prepared_copy_head(&source, &caps, (false, false), &stripped).is_ok());
+        assert!(
+            validate_prepared_copy_head(&source, &caps, (true, false), &stripped).is_err(),
+            "a preserve must carry the Dolby Vision record"
+        );
+    }
+    #[test]
+    fn source_copy_head_admits_profile7_converted_to_8_1() {
+        let source = dolby_vision_file(7, 6, "Dolby Vision · Profile 7 (HDR10-compatible)");
+        let head = dolby_vision_head(*b"hvc1", 16);
+        // The conversion delivers 8.1, so a client that enumerates only 8
+        // takes it; one that enumerates only 7 does not.
+        assert!(validate_prepared_copy_head(
+            &source,
+            &dolby_vision_caps(&[8]),
+            (true, true),
+            &head
+        )
+        .is_ok());
+        assert!(validate_prepared_copy_head(
+            &source,
+            &dolby_vision_caps(&[7]),
+            (true, true),
+            &head
+        )
+        .is_err());
+    }
+    #[test]
+    fn source_copy_head_admits_profile5_dvh1_for_a_dolby_vision_client() {
+        let source = dolby_vision_file(5, 0, "Dolby Vision · Profile 5");
+        let caps = dolby_vision_caps(&[5, 8]);
+        // No compatible base: whatever transfer the promoted head declares.
+        for transfer in [16, 2] {
+            assert!(
+                validate_prepared_copy_head(
+                    &source,
+                    &caps,
+                    (true, false),
+                    &dolby_vision_head(*b"dvh1", transfer)
+                )
+                .is_ok(),
+                "transfer {transfer}"
+            );
+        }
+        // `dvh1` is admitted by the Dolby Vision claim, never for a plain
+        // HEVC delivery.
+        let hdr10 = MediaFile {
+            hdr: Some("hdr10".into()),
+            hdr_format: Some("HDR10".into()),
+            dolby_vision: Default::default(),
+            ..source.clone()
+        };
+        let mut plain = dolby_vision_head(*b"dvh1", 16);
+        plain.dolby_vision_config = false;
+        assert!(validate_prepared_copy_head(&hdr10, &caps, (false, false), &plain).is_err());
+        plain.sample_entry = *b"hvc1";
+        assert!(validate_prepared_copy_head(&hdr10, &caps, (false, false), &plain).is_ok());
+    }
+    #[test]
+    fn source_copy_head_requires_a_known_base_for_every_profile_but_5() {
+        // A Profile 8 row whose base compatibility is unknown or none: no
+        // base transfer to check, so the head is refused, whatever it says.
+        let caps = dolby_vision_caps(&[8]);
+        for (compat, label) in [
+            (0, "Dolby Vision · Profile 8"),
+            (3, "Dolby Vision · Profile 8"),
+        ] {
+            let source = dolby_vision_file(8, compat, label);
+            for transfer in [16, 18, 1, 2] {
+                assert!(
+                    validate_prepared_copy_head(
+                        &source,
+                        &caps,
+                        (true, false),
+                        &dolby_vision_head(*b"hvc1", transfer)
+                    )
+                    .is_err(),
+                    "compat {compat} transfer {transfer}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn source_copy_head_refuses_dolby_vision_for_a_client_without_the_profile() {
+        let profile8 = dolby_vision_file(8, 1, "Dolby Vision · Profile 8.1 (HDR10-compatible)");
+        let profile5 = dolby_vision_file(5, 0, "Dolby Vision · Profile 5");
+        for caps in [dolby_vision_caps(&[]), dolby_vision_caps(&[7])] {
+            assert!(validate_prepared_copy_head(
+                &profile8,
+                &caps,
+                (true, false),
+                &dolby_vision_head(*b"hvc1", 16)
+            )
+            .is_err());
+            assert!(validate_prepared_copy_head(
+                &profile5,
+                &caps,
+                (true, false),
+                &dolby_vision_head(*b"dvh1", 16)
+            )
+            .is_err());
+        }
     }
 }

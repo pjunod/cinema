@@ -26,8 +26,8 @@ pub(crate) async fn configure_access_roots(
     config: &plurx_core::config::Config,
     dirs: &crate::state::Dirs,
 ) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    let validated = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let validated = match crate::dv_tools::ToolSet::capture().await {
         Ok(Some(tools)) => tools.executable_directories(),
         Ok(None) => Vec::new(),
         Err(error) => {
@@ -35,7 +35,7 @@ pub(crate) async fn configure_access_roots(
             Vec::new()
         }
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let validated = Vec::new();
     let (owned, tools) = access_root_paths(config, dirs, &validated);
     plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools).map_err(|error| {
@@ -175,6 +175,9 @@ pub(crate) struct SourceRequest {
     store: Arc<dyn Store>,
     owner: ForegroundSourceOwner,
     file: MediaFile,
+    /// Seconds of media a new transfer input may read before epoch pacing
+    /// engages. Zero keeps the input paced from its first byte.
+    startup_burst_secs: f64,
 }
 /// Permission for a strict child that must keep its original descriptor in a
 /// network-isolated sandbox. The existing child owner retains this value until
@@ -267,6 +270,7 @@ impl SourceIdentity {
         SourceRequest {
             file: file.clone(),
             store,
+            startup_burst_secs: 0.0,
             owner: ForegroundSourceOwner {
                 owner_id: uuid::Uuid::new_v4().to_string(),
                 lifetime_id: lifetime.to_owned(),
@@ -294,7 +298,73 @@ pub(crate) struct SourceObserver {
     commands: mpsc::UnboundedSender<Command>,
     reads: Arc<ReadActivity>,
     foreground_bytes: u64,
+    startup_burst_bytes: u64,
 }
+/// A controlled command owner for deterministic lifecycle regressions. It
+/// never opens a source, grants capacity, or substitutes for store qualification.
+#[cfg(test)]
+pub(crate) struct SourceObserverPolicyTestOwner(mpsc::UnboundedReceiver<Command>);
+#[cfg(test)]
+impl SourceObserverPolicyTestOwner {
+    async fn next_command(&mut self) -> Option<Command> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.0.recv())
+            .await
+            .expect("policy lifecycle command must arrive")
+    }
+    pub(crate) async fn projection(&mut self) -> oneshot::Sender<Result<(), String>> {
+        match self
+            .next_command()
+            .await
+            .expect("live policy command owner")
+        {
+            Command::Project(projection, reply) => {
+                assert_eq!(projection.phase, ForegroundSourcePhase::Refill);
+                reply
+            }
+            _ => panic!("expected rolling-policy projection"),
+        }
+    }
+    pub(crate) async fn cleanup_pending(&mut self) {
+        assert!(matches!(
+            self.next_command().await,
+            Some(Command::CleanupPending)
+        ));
+    }
+    /// Accept every projection (transfer epochs and refills) until the
+    /// observer's input closes, so a read never waits on wall-clock epochs.
+    pub(crate) fn accept_projections(mut self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(command) = self.0.recv().await {
+                if let Command::Project(_, reply) = command {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        })
+    }
+}
+#[cfg(test)]
+impl SourceObserver {
+    pub(crate) fn policy_fixture() -> (Self, SourceObserverPolicyTestOwner) {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                commands,
+                reads: Arc::new(ReadActivity::default()),
+                foreground_bytes: 1024,
+                startup_burst_bytes: 0,
+            },
+            SourceObserverPolicyTestOwner(receiver),
+        )
+    }
+    pub(crate) fn transfer_fixture(
+        startup_burst_bytes: u64,
+    ) -> (Self, SourceObserverPolicyTestOwner) {
+        let (mut observer, owner) = Self::policy_fixture();
+        observer.startup_burst_bytes = startup_burst_bytes;
+        (observer, owner)
+    }
+}
+
 #[derive(Default)]
 struct ReadActivity {
     known: std::sync::atomic::AtomicBool,
@@ -355,12 +425,9 @@ impl SourceRequest {
             pause: plurx_core::process::bounded::source_pause_controller(),
         }))
     }
-    fn foreground_epoch_bytes(&self) -> u64 {
-        // The quantum is a reserved minimum, not a low throughput ceiling.
-        // Size a bounded five-second class for three times container average;
-        // unknown-rate media gets a bounded 64 MiB class, explicitly unqualified.
-        let bps = self
-            .file
+    /// Container average bits per second, from the scan or size and duration.
+    fn average_bps(&self) -> Option<u128> {
+        self.file
             .bitrate
             .filter(|rate| *rate > 0)
             .map(|rate| rate as u128)
@@ -371,13 +438,45 @@ impl SourceRequest {
                     .map(|duration| {
                         (self.file.size.max(0) as u128).saturating_mul(8_000) / (duration as u128)
                     })
-            });
-        let foreground =
-            bps.map_or(64_u128 * 1024 * 1024, |bps| {
+            })
+    }
+    fn foreground_epoch_bytes(&self) -> u64 {
+        // The quantum is a reserved minimum, not a low throughput ceiling.
+        // Size a bounded five-second class for three times container average;
+        // unknown-rate media gets a bounded 64 MiB class, explicitly unqualified.
+        let foreground = self
+            .average_bps()
+            .map_or(64_u128 * 1024 * 1024, |bps| {
                 bps.saturating_mul(5_000).saturating_mul(3) / 8_000
             })
-            .clamp(u128::from(BACKGROUND_QUANTUM * 2), 512_u128 * 1024 * 1024) as u64;
+            .clamp(u128::from(BACKGROUND_QUANTUM * 2), 512_u128 * 1024 * 1024)
+            as u64;
         foreground.div_ceil(2) * 2
+    }
+    /// The same burst-then-hold shape as rolling input pacing
+    /// ([`plurx_core::transcode::Pacing`]): a start reads this many seconds of
+    /// media at source speed, so the player can build a buffer, and only then
+    /// settles to the per-epoch rate. Unknown-rate media bursts one epoch
+    /// class per five seconds requested. Bounded like the epoch class.
+    pub(crate) fn with_startup_burst(mut self, seconds: f64) -> Self {
+        self.startup_burst_secs = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
+        self
+    }
+    fn startup_burst_bytes(&self) -> u64 {
+        if self.startup_burst_secs <= 0.0 {
+            return 0;
+        }
+        let millis = (self.startup_burst_secs * 1_000.0) as u128;
+        self.average_bps()
+            .map_or_else(
+                || u128::from(self.foreground_epoch_bytes()).saturating_mul(millis) / 5_000,
+                |bps| bps.saturating_mul(millis) / 8_000,
+            )
+            .min(512_u128 * 1024 * 1024) as u64
     }
     pub(crate) fn file(&self) -> &MediaFile {
         &self.file
@@ -415,7 +514,7 @@ impl SourceRequest {
                     return Err(match outcome {
                         Err(error) => error.to_string(),
                         _ => "original-source registration lost authority".into(),
-                    })
+                    });
                 }
                 Err(error) => {
                     // No input was opened. A lost registration acknowledgement
@@ -455,6 +554,7 @@ impl SourceRequest {
                 commands,
                 reads,
                 foreground_bytes: self.foreground_epoch_bytes(),
+                startup_burst_bytes: self.startup_burst_bytes(),
             },
             settled: false,
         })
@@ -510,11 +610,20 @@ impl SourceObserver {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Some(SourceReadActivity(Arc::clone(&self.reads)))
     }
-    async fn project(&self, projection: ForegroundSourceProjection) -> Result<(), String> {
+    fn begin_projection(
+        &self,
+        projection: ForegroundSourceProjection,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(Command::Project(projection, reply))
             .map_err(|_| "original-source owner ended".to_owned())?;
+        Ok(response)
+    }
+    async fn finish_projection(
+        &self,
+        response: oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), String> {
         let result = response
             .await
             .map_err(|_| "original-source projection owner ended".to_owned())?;
@@ -522,6 +631,10 @@ impl SourceObserver {
             self.reads.authority_lost.cancel();
         }
         result
+    }
+    async fn project(&self, projection: ForegroundSourceProjection) -> Result<(), String> {
+        self.finish_projection(self.begin_projection(projection)?)
+            .await
     }
     pub(crate) async fn refill(&self) -> Result<(), String> {
         let mut projection =
@@ -626,21 +739,47 @@ impl SourceObserver {
     pub(crate) async fn policy_changed(&self) {
         self.reads.policy_changed.notified().await;
     }
-    pub(crate) async fn declare_rolling_policy(&self) -> Result<(), String> {
-        if self.rolling_policy() {
-            return Ok(());
+    /// Enqueue while the publication owner still holds its retirement fence;
+    /// callers await durable authority outside that fence. This never infers
+    /// retirement from a closed channel: active-owner errors remain errors.
+    pub(crate) fn begin_rolling_policy(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+        let response = (!self.rolling_policy()).then(|| {
+            let mut projection =
+                ForegroundSourceProjection::startup(crate::fragment_index_cluster::unix_ms());
+            projection.phase = ForegroundSourcePhase::Refill;
+            self.begin_projection(projection)
+        });
+        let observer = self.clone();
+        async move {
+            if let Some(response) = response {
+                // Close the old transfer opportunity before making reads
+                // unconstrained by that class's finite grant.
+                observer.finish_projection(response?).await?;
+                observer
+                    .reads
+                    .reads_held
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                observer.reads.reads_resumed.notify_waiters();
+                observer
+                    .reads
+                    .rolling
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                observer.reads.policy_changed.notify_one();
+            }
+            Ok(())
         }
-        // Close the old transfer opportunity before making source reads
-        // unconstrained by that class's finite grant.
-        self.refill().await?;
-        self.reads
-            .rolling
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.reads.policy_changed.notify_one();
-        Ok(())
+    }
+    pub(crate) async fn declare_rolling_policy(&self) -> Result<(), String> {
+        self.begin_rolling_policy().await
     }
     pub(crate) fn rolling_policy(&self) -> bool {
         self.reads.rolling.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Transfer bytes this input may read before its epoch grant paces it.
+    pub(crate) fn startup_burst_bytes(&self) -> u64 {
+        self.startup_burst_bytes
     }
     pub(crate) async fn transfer_epoch(&self) -> Result<SourceServiceGrant, String> {
         let now = crate::fragment_index_cluster::unix_ms();
@@ -923,17 +1062,17 @@ pub(crate) async fn file_body(
             }
             let work_reader = Arc::clone(&reader);
             let read_activity = observer.begin_read().await.map_err(std::io::Error::other)?;
-            let bytes = tokio::task::spawn_blocking(move || {
+            let bytes = plurx_core::media_io::blocking(move || {
                 let read_activity = read_activity;
                 use std::io::{Read, Seek};
                 let mut source = work_reader.source.lock().expect("direct source read");
-                if !source.unchanged() {
+                if !source.unchanged_in_place() {
                     return Err(std::io::Error::other("source range changed"));
                 }
                 source.handle.seek(std::io::SeekFrom::Start(offset))?;
                 let mut bytes = vec![0; size];
                 let n = source.handle.read(&mut bytes)?;
-                if !source.unchanged() {
+                if !source.unchanged_in_place() {
                     return Err(std::io::Error::other("source range changed"));
                 }
                 bytes.truncate(n);

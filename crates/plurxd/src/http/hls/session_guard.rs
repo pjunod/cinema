@@ -20,6 +20,9 @@ pub struct StartQuery {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StartResponse {
+    /// Source offer for one processed prepared successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_upgrade: Option<String>,
     /// Actual server-produced audio, not the client's proposed video plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_audio: Option<plurx_core::playback::audio::AudioDelivery>,
@@ -64,6 +67,10 @@ pub struct StartResponse {
     /// The player treats it like direct play: seek by `currentTime`, and don't
     /// arm the stall watchdog's restart — see `StartInfo::vod`.
     pub vod: bool,
+    /// Local copy attachment with an initialized, contiguous decode window at
+    /// the requested resume point. A durable replay cannot reuse this observation.
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub startup_seek_ready_ms: Option<i64>,
     /// The quality ladder for this source, top rung first — the rungs the
     /// menu and the Auto controller move between, so the client never
     /// hardcodes them (ADAPTIVE-QUALITY.md Phase 1).

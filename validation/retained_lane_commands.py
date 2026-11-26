@@ -233,17 +233,32 @@ JVM_PLAYBACK_SOURCE_ONLY_FILES = {
 }
 
 
+# The tags promotion's merge of Cluster settings changes only the ownership
+# census in this tree. No Android test loads this validation ledger.
+JVM_PLAYBACK_TAGS_OWNERSHIP_TREES = ('833b09847a364aa65033a83507f07db853d580c0',
+                                    'ba71937216d6e2f40208d5cb4d684463cbd3a026')
+JVM_PLAYBACK_TAGS_OWNERSHIP_FILES = {
+    'rolling-producer-owners.toml': (
+        'c836098ddca0a9cea968a0fe3c47321096014feb0d51881a952e0a1058e538b0',
+        '846a355f2af5f7c3f0c0fac1b1796e805281c42cf111c453a866615d9fb456cc'),
+}
+
+
 def same_jvm_fixture_tree(prior, candidate, path, read_source):
     trees = tree_id(prior, path), tree_id(candidate, path)
     if trees[0] == trees[1]:
         return True
     if path != 'tests/playback':
         return False
-    if trees == JVM_PLAYBACK_SOURCE_ONLY_TREES:
+    reviewed_files = {
+        JVM_PLAYBACK_SOURCE_ONLY_TREES: JVM_PLAYBACK_SOURCE_ONLY_FILES,
+        JVM_PLAYBACK_TAGS_OWNERSHIP_TREES: JVM_PLAYBACK_TAGS_OWNERSHIP_FILES,
+    }.get(trees)
+    if reviewed_files is not None:
         return all(tuple(hashlib.sha256(raw).hexdigest() if raw is not None else None
                          for raw in (read_source(prior, path + '/' + name),
                                      read_source(candidate, path + '/' + name))) == hashes
-                   for name, hashes in JVM_PLAYBACK_SOURCE_ONLY_FILES.items())
+                   for name, hashes in reviewed_files.items())
     if trees != JVM_PLAYBACK_COMMENT_TREES:
         return False
     ledger = path + '/rolling-producer-owners.toml'

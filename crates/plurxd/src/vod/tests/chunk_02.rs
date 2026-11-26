@@ -155,6 +155,8 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            audio_excluded: false,
+            dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
@@ -254,6 +256,8 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            audio_excluded: false,
+            dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
@@ -1668,6 +1672,8 @@
             crate::copy_normalization::served_init_contract_sha256(&muxer, &index.promotion)
                 .expect("the seal's init contract");
         let mut recipe = Recipe {
+            audio_excluded: false,
+            dv_refit_gain: None,
             source_telemetry: false,
             retained_logical: None,
             measured_candidate: None,
@@ -2613,6 +2619,7 @@
             "node-a".to_owned(),
             base.path().join("indexes"),
             None,
+            None,
         );
         let mut req = request("first-play", 0.0);
         req.file_id = file.id;
@@ -2737,6 +2744,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                requested_audio_index: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -2755,7 +2763,6 @@
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
@@ -2880,6 +2887,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                requested_audio_index: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -2898,7 +2906,6 @@
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),

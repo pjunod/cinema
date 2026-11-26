@@ -149,6 +149,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case seekPresentationDeadline = "seek_presentation_deadline"
     /// Seek telemetry survives Pause and same-target reopen, but not a new destination.
     case seekTelemetrySupersession = "seek_telemetry_supersession"
+    /// Preparing a position survives a change to transport intent alone.
+    case seekPreparationDestination = "seek_preparation_destination"
     /// `makePeriodicPlaybackObservation`: the black-frame decode-failure
     /// handler. `started` stays beside it as a predicate.
     case blackFrameDecodeFailure = "black_frame_decode_failure"
@@ -228,6 +230,7 @@ enum AttemptFence: String, CaseIterable, Sendable {
         switch self {
         case .seekPresentationDeadline: return [.open, .viewerAction, .seek]
         case .seekTelemetrySupersession: return [.seek]
+        case .seekPreparationDestination: return [.viewerAction, .seek]
         case .blackFrameDecodeFailure: return [.lifecycle, .viewerAction]
         case .stallRecovery: return [.open, .viewerAction]
         case .itemFailureLadder: return [.open, .viewerAction]
@@ -262,5 +265,14 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .translatedCaptionDecision: return [.viewerAction]
         case .translatedCaptionFailure: return [.viewerAction]
         }
+    }
+
+    func isCurrent(_ captured: Attempt, now: Attempt) -> Bool {
+        if self == .seekPreparationDestination {
+            // Either authority can keep the destination current. The caller
+            // separately requires the same lifecycle, open attempt, and item.
+            return captured.staleScopes(now, scopes: scopes).count < scopes.count
+        }
+        return captured.stillCurrent(now, scopes: scopes)
     }
 }

@@ -7,7 +7,7 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap};
 
 use plurx_core::domain::NetworkPrior;
-use plurx_core::store::{keys, Store};
+use plurx_core::store::Store;
 
 use super::error::ApiError;
 use crate::state::AppState;
@@ -158,16 +158,9 @@ pub(crate) fn client_class(headers: &HeaderMap) -> &'static str {
 
 pub(crate) async fn stored_prior(
     store: &dyn Store,
-    applied: &plurx_core::store::AppliedView,
     identity: Option<&NetworkIdentity>,
 ) -> Result<Option<NetworkPrior>, ApiError> {
-    // The preference from this node's applied view (E1b); the prior row
-    // itself stays a store read.
-    let enabled = applied
-        .setting(keys::PLAYBACK_NETWORK_PRIORS)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
-    let Some(identity) = identity.filter(|_| enabled) else {
+    let Some(identity) = identity else {
         return Ok(None);
     };
     let Some(credential_generation) = &identity.credential_generation else {

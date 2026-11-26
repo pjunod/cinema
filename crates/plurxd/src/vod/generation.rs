@@ -1,4 +1,5 @@
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
 /// to [`run_generation`].
@@ -8,6 +9,43 @@ pub(super) async fn spawn_generation(
     at: u32,
     permit: Option<crate::vodencode::EncodePermit>,
 ) {
+    // One epoch read for both the generation and its leftover-custody close,
+    // so an epoch move in between cannot strand resume custody unjoined.
+    let generation_epoch = rendition.gen_epoch.load(Relaxed);
+    let resume_work = rendition.resume_preparation_for_epoch(generation_epoch);
+    let mut source_custody = None;
+    spawn_generation_with_input(
+        shared,
+        rendition,
+        at,
+        permit,
+        generation_epoch,
+        resume_work.clone(),
+        &mut source_custody,
+    )
+    .await;
+    if let (Some(work), Some(input)) = (resume_work, source_custody) {
+        work.cancel();
+        match input.close_and_wait().await {
+            Ok(()) => work.unregistered_source_joined(),
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", %error, rendition = %rendition.key, "could not join unregistered resume source");
+            }
+        }
+        rendition.kick();
+    }
+}
+
+async fn spawn_generation_with_input(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    at: u32,
+    permit: Option<crate::vodencode::EncodePermit>,
+    generation_epoch: u64,
+    resume_work: Option<Arc<super::resume_preparation::ResumePreparation>>,
+    source_custody: &mut Option<crate::source_input::SourceInput>,
+) {
+    let spawn_started = std::time::Instant::now();
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
     }
@@ -36,15 +74,32 @@ pub(super) async fn spawn_generation(
                     plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer
                 },
             )
+            .with_startup_burst(rendition.source_burst_secs)
         });
-    let generation_epoch = rendition.gen_epoch.load(Relaxed);
-    let generation_current = || {
-        !rendition.closed.load(Relaxed)
+    let fail = |decision, cause| {
+        if let Some(work) = resume_work.as_ref() {
+            work.cancel();
+            rendition.kick();
+        } else {
+            record_failure(shared, rendition, decision, cause);
+        }
+    };
+    let generation_current = || async {
+        let accepts_consumers = match resume_work.as_ref() {
+            Some(work) => work.accepts_consumers(rendition, &shared.pool).await,
+            None => true,
+        };
+        accepts_consumers
+            && !rendition.closed.load(Relaxed)
             && rendition.failure().is_none()
             && rendition.gen_epoch.load(Relaxed) == generation_epoch
             && rendition.cancelled_preparation_epoch.load(Acquire)
                 != generation_epoch.saturating_add(1)
+            && resume_work.as_ref().is_none_or(|work| work.is_live())
     };
+    if !generation_current().await {
+        return;
+    }
     let private_operation = match rendition.private_storage.as_ref() {
         Some(storage) => match storage.operation() {
             Some(operation) => Some(operation),
@@ -55,46 +110,42 @@ pub(super) async fn spawn_generation(
     let source_dispatch = match rendition.source_owners.begin_generation() {
         Ok(dispatch) => dispatch,
         Err(cause) => {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
-            record_failure(
-                shared,
-                rendition,
+            fail(
                 crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                 cause.to_owned(),
             );
             return;
         }
     };
+    let authorize_started = std::time::Instant::now();
     let source_authority = match source_dispatch.authorize_before_spawn().await {
         Ok(authority) => authority,
         Err(cause) => {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
-            record_failure(
-                shared,
-                rendition,
+            fail(
                 crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                 cause,
             );
             return;
         }
     };
+    let authorized_at = std::time::Instant::now();
     if !recipe_engine_is_current(&rendition.recipe).await {
-        if !generation_current() {
+        if !generation_current().await {
             return;
         }
-        record_failure(
-            shared,
-            rendition,
+        fail(
             crate::playback_control::ProducerDecisionReason::EngineChanged,
             "the immutable media engine changed; restart is required".to_owned(),
         );
         return;
     }
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     // A spawn position must be a VIDEO entry — the scheduler can name an
@@ -124,43 +175,75 @@ pub(super) async fn spawn_generation(
     // A family may retain this reservation through several generations, but
     // only the exact unreaped process may use it. Refuse a duplicate launch
     // before opening inputs or spawning a second producer under one credit.
+    // A DV window run may already have started this window's encoder under
+    // the family's one worker claim; the generation then shares that claim
+    // instead of taking a second. Any other run holding it is killed and
+    // settled first, so an unrelated seek claims the reservation as before.
+    #[cfg(target_os = "linux")]
+    let mut run_claim: Option<std::sync::Arc<crate::vodencode::EncodeWorkerPermit>> = None;
     let permit = match permit {
-        Some(reservation) => match rendition
-            .retained_admission
-            .bind(reservation)
-            .try_claim_worker()
-        {
-            Some(worker) => {
-                #[cfg(target_os = "linux")]
-                if let Some(encoding) = recipe
+        Some(reservation) => {
+            let bound = rendition.retained_admission.bind(reservation);
+            #[cfg(target_os = "linux")]
+            let claimed = match bound.clone().try_claim_worker() {
+                Some(worker) => Some(worker),
+                None => match recipe
                     .encoding
                     .as_ref()
-                    .filter(|encoding| encoding.dv_runtime.is_some())
+                    .and_then(|encoding| encoding.dv_runtime.as_ref())
                 {
-                    encoding.begin_processed_window(
-                        rendition.gen_epoch.load(Relaxed),
-                        at,
-                        &worker.reservation(),
-                    );
+                    Some(runtime) => match runtime.window_run.claim_for(at, &bound).await {
+                        Some(claim) => {
+                            if let Some(encoding) = recipe.encoding.as_ref() {
+                                encoding.begin_processed_window(
+                                    rendition.gen_epoch.load(Relaxed),
+                                    at,
+                                    &claim.reservation(),
+                                );
+                            }
+                            run_claim = Some(claim);
+                            None
+                        }
+                        None => bound.try_claim_worker(),
+                    },
+                    None => None,
+                },
+            };
+            #[cfg(not(target_os = "linux"))]
+            let claimed = bound.try_claim_worker();
+            match claimed {
+                Some(worker) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(encoding) = recipe
+                        .encoding
+                        .as_ref()
+                        .filter(|encoding| encoding.dv_runtime.is_some())
+                    {
+                        encoding.begin_processed_window(
+                            rendition.gen_epoch.load(Relaxed),
+                            at,
+                            &worker.reservation(),
+                        );
+                    }
+                    Some(worker)
                 }
-                Some(worker)
-            }
-            None => {
-                if !generation_current() {
+                #[cfg(target_os = "linux")]
+                None if run_claim.is_some() => None,
+                None => {
+                    if !generation_current().await {
+                        return;
+                    }
+                    fail(
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        "the producer reservation still belongs to an unreaped worker".to_owned(),
+                    );
                     return;
                 }
-                record_failure(
-                    shared,
-                    rendition,
-                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                    "the producer reservation still belongs to an unreaped worker".to_owned(),
-                );
-                return;
             }
-        },
+        }
         None => None,
     };
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     #[cfg(target_os = "linux")]
@@ -181,9 +264,17 @@ pub(super) async fn spawn_generation(
     // Diagnostic only: the processed window's timing line reports it.
     #[cfg(target_os = "linux")]
     let source_open_started = tokio::time::Instant::now();
-    let source_custody = if !source_needed {
+    let background_budget = resume_work
+        .as_ref()
+        .map(|work| work.source_budget())
+        .or_else(|| {
+            rendition
+                .preparation()
+                .map(|preparation| preparation.fence.source_budget())
+        });
+    *source_custody = if !source_needed {
         None
-    } else if let Some(preparation) = rendition.preparation() {
+    } else if let Some(background_budget) = background_budget {
         let source = match rendition.source.as_ref() {
             Some(source) => crate::fragment_index_cluster::SourceFence::clone_held(
                 &source.handle,
@@ -195,15 +286,13 @@ pub(super) async fn spawn_generation(
             Ok(source) => match crate::source_input::SourceInput::open_background_held(
                 source,
                 crate::http::stream::file_content_type(&rendition.recipe.file.path),
-                preparation.fence.source_budget(),
+                background_budget,
             )
             .await
             {
                 Ok(input) => Some(input),
                 Err(cause) => {
-                    record_failure(
-                        shared,
-                        rendition,
+                    fail(
                         crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                         cause,
                     );
@@ -211,9 +300,7 @@ pub(super) async fn spawn_generation(
                 }
             },
             Err(cause) => {
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::SourceChanged,
                     cause,
                 );
@@ -252,9 +339,7 @@ pub(super) async fn spawn_generation(
             } {
                 Ok(custody) => Some(custody),
                 Err(cause) => {
-                    record_failure(
-                        shared,
-                        rendition,
+                    fail(
                         crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                         cause,
                     );
@@ -264,15 +349,32 @@ pub(super) async fn spawn_generation(
             None => None,
         }
     };
+    if let Some(work) = resume_work.as_ref().filter(|_| source_custody.is_some()) {
+        work.source_opened();
+    }
+    let source_opened_at = std::time::Instant::now();
     #[cfg(target_os = "linux")]
     let source_open = source_needed.then(|| source_open_started.elapsed());
-    if let Some(observer) = source_custody
-        .as_ref()
-        .and_then(|input| input.foreground_observer())
-    {
-        rendition
-            .source_owners
-            .set_source_observer(generation_epoch, observer);
+    if !generation_current().await {
+        return;
+    }
+    if let Some(input) = source_custody.as_mut() {
+        if let Err(cause) = input
+            .publish_source_observer(&rendition.source_owners, generation_epoch)
+            .await
+        {
+            if !generation_current().await {
+                return;
+            }
+            fail(
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                cause,
+            );
+            return;
+        }
+    }
+    if !generation_current().await {
+        return;
     }
     #[cfg(target_os = "linux")]
     if let Some((encoding, runtime)) = recipe.encoding.as_ref().and_then(|encoding| {
@@ -286,13 +388,11 @@ pub(super) async fn spawn_generation(
         // Explicit seek/replacement/failure revoke its publication allowance.
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     cause,
                 );
@@ -312,18 +412,25 @@ pub(super) async fn spawn_generation(
             // this original interval new report authority.
             report_revision = 0;
             drop(permit);
+            // The window is already prepared: a run's encoder pre-started for
+            // it is not needed. Ending the run kills and reaps it; the next
+            // claim waits for that.
+            if run_claim.is_some() {
+                runtime.end_window_run();
+            }
+            drop(run_claim);
             rendition
                 .source_owners
                 .registered(&source_dispatch, &prepared.registration);
             drop(source_dispatch);
-            if let Some(custody) = source_custody {
+            if let Some(custody) = source_custody.take() {
                 let registration = prepared.registration.clone();
                 tokio::spawn(async move {
                     let _ = registration.wait_confirmed_reap().await;
                     drop(custody);
                 });
             }
-            if !runtime.source.unchanged() || !runtime.tools.is_current().await {
+            if !runtime.source.unchanged().await || !runtime.tools.is_current().await {
                 Err("DV source/backend changed before prepared publication".into())
             } else {
                 Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
@@ -331,81 +438,95 @@ pub(super) async fn spawn_generation(
                 ))
             }
         } else {
-            let Some(worker) = permit else {
-                if !generation_current() {
+            let admission = match (permit, run_claim) {
+                (Some(worker), _) => crate::dv_segment::SegmentAdmission::Retained(worker),
+                (None, Some(claim)) => crate::dv_segment::SegmentAdmission::RunShared(claim),
+                (None, None) => {
+                    if !generation_current().await {
+                        return;
+                    }
+                    runtime.refuse_episode();
+                    fail(
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        "DV graph has no retained admission".into(),
+                    );
                     return;
                 }
-                runtime.refuse_episode();
-                record_failure(
-                    shared,
-                    rendition,
-                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                    "DV graph has no retained admission".into(),
-                );
-                return;
             };
             let owners = Arc::clone(rendition);
-            let hook = Box::new(move |registration: &crate::prodrun::ProducerRegistration| {
-                owners
-                    .source_owners
-                    .registered(&source_dispatch, registration);
-                drop(source_dispatch);
-            });
-            let Some(source_custody) = source_custody else {
-                record_failure(
-                    shared,
-                    rendition,
+            let hook = Box::new(
+                move |registrations: &[crate::prodrun::ProducerRegistration]| {
+                    // A window run's helper first, so the encoder stays current.
+                    for registration in registrations {
+                        owners
+                            .source_owners
+                            .registered(&source_dispatch, registration);
+                    }
+                    drop(source_dispatch);
+                },
+            );
+            let Some(source_custody) = source_custody.take() else {
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     "processed generation has no original source read owner".into(),
                 );
                 return;
             };
-            runtime
-                .execute_with_source_input(
+            // Boxed so the DV window's large future lives on the heap, not in
+            // every generation future's stack frame.
+            Box::pin(
+                runtime.execute_with_source_input(
                     &recipe.file,
                     &encoding.plan,
                     &encoding.options,
                     encoding.grid,
                     entry,
                     &encoding.executable.path,
-                    crate::dv_segment::SegmentAdmission::Retained(worker),
+                    admission,
                     Arc::clone(&rendition.slot),
                     tokio_util::sync::CancellationToken::new(),
                     Some(hook),
                     source_custody,
                     None,
                     source_open,
-                )
-                .await
-                .and_then(|outcome| match outcome {
-                    crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
-                        Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
-                    }
-                    crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
-                        match &encoding.dv_processing {
-                            plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
-                                if actual.semantic_digest() == frozen.semantic_digest() =>
-                            {
-                                Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
-                                    window,
-                                ))
-                            }
-                            _ => Err("completed DV graph differs from frozen rendition".into()),
+                    // The entries a window run may render after this one.
+                    rendition
+                        .plan
+                        .entries
+                        .get(at as usize + 1..)
+                        .map_or(&[][..], |rest| {
+                            &rest[..rest.len().min(crate::dv_segment::RUN_MAX - 1)]
+                        }),
+                ),
+            )
+            .await
+            .and_then(|outcome| match outcome {
+                crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                    Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
+                }
+                crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
+                    match &encoding.dv_processing {
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                            if actual.semantic_digest() == frozen.semantic_digest() =>
+                        {
+                            Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
+                                window,
+                            ))
                         }
+                        _ => Err("completed DV graph differs from frozen rendition".into()),
                     }
-                })
+                }
+            })
         };
         let verified = match verified {
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return,
             Err(cause) => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     format!("DV window refused before publication: {cause}"),
                 );
@@ -414,20 +535,18 @@ pub(super) async fn spawn_generation(
         };
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     cause,
                 );
                 return;
             }
         }
-        if !recipe_engine_is_current(recipe).await || !generation_current() {
+        if !recipe_engine_is_current(recipe).await || !generation_current().await {
             return;
         }
         shared
@@ -494,7 +613,7 @@ pub(super) async fn spawn_generation(
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged_in_place())
                 && manifest
                     .state(at)
                     .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
@@ -529,9 +648,7 @@ pub(super) async fn spawn_generation(
             {
                 // Exclude the episode before on_generation_end wakes clients.
                 runtime.refuse_episode();
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     "processed window did not complete publication".to_owned(),
                 );
@@ -543,17 +660,15 @@ pub(super) async fn spawn_generation(
     }
     let attested = attested_source_setup(rendition);
     let source_current = if rendition.key.starts_with("source-") {
-        let Some(held) = rendition
-            .source
-            .as_ref()
-            .filter(|source| source.unchanged())
-        else {
-            if !generation_current() {
+        let held = match rendition.source.as_ref() {
+            Some(source) if source.unchanged().await => Some(source),
+            _ => None,
+        };
+        let Some(held) = held else {
+            if !generation_current().await {
                 return;
             }
-            record_failure(
-                shared,
-                rendition,
+            fail(
                 crate::playback_control::ProducerDecisionReason::SourceChanged,
                 "Source held descriptor changed before spawn".to_owned(),
             );
@@ -567,12 +682,10 @@ pub(super) async fn spawn_generation(
         {
             Ok(current) => Some(current),
             Err(cause) => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::SourceChanged,
                     cause,
                 );
@@ -593,12 +706,10 @@ pub(super) async fn spawn_generation(
     let audio_source = match audio_open {
         Ok(source) => source,
         Err(cause) => {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
-            record_failure(
-                shared,
-                rendition,
+            fail(
                 crate::playback_control::ProducerDecisionReason::SourceChanged,
                 cause,
             );
@@ -609,7 +720,7 @@ pub(super) async fn spawn_generation(
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
     let (child, child_job, stdout, stderr, landing_probe) = {
-        if !generation_current() {
+        if !generation_current().await {
             return;
         }
         let mut args = crate::source_input::source_args(
@@ -658,12 +769,10 @@ pub(super) async fn spawn_generation(
         let env = recipe_child_env(recipe);
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     cause,
                 );
@@ -678,18 +787,20 @@ pub(super) async fn spawn_generation(
                 progress: crate::producer_spawn::Progress::None,
                 descriptors,
                 env: &env,
-                work: crate::process_control::ChildWork::realtime("VOD transcode"),
+                work: if resume_work.is_some() {
+                    crate::process_control::ChildWork::background("VOD resume preparation")
+                } else {
+                    crate::process_control::ChildWork::realtime("VOD transcode")
+                },
             },
         ) {
             Ok(spawned) => spawned,
             Err(error) => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 let cause = format!("spawning the producer: {error}");
-                record_failure(
-                    shared,
-                    rendition,
+                fail(
                     crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                     cause,
                 );
@@ -710,9 +821,11 @@ pub(super) async fn spawn_generation(
     // Transfer the raw child and physical resources synchronously before the
     // first registration await. Losing this caller can only lose its waiter.
     let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+    let source_custody = source_custody.take();
     tokio::spawn({
         let rendition = Arc::clone(rendition);
         let shared = Arc::clone(shared);
+        let resume_work = resume_work.clone();
         async move {
             let _private_operation = private_operation;
             if _private_operation.is_some() {
@@ -729,6 +842,9 @@ pub(super) async fn spawn_generation(
                     source_custody,
                 )
                 .await;
+            if let Some(work) = resume_work.as_ref() {
+                work.producer_registered(&registration);
+            }
             rendition
                 .source_owners
                 .registered(&source_dispatch, &registration);
@@ -748,12 +864,10 @@ pub(super) async fn spawn_generation(
         }
     });
     let Ok((registration, writers, stdout, stderr)) = registration_rx.await else {
-        if !generation_current() {
+        if !generation_current().await {
             return;
         }
-        record_failure(
-            shared,
-            rendition,
+        fail(
             crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
             "owned producer registration did not complete".to_owned(),
         );
@@ -761,7 +875,7 @@ pub(super) async fn spawn_generation(
     };
     // A child launched before a close/failure still belongs to the actual
     // registered reaper. Wait errors retain its permit and descendant job.
-    if !generation_current() {
+    if !generation_current().await {
         drop(stdout);
         drop(stderr);
         writers.settled();
@@ -786,6 +900,7 @@ pub(super) async fn spawn_generation(
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
     let (supervised_shared, supervised) = (Arc::clone(&shared), Arc::clone(&rendition));
+    let writer_resume_work = resume_work.clone();
     let writer = tokio::spawn(async move {
         let key = rendition.key.clone();
         let (retiring, retired) = tokio::sync::oneshot::channel();
@@ -825,18 +940,17 @@ pub(super) async fn spawn_generation(
             }
         );
         writers.settled();
-        match rendition
+        let retirement_confirmed = match rendition
             .slot
             .wait_registered_retirement(&registration)
             .await
         {
-            Ok(receipt) => {
-                debug_assert!(receipt.matches(&registration));
-            }
+            Ok(receipt) => receipt.matches(&registration),
             Err(error) => {
-                tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
+                tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded");
+                false
             }
-        }
+        };
         // Completion is metadata about already-settled writes. It may wait
         // for the manifest only after the reaper has released the writer's
         // resources and any cleanup owner can release its publication gate.
@@ -851,7 +965,13 @@ pub(super) async fn spawn_generation(
         if !diagnostic.actionable.is_empty() {
             tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
         }
-        if let Some(outcome) = outcome {
+        if let Some(work) = writer_resume_work {
+            work.cancel();
+            if retirement_confirmed {
+                rendition.settle_resume_preparation(&work);
+            }
+            rendition.kick();
+        } else if let Some(outcome) = outcome {
             on_generation_end(&shared, &rendition, outcome, epoch, at).await;
         }
     });
@@ -861,6 +981,13 @@ pub(super) async fn spawn_generation(
     // join can: record the failure, which wakes waiters with a terminal class
     // and kicks the driver to reclaim the producer.
     tokio::spawn(on_writer_panic(writer, move || {
+        if let Some(work) = resume_work {
+            // A speculative fault never latches a foreground verdict. The
+            // driver still joins the registered input's exact reaper.
+            work.cancel();
+            supervised.kick();
+            return;
+        }
         record_failure(
             &supervised_shared,
             &supervised,
@@ -873,6 +1000,10 @@ pub(super) async fn spawn_generation(
         rendition = %spawned_key,
         start_entry = at,
         generation = epoch,
+        prelude_ms = authorize_started.duration_since(spawn_started).as_millis() as u64,
+        authorize_ms = authorized_at.duration_since(authorize_started).as_millis() as u64,
+        source_open_ms = source_opened_at.duration_since(authorized_at).as_millis() as u64,
+        launch_ms = source_opened_at.elapsed().as_millis() as u64,
         "spawned a producer generation"
     );
 }
@@ -962,15 +1093,24 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         }
         args
     } else {
-        let mut args = plurx_core::transcode::copy_pipe_args_with_audio_delivery(
-            &recipe.file,
-            start_seconds,
-            recipe.audio_index,
-            recipe.aac,
-            Pacing::unpaced(),
-            recipe.video,
-            recipe.audio_delivery.as_ref(),
-        );
+        let mut args = if recipe.audio_excluded {
+            plurx_core::transcode::copy_video_only_pipe_args(
+                &recipe.file,
+                start_seconds,
+                Pacing::unpaced(),
+                recipe.video,
+            )
+        } else {
+            plurx_core::transcode::copy_pipe_args_with_audio_delivery(
+                &recipe.file,
+                start_seconds,
+                recipe.audio_index,
+                recipe.aac,
+                Pacing::unpaced(),
+                recipe.video,
+                recipe.audio_delivery.as_ref(),
+            )
+        };
         if attested {
             replace_inputs_with_attested_descriptor(&mut args);
         }
@@ -1052,7 +1192,7 @@ fn replace_inputs_with_attested_descriptor(args: &mut [String]) {
 /// Every later reader — the rendition's generation, its playlist facts, its
 /// index pass — asks these options rather than carrying a second copy of the
 /// answer, which is why this is the one place the two flags meet.
-pub(super) fn copy_video_pipeline(
+pub(crate) fn copy_video_pipeline(
     file: &MediaFile,
     probe_json: Option<&str>,
     have_dovi: bool,
@@ -1173,34 +1313,31 @@ pub(super) async fn measure_landing(
     program: &std::path::Path,
     probe: &LandingProbe,
     source: Option<(&crate::fragment_index_cluster::SourceFence, &MediaFile)>,
-    origin: &tokio::sync::OnceCell<f64>,
+    origin: &tokio::sync::OnceCell<LandingPacket>,
     timescale: u32,
     runtime_cache: &std::path::Path,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<vodgen::LandingTime, String> {
-    let (landed, frame) =
-        run_landing_probe(program, &probe.args, source, runtime_cache, cancel).await?;
+    let landed = run_landing_probe(program, &probe.args, source, runtime_cache, cancel).await?;
     let origin = *origin
-        .get_or_try_init(|| async {
+        .get_or_try_init(|| {
             run_landing_probe(program, &probe.origin_args, source, runtime_cache, cancel)
-                .await
-                .map(|(pts, _)| pts)
         })
         .await?;
-    let seconds = landed - origin;
-    if !seconds.is_finite() || seconds < -frame {
-        return Err(format!(
-            "the probe landed before the film's first keyframe ({landed} s < {origin} s)"
-        ));
+    if landed.time_base != origin.time_base {
+        return Err("the seek changed the selected video packet time base".to_owned());
     }
-    if !(frame.is_finite() && frame > 0.0) {
+    if landed.duration == 0 {
         return Err("the landing packet has no duration to bound the match".to_owned());
     }
-    let ticks = |seconds: f64| (seconds.max(0.0) * f64::from(timescale)).round() as u64;
-    Ok(vodgen::LandingTime {
-        ticks: ticks(seconds),
-        frame_ticks: ticks(frame).max(1),
-    })
+    let delta = i128::from(landed.pts) - i128::from(origin.pts);
+    if delta < -i128::from(landed.duration) {
+        return Err("the probe landed before the film's first keyframe".to_owned());
+    }
+    vodgen::LandingTime::from_source_pts(delta, landed.duration, landed.time_base, timescale)
+        .ok_or_else(|| {
+            "the source landing time cannot be represented on the index clock".to_owned()
+        })
 }
 
 async fn run_landing_probe(
@@ -1209,7 +1346,7 @@ async fn run_landing_probe(
     source: Option<(&crate::fragment_index_cluster::SourceFence, &MediaFile)>,
     runtime_cache: &std::path::Path,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<(f64, f64), String> {
+) -> Result<LandingPacket, String> {
     let reopened = match source {
         Some((source, file)) => Some(source.reopen(file).await?),
         None => None,
@@ -1235,10 +1372,17 @@ async fn run_landing_probe(
 /// A probe prints a handful of header lines and one packet line.
 const LANDING_PROBE_MAX_BYTES: u64 = 64 * 1024;
 
-/// The first packet's PTS and duration, in seconds, from a landing probe's
-/// `framecrc` output: `#tb 0: num/den`, then `stream, dts, pts, duration,
-/// size, crc` for the packet.
-pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LandingPacket {
+    pub(super) pts: i64,
+    pub(super) duration: u64,
+    pub(super) time_base: (u32, u32),
+}
+
+/// The first packet's PTS, duration and time base from the probe's
+/// `framecrc` output. The packet line is stream, DTS, PTS, duration, size,
+/// and checksum. A seek may synthesize DTS for reordered packets.
+pub(super) fn first_packet_time(framecrc: &str) -> Result<LandingPacket, String> {
     let mut time_base = None;
     for line in framecrc.lines() {
         if let Some(rest) = line.strip_prefix("#tb 0:") {
@@ -1248,16 +1392,16 @@ pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
                 .ok_or_else(|| format!("unreadable time base {line:?}"))?;
             let num = num
                 .trim()
-                .parse::<f64>()
+                .parse::<u32>()
                 .map_err(|error| error.to_string())?;
             let den = den
                 .trim()
-                .parse::<f64>()
+                .parse::<u32>()
                 .map_err(|error| error.to_string())?;
-            if den <= 0.0 {
+            if num == 0 || den == 0 {
                 return Err(format!("unreadable time base {line:?}"));
             }
-            time_base = Some(num / den);
+            time_base = Some((num, den));
             continue;
         }
         if line.starts_with('#') || line.trim().is_empty() {
@@ -1270,7 +1414,13 @@ pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
                 .and_then(|field| field.trim().parse::<i64>().ok())
                 .ok_or_else(|| format!("unreadable packet line {line:?}"))
         };
-        return Ok((field(2)? as f64 * time_base, field(3)? as f64 * time_base));
+        let duration =
+            u64::try_from(field(3)?).map_err(|_| format!("unreadable packet duration {line:?}"))?;
+        return Ok(LandingPacket {
+            pts: field(2)?,
+            duration,
+            time_base,
+        });
     }
     Err("the probe printed no video packet".to_owned())
 }
@@ -1306,7 +1456,8 @@ async fn run_generation(
                 );
             }
             Ok((consumed, muxer)) => {
-                if let Err(outcome) = establish_or_verify(&shared, &rendition, &muxer).await {
+                if let Err(outcome) = establish_or_verify(&shared, &rendition, &muxer, epoch).await
+                {
                     return (Some(outcome), None);
                 }
                 Box::new(std::io::Cursor::new(consumed).chain(stdout))
@@ -1324,6 +1475,20 @@ async fn run_generation(
             // bailed, which returns above.
             None => return (None, None),
         }
+    };
+    let dv_refit = match rendition.recipe.video.dolby_vision_refit() {
+        Some(digest) => match crate::dv_refit_serving::pinned_table(
+            shared.store.as_ref(), &rendition.recipe.file, digest,
+        ).await {
+            Ok(Some(table)) => Some(table),
+            Ok(None) => return (Some(Outcome::Failed(Failure::Stream(
+                "the rendition's pinned F+ curve table is no longer kept; it needs a new generation identity".into()
+            ))), None),
+            Err(error) => return (Some(Outcome::Failed(Failure::Stream(
+                format!("reading the rendition's F+ curve table: {error}")
+            ))), None),
+        },
+        None => None,
     };
     let generation = Generation {
         plan: rendition.plan.clone(),
@@ -1375,6 +1540,7 @@ async fn run_generation(
         // generation is matched against was built with — they share one
         // `CopyVideoOptions`, so they cannot disagree.
         convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
+        dv_refit,
         retain_hevc_parameter_sets: rendition.recipe.video.retains_hevc_parameter_sets(),
     };
     let sink = RenditionSink {
@@ -1459,6 +1625,7 @@ async fn establish_or_verify(
     shared: &Shared,
     rendition: &Arc<Rendition>,
     muxer: &Init,
+    epoch: u64,
 ) -> Result<(), Outcome> {
     // Hold publication ownership while identity and init are written. The
     // exact byte reservations below may evict other idle cache entries.
@@ -1469,23 +1636,26 @@ async fn establish_or_verify(
             "the immutable media engine changed before init publication".to_owned(),
         )));
     }
+    let resume_work = rendition.resume_preparation_for_epoch(epoch);
     // A v3 copy index promises the init its seal published. Checked against
     // this generation's own muxer init before any identity or init is
     // established or written, so an engine that emits another init serves
     // nothing from this plan.
     if let Some(refused) = sealed_init_refusal(&rendition.recipe, rendition.index.as_ref(), muxer) {
-        if let Some(key) = rendition.recipe.cluster_cache_key.as_deref() {
-            crate::copy_index_v3::refuse_on_this_engine(key);
-        }
-        if matches!(refused, SealedInitRefusal::Mismatch(_)) {
-            report_sealed_init(shared, &rendition.recipe);
+        if resume_work.is_none() {
+            if let Some(key) = rendition.recipe.cluster_cache_key.as_deref() {
+                crate::copy_index_v3::refuse_on_this_engine(key);
+            }
+            if matches!(refused, SealedInitRefusal::Mismatch(_)) {
+                report_sealed_init(shared, &rendition.recipe);
+            }
         }
         let refused = refused.reason().to_owned();
         tracing::warn!(
             target: "plurxd::vodserve",
             rendition = %rendition.key,
             file_id = rendition.recipe.file.id,
-            "{refused}; this process will plan the title from its next index"
+            "{refused}; discarding this generation"
         );
         return Err(Outcome::Failed(Failure::SealedInit(refused)));
     }
@@ -1501,11 +1671,33 @@ async fn establish_or_verify(
             ))));
         }
     }
+    if let Some(work) = resume_work.as_ref() {
+        if !work.accepts_consumers(rendition, &shared.pool).await || !work.is_live() {
+            work.cancel();
+            return Err(Outcome::Failed(Failure::Sink(
+                io::ErrorKind::NotFound.into(),
+            )));
+        }
+    }
+    let charge_init = |bytes: usize| {
+        if let Some(work) = resume_work.as_ref() {
+            if !work.charge(bytes as u64) {
+                work.cancel();
+                return Err(Outcome::Failed(Failure::Sink(
+                    io::ErrorKind::NotFound.into(),
+                )));
+            }
+        }
+        Ok(())
+    };
     let served = {
         let mut state = rendition.identity.lock().await;
         match &state.identity {
             Some(identity) => match identity.served_init_for(muxer) {
-                Ok(served) => served,
+                Ok(served) => {
+                    charge_init(served.bytes.len())?;
+                    served
+                }
                 Err(refused) => {
                     if matches!(refused, InitRefused::PromotionDrift { .. }) {
                         tracing::error!(
@@ -1538,10 +1730,12 @@ async fn establish_or_verify(
                 let served = identity
                     .served_init_for(muxer)
                     .expect("an identity just established from this muxer init serves it");
+                charge_init(served.bytes.len())?;
                 if let Err(error) = store_identity_observed(
                     &rendition.identity_path(),
                     &identity,
                     rendition.private_storage.as_ref(),
+                    resume_work.as_deref(),
                 )
                 .await
                 {
@@ -1550,7 +1744,10 @@ async fn establish_or_verify(
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
-                    if rendition.private_storage.is_some() {
+                    if let Some(work) = resume_work.as_ref() {
+                        work.cancel();
+                        return Err(Outcome::Failed(Failure::Sink(error)));
+                    } else if rendition.private_storage.is_some() {
                         rendition.revoke_preparation();
                         drop(state);
                         return Err(Outcome::Failed(Failure::Sink(error)));
@@ -1577,9 +1774,21 @@ async fn establish_or_verify(
     } else {
         None
     };
-    if let Err(error) = rendition.dir.write_init(&served.bytes).await {
-        return Err(Outcome::Failed(Failure::Sink(error)));
-    }
+    let write = if let Some(work) = resume_work.as_ref() {
+        if !work.accepts_consumers(rendition, &shared.pool).await || !work.is_live() {
+            work.cancel();
+            return Err(Outcome::Failed(Failure::Sink(
+                io::ErrorKind::NotFound.into(),
+            )));
+        }
+        rendition
+            .dir
+            .write_init_without_eviction(&served.bytes)
+            .await
+    } else {
+        rendition.dir.write_init(&served.bytes).await
+    };
+    write.map_err(|error| Outcome::Failed(Failure::Sink(error)))?;
     if let Some(pending) = pending {
         pending.commit(false);
     }
@@ -1596,6 +1805,11 @@ pub(super) async fn on_generation_end(
     epoch: u64,
     at: u32,
 ) {
+    if let Some(work) = rendition.resume_preparation_for_epoch(epoch) {
+        work.cancel();
+        rendition.kick();
+        return;
+    }
     if rendition.cancelled_preparation_epoch.load(Acquire) == epoch.saturating_add(1) {
         // Background cancellation is not a foreground producer verdict. The
         // key/readers fence refuses to terminate an epoch acquired by a live
@@ -2196,6 +2410,13 @@ impl vodgen::Sink for RenditionSink {
 impl RenditionSink {
     /// Whether the exact completion callback admitted its engine and source.
     async fn completed_output_accepted(&self) -> bool {
+        if self
+            .rendition
+            .resume_preparation_for_epoch(self.epoch)
+            .is_some()
+        {
+            return false;
+        }
         if !recipe_engine_is_current(&self.rendition.recipe).await {
             return false;
         }
@@ -2205,11 +2426,7 @@ impl RenditionSink {
         // invalidate its successfully published bytes. The observer still
         // checks the original Sink epoch; mixed/repeated writes lose proof.
         if !self.rendition.closed.load(Relaxed)
-            && self
-                .rendition
-                .source
-                .as_ref()
-                .is_some_and(|source| source.unchanged())
+            && self.rendition.source.as_ref().held_unchanged().await
         {
             let mut measurement = self
                 .rendition
@@ -2237,6 +2454,17 @@ impl RenditionSink {
         }
     }
     async fn materialize_observed(&self, entry: u32, bytes: Vec<u8>) -> io::Result<bool> {
+        let resume_work = self.rendition.resume_preparation_for_epoch(self.epoch);
+        if let Some(work) = resume_work.as_ref() {
+            if !work.permits_entry(entry)
+                || !work
+                    .accepts_consumers(&self.rendition, &self.shared.pool)
+                    .await
+            {
+                work.cancel();
+                return Err(io::ErrorKind::NotFound.into());
+            }
+        }
         // Pin the exact entry before the optimistic presence check. A driver
         // may otherwise evict it while engine validation awaits, turning a
         // retained replay into a fresh write with no allocation grant.
@@ -2259,10 +2487,30 @@ impl RenditionSink {
             .get()
             .after_cache_presence_observed()
             .await;
+        let len = bytes.len() as u64;
         let reservation = if already_present {
             None
         } else {
-            crate::playback_cache::reserve(self.rendition.dir.path(), bytes.len() as u64).await?
+            // Cache reservation may evict another rendition. Refuse bytes
+            // outside this work's cap before asking it to free any space.
+            if let Some(work) = resume_work.as_ref() {
+                if !work
+                    .accepts_consumers(&self.rendition, &self.shared.pool)
+                    .await
+                    || self.shared.working_set.load(Relaxed).saturating_add(len)
+                        > self.rendition.working_set_budget
+                    || !work.charge(len)
+                {
+                    work.cancel();
+                    return Err(io::ErrorKind::NotFound.into());
+                }
+            }
+            if resume_work.is_some() {
+                crate::playback_cache::reserve_without_eviction(self.rendition.dir.path(), len)
+                    .await?
+            } else {
+                crate::playback_cache::reserve(self.rendition.dir.path(), len).await?
+            }
         };
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
@@ -2277,12 +2525,7 @@ impl RenditionSink {
         // otherwise be classified `producer_write_failed` — a sink fault,
         // which is not what happened. `record_failure` is first-wins, so the
         // class recorded here survives the generation ending underneath it.
-        if let Some(drift) = self
-            .rendition
-            .source
-            .as_ref()
-            .and_then(|source| source.drift())
-        {
+        if let Some(drift) = self.rendition.source.as_ref().held_drift().await {
             // The sentence names what was observed, not what was concluded.
             // "source changed" alone was a confident claim about a thing that
             // may not have happened: the same refusal covers a rewritten
@@ -2360,12 +2603,7 @@ impl RenditionSink {
         } else {
             verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
         }
-        if self
-            .rendition
-            .source
-            .as_ref()
-            .is_some_and(|source| !source.unchanged())
-        {
+        if self.rendition.source.as_ref().held_and_changed().await {
             let cause = "source changed while verifying reserved media".to_owned();
             record_failure(
                 &self.shared,
@@ -2393,7 +2631,6 @@ impl RenditionSink {
             self.rendition.kick();
             return Ok(false);
         }
-        let len = bytes.len() as u64;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         let init = self
             .publication_lock(self.rendition.identity.lock())
@@ -2401,6 +2638,13 @@ impl RenditionSink {
             .identity
             .clone();
         {
+            // The attachment path takes the reader lock before the
+            // manifest. Recheck the exact consumer before publication.
+            let preparation_readers = if resume_work.is_some() {
+                Some(self.publication_lock(self.rendition.readers.lock()).await?)
+            } else {
+                None
+            };
             let mut manifest = self
                 .publication_lock(self.rendition.manifest.lock())
                 .await?;
@@ -2410,6 +2654,22 @@ impl RenditionSink {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
+            if let Some(work) = resume_work.as_ref() {
+                if !work.accepts_current_consumers(
+                    preparation_readers
+                        .as_deref()
+                        .expect("resume reader snapshot"),
+                    &self.rendition,
+                    &self.shared.pool,
+                ) || self.shared.working_set.load(Relaxed).saturating_add(len)
+                    > self.rendition.working_set_budget
+                    || !work.is_live()
+                {
+                    work.cancel();
+                    return Err(io::ErrorKind::NotFound.into());
+                }
+            }
+            drop(preparation_readers);
             let preparation = self.rendition.preparation();
             let pending = if let Some(storage) = self.rendition.private_storage.as_ref() {
                 if before != 0 || manifest.is_admitted() {
@@ -2467,7 +2727,10 @@ impl RenditionSink {
             if let Some(pending) = pending {
                 pending.commit(true);
             }
-            if manifest.next_gap(0).is_none() && self.rendition.private_storage.is_none() {
+            if resume_work.is_none()
+                && manifest.next_gap(0).is_none()
+                && self.rendition.private_storage.is_none()
+            {
                 self.shared.try_admit(&self.rendition, &mut manifest).await;
             }
             if let Some(preparation) = preparation {

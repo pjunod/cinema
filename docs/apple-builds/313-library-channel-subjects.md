@@ -1,6 +1,5 @@
 # Describe a channel subject and keep matching after leaving the editor
 
-Build: 157
 Issue: #313
 
 The channel editor adds subjects and semantic presets, background preview

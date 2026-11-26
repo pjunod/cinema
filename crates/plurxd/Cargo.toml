@@ -22,6 +22,8 @@ repository.workspace = true
 cluster-integration-tests = []
 
 [dependencies]
+# Production FEL disk RPU authoring and verified readback.
+dolby_vision = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # CPU-only inference, loaded only when semantic search is enabled.
@@ -111,8 +113,6 @@ windows-sys = { version = "0.61", features = [
 wasmtime = { version = "=50.0.0", default-features = false, features = ["std", "runtime", "cranelift"] }
 
 [dev-dependencies]
-# Rewrites the checked RPU for byte-bound processed lifecycle controls only.
-dolby_vision = { workspace = true }
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }

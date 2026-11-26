@@ -19,8 +19,9 @@ Applies to the main fast lane's `fast Rust gate` and the effort lane's
    in the checkout and fails with the bump instructions when they differ.
 4. **Sizes Cargo from the container.** `scripts/ci-cargo-jobs` reads the
    job's own `cpu.max` and `memory.max` and sets
-   `CARGO_BUILD_JOBS = min(CPUs, memory / 5 GiB)` — 4 in the current
-   container, where it used to be a fixed 1.
+   `CARGO_BUILD_JOBS = max(1, min(CPUs, memory / 12 GiB))`. The 20 GiB gate
+   runs one Cargo job at a time. On a shared carrier, concurrent Clippy
+   drivers exhausted host memory before reaching the container limit.
 5. **Type-checks once.** The fast gate runs `make fast-rust-gate`: format and
    spike-lock checks, one all-target Clippy pass with `-D warnings`, and the
    vendored hiqlite Clippy. It used to run `cargo check --all-targets` first

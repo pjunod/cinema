@@ -1,4 +1,5 @@
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 impl VodServe {
     /// A cache offer never creates a rendition or starts a producer. Only an
@@ -59,10 +60,7 @@ impl VodServe {
             let Some(encoding) = rendition.recipe.encoding.as_ref() else {
                 return false;
             };
-            if !rendition
-                .source
-                .as_ref()
-                .is_some_and(|source| source.unchanged())
+            if !rendition.source.as_ref().held_unchanged().await
                 || !encoding
                     .engine
                     .is_current_with_executable(&encoding.executable)
@@ -119,10 +117,7 @@ impl VodServe {
             }
             !rendition.closed.load(Relaxed)
                 && rendition.failure().is_none()
-                && rendition
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                && rendition.source.as_ref().held_unchanged().await
                 && rendition.manifest.lock().await.is_admitted()
         };
         // A slow or unavailable volume is not a reason to delay playback or
@@ -839,6 +834,11 @@ impl VodServe {
         let tone_map_peak = stream_format::tone_map_peak(&rendition);
         Some(VodPublication {
             result: Ok(VodSessionInfo {
+                dolby_vision_refit: rendition.recipe.refit_report(),
+                dv_refit_digest: rendition.recipe.video.dolby_vision_refit().map(hex::encode),
+                dv_refit_identity_reason: (rendition.recipe.video.converts_dolby_vision()
+                    && rendition.recipe.video.dolby_vision_refit().is_none())
+                .then(|| "No F+ curve table is pinned to this rendition".to_owned()),
                 stream_format: StreamFormat::for_rendition(&rendition),
                 active_encode_milli_realtime: active_production.map(|proof| proof.milli_realtime),
                 active_encode_age_ms: active_production.map(|proof| {

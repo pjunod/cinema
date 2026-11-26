@@ -6,12 +6,29 @@ die() {
   exit 1
 }
 
+if [ "$#" -eq 2 ] && [ "$1" = --check-space ]; then
+  python3 - "$2" <<'CHECK_SPACE'
+import os
+import sys
+
+workspace = sys.argv[1]
+usage = os.statvfs(workspace)
+available = usage.f_bavail * usage.f_frsize
+# Match the established 10 GiB minimum reserve on package runners.
+required = 10 * 1024**3
+print(f"Package workspace {workspace}: {available} bytes free, {required} bytes required", flush=True)
+if available < required:
+    raise SystemExit("release-package-candidate: insufficient workspace space before binary build")
+CHECK_SPACE
+  exit
+fi
+
 [ "$#" -eq 7 ] || die \
-  "usage: release-package-candidate <source> <packaging> <export> <artifact> <target> <build-ref> <commit>"
+  "usage: release-package-candidate --check-space <workspace> | <source> <packaging> <export> <artifact> <target> <build-ref> <commit>"
 source_root=$1
 packaging_root=$2
 export_root=$3
-artifact_root=$4
+artifact_root=${4%/}
 target=$5
 build_ref=$6
 expected_commit=$7
@@ -31,15 +48,17 @@ actual_commit=$(git -C "$source_root" rev-parse HEAD^{commit})
 git -C "$source_root" diff --quiet HEAD -- \
   || die "tagged source has tracked changes; artifact identity would name the wrong tree"
 git_tree=$(git -C "$source_root" rev-parse HEAD^{tree})
+[ -f "$export_root/rustc-version" ] && [ ! -L "$export_root/rustc-version" ] \
+  || die "binary export has no regular rustc-version file"
 rustc_version=$(tr '\n' ' ' < "$export_root/rustc-version" | sed 's/[[:space:]]*$//')
 [ -n "$rustc_version" ] || die "binary export has no Rust toolchain identity"
 
+[ -n "$artifact_root" ] && [ ! -L "$artifact_root" ] \
+  || die "artifact path must name a real directory"
 if [ -e "$artifact_root" ]; then
   [ -d "$artifact_root" ] || die "artifact path is not a directory"
   [ -z "$(find "$artifact_root" -mindepth 1 -maxdepth 1 -print -quit)" ] \
     || die "artifact directory must start empty"
-else
-  mkdir -p "$artifact_root"
 fi
 
 binaries=()
@@ -53,11 +72,11 @@ while IFS= read -r name; do
 done <<< "$binary_output"
 [ "${#binaries[@]}" -gt 0 ] || die "tagged runtime has no binaries"
 artifact_args=()
+export_files=()
 for name in "${binaries[@]}"; do
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
     || die "unsafe binary name from runtime contract: $name"
-  [ -f "$export_root/$name" ] || die "binary export is missing $name"
-  install -m 0755 "$export_root/$name" "$artifact_root/$name"
+  export_files+=("$name" 755)
   artifact_args+=(--binary "$name")
 done
 
@@ -78,14 +97,79 @@ PY
   artifact_args+=(--packed-debug --rustc-release "$rustc_release")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ -f "$export_root/$name.dwp" ] && [ ! -L "$export_root/$name.dwp" ] \
-      || die "binary export is missing regular packed debug $name.dwp"
-    install -m 0644 "$export_root/$name.dwp" "$artifact_root/$name.dwp"
+    [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+      || die "unsafe debug name from runtime contract: $name"
+    export_files+=("$name.dwp" 644)
   done <<< "$debug_output"
 fi
 
+artifact_parent=$(dirname "$artifact_root")
+mkdir -p "$artifact_parent"
+stage_root=$(mktemp -d "$artifact_parent/.release-bin.XXXXXXXX")
+cleanup() {
+  rm -rf -- "$stage_root"
+}
+trap cleanup EXIT
+
+# The exporter owns the input files. Only link entries that already have the
+# required mode. A mode correction must never modify the export via a link.
+python3 - "$export_root" "$stage_root" "${export_files[@]}" <<'STAGE_EXPORT'
+import errno
+import os
+from pathlib import Path
+import shutil
+import stat
+import sys
+
+export, stage = map(Path, sys.argv[1:3])
+specs = sys.argv[3:]
+files = []
+for name, expected_mode in zip(specs[::2], specs[1::2], strict=True):
+    source = export / name
+    try:
+        info = source.lstat()
+    except FileNotFoundError:
+        raise SystemExit(f"release-package-candidate: binary export is missing regular {name}") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"release-package-candidate: binary export is missing regular {name}")
+    files.append((source, int(expected_mode, 8), info))
+
+copy_files = []
+unavailable_link = {errno.EXDEV, errno.EPERM, errno.EACCES, errno.EMLINK, errno.EOPNOTSUPP}
+for source, expected_mode, info in files:
+    if stat.S_IMODE(info.st_mode) == expected_mode:
+        try:
+            os.link(source, stage / source.name, follow_symlinks=False)
+        except OSError as error:
+            if error.errno not in unavailable_link:
+                raise
+        else:
+            if not os.path.samestat(info, (stage / source.name).lstat()):
+                raise SystemExit(f"release-package-candidate: export changed while linking {source.name}")
+            continue
+    copy_files.append((source, expected_mode, info))
+
+disk = os.statvfs(stage)
+block = disk.f_frsize
+copy_bytes = sum(((info.st_size + block - 1) // block) * block for _, _, info in copy_files)
+# Leave room for the manifest, checksums, and staging metadata.
+required = copy_bytes + 1024**2
+available = disk.f_bavail * block
+print(f"Package binding: {available} bytes free, {copy_bytes} bytes to copy", flush=True)
+if available < required:
+    raise SystemExit(f"release-package-candidate: need {required} free bytes to stage the verified binary set")
+for source, expected_mode, info in copy_files:
+    destination = stage / source.name
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as origin, destination.open("xb") as output:
+        if not os.path.samestat(info, os.fstat(origin.fileno())):
+            raise SystemExit(f"release-package-candidate: export changed while copying {source.name}")
+        shutil.copyfileobj(origin, output)
+    destination.chmod(expected_mode)
+STAGE_EXPORT
+
 PYTHONPATH="$packaging_root" python3 -m validation.release_artifact create \
-  --directory "$artifact_root" \
+  --directory "$stage_root" \
   --git-tree "$git_tree" \
   --git-commit "$actual_commit" \
   --build-ref "$build_ref" \
@@ -102,9 +186,20 @@ fi
 PYTHONPATH="$packaging_root" python3 -m validation.release_dockerfile \
   ${media_args[@]+"${media_args[@]}"} "$source_root/Dockerfile" "$source_root/Dockerfile.release"
 PYTHONPATH="$packaging_root" python3 -m validation.release_artifact verify \
-  --directory "$artifact_root" \
+  --directory "$stage_root" \
   --git-tree "$git_tree" \
   --git-commit "$actual_commit" \
   --build-ref "$build_ref" \
   --target "$target" \
   "${artifact_args[@]}"
+
+# Publish the complete directory with one rename on the destination filesystem.
+python3 - "$stage_root" "$artifact_root" <<'PUBLISH_ARTIFACT'
+import os
+import sys
+
+stage, destination = sys.argv[1:]
+os.chmod(stage, 0o755)
+os.replace(stage, destination)
+PUBLISH_ARTIFACT
+trap - EXIT

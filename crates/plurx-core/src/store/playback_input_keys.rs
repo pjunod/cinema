@@ -49,7 +49,7 @@ pub const PLAYBACK_INPUT_EXTRA_KEYS: [&str; 6] = [
 /// A copy of the `plurxd` planning list (`QUALITY_PLANNING_KEYS`), so the
 /// store-contract test can write every key. A `plurxd` test pins it equal to
 /// that list; D3b widens both together.
-pub const PLAYBACK_PLANNING_KEYS: [&str; 36] = [
+pub const PLAYBACK_PLANNING_KEYS: [&str; 32] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
@@ -58,23 +58,19 @@ pub const PLAYBACK_PLANNING_KEYS: [&str; 36] = [
     keys::AUDIO_LANG,
     keys::SUB_LANG,
     keys::SUB_MODE,
-    keys::PLAYBACK_DISPLAY_AWARE_AUTO,
     keys::PLAYBACK_CONTROL_PROTOCOL_V1,
     keys::TRANSCODE_RATE_MODE,
     keys::TRANSCODE_QUALITY,
     "playback.vod_reorder_frames",
-    keys::PLAYBACK_SDR_MASTER_CODECS,
     keys::CACHE_MAX_GB,
     keys::HLS_READRATE,
     keys::HLS_BURST_SECS,
     keys::SW_POOL_THREADS,
     keys::MAX_HW_SESSIONS,
-    keys::CONTENT_AWARE_ENCODING,
     keys::HLS_AHEAD_MAX_SECS,
     keys::HLS_AHEAD_MAX_BYTES,
     keys::HLS_SCRATCH_MAX_BYTES,
     keys::VOD_OUTPUT_PREPARATION,
-    keys::VOD_ROLLING_RETENTION,
     // D3b (§4.2): the settings the create chain read after the snapshot,
     // so the one plan answers them. `vod_settings`' admission policy:
     keys::VOD_PRESENTATION,

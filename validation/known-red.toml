@@ -191,3 +191,26 @@ owner = "playback"
 reason = "The production static parser must be supplied explicitly and exercised against generated qualification media; this exact case passed in the playback startup qualification."
 requires = "Linux; exact packaged static parser PLURX_TEST_STRICT_FFPROBE; generated PLURX_TEST_STRICT_MEDIA; owned scratch directory"
 command = "PLURX_TEST_STRICT_FFPROBE=/path/to/package/ffprobe PLURX_TEST_STRICT_MEDIA=/path/to/owned/generated.mkv TMPDIR=/path/to/owned/scratch RUST_MIN_STACK=8388608 cargo test --locked -p plurxd --bin plurxd decode_facts::tests::packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls -- --ignored --exact --nocapture"
+
+# F+ real-media acceptance is explicitly supplied operator evidence, not
+# temporarily broken product coverage. No private source media is checked in.
+[[fixtures]]
+test = "crates/plurx-core/src/transcode/dv_refit_title_tests.rs::transcode::dv_refit_title::tests::two_real_helper_runs_give_the_same_digest"
+owner = "playback"
+reason = "Digest acceptance consumes two complete current-helper runs over the same private Michael5400 source window; ordinary unit runners cannot supply that operator-owned media evidence."
+requires = "Rust 1.97.1; PLURX_REFIT_RUN_A and PLURX_REFIT_RUN_B naming complete JSONL outputs from two current segment_decode_render --refit-stats runs on the same explicitly selected bounded private Michael5400 window (refit_digest_twice.sh); owned TMPDIR"
+command = "TMPDIR=/path/to/owned/tmp PLURX_REFIT_RUN_A=/path/to/owned/refit/run-a.jsonl PLURX_REFIT_RUN_B=/path/to/owned/refit/run-b.jsonl cargo test --locked -p plurx-core --features hiqlite-store --lib transcode::dv_refit_title::tests::two_real_helper_runs_give_the_same_digest -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/dv_disk/tests.rs::dv_disk::tests::real_fel_fit_is_written_and_read_back"
+owner = "playback"
+reason = "Real FEL disk authoring and frame-by-frame replacement RPU readback need an explicitly selected private Michael5400 window and the current native helper, scanner and pinned media tools; the fixture copies its source into owned scratch."
+requires = "Rust 1.97.1; bounded private Michael5400 FEL window; absolute PLURX_FEL_REAL_SOURCE, PLURX_FEL_REAL_SCRATCH_ROOT, PLURX_FEL_REAL_HELPER, PLURX_FEL_REAL_SCANNER, PLURX_FFMPEG, PLURX_FFPROBE, PLURX_DOVI_TOOL and PLURX_MKVMERGE; PLURX_FEL_REAL_VIDEO_INDEX; current helper libraries and owned TMPDIR"
+command = "TMPDIR=/path/to/owned/tmp PLURX_FEL_REAL_SOURCE=/path/to/private/michael5400-window.mkv PLURX_FEL_REAL_SCRATCH_ROOT=/path/to/owned/refit-disk PLURX_FEL_REAL_HELPER=/path/to/current/segment_decode_render PLURX_FEL_REAL_SCANNER=/path/to/current/scan_title PLURX_FEL_REAL_VIDEO_INDEX=0 PLURX_FFMPEG=/path/to/package/ffmpeg PLURX_FFPROBE=/path/to/package/ffprobe PLURX_DOVI_TOOL=/path/to/package/dovi_tool PLURX_MKVMERGE=/path/to/package/mkvmerge cargo test --locked -p plurxd --bin plurxd --features plurx-core/hiqlite-store dv_disk::tests::real_fel_fit_is_written_and_read_back -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/fragindex/refit_acceptance_tests.rs::fragindex::refit_acceptance_tests::real_fitted_index_and_seek_publish_stored_curves"
+owner = "playback"
+reason = "Offline fitted index, seek and actual publication readback need an explicitly selected private Michael5400 window and the current helper/media toolchain; output is retained in a new owned directory and does not qualify a deployed HTTP session or client."
+requires = "Rust 1.97.1; private Michael5400 FEL window at most 256 MiB; absolute PLURX_FEL_REAL_SOURCE, PLURX_FEL_REAL_HELPER, PLURX_FFMPEG and PLURX_FFPROBE; PLURX_FEL_REAL_VIDEO_INDEX; FEL_COMPILED_SOURCE_SHA containing the exact compiled candidate's full 40-hex SHA; PLURX_FEL_COPY_ACCEPTANCE_DIR naming a new absolute owned output directory; current helper libraries and owned TMPDIR; optional PLURX_FEL_COPY_AUDIO_INDEX for controlled stereo PCM/AAC acceptance"
+command = 'TMPDIR=/path/to/owned/tmp PLURX_FEL_REAL_SOURCE=/path/to/private/michael5400-window.mkv PLURX_FEL_REAL_HELPER=/path/to/current/segment_decode_render PLURX_FEL_REAL_VIDEO_INDEX=0 PLURX_FFMPEG=/path/to/package/ffmpeg PLURX_FFPROBE=/path/to/package/ffprobe PLURX_FEL_CANDIDATE_SHA="$FEL_COMPILED_SOURCE_SHA" PLURX_FEL_COPY_ACCEPTANCE_DIR=/path/to/owned/new-refit-copy cargo test --locked -p plurxd --bin plurxd --features plurx-core/hiqlite-store fragindex::refit_acceptance_tests::real_fitted_index_and_seek_publish_stored_curves -- --ignored --exact --nocapture'

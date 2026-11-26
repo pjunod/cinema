@@ -940,6 +940,24 @@ fn apply_identity_repair(
              DO UPDATE SET added_at_ms = max(added_at_ms, excluded.added_at_ms)",
             params![survivor, retired],
         )?;
+        // Tags and rejected suggestions follow the same way: a person's
+        // curation must not be lost to a duplicate's cascade.
+        conn.execute(
+            "INSERT INTO library_curation_item_tags(tag_id, item_id, added_by, added_at_ms, source)
+             SELECT tag_id, ?1, MIN(added_by), MIN(added_at_ms), MIN(source) FROM library_curation_item_tags
+              WHERE item_id IN (SELECT value FROM json_each(?2)) AND item_id <> ?1
+              GROUP BY tag_id
+             ON CONFLICT(tag_id, item_id) DO NOTHING",
+            params![survivor, retired],
+        )?;
+        conn.execute(
+            "INSERT INTO library_curation_rejections(tag_id, item_id, rejected_by, rejected_at_ms)
+             SELECT tag_id, ?1, MIN(rejected_by), MIN(rejected_at_ms) FROM library_curation_rejections
+              WHERE item_id IN (SELECT value FROM json_each(?2)) AND item_id <> ?1
+              GROUP BY tag_id
+             ON CONFLICT(tag_id, item_id) DO NOTHING",
+            params![survivor, retired],
+        )?;
     }
     for kind in ["episode", "season", "show"] {
         for item_id in &plan.retired_item_ids {

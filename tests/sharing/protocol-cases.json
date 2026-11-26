@@ -96,9 +96,9 @@
     "source": {"session_id":"5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a","playlist_url":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/index.m3u8?native=1&subtitle=2","duration_ms":100000,"start_seconds":30.5,"media_origin_ms":29800,"height":1080,"encoder":"libx264","vod":true,"ladder":[{"height":1080,"total_kbps":8000,"peak_kbps":12000}],"control":{"protocol":"plurx-playback-control-v1","url":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/control","generation":"5b5b5b5b-5b5b-45b5-85b5-5b5b5b5b5b5b","control_epoch":9,"next_exchange_ms":5000,"lease_timeout_ms":300000}},
     "receiver": {"session_id":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","incarnation_id":"b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1","control_epoch":3},
     "public": {"session_id":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","playlist_url":"/api/v1/hls/b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0/index.m3u8?native=1&subtitle=2","duration_ms":100000,"start_seconds":30.5,"media_origin_ms":29800,"height":1080,"encoder":"libx264","vod":true,"ladder":[{"height":1080,"total_kbps":8000,"peak_kbps":12000}],"control":{"protocol":"plurx-playback-control-v1","url":"/api/v1/hls/b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0/control","generation":"b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1","control_epoch":3,"next_exchange_ms":5000,"lease_timeout_ms":300000}},
-    "note": "{session} in a value is the Source session for layer b and the B session for layer client",
+    "note": "{session} in a value is the Source session for layer b and the B session for layer client; bounded_range_expected applies only when the client's Start request advertises hls-bounded-range-v1",
     "mutations": [
-      {"id":"vod-false","layer":"both","path":["vod"],"expected":"invalid","value":false},
+      {"id":"vod-false","layer":"both","path":["vod"],"expected":"invalid","bounded_range_expected":"accepted","value":false},
       {"id":"rolling-lease","layer":"both","path":["control","lease_timeout_ms"],"expected":"invalid","value":60000},
       {"id":"foreign-exchange-cadence","layer":"both","path":["control","next_exchange_ms"],"expected":"invalid","value":1000},
       {"id":"missing-control","layer":"both","path":["control"],"expected":"invalid","op":"remove"},

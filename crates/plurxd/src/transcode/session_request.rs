@@ -1,8 +1,43 @@
 use super::*;
 
+/// Human-facing F+ result for the media this session actually serves.
+/// It is observational metadata, never part of a rendition's byte identity.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct RefitPlaybackReport {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gain: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RefitPlaybackReport {
+    pub fn fitted(gain: Option<f64>) -> Self {
+        Self {
+            state: "fitted",
+            gain,
+            reason: None,
+        }
+    }
+
+    pub fn identity(reason: String) -> Self {
+        Self {
+            state: "identity",
+            gain: None,
+            reason: Some(reason),
+        }
+    }
+}
+
 /// A live session, as the activity page sees it.
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dolby_vision_refit: Option<RefitPlaybackReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_identity_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     pub id: String,
@@ -524,6 +559,9 @@ pub struct CandidateExecutionContext {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
@@ -682,14 +720,27 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
-    /// Settings → Developer `playback.sdr_master_codecs`, read by the HTTP
-    /// create from the planning snapshot it already holds, so a rolling start
-    /// does not pay a second serial Store read for it. Never on the wire:
-    /// a request rebuilt from a durable recipe (owner takeover, a remote
-    /// worker, VOD resurrection) carries `None`, and its start reads the
-    /// switch's current value instead.
+    /// The processed-upgrade ask of a start without an Auto candidate
+    /// (Original or a manual rung), derived at create from its accepted
+    /// capabilities. An Auto start leaves it `None`: its candidate context
+    /// is the ask. Read both through [`SessionRequest::processed_upgrade_ask`].
+    /// Process-private, like the candidate context it stands in for.
     #[serde(skip)]
-    pub(crate) sdr_master_codecs: Option<bool>,
+    pub(crate) accepted_processed_ask: Option<Box<super::ProcessedUpgradeAsk>>,
+    /// The viewer's per-playback output-retention choice from the HTTP
+    /// create (`CreateOverrides::retain_output`). `Some(false)` means this
+    /// playback queues no complete-output preparation and does no rolling
+    /// retention; `None` or `Some(true)` follows the server setting. Never on
+    /// the wire: a request rebuilt from a durable recipe (owner takeover, a
+    /// remote worker, VOD resurrection) carries `None` and so falls back to
+    /// the server setting, and mixed fleets never see the field.
+    #[serde(skip)]
+    pub(crate) retain_output: Option<bool>,
+    /// The fitted copy table selected from a typed session platform at a
+    /// generation boundary. Service-owned; absent preserves v1 semantics and
+    /// old durable recipe bytes. A newer fit does not mutate this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dv_refit_digest: Option<String>,
     /// Trusted service policy, retained by durable and worker envelopes. Native
     /// HTTP create never takes this from the client. A VOD-only request may
     /// not allocate the rolling recovery engine, even when globally enabled.
@@ -745,6 +796,12 @@ pub struct SessionRequest {
     pub subtitle_burn: Option<i64>,
     /// Manual A/V correction for this playback only (positive delays audio).
     pub audio_offset_ms: i64,
+    /// The client attaches copy video and selects a soundtrack itself: serve
+    /// one video-only copy rendition with every soundtrack as an alternate
+    /// audio rendition, so a language change never opens a session. Admitted
+    /// only for indexed copy; any other route keeps the muxed presentation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_audio: bool,
     /// The client asked for the HDR10 re-encode grade rather than the SDR
     /// ladder: it decodes and presents HEVC Main10 PQ (`hdr10t=1` at
     /// `/decision`, `CreateSession::hdr10` here).
@@ -1044,8 +1101,6 @@ pub(super) struct SessionOwner<'a> {
     pub(super) supersession_user: &'a str,
     pub(super) playback_id: &'a str,
     pub(super) automatic: bool,
-    /// The starting session's frozen `playback.sdr_master_codecs` choice.
-    pub(super) sdr_master_codecs: bool,
 }
 
 impl SessionKind {
@@ -1063,6 +1118,44 @@ impl SessionKind {
 }
 
 impl SessionRequest {
+    /// The one processed-upgrade ask for this request: its Auto candidate's,
+    /// or the accepted ask of a start that has none. `None` only for a start
+    /// that reported no capabilities, which no processed route can serve.
+    pub(crate) fn processed_upgrade_ask(&self) -> Option<super::ProcessedUpgradeAsk> {
+        self.candidate_context
+            .as_deref()
+            .map(super::ProcessedUpgradeAsk::from_candidate)
+            .or_else(|| self.accepted_processed_ask.as_deref().cloned())
+    }
+
+    /// The rendition height the processed ask describes, if there is one.
+    pub(crate) fn processed_ask_target_height(&self) -> Option<u32> {
+        self.candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.target_height)
+            .or_else(|| {
+                self.accepted_processed_ask
+                    .as_ref()
+                    .map(|ask| ask.target_height)
+            })
+    }
+
+    /// Record a completed FEL qualification on whichever ask this request
+    /// carries. `None` when it carries neither.
+    pub(crate) fn require_fel_qualification(
+        &mut self,
+        qualification: super::PendingFelQualification,
+    ) -> Option<()> {
+        if let Some(context) = self.candidate_context.as_mut() {
+            context.required_fel_qualification = Some(qualification);
+        } else {
+            self.accepted_processed_ask
+                .as_mut()?
+                .required_fel_qualification = Some(qualification);
+        }
+        Some(())
+    }
+
     /// Resolve legacy routes and explicit encoded destinations in one place so
     /// preflight and the completed-window runtime cannot disagree.
     pub(crate) fn dv_processing_route(
@@ -1289,10 +1382,6 @@ pub struct StartInfo {
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
     pub(crate) degraded_processing: Option<String>,
-    /// Why this start's own processing (a reconstructed 8.1 or HDR10-E the
-    /// ordinary request was eligible for) was declined: the verdict, a busy
-    /// reconstruction slot, a refused window. For the enhancement detail.
-    pub(crate) processing_note: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,

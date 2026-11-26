@@ -20,8 +20,9 @@ impl StartupClockObserver for AppliedSingletonObserver {
         _node: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
         Box::pin(async move {
-            let roster = manager
-                .clock_peers()
+            let protocol = manager.cluster_access().clock_protocol();
+            let roster = protocol
+                .prove_roster()
                 .await
                 .map_err(|error| StoreError::Database(error.to_string()))?;
             let applied = roster.membership.as_ref().ok_or_else(|| {
@@ -31,7 +32,7 @@ impl StartupClockObserver for AppliedSingletonObserver {
                 return Err(StoreError::Database(
                     "singleton test observer refuses a real remote member; authenticated transport is required".into()));
             }
-            let guard = manager.clock_guard();
+            let guard = protocol.guard();
             let original = guard
                 .roster_for_peer_directory(&roster)
                 .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -168,14 +169,20 @@ impl MeasuredPeers {
             .with_state(manager)
     }
 
+    /// Select `config`'s store, serving this node's clock on `clock_listener`
+    /// when one is given: the caller's socket bound to `config.server.bind`.
+    ///
+    /// The observer serves a duplicate, so the caller's socket stays bound
+    /// after [`Self::stop_node`] and the same listener serves a restart; the
+    /// port is never unbound for another socket to take.
     pub async fn select(
         &self,
         config: &Config,
-        bind_clock_listener: bool,
+        clock_listener: Option<&std::net::TcpListener>,
     ) -> Result<SelectedStore, StoreError> {
         let observer = MeasuredObserver {
             owner: self,
-            bind: bind_clock_listener.then_some(config.server.bind),
+            listener: clock_listener,
         };
         Box::pin(select_daemon_store_observing(config, Some(&observer))).await
     }
@@ -183,7 +190,7 @@ impl MeasuredPeers {
 
 struct MeasuredObserver<'a> {
     owner: &'a MeasuredPeers,
-    bind: Option<std::net::SocketAddr>,
+    listener: Option<&'a std::net::TcpListener>,
 }
 
 impl StartupClockObserver for MeasuredObserver<'_> {
@@ -193,9 +200,13 @@ impl StartupClockObserver for MeasuredObserver<'_> {
         node: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
         Box::pin(async move {
-            if let Some(bind) = self.bind {
-                let listener = tokio::net::TcpListener::bind(bind)
-                    .await
+            if let Some(owned) = self.listener {
+                let listener = owned
+                    .try_clone()
+                    .and_then(|listener| {
+                        listener.set_nonblocking(true)?;
+                        tokio::net::TcpListener::from_std(listener)
+                    })
                     .map_err(|error| StoreError::Database(error.to_string()))?;
                 let route = MeasuredPeers::route(manager.clone());
                 self.owner
@@ -335,10 +346,11 @@ async fn measured_clock(
 
 async fn measured_round(manager: &MembershipManager) {
     use core::cluster::clock::PeerClockOffset;
-    let Ok(before) = manager.clock_peers().await else {
+    let protocol = manager.cluster_access().clock_protocol();
+    let Ok(before) = protocol.prove_roster().await else {
         return;
     };
-    let guard = manager.clock_guard();
+    let guard = protocol.guard();
     let Ok(ticket) = guard.roster_for_peer_directory(&before) else {
         return;
     };
@@ -418,7 +430,7 @@ async fn measured_round(manager: &MembershipManager) {
             },
         );
     }
-    let Ok(after) = manager.clock_peers().await else {
+    let Ok(after) = protocol.prove_roster().await else {
         return;
     };
     if before.membership != after.membership || before.peers != after.peers {

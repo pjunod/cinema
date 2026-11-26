@@ -2,7 +2,6 @@
 
 **Status:** open — implementation complete; physical acceptance pending.
 
-Build: 234
 Issue: #1037
 
 Adds a closed bounded recorder, off-main protected account storage, portable

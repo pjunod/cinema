@@ -333,6 +333,106 @@ pub struct ClusterConfig {
     pub snapshot_transfer_timeout_secs: u64,
     /// Deadline for the final snapshot installation RPC.
     pub install_snapshot_timeout_secs: u64,
+    /// Raft and API listeners the process already owns for `raft_bind` and
+    /// `api_bind`. Never read from a file: a caller that binds the cluster
+    /// ports itself puts them here, and every voter start for this config
+    /// serves on those sockets rather than binding the addresses again.
+    #[serde(skip)]
+    pub listeners: ClusterListeners,
+}
+
+/// Cluster listeners a caller owns for as long as its [`Config`] lives, lent
+/// to each voter start that serves on them.
+///
+/// Reading a port from a bound listener and then dropping it leaves a window
+/// in which any other socket on the host — a parallel test, an outgoing
+/// connection's ephemeral port — can take that port before the cluster binds
+/// it again. The same window opens whenever one voter generation shuts down
+/// and the next binds the port, as fresh activation does between its staging
+/// voter and the active one. Keeping the bound sockets here closes both: each
+/// start serves on a duplicate of the same socket, so the port is never
+/// unbound until the last clone of the config is dropped.
+///
+/// This is for fixtures, not production, and has three limits:
+/// - Connections queue on the socket instead of being refused whenever no
+///   voter is serving it: before the first start, during Raft startup, and
+///   after shutdown. A fixture that needs a stopped node to refuse
+///   connections binds its ports per start instead.
+/// - Generations must not overlap. Hiqlite signals its plain servers on
+///   shutdown without joining them and never stops a TLS voter's servers
+///   before the runtime ends, so restarting a TLS voter from the same config
+///   in one runtime would leave two accept loops on one socket. Fresh
+///   activation is safe: its staging voter is plain and signalled before the
+///   active voter starts.
+/// - A start on an address the sockets are not bound to binds its own, as
+///   [`ClusterListeners::lend`] says.
+#[derive(Clone, Default)]
+pub struct ClusterListeners(Option<std::sync::Arc<OwnedClusterListeners>>);
+
+/// The Raft and API listeners one [`ClusterListeners`] owns or lends.
+#[derive(Debug)]
+pub struct OwnedClusterListeners {
+    pub raft: std::net::TcpListener,
+    pub api: std::net::TcpListener,
+}
+
+impl ClusterListeners {
+    /// Keep listeners the caller has already bound.
+    pub fn owned(raft: std::net::TcpListener, api: std::net::TcpListener) -> Self {
+        Self(Some(std::sync::Arc::new(OwnedClusterListeners {
+            raft,
+            api,
+        })))
+    }
+
+    /// Whether the caller owns sockets to lend.
+    pub fn is_owned(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Duplicates of the owned sockets for one voter start that will listen
+    /// on exactly `raft` and `api`, or `None` when the caller owns none or
+    /// owns sockets for other addresses, and the start binds its own.
+    pub fn lend(
+        &self,
+        raft: SocketAddr,
+        api: SocketAddr,
+    ) -> std::io::Result<Option<OwnedClusterListeners>> {
+        let Some(owned) = &self.0 else {
+            return Ok(None);
+        };
+        if owned.raft.local_addr()? != raft || owned.api.local_addr()? != api {
+            return Ok(None);
+        }
+        Ok(Some(OwnedClusterListeners {
+            raft: owned.raft.try_clone()?,
+            api: owned.api.try_clone()?,
+        }))
+    }
+}
+
+impl std::fmt::Debug for ClusterListeners {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            None => formatter.write_str("none"),
+            Some(owned) => formatter
+                .debug_struct("owned")
+                .field("raft", &owned.raft.local_addr().ok())
+                .field("api", &owned.api.local_addr().ok())
+                .finish(),
+        }
+    }
+}
+
+/// Two configs are equal when they own the same sockets, or none.
+impl PartialEq for ClusterListeners {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
 }
 
 impl Default for ClusterConfig {
@@ -355,6 +455,7 @@ impl Default for ClusterConfig {
             snapshot_chunk_timeout_secs: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
             snapshot_transfer_timeout_secs: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
             install_snapshot_timeout_secs: DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS,
+            listeners: ClusterListeners::default(),
         }
     }
 }

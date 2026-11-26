@@ -834,9 +834,11 @@ async fn prepare_owned_route<T: Backend>(
             {
                 SourceOwnedRouteAuthorityRead::Ready(Box::new(authority.owned))
             }
-            SourcePublicationAuthorityRead::Ready(_)
-            | SourcePublicationAuthorityRead::Unavailable => {
-                SourceOwnedRouteAuthorityRead::Unavailable
+            SourcePublicationAuthorityRead::Ready(_) => {
+                SourceOwnedRouteAuthorityRead::Unavailable(SourceRouteUnavailable::NotPublished)
+            }
+            SourcePublicationAuthorityRead::Unavailable(reason) => {
+                SourceOwnedRouteAuthorityRead::Unavailable(reason)
             }
             SourcePublicationAuthorityRead::Capacity => SourceOwnedRouteAuthorityRead::Capacity,
         },
@@ -850,15 +852,20 @@ async fn prepare_publication_route<T: Backend>(
     members: &SourceAdmissionMembers,
 ) -> Result<SourcePublicationAuthorityRead, StoreError> {
     let now = now_ms()?;
+    let refused = SourcePublicationAuthorityRead::Unavailable(SourceRouteUnavailable::Refused);
     if assignment.binding.released
         || assignment.dispatch_generation != 1
         || !present(backend).await?
-        || members.write_guard(now, 1, 2, 3).is_err()
     {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
+        return Ok(refused);
+    }
+    if members.write_guard(now, 1, 2, 3).is_err() {
+        return Ok(SourcePublicationAuthorityRead::Unavailable(
+            SourceRouteUnavailable::MembershipStale,
+        ));
     }
     let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
+        return Ok(refused);
     };
     let binding = &assignment.binding;
     #[derive(Deserialize)]
@@ -878,12 +885,13 @@ async fn prepare_publication_route<T: Backend>(
     let mut attempts = 0;
     loop {
         let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision,'pending',CASE WHEN r.state='starting' AND b.start_resolved_at_ms IS NULL AND s.publication_ready_at_ms=9223372036854775807 THEN 1 WHEN r.state='resolved' AND b.start_resolved_at_ms IS NOT NULL AND s.publication_ready_at_ms=0 THEN 0 ELSE -1 END) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.dispatch_generation=1 AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
+        // No active, owned, unexpired route for this binding.
         let [row] = rows.as_slice() else {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         };
         let current: Current = serde_json::from_str(row).map_err(|_| invalid())?;
         if !matches!(current.pending, 0 | 1) || !is_hash(&current.hash) {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         }
         let Some(routing) = super::sharing_source_ingress_custody::routing(
             backend,
@@ -892,7 +900,7 @@ async fn prepare_publication_route<T: Backend>(
         )
         .await?
         else {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         };
         let request = SourceSessionRequest {
             principal: binding.principal.clone(),
@@ -910,13 +918,11 @@ async fn prepare_publication_route<T: Backend>(
         };
         let intent = match prepare_intent(backend, request, credential, true).await? {
             SourceIntentRead::Ready(i) => i,
-            SourceIntentRead::Unavailable => {
-                return Ok(SourcePublicationAuthorityRead::Unavailable)
-            }
+            SourceIntentRead::Unavailable => return Ok(refused),
             SourceIntentRead::Capacity => return Ok(SourcePublicationAuthorityRead::Capacity),
         };
         if !agrees(binding, &intent) {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         }
         // Bare Core has an uninhabited observation; this construction cannot
         // complete there, even though the shared source body remains type-checked.
@@ -938,8 +944,13 @@ async fn prepare_publication_route<T: Backend>(
         } else {
             SourcePublicationPhase::Published
         };
+        // No guard can be formed from this membership observation: its write
+        // guard is stale or its local member is not one this Store names.
+        // A fresher observation can form one.
         let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(SourcePublicationAuthorityRead::Unavailable(
+                SourceRouteUnavailable::MembershipStale,
+            ));
         };
         let rows = backend
             .sharing_read(
@@ -949,13 +960,27 @@ async fn prepare_publication_route<T: Backend>(
             .await?;
         if rows.first().map(String::as_str) != Some("1") {
             attempts += 1;
-            if attempts < 4
-                && lease_revision_moved(backend, binding.incarnation_id, authority.lease_revision)
-                    .await?
-            {
+            let moved =
+                lease_revision_moved(backend, binding.incarnation_id, authority.lease_revision)
+                    .await?;
+            if moved && attempts < 4 {
                 continue;
             }
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            // The guard failed with the lease revision still moving: every
+            // attempt lost to this owner's own renewals. An unmoved revision
+            // is a real refusal.
+            //
+            // A moved revision is read as this owner's own renewal, but the
+            // revision alone cannot say whose it was. A foreign takeover that
+            // committed between the guard and this read is labelled
+            // RaceExhausted once; the caller's next read observes the new
+            // owner's route and refuses it as Refused, so the mislabel costs
+            // one retry and never keeps a lost session alive.
+            return Ok(SourcePublicationAuthorityRead::Unavailable(if moved {
+                SourceRouteUnavailable::RaceExhausted
+            } else {
+                SourceRouteUnavailable::Refused
+            }));
         }
         return Ok(SourcePublicationAuthorityRead::Ready(Box::new(
             SourcePublicationAuthority {
@@ -1665,25 +1690,35 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         intent: &SourceSessionIntent,
         members: &SourceAdmissionMembers,
     ) -> Result<SourceClaimOutcome, StoreError> {
+        // Every "unavailable" below is the same answer to the caller and the
+        // same message to a viewer. Each names its own cause here, once.
+        let refused = |stage: &'static str| -> Result<SourceClaimOutcome, StoreError> {
+            tracing::warn!(target: "plurx::sharing", stage, error_class = "unavailable", operation = "start", request_id = %intent.request.request_id, "Source claim refused");
+            Ok(SourceClaimOutcome::Unavailable)
+        };
         if !present(self).await? {
-            return Ok(SourceClaimOutcome::Unavailable);
+            return refused("source_claim.schema");
         }
         let now = now_ms()?;
         let Ok((floor, roster, cutoff, observed)) = members.write_guard(now, 1, 2, 3) else {
-            return Ok(SourceClaimOutcome::Unavailable);
+            return refused("source_claim.member_observation");
         };
         let guard = authority_guard(&floor);
         let values = claim_values(intent, roster, cutoff, observed);
         let owner = intent.request.principal.owner_key();
         if let Some(row) = binding_row(self, &owner, &intent.request.request_id).await? {
-            return replay(self, row, intent, &guard, values).await;
+            let outcome = replay(self, row, intent, &guard, values).await?;
+            if matches!(outcome, SourceClaimOutcome::Unavailable) {
+                return refused("source_claim.replay");
+            }
+            return Ok(outcome);
         }
         let raft = i64::try_from(members.actual_local_raft_id()).map_err(|_| invalid())?;
         let boot = intent.request.ingress_registry_boot_id;
         let marker = format!("sharing_ingress_boot_v1:{boot}");
         let rows=self.sharing_read("SELECT json_quote(n.node_id) AS payload FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.raft_id=$1 AND n.removed_at IS NULL AND c.capability=$2 LIMIT 2",vec![raft.into(),marker.clone().into()]).await?;
         let [node] = rows.as_slice() else {
-            return Ok(SourceClaimOutcome::Unavailable);
+            return refused("source_claim.ingress_boot_marker");
         };
         let node: String = serde_json::from_str(node).map_err(|_| invalid())?;
         let mut routing = crate::sharing_ingress_custody::IngressCustodyState::default();
@@ -1757,10 +1792,28 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
             Ok(_) => Err(invalid()),
             Err(error) if lost_proposal(&error) => {
                 if let Some(row) = binding_row(self, &owner, &intent.request.request_id).await? {
-                    return replay(self, row, intent, &guard, values).await;
+                    let outcome = replay(self, row, intent, &guard, values).await?;
+                    if matches!(outcome, SourceClaimOutcome::Unavailable) {
+                        return refused("source_claim.lost_proposal_replay");
+                    }
+                    return Ok(outcome);
                 }
                 if !authorized(self, &guard, values.clone()).await? {
-                    return Ok(SourceClaimOutcome::Unavailable);
+                    // The composed guard is one predicate. Read its member
+                    // floors apart, on this refusal only, to say which part.
+                    // Both floors read only the member parameters $1..$3.
+                    let members = values[..3].to_vec();
+                    let member = authorized(self, &floor, members.clone()).await;
+                    let ingress = authorized(self, &ingress_floor, members).await;
+                    let stage = match (member, ingress) {
+                        (Ok(false), _) => "source_claim.member_floor",
+                        (Ok(true), Ok(false)) => "source_claim.ingress_custody_floor",
+                        (Ok(true), Ok(true)) => "source_claim.authority_guard",
+                        // The diagnostic read itself failed: say only that
+                        // the composed guard refused.
+                        _ => "source_claim.guard",
+                    };
+                    return refused(stage);
                 }
                 let unassigned=format!("({guard}) AND EXISTS(SELECT 1 FROM copy_source_owner_designations d WHERE d.server_id=$11 AND d.catalogue_epoch=$12 AND d.file_id=$15 AND d.file_revision=$16 AND d.owner_node_id<>{}) AND NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings b WHERE b.incarnation_id=$10 OR (b.owner_key=$4 AND b.request_id=$7)) AND NOT EXISTS(SELECT 1 FROM media_session_requests r WHERE r.incarnation_id=$10 OR (r.owner_key=$4 AND r.request_id=$7)) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$10) AND NOT EXISTS(SELECT 1 FROM sharing_ingress_custody WHERE principal_kind='source' AND incarnation_id=$10) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$10) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$10) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$10)",quote(&node));
                 if authorized(self, &unassigned, values.clone()).await? {
@@ -1769,10 +1822,12 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
                 let PlaybackPrincipal::Sharing { grant_id, .. } = intent.request.principal else {
                     return Err(invalid());
                 };
-                Ok(capacity(self, grant_id)
-                    .await?
-                    .map(SourceClaimOutcome::Capacity)
-                    .unwrap_or(SourceClaimOutcome::Unavailable))
+                match capacity(self, grant_id).await? {
+                    Some(occupancy) => Ok(SourceClaimOutcome::Capacity(occupancy)),
+                    // The guard holds and no limit is reached: the claim's
+                    // own transaction refused for a reason neither names.
+                    None => refused("source_claim.transaction"),
+                }
             }
             Err(error) => Err(error),
         }

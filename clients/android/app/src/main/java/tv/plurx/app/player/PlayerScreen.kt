@@ -1337,7 +1337,7 @@ private fun PlayerContent(
     if (remoteTrackMenu != null) {
         val kind = remoteTrackMenu
         RemoteChoiceDialog(if (kind == RemoteTrackMenuKind.All) "Audio and subtitles" else "Choose ${kind?.wireName}", ownedTracks().filter { kind == RemoteTrackMenuKind.All && it.kind != "quality" || it.kind == kind?.wireName }.map { track ->
-            RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, track.choose)
+            RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, activate = track.choose)
         }) { remoteTrackMenu = null; poke(); focus(panelOpener) }
     }
 
@@ -1862,6 +1862,8 @@ private fun PlayerContent(
                     controller.setAudioOffset(it)
                     onAudioOffsetChanged(it)
                 },
+                retainOutput = controller.retainOutput,
+                onRetainOutput = controller::setRetainOutput,
                 onDismiss = {
                     panel = null
                     poke()
@@ -2337,9 +2339,13 @@ private fun PlayerSettings(
     currentPosition: () -> Long,
     onReload: (Long, String, PlaybackQuality) -> Unit,
     onAudioOffset: (Long) -> Unit,
+    retainOutput: Boolean,
+    onRetainOutput: (Boolean, () -> Unit) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    var retain by remember(retainOutput) { mutableStateOf(retainOutput) }
+    var retainFailed by remember { mutableStateOf(false) }
     val initialFocusRequester = remember { FocusRequester() }
     var offset by remember(audioOffsetMs) { mutableLongStateOf(audioOffsetMs) }
     val focusIndex = playerSettingsFocusIndex(preferences.playbackQuality, qualityOptions)
@@ -2388,6 +2394,14 @@ private fun PlayerSettings(
         }
         PanelSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
         PanelSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
+        PanelSwitch("Keep a reusable copy of this playback", retain) {
+            retain = it
+            retainFailed = false
+            onRetainOutput(it) { retainFailed = true }
+        }
+        if (retainFailed) {
+            Text("Could not update this playback. Playback continues.", color = Muted, style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 
@@ -2489,6 +2503,12 @@ private fun PlayerInfo(
             ),
             enhancementSummary = enhancementSummary(shownEnhancement),
             enhancement = enhancementLines(shownEnhancement),
+            dvRows = tv.plurx.app.ui.components.dvInfoRows(
+                controller.enhancement,
+                controller.effectiveProcessing,
+                controller.effectiveProcessingGeneration,
+                controller.deliveredRange,
+            ),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
             stalls = "${controller.playbackStallCount} (${controller.playbackStallCount} supply · 0 decode)",
@@ -2586,6 +2606,8 @@ internal data class PlaybackInfoDetails(
     val enhancementSummary: String? = null,
     /** Server-computed Dolby Vision enhancement, one sentence per line. */
     val enhancement: List<String>? = null,
+    /** Server-written Dolby Vision metadata and display target rows; null value hides each. */
+    val dvRows: tv.plurx.app.ui.components.DvInfoRows = tv.plurx.app.ui.components.DvInfoRows(),
     val subtitles: String = "Off",
     val decoder: String? = null,
     val stalls: String? = null,
@@ -2708,6 +2730,7 @@ internal data class InfoRow(
 )
 
 private val StandardAndDebug = setOf(PlaybackStatsMode.Standard, PlaybackStatsMode.Details, PlaybackStatsMode.Debug)
+private val DetailsAndDebug = setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug)
 private val AllInfoModes = PlaybackStatsMode.entries.toSet()
 
 /** Android's fixture-order row model. Platform-exclusive web/Apple fields are absent. */
@@ -2774,6 +2797,10 @@ internal fun playbackInfoRows(
             placement = "notes",
             tone = PlaybackStatTone.Muted,
         ),
+        InfoRow("dv_metadata", "Dolby Vision metadata", "NOW DECODING", DetailsAndDebug,
+            details.dvRows.metadata?.value, note = details.dvRows.metadata?.note, placement = "notes"),
+        InfoRow("display_target", "Display target", "NOW DECODING", DetailsAndDebug,
+            details.dvRows.target?.value, note = details.dvRows.target?.note, placement = "notes"),
         InfoRow("decode_audio", "Stream audio track", "NOW DECODING", StandardAndDebug, details.playingAudio, placement = "notes"),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
         InfoRow(

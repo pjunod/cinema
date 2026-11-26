@@ -214,13 +214,16 @@ epoch/manifest checks, not an independent heartbeat framework.
 
 ### 4.1 One demux input, two measurement domains
 
-Use one FFmpeg input for a range. Fan its selected video stream into the
-production AV output, a canonical video-only MP4 measurement output and a
-bounded `framecrc` packet-clock output; audio exists only in AV output.
-The packet-clock output uses source timestamps (`-copyts`, disabled negative
-clock shifting and the demux time base); the MP4 outputs retain their required
-zero-based mux timelines. Exact signed packet DTS/PTS, durations and pre-conversion
-sizes associate canonical fragments with source time by ordered samples.
+One input fans video to AV, video-only canonical MP4 and `framecrc` (audio AV).
+Clock: `-copyts`, demux time base, no negative shift. Clocked MP4:
+`make_non_negative`+`frag_discont`, no edit lists: tracks shift together; `tfdt`
+keeps common-origin offset. `make_zero` stretches AV video to later AAC start
+(~21 ms); canonical video is unchanged. Legacy policies unchanged. [Pinned
+Jellyfin FFmpeg
+8.1.3-1](https://github.com/jellyfin/jellyfin-ffmpeg/commit/253db2a7b0a8045c54ce68ce33d7f601229b1822).
+Signed DTS/PTS, durations, sizes order fragments; strict payload and AV/AAC
+offset checks stay; seeked-row equality unqualified.
+
 FFmpeg's supported side-data columns remain metadata, never another source
 reader. The parser and argv exist; real seeked-row equality remains unqualified.
 The pipeline must establish this mapping under the held source generation before

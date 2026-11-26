@@ -199,7 +199,7 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
     const body = `${declaration("seekTo")}
       return (...args) => seekTo(...args);`;
     await new Function("scope", `with(scope){${body}}`)(scope)(
-      101.2, false, null, false, null, true, candidate);
+      101.2, false, null, false, null, {qualityBoundary: true, boundaryCandidate: candidate});
     return {video, player, calls};
   };
   const failed = await seekRun({changed: false});

@@ -378,22 +378,26 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         let prior = Session.shared.credentials
         Session.shared.setCredentials(origin: "http://127.0.0.1:\(port)", token: nil)
         defer { Session.shared.setCredentials(origin: prior.origin, token: prior.token) }
-        let decision = try coldDecision()
+        // A silent video item supplies no native picture evidence to the sampler.
+        let decision = try coldDecision(hasVideo: true)
         let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
         {"sessionId":"resume-failure","playlistUrl":"/hls/resume-failure/index.m3u8","mediaOriginMs":0,"vod":true}
         """.utf8))
         var seeks: [Int] = []
+        var requests: [Double] = []
         let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
             itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
                 seeks.append(ms)
                 return false
             }), releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in },
             requestHlsSession: { _, _, body in
+                requests.append(body.start ?? -1)
                 XCTAssertEqual(body.start, 90)
                 return hls
             }, requestHlsStatus: { _, id in PlaybackSessionStatus(id: id) })
-        defer { controller.stop() }
-        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 90_000,
+        let model = AppModel(startServices: false)
+        defer { withExtendedLifetime(model) { controller.stop() } }
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 90_000,
                          durationMs: 600_000, title: "Failed VOD resume")
         await controller.loadingTask?.value
         XCTAssertEqual(seeks, [90_000, 90_000])
@@ -402,8 +406,10 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.makePeriodicPlaybackObservation()()
         XCTAssertEqual(controller.currentMs, 90_000)
         XCTAssertEqual(controller.positionForPlaybackStop(), 90_000)
+        XCTAssertTrue(controller.isPlaybackBlocked, "The periodic sample must preserve the seek failure")
         controller.retryAfterPlaybackFailure()
         try await waitUntil("failed resume Retry") { seeks.count == 4 && controller.isPlaybackBlocked }
+        XCTAssertEqual(requests, [90, 90])
         controller.makePeriodicPlaybackObservation()()
         XCTAssertEqual(seeks, [90_000, 90_000, 90_000, 90_000])
         XCTAssertEqual(controller.currentMs, 90_000, "The reopen error handler must retain the resume target too")
@@ -1375,10 +1381,10 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertEqual(seeks, [743], "only the replacement may perform the correction")
     }
 
-    private func coldDecision(file: Int = 1, mode: String = "transcode") throws -> Decision {
+    private func coldDecision(file: Int = 1, mode: String = "transcode", hasVideo: Bool = false) throws -> Decision {
         try JSONDecoder().decode(Decision.self, from: Data("""
         {"fileId":\(file),"method":"\(mode)","playUrl":"/not-fetched",
-         "source":{"height":1080,"durationMs":600000},
+         "source":{"height":1080,"durationMs":600000,"videoCodec":\(hasVideo ? #""h264""# : "null")},
          "audio":[{"index":0,"codec":"aac","default":true},
                   {"index":7,"codec":"aac","default":false}],
          "subtitles":[],"ladder":[]}

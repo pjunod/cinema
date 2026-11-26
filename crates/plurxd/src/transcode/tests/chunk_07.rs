@@ -1642,7 +1642,6 @@ async fn a_lookup_hits_only_on_a_finished_entry_whose_bytes_are_really_there() {
                 supersession_user: r#"["username","paul"]"#,
                 playback_id: "pb-1",
                 automatic: true,
-                sdr_master_codecs: false,
             },
         )
     };
@@ -2000,10 +1999,6 @@ async fn d4_rolling_start_reads(
         .put_setting(plurx_core::store::keys::CACHE_MAX_GB, "1")
         .await
         .expect("budget");
-    store
-        .put_setting(plurx_core::store::keys::VOD_ROLLING_RETENTION, "1")
-        .await
-        .expect("retention on, so the retained lookup runs");
     for (key, value) in settings {
         store.put_setting(key, value).await.expect("setting");
     }
@@ -2129,7 +2124,6 @@ async fn rolling_start_enforces_operator_ahead_and_scratch_limits_from_the_snaps
         (keys::HLS_AHEAD_MAX_SECS, "7"),
         (keys::HLS_AHEAD_MAX_BYTES, "8388608"),
         (keys::CACHE_MAX_GB, "3"),
-        (keys::VOD_ROLLING_RETENTION, "1"),
     ] {
         store.put_setting(key, value).await.expect("setting");
     }
@@ -2188,12 +2182,10 @@ async fn candidate_bound_start_honours_operator_cache_and_pacing_settings() {
     let file_id = seed_file(&store).await;
     for (key, value) in [
         (keys::CACHE_MAX_GB, "2"),
-        (keys::VOD_ROLLING_RETENTION, "1"),
         (keys::HLS_READRATE, "1.5"),
         (keys::HLS_BURST_SECS, "11"),
         (keys::SW_POOL_THREADS, "3"),
         (keys::MAX_HW_SESSIONS, "5"),
-        (keys::CONTENT_AWARE_ENCODING, "1"),
     ] {
         store.put_setting(key, value).await.expect("setting");
     }
@@ -2208,7 +2200,6 @@ async fn candidate_bound_start_honours_operator_cache_and_pacing_settings() {
         keys::HLS_BURST_SECS,
         keys::SW_POOL_THREADS,
         keys::MAX_HW_SESSIONS,
-        keys::CONTENT_AWARE_ENCODING,
     ] {
         assert!(
             snapshot.settings.contains_key(key),
@@ -2244,7 +2235,6 @@ async fn candidate_bound_start_honours_operator_cache_and_pacing_settings() {
         TranscodeManager::rolling_retained_budget_from(&inputs.settings),
         Some(2 << 30)
     );
-    assert!(inputs.content_aware_encoding());
     assert_eq!(
         TranscodeManager::num_from(&inputs.settings, keys::SW_POOL_THREADS, 99usize),
         3
@@ -3012,7 +3002,6 @@ async fn a_manager_without_a_cache_root_simply_always_misses() {
                 supersession_user: r#"["username","paul"]"#,
                 playback_id: "pb-1",
                 automatic: true,
-                sdr_master_codecs: false,
             },
         )
         .await

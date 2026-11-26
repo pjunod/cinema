@@ -9,9 +9,10 @@ rather than written down a second time:
 
 - CPUs: ``cpu.max`` quota / period, rounded down (an unlimited quota falls
   back to the CPUs this process may run on);
-- memory: one job per ``MEMORY_PER_JOB`` of ``memory.max``. A workspace
-  Clippy driver peaks at 2.3-4.6 GB (docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md
-  §3.6), so 5 GiB per job keeps the worst case inside the limit;
+- memory: one job per ``MEMORY_PER_JOB`` of ``memory.max``. Two concurrent
+  daemon Clippy drivers used about 12 GiB of anonymous memory before the
+  shared runner ran out of host memory. A 12 GiB budget per job limits
+  the 20 GiB compiler container to one Cargo job;
 - jobs = max(1, min(CPUs, memory jobs)).
 
 Usage: ``scripts/ci-cargo-jobs [--cgroup DIR] >> "$GITHUB_ENV"`` prints
@@ -26,7 +27,8 @@ import os
 import sys
 from pathlib import Path
 
-MEMORY_PER_JOB = 5 * 1024**3
+MEMORY_PER_JOB_GIB = 12
+MEMORY_PER_JOB = MEMORY_PER_JOB_GIB * 1024**3
 
 
 def own_cgroup(membership: str = "/proc/self/cgroup", mount: str = "/sys/fs/cgroup") -> Path:
@@ -56,7 +58,7 @@ def jobs(root: Path) -> tuple[int, str]:
     by_memory = cpus if memory is None else memory // MEMORY_PER_JOB
     count = max(1, min(cpus, by_memory))
     shown = "unlimited" if memory is None else f"{memory / 1024**3:.1f} GiB"
-    return count, f"{cpus} CPUs, {shown} memory ({by_memory} jobs at 5 GiB each) -> {count} jobs"
+    return count, f"{cpus} CPUs, {shown} memory ({by_memory} jobs at {MEMORY_PER_JOB_GIB} GiB each) -> {count} jobs"
 
 
 def main(argv: list[str] | None = None) -> int:

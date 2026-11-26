@@ -140,16 +140,14 @@ fn parse_request(bytes: &[u8]) -> Result<RetainedRequest, ApiError> {
     }) {
         return Err(invalid());
     }
-    // A shared Dolby Vision delivery is not built yet. The Source refuses it
-    // with the same typed reason; B answers the viewer's explicit ask itself
-    // rather than dispatch work that can only be refused.
-    if typed.preserve_dolby_vision == Some(true) {
-        return Err(ApiError::typed(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            super::shared_source_playback::SHARING_START_DOLBY_VISION_UNSUPPORTED,
-            "Shared Dolby Vision playback is not available",
-        ));
+    // Only B's server-owned prepared successor may request processed output.
+    // A public client cannot enter that branch or claim receiver affirmation.
+    if typed.processed_upgrade.is_some() {
+        return Err(invalid());
     }
+    // An explicit `preserve_dolby_vision` ask is forwarded untouched: the
+    // Source's shared planner derives the delivery from the player's caps
+    // (the ask only clamps), and B never re-plans.
     let caps = typed.caps.ok_or_else(invalid)?;
     super::stream::validate_device_caps(&caps)?;
     if caps.v != plurx_core::playback::DeviceCaps::VERSION || caps.is_empty() {
@@ -355,6 +353,14 @@ mod tests {
         (scope, reference)
     }
     #[test]
+    fn public_receiver_ingress_rejects_client_processed_upgrade_flags() {
+        for flag in [Value::Bool(false), Value::Bool(true)] {
+            let mut value = request();
+            value["processed_upgrade"] = flag;
+            assert!(parse_request(&serde_json::to_vec(&value).expect("encode")).is_err());
+        }
+    }
+    #[test]
     fn sharing_receiver_ingress_preserves_complete_original_request_and_lossless_source_context() {
         let mut value = request();
         for key in [
@@ -414,6 +420,35 @@ mod tests {
         let mut wrong = reference.clone();
         wrong.lifecycle_generation += 1;
         assert!(prepare(scope, wrong, 7, "b".repeat(64), &request).is_err());
+    }
+    #[test]
+    fn sharing_receiver_ingress_forwards_a_dolby_vision_ask_for_the_source_to_plan() {
+        let mut value = request();
+        for key in [
+            "previous_session_id",
+            "control_sequence",
+            "reopen_reason",
+            "intent",
+        ] {
+            value[key] = Value::Null;
+        }
+        value["preserve_dolby_vision"] = Value::Bool(true);
+        value["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[8]}],"audio":["aac"],"containers":["mp4"],"transports":["hls"],"dv_transport":"hls"});
+        let request = parse_request(&serde_json::to_vec(&value).expect("encode"))
+            .expect("a Dolby Vision ask is the Source's to plan, not B's to refuse");
+        let (scope, reference) = context();
+        let (intent, wrapper) =
+            prepare(scope, reference, 7, "b".repeat(64), &request).expect("captured context");
+        assert_eq!(intent.recipe.request_json, value.to_string());
+        let source: Value = serde_json::from_str(&wrapper).expect("wrapper");
+        assert_eq!(
+            source["session"]["preserve_dolby_vision"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            source["session"]["caps"]["video"][0]["dv_profiles"],
+            serde_json::json!([8])
+        );
     }
     #[test]
     fn receiver_source_wrapper_matches_ingress_prepare() {

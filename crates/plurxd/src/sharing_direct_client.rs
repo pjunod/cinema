@@ -86,9 +86,7 @@ impl PeerConnection {
             status => {
                 return Err(crate::sharing_client::peer_status_refusal(
                     status,
-                    response
-                        .headers()
-                        .contains_key(axum::http::header::RETRY_AFTER),
+                    response.headers().get(axum::http::header::RETRY_AFTER),
                 ))
             }
         }

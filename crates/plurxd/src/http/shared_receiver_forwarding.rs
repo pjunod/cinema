@@ -459,8 +459,9 @@ async fn authenticate(
     let valid = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state
-            .membership
-            .authorize_internal_peer_request(&auth, "POST", path, body),
+            .cluster
+            .authentication()
+            .authorize_exact_request(&auth, "POST", path, body),
     )
     .await
     .map_err(|_| unavailable())?
@@ -485,8 +486,9 @@ async fn signed(
         return Err(unavailable());
     }
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| unavailable())?;
     axum::response::Response::builder()
         .status(StatusCode::OK)
@@ -540,12 +542,21 @@ pub(super) async fn relay_public(
             };
             ReceiverForwardOperation::Control { canonical_body }
         }
-        (_, "GET", query) => ReceiverForwardOperation::Resource {
-            relative: match query {
-                Some(query) => format!("{suffix}?{query}"),
-                None => suffix.to_owned(),
-            },
-        },
+        (_, "GET", query) => {
+            // The same public-to-Source mapping the owner applies: the
+            // viewer's login token stays on this node.
+            let Some(resource) = super::receiver_hls_resource(suffix, query) else {
+                return super::unsupported_resource(
+                    &route.incarnation_id,
+                    suffix,
+                    query,
+                    "forward_resource_grammar",
+                );
+            };
+            ReceiverForwardOperation::Resource {
+                relative: resource.as_str().to_owned(),
+            }
+        }
         _ => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
     match relay_operation(state, route, operation, connection).await {

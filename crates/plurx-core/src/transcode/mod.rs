@@ -19,6 +19,8 @@ mod dolby;
 pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dv_refit;
+pub mod dv_refit_serve;
+pub mod dv_refit_title;
 pub mod dvconvert;
 mod encoder;
 mod enhancement_rate;
@@ -44,8 +46,8 @@ pub use decode::{
     OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
     Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
     SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
-    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
-    UNQUALIFIED_ARTIFACT_NAMESPACE,
+    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, HEVC_SCAN_PROBE_KEY,
+    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use dolby::{
     LinuxDolbyContext, LinuxDolbyExecutionBinding, LinuxDolbyIdentity, LinuxDolbyObservation,
@@ -75,9 +77,10 @@ pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
     vod_audio_anchor, vod_completed_reconstructed_pipe_args, vod_pipe_args,
     vod_pipe_args_with_reorder, vod_pipe_args_with_source_clock, vod_reconstructed_pipe_args,
-    vod_reconstructed_video_origin, vod_shared_audio_args, vod_shared_audio_plan, VodFrameGrid,
-    VodPresentationFamily, VodRenditionBandwidth, VodSharedAudioRecipe, VodSharedAudioRendition,
-    VodSourceClock, VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+    vod_reconstructed_video_origin, vod_shared_audio_args, vod_shared_audio_plan,
+    VodCopyVideoRendition, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
+    VodSharedAudioRecipe, VodSharedAudioRendition, VodSourceClock, VodSplitCopyFamily,
+    VodSplitSoundtrack, VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
     VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
@@ -416,6 +419,32 @@ pub fn copy_leaves_a_stale_dolby_vision_record(
     hdr == Some("dolby_vision") && !convert_dolby_vision && !preserve_dolby_vision && !have_dovi_bsf
 }
 
+/// The timescale FFmpeg's MP4 muxer gives the copied video track.
+///
+/// Every copy recipe passes `-copytb 1`, so the muxed stream keeps the
+/// source stream's time base and `movenc` takes its denominator, doubled
+/// until it reaches 10000 (a Matroska 1/1000 becomes 16000). The stream is
+/// the one `-map 0:v:0` selects: the first video stream, attached picture or
+/// not. `None` when the stored probe names no usable video time base.
+pub fn copy_mp4_video_timescale(probe_json: Option<&str>) -> Option<u32> {
+    let probe = serde_json::from_str::<serde_json::Value>(probe_json?).ok()?;
+    let stream = probe.get("streams")?.as_array()?.iter().find(|stream| {
+        stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+    })?;
+    let (num, den) = stream.get("time_base")?.as_str()?.split_once('/')?;
+    let (num, mut den) = (
+        num.trim().parse::<u32>().ok()?,
+        den.trim().parse::<u32>().ok()?,
+    );
+    if num == 0 || den == 0 {
+        return None;
+    }
+    while den < 10_000 {
+        den = den.checked_mul(2)?;
+    }
+    Some(den)
+}
+
 /// Whether the stored probe describes HEVC with the smallest legal hvcC
 /// record: the 23-byte fixed header followed by zero parameter-set arrays.
 ///
@@ -463,7 +492,9 @@ pub struct CopyVideoOptions {
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
     dv_convert: bool,
+    dv_refit_digest: Option<[u8; 32]>,
     retain_hevc_parameter_sets: bool,
+    packet_clock_timescale: Option<u32>,
 }
 
 impl CopyVideoOptions {
@@ -473,8 +504,27 @@ impl CopyVideoOptions {
             preserve_dolby_vision,
             promote_hevc_parameter_sets: false,
             dv_convert: false,
+            dv_refit_digest: None,
             retain_hevc_parameter_sets: false,
+            packet_clock_timescale: None,
         }
+    }
+
+    /// The canonical MP4 track's timescale, in which the packet clock is
+    /// written ([`copy_pipe_args_with_index_and_packet_clock`]).
+    ///
+    /// FFmpeg rounds a timestamp it synthesizes (Matroska stores none for
+    /// decode) into each output's own time base, so a clock in the source's
+    /// 1/1000 differs from the 1/16000 MP4 by a fraction of a millisecond and
+    /// no sample can be associated with it. It is not part of the copied
+    /// bytes or of `copy_video_args`, so it leaves the argv fingerprint alone.
+    pub const fn with_packet_clock_timescale(mut self, timescale: Option<u32>) -> Self {
+        self.packet_clock_timescale = timescale;
+        self
+    }
+
+    pub const fn packet_clock_timescale(self) -> Option<u32> {
+        self.packet_clock_timescale
     }
 
     /// Keep the source's in-band VPS/SPS/PPS in the copied stream.
@@ -527,6 +577,9 @@ impl CopyVideoOptions {
     /// filter, so the invariant lives here and not in each caller (plan §4.8).
     pub const fn with_dolby_vision_conversion(mut self, convert: bool) -> Self {
         self.dv_convert = convert;
+        if !convert {
+            self.dv_refit_digest = None;
+        }
         if convert {
             self.preserve_dolby_vision = true;
         }
@@ -536,6 +589,16 @@ impl CopyVideoOptions {
     /// Whether this copy converts Profile 7 to Profile 8.1.
     pub const fn converts_dolby_vision(self) -> bool {
         self.dv_convert
+    }
+
+    /// A fitted table is an output-affecting part of a converting copy.
+    pub const fn with_dolby_vision_refit(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.dv_refit_digest = if self.dv_convert { digest } else { None };
+        self
+    }
+
+    pub const fn dolby_vision_refit(self) -> Option<[u8; 32]> {
+        self.dv_refit_digest
     }
 
     pub fn from_probe(
@@ -549,6 +612,7 @@ impl CopyVideoOptions {
             .with_parameter_set_retention(hevc_census::in_band_parameter_sets_vary(
                 source, probe_json,
             ))
+            .with_packet_clock_timescale(copy_mp4_video_timescale(probe_json))
     }
 
     pub const fn promotes_parameter_sets(self) -> bool {
@@ -2290,6 +2354,26 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
         if source.hdr.as_deref() == Some("dolby_vision") && options.preserve_dolby_vision {
             args.push("-strict".into());
             args.push("unofficial".into());
+            // FFmpeg 8 drops dvcC/dvvC when the muxer's colour tags conflict
+            // with the record's compatible base. The scanned compatibility
+            // id defines that base even when container colour tags are absent
+            // or wrong. Freeze the same output tags in every copy recipe so
+            // cold/indexed/local/shared copies and their identities agree.
+            let transfer = match source.dolby_vision.bl_compat_id {
+                Some(1 | 6) => Some("smpte2084"),
+                Some(4) => Some("arib-std-b67"),
+                _ => None,
+            };
+            if let Some(transfer) = transfer {
+                args.extend([
+                    "-color_primaries".into(),
+                    "bt2020".into(),
+                    "-color_trc".into(),
+                    transfer.into(),
+                    "-colorspace".into(),
+                    "bt2020nc".into(),
+                ]);
+            }
         }
         // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
         // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the
@@ -2762,6 +2846,14 @@ pub fn copy_index_shared_args_with_input(
     args
 }
 
+#[derive(Clone, Copy)]
+enum CopyMp4Timeline {
+    /// Existing copy/index consumers expect a zero-based muxed presentation.
+    Rebased,
+    /// Clocked companions compare exact samples and retain track start offsets.
+    SourceClock,
+}
+
 /// One identity's output block of the index pipe, writing to `url`. `trace`
 /// prepends `trace_headers` to an HEVC block's bitstream filters; see
 /// [`copy_index_shared_args_with_input`] for why only one block carries it.
@@ -2770,6 +2862,16 @@ pub fn copy_index_output_args(
     video: CopyVideoOptions,
     url: &str,
     trace: bool,
+) -> Vec<String> {
+    copy_index_output_args_with_timeline(source, video, url, trace, CopyMp4Timeline::Rebased)
+}
+
+fn copy_index_output_args_with_timeline(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    url: &str,
+    trace: bool,
+    timeline: CopyMp4Timeline,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-map_chapters".into(),
@@ -2780,7 +2882,7 @@ pub fn copy_index_output_args(
         "-sn".into(),
     ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
-    append_copy_mp4_output(&mut args, url);
+    append_copy_mp4_output_with_timeline(&mut args, url, timeline);
     if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
@@ -2795,12 +2897,36 @@ pub fn copy_index_output_args(
 
 /// The common fragmented MP4 mux contract for playback and index outputs.
 fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
+    append_copy_mp4_output_with_timeline(args, url, CopyMp4Timeline::Rebased);
+}
+
+fn append_copy_mp4_output_with_timeline(
+    args: &mut Vec<String>,
+    url: &str,
+    timeline: CopyMp4Timeline,
+) {
+    let (negative_ts, movflags) = match timeline {
+        CopyMp4Timeline::Rebased => (
+            "make_zero",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        ),
+        // MAKE_ZERO plus no edit list makes MOV stretch a late track's first
+        // sample to start at zero. AAC priming then changes only the AV
+        // companion's first video duration. Shift negative input clocks as a
+        // group, and retain one common track origin via the initial discont;
+        // without discont, MOV independently rebases each track and loses its
+        // A/V start offset. No sample or edit-list repair is needed in Rust.
+        CopyMp4Timeline::SourceClock => (
+            "make_non_negative",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+frag_discont",
+        ),
+    };
     args.extend(
         [
             "-avoid_negative_ts",
-            "make_zero",
+            negative_ts,
             "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            movflags,
             "-use_editlist",
             "0",
             "-f",
@@ -2833,6 +2959,14 @@ fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
 /// express the seek preroll; AVPlayer accepts that file directly but rejects
 /// the same rendition during multivariant HLS validation. Keep the normalized
 /// fragment decode times and suppress those movie-level edits.
+/// Whether a copy's fragmented MP4 output can carry `codec`'s packets as they
+/// are. FFmpeg's MP4 muxer has no sample entry for MLP and writes TrueHD only
+/// under `-strict experimental`, which the copy never passes, so either one
+/// fails the output's header and must be converted instead.
+pub fn copy_mp4_carries_audio_codec(codec: &str) -> bool {
+    !matches!(codec.to_ascii_lowercase().as_str(), "truehd" | "mlp")
+}
+
 pub fn copy_pipe_args(
     source: &MediaFile,
     start_seconds: f64,
@@ -2893,6 +3027,98 @@ pub fn copy_pipe_args_with_audio_delivery(
     args
 }
 
+/// The shared video of a split copy presentation: the ordinary copy input,
+/// seek, pacing and video bitstream handling, with no audio track at all.
+/// Language, audio offset and audio delivery are not inputs, so every
+/// soundtrack and viewer of one source shares the same packaged video.
+pub fn copy_video_only_pipe_args(
+    source: &MediaFile,
+    start_seconds: f64,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    args.extend(copy_input_seek_args(start_seconds));
+    pacing.push(&mut args);
+    args.push("-i".into());
+    args.push(source.path.to_string_lossy().into_owned());
+    for arg in ["-map_chapters", "-1", "-map", "0:v:0", "-an", "-sn"] {
+        args.push(arg.into());
+    }
+    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+    append_copy_mp4_output(&mut args, "pipe:1");
+    args
+}
+
+/// Keep the ordinary muxed playback output and observe only a bounded
+/// prefix of the selected video on a second, inherited pipe. The SHA-256
+/// output removes non-picture NALs so the receiver can identify the same
+/// picture after the MP4 mux changes HEVC framing or parameter sets.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_picture_clock(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    clock_url: &str,
+    picture_limit: std::num::NonZeroUsize,
+) -> Result<Vec<String>, &'static str> {
+    if inherited_copy_pipe_descriptor(clock_url).is_none() {
+        return Err("picture clock requires an inherited pipe descriptor >= 3");
+    }
+    if !matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        return Err("picture clock requires selected HEVC video");
+    }
+    let mut args = copy_pipe_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+    );
+    if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
+        return Err("picture clock requires a single production input");
+    }
+    args.insert(0, "-copyts".to_owned());
+    args.extend(
+        [
+            "-map",
+            "0:v:0?",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "filter_units=pass_types=0-31",
+            "-copytb",
+            "1",
+            "-avoid_negative_ts",
+            "disabled",
+            "-f",
+            "framehash",
+            "-hash",
+            "sha256",
+            "-frames:v",
+        ]
+        .map(str::to_owned),
+    );
+    args.push(picture_limit.to_string());
+    args.push(clock_url.to_owned());
+    Ok(args)
+}
+
+fn inherited_copy_pipe_descriptor(url: &str) -> Option<i32> {
+    url.strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3)
+}
+
 /// One production playback output plus canonical video-only measurement,
 /// sharing the input and selected video recipe. The caller must inherit and
 /// concurrently drain `measurement_url` (a `pipe:N` descriptor with N >= 3).
@@ -2912,12 +3138,32 @@ pub fn copy_pipe_args_with_index_measurement(
     audio: Option<&crate::playback::audio::AudioDelivery>,
     measurement_url: &str,
 ) -> Result<Vec<String>, &'static str> {
-    let descriptor = measurement_url
-        .strip_prefix("pipe:")
-        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|descriptor| *descriptor >= 3);
-    if descriptor.is_none() {
+    copy_pipe_args_with_index_measurement_timeline(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        measurement_url,
+        CopyMp4Timeline::Rebased,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_pipe_args_with_index_measurement_timeline(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+    timeline: CopyMp4Timeline,
+) -> Result<Vec<String>, &'static str> {
+    if inherited_copy_pipe_descriptor(measurement_url).is_none() {
         return Err("index measurement requires an inherited pipe descriptor >= 3");
     }
     let mut args = copy_input_args_with_offset_mode(
@@ -2930,7 +3176,7 @@ pub fn copy_pipe_args_with_index_measurement(
         audio,
         CopyAudioOffsetMode::SingleInputPacketTimestamps,
     );
-    append_copy_mp4_output(&mut args, "pipe:1");
+    append_copy_mp4_output_with_timeline(&mut args, "pipe:1", timeline);
     if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
         return Err("index measurement requires a single production input");
     }
@@ -2941,15 +3187,23 @@ pub fn copy_pipe_args_with_index_measurement(
             args[level + 1] = "info".to_owned();
         }
     }
-    args.extend(copy_index_output_args(source, video, measurement_url, true));
+    args.extend(copy_index_output_args_with_timeline(
+        source,
+        video,
+        measurement_url,
+        true,
+        timeline,
+    ));
     Ok(args)
 }
 
 /// Add a selected-video packet-clock observation output to the one-input
 /// playback/canonical-measurement recipe. Clock packets retain source decode
-/// timestamps with `-copyts`; MP4 outputs still request their existing
-/// `make_zero` mux normalization. This interaction, especially after seeking,
-/// requires media qualification before the observations can bind a range.
+/// timestamps with `-copyts`. Both MP4 outputs preserve sample durations and
+/// track start offsets: only negative timestamps are shifted, and the initial
+/// fragment has a common track origin. Per-output MAKE_ZERO would stretch a
+/// late track's first sample differently when only the AV mux carries audio.
+/// Seeked measurements still require qualification before binding a range.
 ///
 /// Sizes/checksums describe packets after FFmpeg filters and before any Rust
 /// Dolby Vision rewrite. The caller must correlate packet order with samples
@@ -2966,13 +3220,9 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
     measurement_url: &str,
     clock_url: &str,
 ) -> Result<Vec<String>, &'static str> {
-    let clock_descriptor = clock_url
-        .strip_prefix("pipe:")
-        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|descriptor| *descriptor >= 3)
+    let clock_descriptor = inherited_copy_pipe_descriptor(clock_url)
         .ok_or("packet clock requires an inherited pipe descriptor >= 3")?;
-    let mut args = copy_pipe_args_with_index_measurement(
+    let mut args = copy_pipe_args_with_index_measurement_timeline(
         source,
         start_seconds,
         audio_index,
@@ -2981,6 +3231,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         video,
         audio,
         measurement_url,
+        CopyMp4Timeline::SourceClock,
     )?;
     let measurement_descriptor = measurement_url[5..]
         .parse::<i32>()
@@ -2990,7 +3241,19 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
     }
     args.insert(0, "-copyts".to_owned());
     args.extend(["-map", "0:v:0?", "-an", "-sn"].map(str::to_owned));
-    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+    let mut clock_video = strip_plurx_markers(&copy_video_args(source, video));
+    if let Some(timescale) = video.packet_clock_timescale() {
+        // The clock is written in the MP4 track's own time base, so a
+        // timestamp FFmpeg synthesizes is rounded identically in both.
+        let setts = format!("setts=time_base=1/{timescale}:pts=PTS:dts=DTS");
+        match clock_video.iter().rposition(|arg| arg == "-bsf:v") {
+            Some(at) if at + 1 < clock_video.len() => {
+                clock_video[at + 1] = format!("{},{setts}", clock_video[at + 1]);
+            }
+            _ => clock_video.extend(["-bsf:v".to_owned(), setts]),
+        }
+    }
+    args.extend(clock_video);
     args.extend(
         [
             "-copytb",

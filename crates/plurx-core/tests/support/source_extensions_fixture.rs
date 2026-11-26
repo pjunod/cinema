@@ -7,7 +7,7 @@ pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_
 
 pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     assert!(
-        matches!(version, 1..=6),
+        matches!(version, 1..=7),
         "only published managed fixture versions are recognized"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
@@ -43,12 +43,19 @@ pub(crate) fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
             ))
             .expect("published managed v5 objects");
     }
-    if version == 6 {
+    if version >= 6 {
         expected
             .execute_batch(include_str!(
                 "../../src/store/subtitle_managed_resources_v6.sql"
             ))
             .expect("published managed v6 objects");
+    }
+    if version == 7 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v7.sql"
+            ))
+            .expect("published managed v7 objects");
     }
     expected
 }
@@ -77,7 +84,9 @@ pub(crate) const SOURCE_TAIL_SHAPE: &str = "SELECT type,name,sql FROM sqlite_mas
  OR tbl_name GLOB 'playback_analysis_*' OR tbl_name='analysis_source_checkpoints'
  OR tbl_name GLOB 'dispatch_turn_*') ORDER BY type,name";
 
-fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
+pub(crate) fn source_tail_objects(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
     connection
         .prepare(SOURCE_TAIL_SHAPE)
         .expect("source extension fixture inventory")
@@ -87,9 +96,13 @@ fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String
         .expect("complete source extension fixture objects")
 }
 
-/// The published v1 (v122 source, v124 dispatch) source tail objects.
-pub(crate) fn published_source_tail(dispatch: bool) -> Vec<(String, String, String)> {
-    source_tail_objects(&published_source_tail_witness(dispatch))
+/// The published v1 (v122 source, v124 dispatch, optional v136 live-title
+/// dispatch) source tail objects.
+pub(crate) fn published_source_tail(
+    dispatch: bool,
+    live_titles: bool,
+) -> Vec<(String, String, String)> {
+    source_tail_objects(&published_source_tail_witness(dispatch, live_titles))
 }
 
 /// The source tail of a store migrated by this binary (contracted leases).
@@ -101,97 +114,7 @@ pub(crate) fn current_source_tail() -> Vec<(String, String, String)> {
     source_tail_objects(&rusqlite::Connection::open(&path).expect("current catalogue"))
 }
 
-#[cfg(feature = "hiqlite-contract-tests")]
-pub(crate) struct ExpandedLeaseWitness {
-    pub lease_shape: Vec<(String, String, String)>,
-    pub source_shape: Vec<(String, String, String)>,
-    pub source_counts: Vec<(String, i64)>,
-    pub contract: Vec<String>,
-    background: Vec<(String, String)>,
-    contracted_background: Vec<(String, String)>,
-}
-
-#[cfg(feature = "hiqlite-contract-tests")]
-fn background_trigger_rows(conn: &rusqlite::Connection) -> Vec<(String, String)> {
-    conn.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name")
-        .expect("canonical background trigger inventory")
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .expect("canonical background trigger rows")
-        .collect::<Result<_, _>>()
-        .expect("complete canonical background triggers")
-}
-
-/// Use the production migration and generated contract, including macro guards;
-/// a raw SQL include would omit the permanent contracted service guard.
-#[cfg(feature = "hiqlite-contract-tests")]
-pub(crate) fn expanded_source_lease_witness() -> &'static ExpandedLeaseWitness {
-    static EXPECTED: std::sync::OnceLock<ExpandedLeaseWitness> = std::sync::OnceLock::new();
-    EXPECTED.get_or_init(|| {
-        let (conn, contract) = plurx_core::store::validation_expanded_source_lease_fixture()
-            .expect("canonical expanded source leases");
-        let source_shape = source_tail_objects(&conn);
-        let source_counts = source_shape
-            .iter()
-            .filter(|(kind, _, _)| kind == "table")
-            .map(|(_, name, _)| {
-                let count = conn
-                    .query_row(
-                        &format!(r#"SELECT count(*) FROM "{}""#, name.replace('"', r#""""#)),
-                        [],
-                        |row| row.get(0),
-                    )
-                    .expect("expanded source marker/data witness");
-                (name.clone(), count)
-            })
-            .collect();
-        let directory = tempfile::tempdir().expect("contracted background witness");
-        let path = directory.path().join("current.db");
-        drop(plurx_core::store::SqliteStore::open(&path).expect("contracted current witness"));
-        let current = rusqlite::Connection::open(path).expect("contracted catalogue");
-        ExpandedLeaseWitness {
-            lease_shape: source_lease_rewind_objects(&conn),
-            source_shape,
-            source_counts,
-            contract,
-            background: background_trigger_rows(&conn),
-            contracted_background: background_trigger_rows(&current),
-        }
-    })
-}
-
-/// Preserve every unrelated captured definition; replace only the exact
-/// canonical generation delta, refusing an already-drifted original oracle.
-#[cfg(feature = "hiqlite-contract-tests")]
-pub(crate) fn expanded_background_trigger_oracle(
-    original: Vec<(String, String)>,
-) -> Vec<(String, String)> {
-    use std::collections::{BTreeMap, BTreeSet};
-    let witness = expanded_source_lease_witness();
-    let before: BTreeMap<_, _> = witness.contracted_background.iter().cloned().collect();
-    let after: BTreeMap<_, _> = witness.background.iter().cloned().collect();
-    let mut result: BTreeMap<_, _> = original.into_iter().collect();
-    let names: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
-    for name in names {
-        if before.get(&name) != after.get(&name) {
-            assert_eq!(
-                result.get(&name),
-                before.get(&name),
-                "original generation drift: {name}"
-            );
-            match after.get(&name) {
-                Some(sql) => {
-                    result.insert(name, sql.clone());
-                }
-                None => {
-                    result.remove(&name);
-                }
-            }
-        }
-    }
-    result.into_iter().collect()
-}
-
-fn published_source_tail_witness(dispatch: bool) -> rusqlite::Connection {
+fn published_source_tail_witness(dispatch: bool, live_titles: bool) -> rusqlite::Connection {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
     expected.execute_batch(
         "CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER);
@@ -206,6 +129,11 @@ fn published_source_tail_witness(dispatch: bool) -> rusqlite::Connection {
         expected
             .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
             .expect("published v124 dispatch extension");
+        if live_titles {
+            expected
+                .execute_batch(include_str!("../../src/store/background_job_turns_v2.sql"))
+                .expect("published v136 dispatch migration");
+        }
     }
     expected
 }
@@ -214,11 +142,12 @@ pub(crate) fn validated_source_tail_drops(
     objects: &[(String, String, String)],
     counts: &[(String, i64)],
     dispatch: bool,
+    live_titles: bool,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     assert_eq!(
         objects,
-        published_source_tail(dispatch),
+        published_source_tail(dispatch, live_titles),
         "exact published source tail required"
     );
     let expected_counts = objects
@@ -431,6 +360,7 @@ fn source_extension_rewind_plan(
         &objects,
         &counts,
         version >= 124,
+        false,
         |_| true,
     ));
     let marker: i64 = connection
@@ -510,7 +440,7 @@ pub(crate) fn coordination_tail_witness() -> Vec<(String, String, String)> {
 }
 
 /// The v124 definition v127 replaced, from its own published migration.
-fn published_v124_reservation_trigger() -> &'static str {
+pub(crate) fn published_v124_reservation_trigger() -> &'static str {
     let mut statements = include_str!("../../src/store/background_jobs_viewer_analysis.sql")
         .split("-- next statement")
         .filter(|statement| {
@@ -674,11 +604,59 @@ pub(crate) fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
+/// Rewind v134 (F+ curve fits) to v133: the exact marker is required and
+/// stored fits refuse; the extension's own objects go.
+pub(crate) fn rewind_dv_refit_to_v133(connection: &rusqlite::Connection) {
+    rewind_empty_curation_to_v134(connection);
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture F+ ordinal");
+    if version != 134 {
+        return;
+    }
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_dv_refit_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("F+ marker");
+    assert_eq!(marker, 1, "F+ curve fits require their exact marker");
+    let rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT count(*) FROM background_dv_refit_titles)
+              + (SELECT count(*) FROM background_dv_refit_scenes)
+              + (SELECT count(*) FROM background_dv_refit_outcomes)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("F+ fixture data");
+    assert_eq!(rows, 0, "stored F+ fits cannot be rewound");
+    let objects: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE name GLOB 'background_dv_refit_*'
+              AND type IN ('trigger','table') ORDER BY type DESC,name",
+        )
+        .expect("F+ objects")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("F+ object rows")
+        .collect::<Result<_, _>>()
+        .expect("F+ object inventory");
+    let mut plan: Vec<String> = objects
+        .iter()
+        .map(|(kind, name)| format!("DROP {} {name};", kind.to_ascii_uppercase()))
+        .collect();
+    plan.push("PRAGMA user_version=133;".into());
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published F+ rewind");
+}
+
+/// The title-v2 extension is removed by the shared exact title teardown.
+/// First validate its complete published shape and absence of accepted work;
+/// keep the objects until that teardown while lowering the unrelated tail.
 pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
-    // Rewind appended extensions in reverse migration order. The lease
-    // rewind preserves delegation at v133; its own strict empty-data check
-    // then removes delegation to reach v132.
-    rewind_empty_source_leases_to_v133(connection);
+    rewind_dv_refit_to_v133(connection);
     rewind_empty_delegation_to_v132(connection);
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -718,6 +696,23 @@ pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
     });
 }
 
+fn storage_domain_pending_fixture_objects(
+    catalogue: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
+    catalogue
+        .prepare(STORAGE_PENDING_FIXTURE_SHAPE_SQL)
+        .expect("storage domain fixture inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("storage domain fixture objects")
+        .collect::<Result<_, _>>()
+        .expect("complete storage domain fixture objects")
+}
+
+/// The exact published v131 pending-domain extension, before root overlays.
+pub(crate) fn storage_domain_pending_fixture_shape() -> Vec<(String, String, String)> {
+    published_storage_pending_fixture_shape()
+}
+
 /// Rewind an owned, empty v131 storage-domain extension to published v130.
 /// Desired configuration is user data, including an already settled revision,
 /// so no pending-table row may be discarded by a historical fixture.
@@ -747,18 +742,11 @@ pub(crate) const STORAGE_PENDING_REWIND_SQL: &str = "DROP TRIGGER background_sto
 pub(crate) fn published_storage_pending_fixture_shape() -> Vec<(String, String, String)> {
     let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
     witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
-        .expect("storage domain dependency");
+        .expect("storage domain trigger dependency");
     witness
         .execute_batch(include_str!("../../src/store/storage_domain_pending.sql"))
-        .expect("published storage domain extension");
-    let result = witness
-        .prepare(STORAGE_PENDING_FIXTURE_SHAPE_SQL)
-        .expect("storage pending inventory")
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .expect("storage pending rows")
-        .collect::<Result<_, _>>()
-        .expect("complete storage pending fixture");
-    result
+        .expect("published v131 storage domain extension");
+    storage_domain_pending_fixture_objects(&witness)
 }
 
 fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection) {
@@ -772,19 +760,9 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
         version, 131,
         "only the published v131 storage domain tail may be rewound"
     );
-    let shape_sql = STORAGE_PENDING_FIXTURE_SHAPE_SQL;
-    let objects = |catalogue: &rusqlite::Connection| -> Vec<(String, String, String)> {
-        catalogue
-            .prepare(shape_sql)
-            .expect("storage domain fixture inventory")
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .expect("storage domain fixture objects")
-            .collect::<Result<_, _>>()
-            .expect("complete storage domain fixture objects")
-    };
     assert_eq!(
-        objects(connection),
-        published_storage_pending_fixture_shape(),
+        storage_domain_pending_fixture_objects(connection),
+        storage_domain_pending_fixture_shape(),
         "exact published storage domain tail required"
     );
     let marker: (i64, i64) = connection.query_row(
@@ -847,24 +825,38 @@ fn rewind_offload_to_v129(connection: &rusqlite::Connection) {
         .expect("published offload rewind");
 }
 
-/// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
-/// exact marker is required; the v85 enqueue and v86 upkeep triggers return.
-fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("fixture custody retention ordinal");
-    if version != 129 {
-        return;
-    }
-    let marker: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM background_custody_retention_schema WHERE singleton=1 AND version=1",
-            [],
-            |row| row.get(0),
+pub(crate) const CUSTODY_RETENTION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('background_custody_retention_schema','background_job_enqueue_command','background_job_maintenance_command','background_source_custody_owner_work') AND sql IS NOT NULL ORDER BY name";
+
+fn custody_retention_shape(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    connection
+        .prepare(CUSTODY_RETENTION_FIXTURE_SHAPE_SQL)
+        .expect("custody retention fixture inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("custody retention fixture objects")
+        .collect::<Result<_, _>>()
+        .expect("complete custody retention fixture objects")
+}
+
+pub(crate) fn validated_custody_retention_rewind(shape: &[(String, String)]) -> [String; 6] {
+    let expected =
+        rusqlite::Connection::open_in_memory().expect("published custody retention witness");
+    expected
+        .execute_batch(
+            "CREATE TABLE background_job_commands(id TEXT);
+         CREATE TABLE background_source_custody(owner_kind TEXT,work_id TEXT);",
         )
-        .expect("custody retention marker");
-    assert_eq!(marker, 1, "custody retention requires its exact marker");
-    let plan = [
+        .expect("published custody retention dependencies");
+    expected
+        .execute_batch(include_str!(
+            "../../src/store/background_jobs_custody_retention.sql"
+        ))
+        .expect("published v129 custody retention");
+    assert_eq!(
+        shape,
+        custody_retention_shape(&expected),
+        "exact published custody retention required"
+    );
+    [
         "DROP TABLE background_custody_retention_schema;".to_owned(),
         "DROP INDEX background_source_custody_owner_work;".to_owned(),
         "DROP TRIGGER background_job_enqueue_command;".to_owned(),
@@ -885,10 +877,29 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
             )
             .trim_end_matches(';')
         ),
-        "PRAGMA user_version=128;".to_owned(),
-    ];
+    ]
+}
+
+/// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
+/// exact marker is required; the v85 enqueue and v86 upkeep triggers return.
+fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture custody retention ordinal");
+    if version != 129 {
+        return;
+    }
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_custody_retention_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("custody retention marker");
+    assert_eq!(marker, 1, "custody retention requires its exact marker");
+    let plan = validated_custody_retention_rewind(&custody_retention_shape(connection));
     connection
-        .execute_batch(&plan.join("\n"))
+        .execute_batch(&format!("{}\nPRAGMA user_version=128;", plan.join("\n")))
         .expect("published custody retention rewind");
 }
 
@@ -935,7 +946,9 @@ pub(crate) const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FRO
  'background_job_maintenance_command','background_custody_retention_schema',
  'background_source_custody_owner_work')) ORDER BY type,name";
 
-fn source_lease_rewind_objects(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
+pub(crate) fn source_lease_rewind_objects(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
     connection
         .prepare(SOURCE_LEASE_REWIND_SHAPE_SQL)
         .expect("source lease rewind inventory")
@@ -986,11 +999,11 @@ fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
 /// Rewind an owned, empty v134-v135 source-lease tail to pre-lease v133:
 /// drop the lease objects and restore the v1 source owners and the four
 /// dependents the expand replaced, from their own published text.
-fn rewind_empty_source_leases_to_v133(connection: &rusqlite::Connection) {
+fn rewind_empty_source_leases_to_v138(connection: &rusqlite::Connection) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture source lease ordinal");
-    if version != 135 {
+    if version != 140 {
         return;
     }
     verify_current_source_lease_rewind_shape(connection);
@@ -1004,7 +1017,7 @@ fn rewind_empty_source_leases_to_v133(connection: &rusqlite::Connection) {
         "historical fixture must not discard source leases"
     );
     let mut plan = source_lease_rewind_plan();
-    plan.push("PRAGMA user_version=133;".to_owned());
+    plan.push("PRAGMA user_version=138;".to_owned());
     connection
         .execute_batch(&plan.join("\n"))
         .expect("published source lease rewind");
@@ -1017,16 +1030,18 @@ pub(crate) const SOURCE_LEASE_UNOWNED_SQL: &str =
     "SELECT count(*)+(SELECT count(*) FROM source_lease_receipt_sources) AS value FROM source_leases WHERE owner_kind NOT IN ('job','analysis')";
 
 /// The statements that take a contracted (v3) source-lease tail back to
-/// the published v1 source owners, on either backend. The claim effects
-/// are left as they are: the replicated rewind restores their v1 text
-/// itself, SQLite's v132 already has the open-ended text.
+/// the published v1 source owners, on either backend: the managed v7 and
+/// analysis-scope (v138) resource views the expand replaced come back
+/// exactly. The claim effects are left as they are: the replicated rewind
+/// restores their v1 text itself, SQLite's v132 already has the open-ended
+/// text.
 pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
     let foreground = include_str!("../../src/store/background_jobs_foreground.sql");
     let turns = include_str!("../../src/store/background_job_turns.sql");
     let pending = include_str!("../../src/store/storage_domain_pending.sql");
     let retention = include_str!("../../src/store/background_jobs_custody_retention.sql");
-    let managed_v6 = include_str!("../../src/store/subtitle_managed_resources_v6.sql");
-    let analysis = include_str!("../../src/store/background_jobs_viewer_analysis.sql");
+    let managed_v7 = include_str!("../../src/store/subtitle_managed_resources_v7.sql");
+    let analysis = include_str!("../../src/store/analysis_source_scope.sql");
     let mut plan = Vec::new();
     for trigger in [
         "source_lease_job_claim",
@@ -1082,7 +1097,7 @@ pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
     plan.push(foreground.to_owned());
     for (sql, opening) in [
         (
-            managed_v6,
+            managed_v7,
             "CREATE VIEW IF NOT EXISTS background_job_required_resources AS",
         ),
         (
@@ -1130,7 +1145,7 @@ pub(crate) const CLAIM_EFFECTS_V1: [&str; 2] = [
     include_str!("../fixtures/background-job-claim-effects-v1.sql"),
 ];
 
-/// Rewind an owned, empty v127-v134 coordination tail to published v126;
+/// Rewind an owned, empty v127-v140 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
@@ -1160,10 +1175,187 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
     });
 }
 
+const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('analysis_required_resources','analysis_source_scope_schema') AND sql IS NOT NULL ORDER BY name";
+
+/// Rewind v138 (analysis reads only its file's root) and v137 (managed v7:
+/// a per-file job reads only its file's root) to v136. Each requires its exact
+/// published shape and marker, then restores the original analysis view and
+/// the managed v6 view with marker 6. Only views and markers change, so no
+/// queued work or reservation is discarded.
+fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
+    // Appended extensions rewind in reverse migration order: the lease
+    // tail (v139/v140) restores the exact v137/v138 views first.
+    rewind_empty_source_leases_to_v138(conn);
+    let ordinal = |conn: &rusqlite::Connection| {
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .expect("file-root scope ordinal")
+    };
+    let version = ordinal(conn);
+    if version <= 136 {
+        return;
+    }
+    assert!(
+        version <= 138,
+        "only the published file-root tail can rewind"
+    );
+    let shape = |db: &rusqlite::Connection, query: &str| {
+        db.prepare(query)
+            .expect("shape query")
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .expect("shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete shape")
+    };
+    let original_analysis = include_str!("../../src/store/background_jobs_viewer_analysis.sql")
+        .split("-- next statement")
+        .find(|sql| sql.contains("CREATE VIEW IF NOT EXISTS analysis_required_resources AS"))
+        .expect("published analysis resource view")
+        .trim()
+        .to_owned();
+    let mut plan = vec!["SAVEPOINT rewind_file_root_scope;".to_owned()];
+    if version == 138 {
+        let fixture = rusqlite::Connection::open_in_memory().expect("analysis scope witness");
+        fixture
+            .execute_batch(&original_analysis)
+            .expect("published analysis view");
+        fixture
+            .execute_batch(include_str!("../../src/store/analysis_source_scope.sql"))
+            .expect("published analysis scope");
+        assert_eq!(
+            shape(conn, ANALYSIS_SCOPE_SHAPE_SQL),
+            shape(&fixture, ANALYSIS_SCOPE_SHAPE_SQL),
+            "exact analysis source scope required"
+        );
+        let marker: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM analysis_source_scope_schema WHERE singleton=1 AND version=1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("analysis scope marker");
+        assert_eq!(marker, 1, "published analysis scope marker required");
+        plan.push("DROP VIEW analysis_required_resources;".to_owned());
+        plan.push(original_analysis);
+        plan.push("DROP TABLE analysis_source_scope_schema;".to_owned());
+    }
+    assert_eq!(
+        managed_fixture_rows(conn),
+        managed_fixture_rows(&managed_fixture_connection(7)),
+        "exact published managed v7 required"
+    );
+    let marker: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=7",
+            [],
+            |r| r.get(0),
+        )
+        .expect("managed v7 marker");
+    assert_eq!(marker, 1, "published managed v7 marker required");
+    plan.push(include_str!("../../src/store/subtitle_managed_resources_v6.sql").to_owned());
+    plan.push("PRAGMA user_version=136; RELEASE rewind_file_root_scope;".to_owned());
+    conn.execute_batch(&plan.join("\n"))
+        .expect("published file-root scope rewind");
+}
+
+/// Remove only the exact, entirely empty v135 curation extension (custom
+/// tags, rows, Home layouts, grants) before older tails. Validates the whole
+/// shape, the marker and that every table is empty before dropping anything.
+#[allow(dead_code)]
+pub(crate) fn rewind_empty_curation_to_v134(conn: &rusqlite::Connection) {
+    rewind_file_root_scope_to_v136(conn);
+    if conn
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .expect("dispatch ordinal")
+        == 136
+    {
+        let fixture = rusqlite::Connection::open_in_memory().expect("dispatch fixture");
+        fixture.execute_batch("CREATE TABLE background_jobs(id); CREATE TABLE analysis_requests(request_id); CREATE TABLE background_source_custody(custody_id);").expect("dispatch subjects");
+        let original = include_str!("../../src/store/background_job_turns.sql");
+        fixture
+            .execute_batch(original)
+            .expect("original dispatch catalog");
+        fixture
+            .execute_batch(include_str!("../../src/store/background_job_turns_v2.sql"))
+            .expect("current dispatch catalog");
+        let catalog = |db: &rusqlite::Connection| {
+            db.prepare("SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name")
+                .expect("dispatch objects").query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
+                .expect("dispatch rows").collect::<Result<Vec<_>,_>>().expect("complete dispatch catalog")
+        };
+        assert_eq!(catalog(conn), catalog(&fixture));
+        let restore: Vec<_> = original
+            .split("-- next statement")
+            .filter(|sql| {
+                sql.contains("CREATE TRIGGER dispatch_turn_job ")
+                    || sql.contains("CREATE VIEW dispatch_turn_protected_jobs ")
+            })
+            .collect();
+        assert_eq!(restore.len(), 2);
+        conn.execute_batch(&format!("SAVEPOINT restore_turns; DROP TRIGGER dispatch_turn_job; DROP VIEW dispatch_turn_protected_jobs; {} PRAGMA user_version=135; RELEASE restore_turns;",restore.join("\n"))).expect("restore original dispatch objects without deleting data");
+    }
+    let ordinal: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .expect("curation ordinal");
+    if ordinal < 135 {
+        return;
+    };
+    assert_eq!(ordinal, 135, "only published curation tail can rewind");
+    const QUERY: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'library_curation*' OR tbl_name GLOB 'library_curation*') AND sql IS NOT NULL ORDER BY name";
+    let shape = |db: &rusqlite::Connection| {
+        db.prepare(QUERY)
+            .expect("shape query")
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .expect("shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete shape")
+    };
+    let fixture = rusqlite::Connection::open_in_memory().expect("canonical shape");
+    fixture
+        .execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY);")
+        .expect("dependency");
+    fixture
+        .execute_batch(include_str!("../../src/store/library_curation.sql"))
+        .expect("published curation");
+    assert_eq!(
+        shape(conn),
+        shape(&fixture),
+        "exact curation shape required"
+    );
+    let marker: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM library_curation_schema WHERE singleton=1 AND version=1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("marker");
+    assert_eq!(marker, 1, "published marker required");
+    for table in [
+        "library_curation_grants",
+        "library_curation_tags",
+        "library_curation_item_tags",
+        "library_curation_rejections",
+        "library_curation_rows",
+        "library_curation_home",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .expect("data inventory");
+        assert_eq!(count, 0, "cannot discard curation user data");
+    }
+    conn.execute_batch(
+        "DROP TABLE library_curation_home;DROP TABLE library_curation_rows;\
+         DROP TABLE library_curation_rejections;DROP TABLE library_curation_item_tags;\
+         DROP TABLE library_curation_tags;DROP TABLE library_curation_grants;\
+         DROP TABLE library_curation_schema;PRAGMA user_version=134;",
+    )
+    .expect("empty curation rewind");
+}
+
 /// Remove only the exact, entirely empty v133 extension before older tails.
 /// Read and validate the complete removal plan before changing any object.
 #[allow(dead_code)]
 pub(crate) fn rewind_empty_delegation_to_v132(conn: &rusqlite::Connection) {
+    rewind_dv_refit_to_v133(conn);
     let ordinal: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("delegation ordinal");

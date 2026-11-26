@@ -29,6 +29,7 @@ import urllib.request
 import zipfile
 import zlib
 
+from validation.apple_simulator_runtime import runtime_identifier
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, input_digest,
     matches_input, reason, terminal_status,
@@ -41,11 +42,14 @@ JOB = 'Apple compile and native TV navigation'
 WORKFLOW = '.github/workflows/main-fast-lane.yml'
 RUNS_ON = ['self-hosted', 'macOS', 'ARM64', 'lab', 'apple', 'xcode-27.2']
 XCODE = 'Xcode 27.2\nBuild version 27B52'
-RUNTIME = 'com.apple.CoreSimulator.SimRuntime.tvOS-26-5'
+RUNTIME = runtime_identifier('tvOS', XCODE.split()[1])
 # Reviewed schema-1 producer: unconditional pinned-tool checks; native make
 # commands conditional only on affected scope; failure-preserving artifacts.
 CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
 LEGACY_JOB_SHA256 = 'c6b5c40ac94f5505d0afd1f9d724a9fec8ca4f5a077fff01a6e738933bd8a415'
+# The same producer before its TV evidence went from 90 to 14 days' retention
+# (plurx#1932): the job is unchanged, only how long its artifact is kept.
+RETENTION90_JOB_SHA256 = '7edf7a8e71d8096ce3f51b11afcab6184b6d91b51148d1668f055b12b2ade5bf'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 50000
@@ -85,23 +89,48 @@ BUILD_SPECS = {
     # native build recipe changed.
     # PR #1666 adds only `node --test tests/playback/prepared-successor-chase.test.js`
     # to the web-unit-check recipe (a Node web test); no native recipe changes.
-    'Makefile': 'a7b767c0bc813c46c2fedd64fe465cc44748fb660f088c78a13e30d9a528440b',
-    # Reviewed raw project spec at build 300. Counter-only variants may enter
-    # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
-    # still bind fingerprints and case compatibility. Resource, script, or flag
-    # changes require a newly reviewed boundary, not counter normalization.
-    'clients/apple/project.yml': 'e7d701cd716173e28559d4f4104f0c38046ba48ecbb992878c5fe3747f94bce7',
+    # P49 adds only `node --test tests/playback/audio-alternation.test.js` to
+    # the web-unit-check recipe (a Node playback-lab observer test); no native
+    # recipe changes.
+    # #1866 changes only cluster-wal-check's exact `snapshot_metrics` hiqlite
+    # test count from 13 to 17 (four landed snapshot recovery contracts).
+    # Derived build numbers remove only the `apple-build-bump` target, reword
+    # the paperwork help and comment, and make android-release hand the
+    # host-derived build number to Gradle as a project property; no native
+    # recipe changes.
+    # C4 pre-vote (#1904) changes only cluster-wal-check: eight exact vendored
+    # hiqlite pre-vote tests, the vendored OpenRaft pre-vote module, and the
+    # OpenRaft snapshot regression run from vendor/openraft instead of the
+    # registry package located through cargo metadata; no native recipe changes.
+    # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
+    # the web-unit-check recipe (a Node web test); no native recipe changes.
+    # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
+    # no native recipe changes.
+    'Makefile': 'c4ad23b20355dfea405ddc07ceab1328932dd5a348a7787296dcf53a150bfd7d',
+    # Reviewed raw project spec with derived build numbers: the placeholder
+    # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
+    # targets, and one "Stamp derived build number" post-build phase each,
+    # which runs scripts/build-number (an input below) and sets CFBundleVersion
+    # in the built Info.plist. Placeholder-only variants may enter the reviewed
+    # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
+    # fingerprints and case compatibility. Resource, script, or flag changes
+    # require a newly reviewed boundary, not counter normalization.
+    # release: v0.9.2 changes only MARKETING_VERSION "0.9.1" -> "0.9.2".
+    'clients/apple/project.yml': 'f20d8ed75aa34011197a65bd9fa063c53440aee5eed69166b2ac1e914e33e33d',
+    'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     # PR #1552: the tray build accepts --arch arm64 only (Intel Macs dropped).
     'clients/server-tray/macos/build': 'c39dcb201d45bbace9cd3bb59dd4ea47620c031b6f4468472978bf3be4fd48ea',
 }
 FAMILY_SPECS = {
-    'tv_navigation': ['Makefile', 'clients/apple/project.yml', 'scripts/apple-tv-navigation-test'],
+    'tv_navigation': ['Makefile', 'clients/apple/project.yml', 'scripts/apple-tv-navigation-test',
+        'validation/apple_simulator_runtime.py'],
     'desktop_macos': ['Makefile', 'clients/server-tray/macos/Package.swift', 'clients/server-tray/macos/build'],
 }
 INPUTS = {
-    'tv_navigation': COMMON + ['clients/apple/**', 'scripts/apple-tv-navigation-test',
+    'tv_navigation': COMMON + ['clients/apple/**', 'scripts/apple-tv-navigation-test', 'scripts/build-number',
+        'validation/apple_simulator_runtime.py',
         *APPLE_EXTERNAL_INPUTS],
     'desktop_macos': COMMON + ['clients/server-tray/macos/**', 'LICENSE', 'VERSION', 'Cargo.toml',
         'brand/export/icon*'],
@@ -117,7 +146,8 @@ def native_block(workflow):
 def producer(commit, current):
     old = native_block(git('show', commit + ':' + WORKFLOW))
     now = native_block(git('show', current + ':' + WORKFLOW))
-    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256) or old == now,
+    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
+                                                         RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
     # The adapter's own adoption records are deliberately never accepted as
     # native origin evidence; producer output must still be an original pass.
@@ -126,7 +156,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "d5eda692d7c4691cc20926ec85c87ec65cbc60122c6b638853d6cbd57b645c5b"
+APPLE_PROJECT_SHAPE = "9ef3285ec7f9ce17eafad6719c7c53f0de0f6a090b7418f9174f9ff5ec425df0"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 
@@ -330,7 +360,8 @@ def verify_desktop(data):
 
 def origin(api, artifact, scope, current, current_run, *, tv_cases=False):
     rid = positive(artifact['run_id'])
-    require(rid < current_run and artifact.get('expired') is False, 'Expired/current/future origin')
+    require((current_run is None or rid < current_run) and artifact.get('expired') is False,
+            'Expired/current/future origin')
     run = api.get(f'/actions/runs/{rid}')
     require(run['id'] == rid and run['repository']['id'] == scope['repository'], 'Foreign origin run')
     event = bounded_json(run['event_payload'].encode())
@@ -462,8 +493,8 @@ TRANSITION_INVALIDATES = {
     'TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute',
 }
 # Reviewed schema-2 runner; changes require another explicit producer review.
-# Reviewed required-journey addition: held timeline preview and release.
-CASE_RUNNER_SHA256 = '6462c5d3d4c6bb782181144f73233074732a0fc3abea805b56a291021e687604'
+# The current producer selects the standard simulator for the active SDK.
+CASE_RUNNER_SHA256 = '834944f7ee9e7d235a921a604b4bb150e158b3ca4c169b0cd21d096278f2dbd9'
 
 
 def case_input_compatibility(commit, current):

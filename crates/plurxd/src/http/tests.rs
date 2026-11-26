@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -12,7 +13,9 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod activity_routes;
 mod delegation;
+mod playback_devices;
 mod playback_handoffs;
 mod public_copy_wire;
 mod storage_domains;
@@ -1508,6 +1511,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         "/api/v1/hls/session/index.m3u8",
         crate::media_pool::SNAPSHOT_PATH,
         internal_clock::PATH,
+        internal_activity::PATH,
     ] {
         assert!(learner_route_eligible(&Method::GET, path), "{path}");
     }
@@ -1592,6 +1596,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         (Method::POST, crate::media_sessions::RELAY_PATH),
         (Method::POST, crate::shared_cache::CANARY_PATH),
         (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, internal_activity::SOURCE_STOP_PATH),
         // Peer hydration of a fragment index. `media_peers()` names
         // learners, so refusing this at the route matrix made the
         // directory point at a closed door.
@@ -1650,6 +1655,17 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         &Method::POST,
         "/internal/media/subtitle-source/7/2/sup"
     ));
+    for (method, path) in [
+        (Method::POST, internal_activity::PATH),
+        (Method::GET, internal_activity::SOURCE_STOP_PATH),
+        (Method::GET, "/_internal/v1/activity-snapshot/other"),
+        (
+            Method::POST,
+            "/_internal/v1/activity-source-processed-stop/other",
+        ),
+    ] {
+        assert!(!learner_route_eligible(&method, path), "{method} {path}");
+    }
 }
 
 #[test]
@@ -1661,7 +1677,9 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::GET, "/api/v1/cluster/status"),
         (Method::GET, "/api/v1/cluster/support-bundle"),
         (Method::GET, cluster_operations::INTERNAL_PATH),
+        (Method::GET, internal_activity::PATH),
         (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, internal_activity::SOURCE_STOP_PATH),
         (Method::POST, "/api/v1/auth/login"),
         (Method::POST, "/api/v1/auth/logout"),
         // Read beside /me so a client signed in to a node under
@@ -1734,6 +1752,13 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::POST, crate::live_tv::START_PATH),
         (Method::POST, crate::live_tv::ACTIVATE_PATH),
         (Method::POST, crate::live_tv::GUIDE_PATH),
+        (Method::POST, internal_activity::PATH),
+        (Method::GET, internal_activity::SOURCE_STOP_PATH),
+        (Method::GET, "/_internal/v1/activity-snapshot/other"),
+        (
+            Method::POST,
+            "/_internal/v1/activity-source-processed-stop/other",
+        ),
         (Method::POST, "/api/v1/cluster/join-tokens"),
         (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
         (Method::POST, "/api/v1/libraries"),
@@ -1922,6 +1947,45 @@ async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
     assert_eq!(
         app.oneshot(unsigned).await.expect("response").status(),
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn retain_output_routes_bound_bodies_and_require_peer_auth() {
+    let app = test_app();
+    for path in [
+        format!("/api/v1/hls/{}/retain-output", uuid::Uuid::new_v4()),
+        hls::RETAIN_OUTPUT_PATH.to_owned(),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![b'x'; hls::RETAIN_OUTPUT_MAX_BYTES + 1]))
+            .expect("oversized retain-output");
+        assert_eq!(
+            app.clone()
+                .oneshot(request)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+    let relay = serde_json::json!({
+        "session_id": uuid::Uuid::new_v4().to_string(),
+        "expected_owner_node_id": "any-node",
+    });
+    let unsigned = Request::builder()
+        .method("POST")
+        .uri(hls::RETAIN_OUTPUT_PATH)
+        .header("content-type", "application/json")
+        .body(Body::from(relay.to_string()))
+        .expect("unsigned relay");
+    assert_eq!(
+        app.oneshot(unsigned).await.expect("response").status(),
+        StatusCode::UNAUTHORIZED,
+        "the owner relay is peer-authenticated"
     );
 }
 
@@ -2209,7 +2273,8 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
         );
     }
     assert_catalogue_methods(
-        &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
+        // The whole handler, through its `tag:` early return.
+        &compact_handler(browse, "pub async fn search", "#[cfg(test)]"),
         &["search_items"],
     );
 
@@ -2760,6 +2825,99 @@ async fn local_https_certificate_exports_only_loaded_public_chain_even_after_dis
     assert_eq!(after["certificate"], snapshot["certificate"]);
 }
 
+#[test]
+fn discovery_policy_route_is_exact_for_every_admission_projection() {
+    for role in [
+        None,
+        Some(LocalServingRole::Learner),
+        Some(LocalServingRole::Fenced),
+    ] {
+        assert!(capacity_role_refusal(role, &Method::GET, crate::discovery::PATH).is_none());
+        assert!(capacity_role_refusal(role, &Method::POST, crate::discovery::PATH).is_some());
+        assert!(
+            capacity_role_refusal(role, &Method::GET, "/api/v1/server/discovery/extra").is_some()
+        );
+        assert!(capacity_role_refusal(role, &Method::GET, "/api/v1/settings").is_some());
+    }
+    assert!(learner_route_eligible(&Method::GET, crate::discovery::PATH));
+    assert!(maintenance_route_eligible(
+        &Method::GET,
+        crate::discovery::PATH
+    ));
+    assert!(!maintenance_route_eligible(
+        &Method::POST,
+        crate::discovery::PATH
+    ));
+}
+
+#[tokio::test]
+async fn discovery_route_survives_learner_and_maintenance_admission() {
+    // The real handler's state is standalone. Inject only admission facts,
+    // proving both production gates admit this exact Store-free public route.
+    let app = router(test_state_without_router());
+    for (role, maintenance) in [
+        (LocalServingRole::Unclustered, false),
+        (LocalServingRole::Learner, false),
+        (LocalServingRole::Fenced, false),
+        (LocalServingRole::Voter, true),
+    ] {
+        let admitted = app.clone().layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: Next| async move {
+                if let Some(response) = capacity_maintenance_refusal(
+                    maintenance,
+                    request.method(),
+                    request.uri().path(),
+                ) {
+                    return response;
+                }
+                if let Some(response) =
+                    capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                {
+                    return response;
+                }
+                next.run(request).await
+            },
+        ));
+        let response = admitted
+            .clone()
+            .oneshot(get(crate::discovery::PATH, None))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("bounded eligibility"),
+            json!({"advertise":true})
+        );
+        if maintenance || role == LocalServingRole::Learner {
+            assert_eq!(
+                call(&admitted, get("/api/v1/settings", None)).await.0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        assert!(!learner_route_eligible(&method, crate::discovery::PATH));
+        assert!(!maintenance_route_eligible(&method, crate::discovery::PATH));
+    }
+    for path in [
+        "/api/v1/server/discovery/extra",
+        "/api/v1/server/discovery-other",
+    ] {
+        assert!(!learner_route_eligible(&Method::GET, path));
+        assert!(!maintenance_route_eligible(&Method::GET, path));
+    }
+}
+
 #[tokio::test]
 async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
     let root = crate::test_tempdir().expect("tempdir");
@@ -3031,8 +3189,8 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
 async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
     use plurx_core::cluster::clock::PeerClockOffset;
     let (app, state) = test_app_with_state();
-    state.serving.validation_set_ready(true).await;
-    let clock = state.membership.clock_guard();
+    state.cluster.test_fence().validation_set_ready(true).await;
+    let clock = state.cluster.test_membership().clock_guard();
     let publish = |offset_us| {
         let ticket = clock.roster(&["peer".to_owned()]);
         assert!(clock.publish(
@@ -3089,7 +3247,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         call_text(&app, get("/healthz", None)).await.0,
         StatusCode::OK
     );
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     assert_eq!(
         evaluate_readiness(&state).await.reason,
         Some(ReadinessFailure::QuorumUnavailable),
@@ -3099,7 +3257,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         cluster_operations::operations_readiness(&state).reason,
         Some(ReadinessFailure::QuorumUnavailable)
     );
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     clock.roster_failed();
     assert!(
         evaluate_readiness(&state).await.ready,
@@ -3125,7 +3283,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
 #[tokio::test]
 async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
     let (app, state) = test_app_with_state();
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
 
     assert_eq!(
         evaluate_readiness(&state).await,
@@ -6858,7 +7016,7 @@ async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_w
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
 
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     let (status, readiness) = call(&app, get("/api/v1/live-tv/readiness", Some(&admin))).await;
     assert_eq!(status, StatusCode::OK, "{readiness}");
     assert_eq!(readiness["ready"], false);
@@ -6895,6 +7053,8 @@ async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_w
 async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
     let (app, state) = test_app_with_state();
     let admin = setup_admin(&app).await;
+    // Content-aware encoding is always on: an old client's field is accepted,
+    // ignored and never stored, and the GET keeps reporting `true`.
     for (enabled, frames) in [(true, 2), (false, 0)] {
         let (status, result) = call(
             &app,
@@ -6906,16 +7066,15 @@ async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{result}");
-        assert_eq!(result["content_aware_encoding"], enabled);
+        assert_eq!(result["content_aware_encoding"], true);
         assert_eq!(result["vod_reorder_frames"], frames);
         assert_eq!(
             state
                 .store
-                .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                .get_setting("transcode.content_aware_encoding")
                 .await
-                .expect("fixture succeeds")
-                .as_deref(),
-            Some(if enabled { "1" } else { "0" })
+                .expect("fixture succeeds"),
+            None
         );
     }
     let (status, _) = call(
@@ -6928,15 +7087,6 @@ async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        state
-            .store
-            .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
-            .await
-            .expect("fixture succeeds")
-            .as_deref(),
-        Some("0")
-    );
 }
 
 #[tokio::test]
@@ -7001,18 +7151,32 @@ async fn rate_control_settings_validate_publish_and_restore() {
         "{partial}"
     );
 
-    let (status, quality) = call(
-        &app,
-        put(
-            "/api/v1/settings",
-            Some(&admin),
-            json!({
-                "transcode_rate_mode": "quality",
-                "transcode_quality": 22
-            }),
-        ),
-    )
-    .await;
+    let save_quality = || {
+        call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "transcode_rate_mode": "quality",
+                    "transcode_quality": 22
+                }),
+            ),
+        )
+    };
+    // The real encoder probe may defer under runner load. Retry that response
+    // with the same request and still require a validated publication.
+    let (mut status, mut quality) = save_quality().await;
+    for _ in 0..2 {
+        if status != StatusCode::CONFLICT
+            || !quality["error"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("rate-control validation deferred"))
+        {
+            break;
+        }
+        (status, quality) = save_quality().await;
+    }
     assert_eq!(status, StatusCode::OK, "{quality}");
     assert_eq!(quality["transcode_rate_mode"], "quality");
     assert_eq!(quality["transcode_quality"], 22);
@@ -8482,6 +8646,12 @@ async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotentl
         })
         .await
         .expect("claim");
+    let (status, body) = call(&app, get(&format!("{detail}?explain=true"), Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let predicates = &body["job"]["claim_predicates"];
+    assert_eq!(predicates["evaluated"], true);
+    assert_eq!(predicates["first_block"], "state");
+    assert_eq!(predicates["node_id"], state.node_id.as_str());
     for path in ["/api/v1/cluster/jobs?state=running", &detail] {
         let (status, body) = call(&app, get(path, Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -8805,10 +8975,6 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "cluster_transport_recovery",
             "playback_control_protocol_v1",
             "prepared_quality_handoff",
-            // S-10's SDR master CODECS switch, off by default. Its one
-            // row is `unknown`: the device re-qualification is a
-            // physical result this daemon cannot read.
-            "sdr_master_codecs",
             "content_analysis_repair",
             "live_hls_recovery",
             "pgs_overlay",
@@ -8820,11 +8986,12 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "dolby_vision_hdr_processing",
             "dolby_vision_display_target",
             "dolby_vision_fel_reencode",
+            "dolby_vision_refit_apple",
+            "dolby_vision_refit_web",
+            "dolby_vision_refit_android",
+            "dolby_vision_refit_linux",
             "source_probe_comparison",
-            "output_preparation",
-            "rolling_retention",
-            "display_aware_auto",
-            "network_priors"
+            "output_preparation"
         ],
         "every Developer card with prerequisites needs a row here: {body}"
     );
@@ -8853,7 +9020,54 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         }
     }
 
-    // These three rows describe facts this single-node fixture can prove:
+    // The empty catalogue has no FEL titles awaiting a fit; the isolated
+    // runtime cache has no statistics runs. Neither row claims that a title
+    // was fitted or that this host has a processing helper.
+    let refit_requirements = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_refit_apple")
+        .expect("Apple refit card")["requirements"]
+        .as_array()
+        .expect("refit requirements");
+    for (id, evidence) in [
+        (
+            "refit_coverage",
+            "0 of 0 Profile 7 FEL titles fitted for their current source (0 keep identity curves, 0 refused by the helper). Fits run in the background while a switch is on.".to_owned(),
+        ),
+        (
+            "refit_spool",
+            format!("0 complete and 0 partial runs, 0.0 MiB, under the runtime cache's {} directory. Delete it from this card; a later fit decodes its title again.", crate::source_probe::REFIT_SPOOL_DIR),
+        ),
+    ] {
+        let row = refit_requirements
+            .iter()
+            .find(|row| row["id"] == id)
+            .expect("refit inventory requirement");
+        assert_eq!(row["status"], "met", "{id}: {row}");
+        assert_eq!(row["evidence"], evidence, "{id}: {row}");
+    }
+    // The bundle is a host observation, independent of the empty catalogue.
+    // Assert its bounded verdict and evidence outside the exact green set.
+    let helper = refit_requirements
+        .iter()
+        .find(|row| row["id"] == "refit_helper")
+        .expect("refit helper requirement");
+    let helper_evidence = helper["evidence"].as_str().expect("helper evidence");
+    match helper["status"].as_str().expect("helper status") {
+        "met" => assert!(helper_evidence.starts_with(
+            "The DV processing bundle on this node was built from this build's sources (refit mode "
+        )),
+        "unmet" => assert_eq!(
+            helper_evidence,
+            "No DV processing bundle on this node: it fits no titles. Other nodes may."
+        ),
+        "unavailable" => {
+            assert!(helper_evidence.starts_with("The DV processing bundle could not be read: "))
+        }
+        status => panic!("unexpected refit helper status {status}: {helper}"),
+    }
+
+    // These rows describe facts this single-node fixture can prove:
     // the authoritative catalogue responds, server-side handoff exists,
     // and the DVR's tuner arithmetic leaves a recording somewhere to go —
     // that last one is a sum of two configured numbers, so it is knowable
@@ -8896,6 +9110,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "processed_upgrade_renderer"
                     | "processed_upgrade_slot"
                     | "processed_upgrade_activity"
+                    | "refit_helper"
             )
         })
         .collect::<Vec<_>>();
@@ -9009,21 +9224,15 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "durable_queue",
             "durable_role",
             "dv_target_cache",
-            // Display-aware Auto on a single node owns every session.
-            "local_session_owner",
-            // Output preparation and rolling retention: the budget is the
-            // 50 GB unset default; the job list, mode, Stop and live
-            // bytes are statements of what this node reads.
+            // Output preparation reports its default budget, current jobs,
+            // mode, and Stop state.
             "output_budget",
             "output_jobs",
             "output_mode",
             "output_stop",
-            // Network priors' two rows say what the switch does.
-            "priors_cold_start",
-            "priors_history",
-            "retention_budget",
-            "retention_cleanup_pending",
-            "retention_live_bytes",
+            // Empty FEL catalogue and statistics spool, asserted above.
+            "refit_coverage",
+            "refit_spool",
             "rolling_contract_built",
             "runtime",
             "server_preparation_is_real",
@@ -10382,10 +10591,12 @@ async fn activity_requires_auth_and_reports_idle() {
             // P-02 §3.2); node-local, so not a clustered-only field.
             "processes",
             "producing",
+            "receiver_processed",
             "retained_output",
             "retained_output_node",
             "scans",
             "sessions",
+            "source_processed",
             "trakt",
             // Local worker observations are useful on SQLite too, with the
             // nodes that were observed (learner workers included).
@@ -11485,11 +11696,6 @@ async fn client_telemetry_updates_the_matching_network_prior() {
         .await
         .expect("admin lookup")
         .expect("admin user");
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
 
     let report =
         |event: &'static str, bandwidth: i64, height: i64, detail: Option<&'static str>| {
@@ -11570,11 +11776,6 @@ async fn client_telemetry_updates_the_matching_network_prior() {
 async fn authenticated_client_log_stays_bound_to_captured_credential_generation() {
     let (app, state) = test_state();
     let token = setup_admin(&app).await;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
     let original = state
         .store
         .get_user_by_username("paul")
@@ -15350,6 +15551,201 @@ async fn a_high_bitrate_remux_is_hinted_toward_segments() {
     assert!(why.contains("69 Mb/s"), "{body}");
 }
 
+/// Exercise the progressive response, including its actual FFmpeg process and
+/// fragmented MP4 body. The old lowercase-v map selects the JPEG in cover-first
+/// inputs even though the scanner has selected the moving film.
+#[tokio::test]
+async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
+    use plurx_core::testfixtures::{ffmpeg, require_ffmpeg, run};
+    use std::process::Command;
+
+    fn atoms(mut bytes: &[u8]) -> Vec<&[u8]> {
+        let mut atoms = Vec::new();
+        while !bytes.is_empty() {
+            let size =
+                u32::from_be_bytes(bytes[..4].try_into().expect("four-byte box size")) as usize;
+            assert!(size >= 8);
+            let (atom, rest) = bytes.split_at(size);
+            atoms.push(atom);
+            bytes = rest;
+        }
+        atoms
+    }
+
+    fn decoded_video(path: &Path) -> Vec<u8> {
+        run(Command::new(ffmpeg())
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:V:0", "-threads", "1", "-f", "rawvideo", "pipe:1"]))
+    }
+
+    require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("progressive remux fixtures");
+    let cover = dir.path().join("cover.jpg");
+    run(Command::new(ffmpeg())
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=32x32",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-threads",
+            "1",
+        ])
+        .arg(&cover));
+
+    for (name, has_cover, playable_streams) in [
+        ("ordinary", false, 1),
+        ("cover-first", true, 2),
+        ("audio-with-cover", true, 0),
+    ] {
+        let source = dir.path().join(format!("{name}.mp4"));
+        let mut fixture = Command::new(ffmpeg());
+        fixture.args(["-v", "error", "-i"]).arg(&cover).args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=96x64:r=8:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:s=64x48:r=8:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:r=44100:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=880:r=48000:d=1",
+        ]);
+        for input in 1..=playable_streams {
+            fixture.args(["-map", &format!("{input}:v")]);
+        }
+        fixture.args([
+            "-map", "3:a", "-map", "4:a", "-c:a", "aac", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-threads", "1",
+        ]);
+        if has_cover {
+            fixture.args([
+                "-map",
+                "0:v",
+                &format!("-c:v:{playable_streams}"),
+                "copy",
+                &format!("-disposition:v:{playable_streams}"),
+                "attached_pic",
+            ]);
+        }
+        fixture.arg(&source);
+        run(&mut fixture);
+        if has_cover {
+            // The MOV muxer writes cover art into udta at the end of moov.
+            // Move udta before the track atoms so the demuxer sees the cover
+            // first. The atoms' sizes and all media chunk offsets stay fixed.
+            let original = std::fs::read(&source).expect("read");
+            let mut reordered = Vec::new();
+            for atom in atoms(&original) {
+                if &atom[4..8] == b"moov" {
+                    let mut children = atoms(&atom[8..]);
+                    children.sort_by_key(|child| &child[4..8] != b"udta");
+                    reordered.extend_from_slice(&atom[..8]);
+                    reordered.extend(children.into_iter().flatten());
+                } else {
+                    reordered.extend_from_slice(atom);
+                }
+            }
+            std::fs::write(&source, reordered).expect("write");
+        }
+
+        let scan = plurx_core::scan::probe::probe(&source)
+            .await
+            .expect("scan source");
+        if has_cover {
+            let raw: Value =
+                serde_json::from_str(scan.raw_json.as_deref().expect("raw probe JSON"))
+                    .expect("probe JSON");
+            assert_eq!(
+                raw["streams"][0]["disposition"]["attached_pic"], 1,
+                "{name}"
+            );
+        }
+        let dimensions = (playable_streams != 0).then_some((96, 64));
+        assert_eq!(scan.width.zip(scan.height), dimensions, "{name}");
+        let metadata = std::fs::metadata(&source).expect("metadata");
+        let mtime = metadata
+            .modified()
+            .expect("modified")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("duration since");
+        let file_id = state
+            .store
+            .upsert_file(
+                seed.movie,
+                source.to_str().expect("UTF-8 fixture path"),
+                metadata.len() as i64,
+                mtime.as_secs() as i64,
+                &scan,
+            )
+            .await
+            .expect("catalogue fixture");
+
+        let response = app.clone().oneshot(get(
+            &format!("/api/v1/files/{file_id}/stream.mp4?vcodec=h264&acodec=aac&container=mp4&audio=1"),
+            Some(&admin),
+        )).await.expect("progressive response");
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let output = dir.path().join(format!("{name}-progressive.mp4"));
+        std::fs::write(&output, body).expect("write");
+        let delivered = plurx_core::scan::probe::probe(&output)
+            .await
+            .expect("scan remux output");
+        assert_eq!(delivered.width.zip(delivered.height), dimensions, "{name}");
+        let raw: Value =
+            serde_json::from_str(delivered.raw_json.as_deref().expect("raw probe JSON"))
+                .expect("probe JSON");
+        assert_eq!(
+            raw["streams"].as_array().expect("JSON array").len(),
+            1 + usize::from(dimensions.is_some()),
+            "{name}"
+        );
+        assert_eq!(delivered.audio_streams.len(), 1, "{name}");
+        assert_eq!(
+            delivered.audio_streams[0].sample_rate,
+            Some(48_000),
+            "{name}"
+        );
+        if dimensions.is_some() {
+            let film = decoded_video(&source);
+            let frame_bytes = 96 * 64 * 3 / 2;
+            assert_eq!(film.len(), 8 * frame_bytes, "{name}");
+            assert!(
+                film.chunks_exact(frame_bytes)
+                    .any(|frame| frame != &film[..frame_bytes]),
+                "{name} has motion"
+            );
+            assert_eq!(
+                decoded_video(&output),
+                film,
+                "{name} must carry the scanned film"
+            );
+        }
+    }
+}
+
 /// A caller-selected audio track must replace the policy default before
 /// capability evaluation. This is the retained regression for #265: with
 /// the production selection handling removed, the second request silently
@@ -16260,11 +16656,6 @@ async fn a_browser_reads_back_the_prior_it_reported_over_the_wire() {
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     prepare_vod_copy_fixture(&state, s.file, 16).await;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
 
     let as_client = |mut request: Request<Body>, ua: &'static str| {
         request.headers_mut().insert(
@@ -16398,7 +16789,7 @@ async fn network_prior_is_opt_in_and_additive_on_decision_and_session_wires() {
     assert_eq!(status, StatusCode::OK, "{cold}");
     assert!(
         cold.get("prior_kbps").is_none(),
-        "the default-off response must be byte-for-byte additive: {cold}"
+        "a network with no stored prior gets a byte-for-byte additive response: {cold}"
     );
     let (status, cold_session) = call(
         &app,
@@ -16415,7 +16806,7 @@ async fn network_prior_is_opt_in_and_additive_on_decision_and_session_wires() {
     assert_eq!(status, StatusCode::OK, "{cold_session}");
     assert!(
         cold_session.get("prior_kbps").is_none(),
-        "the default-off session response must omit the additive key: {cold_session}"
+        "a network with no stored prior omits the additive key: {cold_session}"
     );
     if let Some(session_id) = cold_session["session_id"].as_str() {
         state.transcode.stop_session(session_id, "test").await;
@@ -17387,72 +17778,333 @@ async fn shared_native_api_fixture_uses_the_servers_live_wire_keys() {
     );
 }
 
-#[tokio::test]
-async fn decision_rereads_a_manual_override_that_commits_during_fallback_publication() {
-    let (app, state) = test_state();
-    let admin = setup_admin(&app).await;
-    let seeded = seed_content(&state).await;
-    let file = state
-        .store
-        .get_file(seeded.file)
-        .await
-        .expect("read seeded file")
-        .expect("seeded file");
-    let pause = stream::pause_next_marker_fallback_for_test(&file.path);
+fn write_chapter_fixture(path: &Path, with_intro: bool) {
+    use plurx_core::testfixtures::{ffmpeg, require_ffmpeg, run};
+    require_ffmpeg();
+    let mut command = std::process::Command::new(ffmpeg());
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=96x64:r=8:d=1",
+    ]);
+    if with_intro {
+        let chapters = path.with_extension("ffmetadata");
+        std::fs::write(
+            &chapters,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=60000\ntitle=Intro\n",
+        )
+        .expect("write chapter metadata fixture");
+        command
+            .args(["-f", "ffmetadata", "-i"])
+            .arg(chapters)
+            .args(["-map_chapters", "1"]);
+    }
+    run(command
+        .args(["-map", "0:v", "-c:v", "libx264", "-threads", "1"])
+        .arg(path));
+}
 
-    let decision_app = app.clone();
-    let decision_admin = admin.clone();
-    let decision = tokio::spawn(async move {
-        call(
-            &decision_app,
-            get(
-                &format!(
-                    "/api/v1/files/{}/decision?vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0",
-                    seeded.file
-                ),
-                Some(&decision_admin),
-            ),
+async fn catalogue_legacy_chapter_fixture(
+    state: &AppState,
+    item_id: i64,
+    path: &Path,
+) -> plurx_core::domain::MediaFile {
+    let metadata = std::fs::metadata(path).expect("metadata");
+    let mtime = metadata
+        .modified()
+        .expect("modified")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("duration since");
+    let file_id = state
+        .store
+        .upsert_file(
+            item_id,
+            path.to_str().expect("UTF-8 fixture path"),
+            metadata.len() as i64,
+            mtime.as_secs() as i64,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: Some(9_000_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(96),
+                height: Some(64),
+                raw_json: Some(r#"{"format":{"duration":"9000"},"streams":[]}"#.into()),
+                ..Default::default()
+            },
         )
         .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), pause.wait())
+        .expect("upsert fixture file");
+    state
+        .store
+        .get_file(file_id)
         .await
-        .expect("decision reached its authoritative annotation miss");
+        .expect("get file")
+        .expect("fixture file exists")
+}
 
-    let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", file.id);
+fn chapter_decision(file_id: i64, token: &str) -> Request<Body> {
+    get(
+        &format!("/api/v1/files/{file_id}/decision?vcodec=h264&acodec=aac&container=mp4"),
+        Some(token),
+    )
+}
+
+async fn wait_for_chapter_probe(
+    state: &AppState,
+    pause: &tokio::sync::Barrier,
+    worker: &mut tokio::task::JoinHandle<()>,
+) {
+    tokio::select! {
+        _ = pause.wait() => return,
+        _ = worker => {},
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+    }
+    panic!(
+        "background chapter probe was never reached: {:?}",
+        state
+            .store
+            .analysis_requests(10)
+            .await
+            .expect("analysis requests")
+    );
+}
+
+async fn configure_chapter_worker(state: &AppState) {
+    use plurx_core::store::keys;
+    state
+        .store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+        .await
+        .expect("put setting");
+    state
+        .store
+        .put_setting(keys::ANALYSIS_LEASE_SECS, "15")
+        .await
+        .expect("put setting");
+}
+
+async fn wait_out_chapter_attempt(state: &AppState, request_id: &str, retry_at_ms: i64) {
+    // A failed or superseded claim can keep its source reservation for its lease.
+    let expires = state
+        .store
+        .analysis_attempts(request_id, 1)
+        .await
+        .expect("analysis attempts")[0]
+        .claim_expires_at_ms;
+    let wait = expires
+        .max(retry_at_ms)
+        .saturating_sub(crate::state::clock_ms())
+        .max(0);
+    tokio::time::sleep(Duration::from_millis(wait as u64 + 1)).await;
+}
+
+#[tokio::test]
+async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() {
+    let (app, state) = test_state();
+    configure_chapter_worker(&state).await;
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("test tempdir");
+    let path = dir.path().join("legacy.mp4");
+    write_chapter_fixture(&path, true);
+    let file = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+
+    let pause = stream::pause_next_chapter_probe_for_test(&file.path, Some(Duration::from_secs(1)));
+    let ((status, first), (other_status, second)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                call(&app, chapter_decision(file.id, &admin)),
+                call(&app, chapter_decision(file.id, &admin)),
+            )
+        })
+        .await
+        .expect("Play must never await the chapter probe");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_status, StatusCode::OK);
+    assert_eq!(first["markers"], json!([]));
+    assert_eq!(second["markers"], json!([]));
+    assert!(
+        state
+            .store
+            .analysis_requests(10)
+            .await
+            .expect("analysis requests")
+            .is_empty(),
+        "Play returned while the background owner was unavailable to admit work"
+    );
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+    let queue = state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests");
+    assert_eq!(queue.len(), 1, "one durable request for both decisions");
+    assert_eq!(queue[0].trigger, "background");
+    let request_id = &queue[0].request_id;
+    worker.await.expect("chapter worker task");
+
+    let retry = state
+        .store
+        .analysis_request(request_id)
+        .await
+        .expect("analysis request")
+        .expect("retry request exists");
+    assert_eq!(retry.state, "queued");
+    assert_eq!(retry.last_error_code, "source_probe_timeout");
+    let identity = stream::annotation_source_identity(&file);
+    assert!(state
+        .store
+        .timeline_annotation_set(file.id, &identity)
+        .await
+        .expect("timeline annotation set")
+        .is_none());
+
+    wait_out_chapter_attempt(&state, request_id, retry.not_before_ms).await;
+    let pause = stream::pause_next_chapter_probe_for_test(&file.path, None);
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+
     let (status, manual) = call(
         &app,
         put(
-            &manual_url,
+            &format!("/api/v1/files/{}/timeline-annotations/credits", file.id),
             Some(&admin),
             json!({
-                "start_ticks": 8_500_000,
-                "end_ticks": 9_000_000,
-                "timescale": 1000,
-                "start_ms": 8_500_000,
-                "end_ms": 9_000_000,
+                "start_ticks": 8_500_000, "end_ticks": 9_000_000, "timescale": 1000,
+                "start_ms": 8_500_000, "end_ms": 9_000_000,
             }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{manual}");
-    assert_eq!(manual["provenance"], "manual");
+    let (_, pending) = call(&app, chapter_decision(file.id, &admin)).await;
+    assert_eq!(pending["markers"].as_array().expect("JSON array").len(), 1);
+    assert_eq!(pending["markers"][0]["provenance"], "manual");
 
     pause.wait().await;
-    let (status, decision) = tokio::time::timeout(std::time::Duration::from_secs(5), decision)
-        .await
-        .expect("decision completed after fallback release")
-        .expect("decision task");
+    worker.await.expect("chapter worker task");
+    let (status, decision) = call(&app, chapter_decision(file.id, &admin)).await;
     assert_eq!(status, StatusCode::OK, "{decision}");
-    let credits = decision["markers"]
-        .as_array()
-        .expect("decision markers")
+    let markers = decision["markers"].as_array().expect("JSON array");
+    assert!(
+        markers
+            .iter()
+            .any(|marker| marker["kind"] == "intro" && marker["provenance"] == "authored"),
+        "{markers:?}"
+    );
+    let credits = markers
         .iter()
         .find(|marker| marker["kind"] == "credits")
         .expect("credits marker");
     assert_eq!(credits["start_ms"], 8_500_000);
     assert_eq!(credits["provenance"], "manual");
     assert_eq!(credits["confidence"], 1_000);
+}
+
+#[tokio::test]
+async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sources() {
+    let (app, state) = test_state();
+    configure_chapter_worker(&state).await;
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("test tempdir");
+    let path = dir.path().join("replacement.mp4");
+    write_chapter_fixture(&path, true);
+    let original = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+    let old_identity = stream::annotation_source_identity(&original);
+    let legacy = stream::annotation_set_from_markers(old_identity.clone(), &[]);
+    state
+        .store
+        .put_timeline_annotation_set(original.id, 9_000_000, &legacy)
+        .await
+        .expect("put timeline annotation set");
+    let (_, decision) = call(&app, chapter_decision(original.id, &admin)).await;
+    assert_eq!(decision["markers"], json!([]));
+
+    let pause = stream::pause_next_chapter_probe_for_test(&path, None);
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+    let old_request = state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests")
+        .remove(0);
+    let replacement_path = dir.path().join("new.mp4");
+    write_chapter_fixture(&replacement_path, false);
+    std::fs::rename(replacement_path, &path).expect("rename");
+    let replacement = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+    assert_eq!(replacement.id, original.id);
+    let identity = stream::annotation_source_identity(&replacement);
+    assert_ne!(identity, old_identity);
+    pause.wait().await;
+    worker.await.expect("chapter worker task");
+    assert!(state
+        .store
+        .timeline_annotation_set(replacement.id, &identity)
+        .await
+        .expect("timeline annotation set")
+        .is_none());
+
+    wait_out_chapter_attempt(&state, &old_request.request_id, 0).await;
+    let (_, unknown) = call(&app, chapter_decision(replacement.id, &admin)).await;
+    assert_eq!(unknown["markers"], json!([]));
+    state
+        .jobs
+        .clone()
+        .work_cluster_fragment_index_queue(state.transcode.clone())
+        .await;
+    let confirmed = state
+        .store
+        .timeline_annotation_set(replacement.id, &identity)
+        .await
+        .expect("timeline annotation set")
+        .expect("chapterless probe published");
+    assert_eq!(
+        state
+            .store
+            .get_file_probe_chapters_json(replacement.id, replacement.size, replacement.mtime)
+            .await
+            .expect("get file probe chapters json")
+            .as_deref(),
+        Some("[]"),
+        "the confirmed chapterless probe also backfills raw chapter consumers"
+    );
+    assert_eq!(confirmed.version, stream::CHAPTER_EVIDENCE_VERSION);
+    assert!(confirmed
+        .annotations
+        .iter()
+        .all(|marker| marker.provenance == plurx_core::segplan::AnnotationProvenance::Estimated));
+    let (_, decision) = call(&app, chapter_decision(replacement.id, &admin)).await;
+    assert!(decision["markers"]
+        .as_array()
+        .expect("JSON array")
+        .iter()
+        .all(|marker| marker["provenance"] == "estimated"));
+    assert_eq!(
+        decision["markers"].as_array().expect("JSON array").len(),
+        confirmed.annotations.len()
+    );
 }
 
 #[tokio::test]
@@ -21514,7 +22166,7 @@ async fn facts_skip_photos_and_folders() {
 async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects() {
     use tower::ServiceExt;
     let state = test_state_without_router();
-    let fence = state.serving.clone();
+    let fence = state.cluster.test_fence().clone();
     let app = Router::new()
         .route(
             "/items/one/direct",
@@ -21567,7 +22219,7 @@ async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects
 async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
     use tower::ServiceExt;
     let state = test_state_without_router();
-    let fence = state.serving.clone();
+    let fence = state.cluster.test_fence().clone();
     let app = Router::new()
         .route(
             "/internal/media/fragment-index/key",
@@ -23762,4 +24414,376 @@ async fn source_readers_per_root_setting_round_trips_and_rejects_only_bad_input(
         "a refused write changes nothing"
     );
     assert_eq!(after["source_readers_root_overrides"], json!({}));
+}
+
+// ---------------------------------------------------------------------------
+// Custom tags, rows and Home layout (docs/features/CUSTOM-TAGS-PLAN.md §3, §7)
+// ---------------------------------------------------------------------------
+
+async fn curation_viewer(app: &Router, admin: &str, name: &str) -> (i64, String) {
+    let (status, created) = call(
+        app,
+        post(
+            "/api/v1/users",
+            Some(admin),
+            json!({"username": name, "password": "longenough"}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "{created}");
+    let (_, login) = call(
+        app,
+        post(
+            "/api/v1/auth/login",
+            None,
+            json!({"username": name, "password": "longenough"}),
+        ),
+    )
+    .await;
+    (
+        created["id"].as_i64().expect("user id"),
+        login["token"].as_str().expect("token").to_owned(),
+    )
+}
+
+/// §3: private tags are anyone's; household tags need the grant (admins hold
+/// it implicitly); someone else's private tag is invisible, not forbidden;
+/// a viewer's checklist can never strip or add a household tag it cannot edit.
+#[tokio::test]
+async fn curation_permissions_follow_scope_and_the_manage_tags_grant() {
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let admin = setup_admin(&app).await;
+    let (viewer_id, viewer) = curation_viewer(&app, &admin, "viewer").await;
+
+    let (status, _) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&viewer),
+            json!({"name": "Gay-themed", "scope": "household"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "no grant, no household tag");
+    let (status, mine) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&viewer),
+            json!({"name": "rewatch", "scope": "private"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{mine}");
+    let (status, house) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&admin),
+            json!({"name": "Gay-themed", "scope": "household", "color": "violet"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{house}");
+    let (status, _) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&admin),
+            json!({"name": " gay-THEMED ", "scope": "household"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "one key per scope");
+    let house_id = house["id"].as_i64().expect("id");
+    let mine_id = mine["id"].as_i64().expect("id");
+
+    // The admin cannot see the viewer's private tag at all.
+    let (_, admin_tags) = call(&app, get("/api/v1/tags", Some(&admin))).await;
+    let ids: Vec<i64> = admin_tags["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .map(|t| t["id"].as_i64().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![house_id], "{admin_tags}");
+    assert_eq!(
+        call(
+            &app,
+            get(&format!("/api/v1/tags/{mine_id}/items"), Some(&admin))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Without the grant the viewer sees the household tag but cannot apply it.
+    let (_, viewer_tags) = call(&app, get("/api/v1/tags", Some(&viewer))).await;
+    assert_eq!(viewer_tags["can_manage_household"], false, "{viewer_tags}");
+    let item_tags = format!("/api/v1/items/{}/tags", seed.movie);
+    let (status, _) = call(
+        &app,
+        put(&item_tags, Some(&viewer), json!({"tag_ids": [house_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = call(
+        &app,
+        put(&item_tags, Some(&admin), json!({"tag_ids": [house_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The viewer's own checklist (private tag only) leaves the household tag on.
+    let (status, body) = call(
+        &app,
+        put(&item_tags, Some(&viewer), json!({"tag_ids": [mine_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .map(|t| t["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["Gay-themed", "rewatch"], "{body}");
+    // Episodes follow their show; they are not tagged on their own.
+    let (status, _) = call(
+        &app,
+        put(
+            &format!("/api/v1/items/{}/tags", seed.ep),
+            Some(&admin),
+            json!({"tag_ids": [house_id]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Granting manage_tags lets the viewer curate household tags; revoking takes it back.
+    let grants = format!("/api/v1/users/{viewer_id}/grants");
+    assert_eq!(
+        call(
+            &app,
+            put(&grants, Some(&viewer), json!({"grants": ["manage_tags"]}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = call(
+        &app,
+        put(&grants, Some(&admin), json!({"grants": ["manage_tags"]})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["grants"].clone()),
+        (StatusCode::OK, json!(["manage_tags"]))
+    );
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/tags/{house_id}/items"),
+            Some(&viewer),
+            json!({"add": [seed.show]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call(&app, put(&grants, Some(&admin), json!({"grants": []}))).await;
+    assert_eq!(
+        (status, body["grants"].clone()),
+        (StatusCode::OK, json!([]))
+    );
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/tags/{house_id}/items"),
+            Some(&viewer),
+            json!({"remove": [seed.show]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// §4: the grid filter, `tag:` search, saved rows, Home rows, and a delete
+/// that is refused while a row uses the tag.
+#[tokio::test]
+async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let admin = setup_admin(&app).await;
+    let (_, house) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&admin),
+            json!({"name": "date night", "scope": "household"}),
+        ),
+    )
+    .await;
+    let tag = house["id"].as_i64().expect("id");
+    call(
+        &app,
+        post(
+            &format!("/api/v1/tags/{tag}/items"),
+            Some(&admin),
+            json!({"add": [seed.movie]}),
+        ),
+    )
+    .await;
+
+    let (status, grid) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items?tags={tag}", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{grid}");
+    assert_eq!(grid["total"], 1, "{grid}");
+    assert_eq!(grid["items"][0]["id"], seed.movie, "{grid}");
+    let (_, grid) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items?not_tags={tag}", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert!(
+        grid["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .all(|i| i["id"] != seed.movie),
+        "{grid}"
+    );
+    let (_, plain) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert!(
+        plain["total"].as_i64().expect("total") >= 2,
+        "the unfiltered grid is unchanged: {plain}"
+    );
+
+    let (status, found) = call(
+        &app,
+        get("/api/v1/search?q=tag:%22date%20night%22", Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(
+        found["results"].as_array().expect("results").len(),
+        1,
+        "{found}"
+    );
+    let (_, none) = call(&app, get("/api/v1/search?q=tag:nonexistent", Some(&admin))).await;
+    assert_eq!(none["results"], json!([]));
+
+    // No stored layout: Home is today's Home, then visible rows.
+    let (_, layout) = call(&app, get("/api/v1/home/layout", Some(&admin))).await;
+    assert_eq!(layout["source"], "builtin", "{layout}");
+    let keys: Vec<&str> = layout["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(
+        keys,
+        plurx_core::curation::BUILTIN_HOME.to_vec(),
+        "{layout}"
+    );
+
+    let (status, row) = call(
+        &app,
+        post("/api/v1/rows", Some(&admin), json!({"title": "Date night", "scope": "household", "spec": {"all_of": [{"tag": tag}]}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let row_id = row["id"].as_i64().expect("id");
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert_eq!(home["rows"][row_id.to_string()]["total"], 1, "{home}");
+    assert_eq!(
+        home["layout"]
+            .as_array()
+            .expect("layout")
+            .last()
+            .expect("row")["key"],
+        format!("row:{row_id}"),
+        "{home}"
+    );
+
+    // Move the row first and hide Next up.
+    let (status, _) = call(
+        &app,
+        put("/api/v1/home/layout", Some(&admin), json!({"entries": [{"key": format!("row:{row_id}")}, {"key": "next_up", "hidden": true}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    let keys: Vec<&str> = home["layout"]
+        .as_array()
+        .expect("layout")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(keys[0], format!("row:{row_id}"), "{home}");
+    assert!(!keys.contains(&"next_up"), "{home}");
+    let (status, _) = call(
+        &app,
+        put(
+            "/api/v1/home/layout",
+            Some(&admin),
+            json!({"entries": [{"key": "bogus"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Deleting a tag a row uses is refused with the row named; archive is fine.
+    let (status, body) = call(
+        &app,
+        delete_req(&format!("/api/v1/tags/{tag}"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("Date night"), "{body}");
+    // Forcing it leaves the row alone: its condition now matches nothing, so
+    // it leaves Home instead of widening to everything.
+    let (status, _) = call(
+        &app,
+        delete_req(&format!("/api/v1/tags/{tag}?force=1"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, rows) = call(&app, get("/api/v1/rows", Some(&admin))).await;
+    assert_eq!(rows["rows"].as_array().expect("rows").len(), 1, "{rows}");
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert!(home["rows"].get(row_id.to_string()).is_none(), "{home}");
+}
+
+/// §2.3: nothing outside the native API reads curation, so a tag cannot
+/// reach Jellyfin, Plex or a shared-library receiver.
+#[test]
+fn compatibility_and_federation_dtos_never_read_curation() {
+    for (name, source) in [
+        ("jellyfin.rs", include_str!("jellyfin.rs")),
+        ("plex.rs", include_str!("plex.rs")),
+        ("shared_library.rs", include_str!("shared_library.rs")),
+    ] {
+        for needle in ["curation", "item_tag_ids", "visible_tags", "rule_items"] {
+            assert!(!source.contains(needle), "{name} must not read {needle}");
+        }
+    }
 }

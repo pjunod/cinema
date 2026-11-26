@@ -2,6 +2,11 @@
 //! the player shows it: short badges for what is active (FEL, RPU, DYN) and
 //! plain detail rows for everything, including why something is not in use.
 //!
+//! A Profile 7 enhancement layer is full (FEL) or minimal (MEL). A MEL's
+//! residual is the identity, so it adds no picture detail and the Dolby grade
+//! is all in the RPU. The complete-title scan records which one a title has;
+//! a MEL title's enhancement-layer row says MEL and is never active.
+//!
 //! The server computes this once so every client renders the same thing and
 //! none has to reconstruct the delivery route from wire fields.
 
@@ -10,7 +15,10 @@ use serde::{Deserialize, Serialize};
 /// The enhancements a badge can name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnhancementBadge {
-    /// The full enhancement layer's residual is in the delivered picture.
+    /// The enhancement-layer row. Active only while a full enhancement
+    /// layer's residual is in the delivered picture. A minimal layer (MEL)
+    /// keeps this row, inactive, and its text names it MEL; the wire label
+    /// stays `FEL` so a receiver built before MEL was named still decodes it.
     #[serde(rename = "FEL")]
     Fel,
     /// The RPU's reshaping (polynomial/MMR) was applied by the server.
@@ -40,6 +48,73 @@ pub struct PlaybackEnhancement {
     /// generation (they clear on seek, fallback or replacement with it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requires_effective_processing: bool,
+    /// `fel` or `mel`: the source's enhancement layer as the complete-title
+    /// scan classified it, so a client naming the layer it composed itself
+    /// (the Linux player's EL pill) says which one. Absent for a source
+    /// without one, or before the scan has run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub el_kind: Option<crate::scan::dv_title::TitleElKind>,
+    /// The `Dolby Vision metadata` row of a delivery the server does not
+    /// process. A processed delivery's row describes its current processing
+    /// report, so it travels with that report (`effective_processing`), not
+    /// here, and this is omitted.
+    ///
+    /// Decoded leniently: a row this build cannot read is dropped, never the
+    /// enhancement it rides in (a relayed start must not fail over a
+    /// diagnostic row).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_rows"
+    )]
+    pub dv_metadata: Option<super::dv_provenance::DvMetadataRows>,
+}
+
+fn lenient_rows<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<super::dv_provenance::DvMetadataRows>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+impl PlaybackEnhancement {
+    /// Drop a Dolby Vision metadata row that is out of shape, keeping the
+    /// rest. A receiver calls this before relaying.
+    pub fn drop_ill_formed_rows(&mut self) {
+        if self
+            .dv_metadata
+            .as_ref()
+            .is_some_and(|rows| !rows.is_well_formed())
+        {
+            self.dv_metadata = None;
+        }
+    }
+
+    /// Whether a decoded value has the shape [`playback_enhancement`] builds:
+    /// at most one detail per badge, each with one bounded sentence, and
+    /// `active` exactly the active details' badges in order. A receiver
+    /// relays a Source's rows only when they hold.
+    pub fn is_well_formed(&self) -> bool {
+        const MAX_TEXT: usize = 1024;
+        let mut seen = Vec::with_capacity(3);
+        for detail in &self.details {
+            if seen.contains(&detail.badge)
+                || detail.text.trim().is_empty()
+                || detail.text.len() > MAX_TEXT
+                || detail.text.chars().any(char::is_control)
+            {
+                return false;
+            }
+            seen.push(detail.badge);
+        }
+        self.details.len() <= 3
+            && self
+                .details
+                .iter()
+                .filter(|detail| detail.active)
+                .map(|detail| detail.badge)
+                .eq(self.active.iter().copied())
+    }
 }
 
 /// How many of the served frames' display mappings applied the title's creative trims.
@@ -83,12 +158,34 @@ pub enum EnhancementRoute {
     Other,
 }
 
+/// What the title scans recorded in a source's probe document that these
+/// rows read: the display-metadata levels and the enhancement-layer kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TitleScanFacts {
+    /// `plurx_dv_levels_v1`; `None` until the levels pass has read the title.
+    pub levels: Option<crate::scan::dv_levels::DvTitleLevels>,
+    /// `plurx_dv_title_v1`'s consistent enhancement-layer kind.
+    pub el_kind: Option<crate::scan::dv_title::TitleElKind>,
+}
+
+impl TitleScanFacts {
+    pub fn from_probe(document: Option<&str>) -> Self {
+        Self {
+            levels: crate::scan::dv_levels::title_levels_from_probe(document),
+            el_kind: crate::scan::dv_title::title_el_kind_from_probe(document),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EnhancementFacts<'a> {
     /// Source Dolby Vision profile (5, 7, 8); `None` for a non-DV source.
     pub source_profile: Option<u8>,
     /// Whether the source declares an enhancement layer.
     pub source_el_present: Option<bool>,
+    /// Full or minimal, as the complete-title scan classified the layer from
+    /// its RPUs; `None` until the scan has run or when its RPUs disagree.
+    pub el_kind: Option<crate::scan::dv_title::TitleElKind>,
     pub route: EnhancementRoute,
     /// Developer tab: "Process Dolby Vision for HDR output". `None` when the
     /// caller does not hold the settings snapshot (a prepared successor).
@@ -97,6 +194,9 @@ pub struct EnhancementFacts<'a> {
     pub fel_reencode_enabled: Option<bool>,
     /// Why processing was declined for this play, when it was.
     pub decline_reason: Option<&'a str>,
+    /// The title's recorded display-metadata levels (`plurx_dv_levels_v1`);
+    /// `None` until the levels pass has read it.
+    pub levels: Option<&'a crate::scan::dv_levels::DvTitleLevels>,
 }
 
 fn detail(badge: EnhancementBadge, active: bool, text: impl Into<String>) -> EnhancementDetail {
@@ -112,10 +212,24 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
     use EnhancementBadge::{Dyn, Fel, Rpu};
     let profile = facts.source_profile?;
     let has_el = profile == 7 && facts.source_el_present != Some(false);
+    // A minimal layer contributes nothing, so its row never claims the layer
+    // as missing detail or as a dropped enhancement; only a receipt that the
+    // server composed a full layer can make the row active.
+    let mel = has_el && facts.el_kind == Some(crate::scan::dv_title::TitleElKind::Mel);
+    let mel_row = |how: &str| {
+        detail(
+            Fel,
+            false,
+            format!(
+                "MEL: minimal enhancement layer{how} — it adds no picture detail; \
+                 the Dolby grade is in the RPU"
+            ),
+        )
+    };
     let not_used = |setting: Option<bool>, setting_name: &str| -> String {
         match (setting, facts.decline_reason) {
             (Some(false), _) => {
-                format!("not used — {setting_name} is off in Settings → Developer")
+                format!("not used — {setting_name} is off in Settings → Playback")
             }
             (_, Some(reason)) => format!("not used for this play — {reason}"),
             (_, None) => "not used for this play".to_owned(),
@@ -125,7 +239,18 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
     let mut requires_effective_processing = false;
     match &facts.route {
         EnhancementRoute::NativeDolbyVision => {
-            if has_el {
+            if mel {
+                details.push(mel_row(" delivered for the display"));
+            } else if has_el && facts.el_kind.is_none() {
+                // Unscanned, or its RPUs disagree: the version line says
+                // "type not yet scanned", and this row does not guess FEL.
+                details.push(detail(
+                    Fel,
+                    false,
+                    "Enhancement layer: delivered for the display to decode — the title \
+                     scan has not yet said whether it is full (FEL) or minimal (MEL)",
+                ));
+            } else if has_el {
                 details.push(detail(
                     Fel,
                     false,
@@ -146,12 +271,17 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             ));
         }
         EnhancementRoute::ConvertedProfile81 => {
-            if has_el {
+            if mel {
+                details.push(mel_row(" dropped for Profile 8.1, losing nothing"));
+            } else if has_el {
+                // Said outright (Curator ADR 0031 §7): a viewer who chose the
+                // FEL remux should read that this play drops its layer, not
+                // infer it from the RPU line.
                 details.push(detail(
                     Fel,
                     false,
                     format!(
-                        "FEL: {}",
+                        "FEL: {} — the enhancement layer is dropped and this plays as Profile 8.1",
                         not_used(facts.fel_reencode_enabled, "FEL re-encode")
                     ),
                 ));
@@ -169,18 +299,22 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             ));
         }
         EnhancementRoute::ReconstructedProfile81 { fel_contributed } => {
-            details.push(detail(
-                Fel,
-                *fel_contributed,
-                if *fel_contributed {
-                    "FEL: full enhancement layer reconstructed into the picture"
-                } else {
-                    // Only the selected plan or its served-window receipt can
-                    // say the base layer came from composition; neither did.
-                    "FEL: not confirmed for this play — the processing receipt does not \
+            if mel && !*fel_contributed {
+                details.push(mel_row(""));
+            } else {
+                details.push(detail(
+                    Fel,
+                    *fel_contributed,
+                    if *fel_contributed {
+                        "FEL: full enhancement layer reconstructed into the picture"
+                    } else {
+                        // Only the selected plan or its served-window receipt can
+                        // say the base layer came from composition; neither did.
+                        "FEL: not confirmed for this play — the processing receipt does not \
                      report the enhancement layer composed into the picture"
-                },
-            ));
+                    },
+                ));
+            }
             details.push(detail(
                 Rpu,
                 true,
@@ -199,7 +333,9 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             creative_trims,
         } => {
             requires_effective_processing = true;
-            if has_el {
+            if mel && !*fel_contributed {
+                details.push(mel_row(""));
+            } else if has_el {
                 details.push(detail(
                     Fel,
                     *fel_contributed,
@@ -234,7 +370,9 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             creative_trims,
         } => {
             requires_effective_processing = true;
-            if has_el {
+            if mel && !*fel_contributed {
+                details.push(mel_row(""));
+            } else if has_el {
                 details.push(detail(
                     Fel,
                     *fel_contributed,
@@ -263,7 +401,9 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         }
         EnhancementRoute::Hdr10Base => {
             let why = not_used(facts.hdr_processing_enabled, "Dolby Vision processing");
-            if has_el {
+            if mel {
+                details.push(mel_row(""));
+            } else if has_el {
                 details.push(detail(Fel, false, format!("FEL: {why}")));
             }
             details.push(detail(Rpu, false, format!("RPU: {why}")));
@@ -275,7 +415,9 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         }
         EnhancementRoute::ToneMappedSdr => {
             let why = "not used — this display gets SDR, tone-mapped from the HDR10 base";
-            if has_el {
+            if mel {
+                details.push(mel_row(""));
+            } else if has_el {
                 details.push(detail(Fel, false, format!("FEL: {why}")));
             }
             details.push(detail(Rpu, false, format!("RPU: {why}")));
@@ -292,10 +434,17 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         .filter(|detail| detail.active)
         .map(|detail| detail.badge)
         .collect();
+    let dv_metadata = if requires_effective_processing {
+        None
+    } else {
+        super::dv_provenance::dv_metadata_rows(&facts.route, facts.levels)
+    };
     Some(PlaybackEnhancement {
         active,
         details,
         requires_effective_processing,
+        el_kind: facts.el_kind.filter(|_| has_el),
+        dv_metadata,
     })
 }
 
@@ -308,10 +457,12 @@ mod tests {
         EnhancementFacts {
             source_profile: Some(7),
             source_el_present: Some(true),
+            el_kind: None,
             route,
             hdr_processing_enabled: Some(true),
             fel_reencode_enabled: Some(false),
             decline_reason: None,
+            levels: None,
         }
     }
 
@@ -321,6 +472,7 @@ mod tests {
             let enhancement = playback_enhancement(&EnhancementFacts {
                 source_profile: Some(7),
                 source_el_present: Some(true),
+                el_kind: None,
                 route: EnhancementRoute::ProcessedSdr {
                     fel_contributed: true,
                     display_target: target,
@@ -329,6 +481,7 @@ mod tests {
                 hdr_processing_enabled: Some(true),
                 fel_reencode_enabled: None,
                 decline_reason: None,
+                levels: None,
             })
             .expect("DV source");
             assert!(enhancement.requires_effective_processing);
@@ -407,6 +560,11 @@ mod tests {
             .expect("FEL row");
         assert!(!fel.active);
         assert!(fel.text.contains("FEL re-encode is off"), "{}", fel.text);
+        assert!(
+            fel.text.contains("enhancement layer is dropped"),
+            "{}",
+            fel.text
+        );
     }
 
     #[test]
@@ -450,7 +608,7 @@ mod tests {
         let shown = playback_enhancement(&base).expect("DV source");
         assert!(shown.details[0]
             .text
-            .contains("is off in Settings → Developer"));
+            .contains("is off in Settings → Playback"));
     }
 
     #[test]
@@ -502,10 +660,273 @@ mod tests {
     }
 
     #[test]
+    fn every_built_enhancement_is_well_formed_for_a_receiver_to_relay() {
+        let mut routes = vec![
+            EnhancementRoute::NativeDolbyVision,
+            EnhancementRoute::ConvertedProfile81,
+            EnhancementRoute::Hdr10Base,
+            EnhancementRoute::ToneMappedSdr,
+        ];
+        for fel_contributed in [false, true] {
+            routes.push(EnhancementRoute::ReconstructedProfile81 { fel_contributed });
+            for creative_trims in [
+                CreativeTrims::None,
+                CreativeTrims::Partial,
+                CreativeTrims::All,
+            ] {
+                for display_target in [None, Some(1000)] {
+                    routes.push(EnhancementRoute::ProcessedHdr10 {
+                        fel_contributed,
+                        display_target,
+                        creative_trims,
+                    });
+                    routes.push(EnhancementRoute::ProcessedSdr {
+                        fel_contributed,
+                        display_target,
+                        creative_trims,
+                    });
+                }
+            }
+        }
+        let mut built = 0;
+        for route in routes {
+            for profile in [5, 7, 8] {
+                for el in [false, true] {
+                    for decline in [None, Some("the display does not take Dolby Vision")] {
+                        let mut facts = facts(route.clone());
+                        facts.source_profile = Some(profile);
+                        facts.source_el_present = Some(el);
+                        facts.decline_reason = decline;
+                        if let Some(shown) = playback_enhancement(&facts) {
+                            assert!(shown.is_well_formed(), "{route:?}: {shown:?}");
+                            built += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(built > 0);
+        let mut reordered =
+            playback_enhancement(&facts(EnhancementRoute::NativeDolbyVision)).expect("DV source");
+        reordered.active.reverse();
+        reordered.active.push(Fel);
+        assert!(!reordered.is_well_formed());
+    }
+    #[test]
     fn wire_names_are_the_badge_labels() {
         assert_eq!(
             serde_json::to_string(&[Fel, Rpu, Dyn]).expect("badges serialize"),
             r#"["FEL","RPU","DYN"]"#
+        );
+    }
+
+    #[test]
+    fn an_unreadable_or_out_of_shape_metadata_row_never_costs_the_enhancement() {
+        let mut built =
+            playback_enhancement(&facts(EnhancementRoute::NativeDolbyVision)).expect("DV source");
+        let levels = crate::scan::dv_levels::DvTitleLevels {
+            levels: [1, 2, 6].into(),
+            cm_v40: false,
+        };
+        built.dv_metadata = crate::playback::dv_provenance::dv_metadata_rows(
+            &EnhancementRoute::NativeDolbyVision,
+            Some(&levels),
+        );
+        let mut wire = serde_json::to_value(&built).expect("serialize");
+        // A peer's row this build cannot read decodes to nothing.
+        wire["dv_metadata"] = serde_json::json!({"in_file": 7});
+        let decoded: PlaybackEnhancement = serde_json::from_value(wire.clone()).expect("decodes");
+        assert_eq!(decoded.dv_metadata, None);
+        assert!(decoded.is_well_formed());
+        // A newer peer's additive field is tolerated.
+        let mut newer = serde_json::to_value(&built).expect("serialize");
+        newer["dv_metadata"]["in_file"]["extra"] = serde_json::json!(true);
+        let decoded: PlaybackEnhancement = serde_json::from_value(newer).expect("decodes");
+        assert!(decoded.dv_metadata.is_some());
+        // An out-of-shape row is dropped and the rest relays.
+        let mut bad = serde_json::to_value(&built).expect("serialize");
+        bad["dv_metadata"]["applied"]["text"] = serde_json::json!("");
+        let mut decoded: PlaybackEnhancement = serde_json::from_value(bad).expect("decodes");
+        assert!(decoded.dv_metadata.is_some());
+        decoded.drop_ill_formed_rows();
+        assert_eq!(decoded.dv_metadata, None);
+        assert!(decoded.is_well_formed());
+    }
+
+    fn every_route() -> Vec<EnhancementRoute> {
+        let mut routes = vec![
+            EnhancementRoute::NativeDolbyVision,
+            EnhancementRoute::ConvertedProfile81,
+            EnhancementRoute::Hdr10Base,
+            EnhancementRoute::ToneMappedSdr,
+        ];
+        for fel_contributed in [false, true] {
+            routes.push(EnhancementRoute::ReconstructedProfile81 { fel_contributed });
+            routes.push(EnhancementRoute::ProcessedHdr10 {
+                fel_contributed,
+                display_target: Some(1000),
+                creative_trims: CreativeTrims::All,
+            });
+            routes.push(EnhancementRoute::ProcessedSdr {
+                fel_contributed,
+                display_target: Some(100),
+                creative_trims: CreativeTrims::None,
+            });
+        }
+        routes
+    }
+
+    /// A Profile 7 MEL title (an identity NLQ residual) used to read
+    /// "FEL: delivered for the display to decode". Its layer row now names
+    /// MEL on every route and never claims the layer, unless a processing
+    /// receipt proves a full layer was composed.
+    #[test]
+    fn profile7_mel_title_names_mel_not_fel() {
+        use crate::scan::dv_title::TitleElKind;
+        for route in every_route() {
+            let mut mel = facts(route.clone());
+            mel.el_kind = Some(TitleElKind::Mel);
+            let shown = playback_enhancement(&mel).expect("DV source");
+            assert!(shown.is_well_formed(), "{route:?}: {shown:?}");
+            assert_eq!(shown.el_kind, Some(TitleElKind::Mel), "{route:?}");
+            let layer = shown
+                .details
+                .iter()
+                .find(|detail| detail.badge == Fel)
+                .expect("a Profile 7 source keeps its layer row");
+            let receipt_proves_fel = matches!(
+                route,
+                EnhancementRoute::ReconstructedProfile81 {
+                    fel_contributed: true
+                } | EnhancementRoute::ProcessedHdr10 {
+                    fel_contributed: true,
+                    ..
+                } | EnhancementRoute::ProcessedSdr {
+                    fel_contributed: true,
+                    ..
+                }
+            );
+            // The planner composes only a FEL (dv_processing refuses a
+            // non-FEL source for composition), so a receipt saying a full
+            // layer was composed means the scan and the processor disagree;
+            // the receipt is the measurement of this play and wins.
+            if receipt_proves_fel {
+                assert!(layer.active && layer.text.starts_with("FEL:"), "{route:?}");
+            } else {
+                assert!(!layer.active, "{route:?}");
+                assert!(
+                    layer.text.starts_with("MEL: minimal enhancement layer"),
+                    "{route:?}"
+                );
+                assert!(layer.text.contains("adds no picture detail"), "{route:?}");
+                assert!(!layer.text.contains("FEL"), "{route:?}: {}", layer.text);
+                assert!(!shown.active.contains(&Fel), "{route:?}");
+            }
+        }
+        let mut native = facts(EnhancementRoute::NativeDolbyVision);
+        native.el_kind = Some(TitleElKind::Mel);
+        let shown = playback_enhancement(&native).expect("DV source");
+        assert_eq!(
+            shown.details[0].text,
+            "MEL: minimal enhancement layer delivered for the display — it adds no \
+             picture detail; the Dolby grade is in the RPU"
+        );
+        let wire = serde_json::to_value(&shown).expect("serialize");
+        assert_eq!(wire["el_kind"], "mel");
+        // The wire badge stays FEL, so a receiver built before MEL was named
+        // still decodes the row.
+        assert_eq!(wire["details"][0]["badge"], "FEL");
+    }
+
+    #[test]
+    fn fel_and_unscanned_titles_are_not_called_mel() {
+        use crate::scan::dv_title::TitleElKind;
+        for el_kind in [Some(TitleElKind::Fel), None] {
+            for route in every_route() {
+                let mut fel = facts(route.clone());
+                fel.el_kind = el_kind;
+                let shown = playback_enhancement(&fel).expect("DV source");
+                assert_eq!(shown.el_kind, el_kind);
+                let unscanned_native =
+                    el_kind.is_none() && route == EnhancementRoute::NativeDolbyVision;
+                let prefix = if unscanned_native {
+                    "Enhancement layer:"
+                } else {
+                    "FEL:"
+                };
+                assert!(shown
+                    .details
+                    .iter()
+                    .filter(|detail| detail.badge == Fel)
+                    .all(|detail| detail.text.starts_with(prefix)));
+            }
+        }
+        let mut native = facts(EnhancementRoute::NativeDolbyVision);
+        native.el_kind = Some(TitleElKind::Fel);
+        let shown = playback_enhancement(&native).expect("DV source");
+        assert_eq!(
+            shown.details[0].text,
+            "FEL: delivered for the display to decode"
+        );
+        // An unscanned title is not called FEL: the state the Gran Turismo
+        // (2023) MEL remux was in when its row read "FEL: delivered".
+        native.el_kind = None;
+        let shown = playback_enhancement(&native).expect("DV source");
+        assert!(shown.details[0]
+            .text
+            .contains("has not yet said whether it is full (FEL) or minimal (MEL)"));
+        // A single-layer source names no layer kind, whatever the scan said.
+        let mut p8 = facts(EnhancementRoute::NativeDolbyVision);
+        p8.source_profile = Some(8);
+        p8.source_el_present = Some(false);
+        p8.el_kind = Some(TitleElKind::Mel);
+        let shown = playback_enhancement(&p8).expect("DV source");
+        assert_eq!(shown.el_kind, None);
+        assert!(shown.details.iter().all(|detail| detail.badge != Fel));
+        // An older peer's enhancement without the field still decodes.
+        let mut wire = serde_json::to_value(&shown).expect("serialize");
+        wire.as_object_mut().expect("object").remove("el_kind");
+        let decoded: PlaybackEnhancement = serde_json::from_value(wire).expect("decodes");
+        assert_eq!(decoded.el_kind, None);
+    }
+
+    #[test]
+    fn title_scan_facts_read_the_layer_kind_from_the_probe_document() {
+        use crate::scan::dv_title::{
+            DvTitleStats, TitleConstant, TitleElKind, PROBE_FIELD, SCHEMA,
+        };
+        let stats = |el_kind| DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(3079),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+            el_kind,
+        };
+        let probe = |el_kind| serde_json::json!({ PROBE_FIELD: stats(el_kind) }).to_string();
+        for (recorded, read) in [
+            (
+                TitleConstant::Consistent(TitleElKind::Mel),
+                Some(TitleElKind::Mel),
+            ),
+            (
+                TitleConstant::Consistent(TitleElKind::Fel),
+                Some(TitleElKind::Fel),
+            ),
+            (TitleConstant::Inconsistent, None),
+            (TitleConstant::Unknown, None),
+        ] {
+            let document = probe(recorded);
+            assert_eq!(TitleScanFacts::from_probe(Some(&document)).el_kind, read);
+        }
+        assert_eq!(TitleScanFacts::from_probe(None), TitleScanFacts::default());
+        assert_eq!(
+            TitleScanFacts::from_probe(Some("{}")),
+            TitleScanFacts::default()
         );
     }
 }

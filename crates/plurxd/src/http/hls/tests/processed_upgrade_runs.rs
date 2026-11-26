@@ -87,6 +87,34 @@ async fn the_upgrade_positions_its_trial_and_stage_at_the_viewer_not_the_start()
 
 }
 
+/// A worker whose one reconstruction slot is busy with another playback has
+/// not judged this session. The upgrade waits for a later rendering exchange,
+/// the way a held preparation slot does, instead of being skipped for good.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_busy_reconstruction_slot_leaves_the_upgrade_waiting() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-slot-busy");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 30_000).await;
+    let outcome = super::processed_upgrade::run_upgrade_with(
+        &fixture.state,
+        &intent,
+        &run,
+        |_request, _recovery| {
+            std::future::ready(Err(crate::transcode::TranscodeManager::reconstruction_slot_busy()))
+        },
+    )
+    .await;
+    assert_eq!(outcome, "slot_held");
+    let completed = super::processed_upgrade::finish_upgrade_run(intent, run, outcome);
+    assert_eq!(completed, "displaced");
+    assert!(super::processed_upgrade::is_waiting(&session_id));
+    assert!(
+        super::processed_upgrade::processing_skip(&session_id, &route.incarnation_id).is_none()
+    );
+}
+
 /// A trial that fails leaves the ordinary session exactly as it was: the same
 /// durable route, its worker's preparation gate, no staged successor, the
 /// playback's one preparation slot free again, and the session still
@@ -315,7 +343,8 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     file.dolby_vision.profile=Some(7);file.dolby_vision.el_present=Some(true);
     let wait=super::processed_upgrade::pending_qualification_fixture(file.id,file.size,file.mtime,0,"private-held-object");
     let private=crate::transcode::pending_fel_qualification_error(wait);
-    let public=crate::transcode::ordinary_processing_decline(private);
+    // What the upgrade reports while it waits: the explanation, never the token.
+    let public=crate::transcode::pending_fel_qualification(&private).expect("token").reason().to_owned();
     let kind=crate::transcode::SessionKind::Copy {aac:false,preserve_dolby_vision:true,
         convert_dolby_vision:true,dual_layer_as_copied:false};
     let enhancement=session_enhancement(Some(&file),&kind,plurx_core::transcode::OutputGrade::Hdr10,
@@ -325,7 +354,6 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     for private in ["private-held-object","source_object_version","settings_generation","backend_identity","fel_qualification_pending"] {
         assert!(!wire.contains(private),"private continuation data must not enter Playback Info: {wire}");
     }
-    assert_eq!(crate::transcode::ordinary_processing_decline("the decoder refused the window".into()),"the decoder refused the window");
 }
 
 /// A repeat upgrade of the same playback: this node described the processed
@@ -527,6 +555,7 @@ async fn a_late_staging_cancellation_rearms_only_a_live_processed_upgrade() {
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    platform: None,
                     prepared_proof: None,
                     film_time_ms: 30_000,
                     desired_digest: None,
@@ -678,6 +707,7 @@ async fn a_refused_upgrade_reservation_is_not_rearmed_by_its_cleanup() {
         &fixture.state.node_id,
         PreparationPurpose::SelectionChange,
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             film_time_ms: 30_000,
             desired_digest: None,
@@ -929,11 +959,6 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "1")
         .await
         .expect("processing enabled");
-    fixture
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("route-v1 owner enabled before planning snapshot");
     let snapshot = fixture
         .store
         .playback_planning_snapshot(fixture.file_id(), &crate::transcode::QUALITY_PLANNING_KEYS)
@@ -1028,6 +1053,7 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         &fixture.state.node_id,
         PreparationPurpose::SelectionChange,
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
             desired_digest: None,

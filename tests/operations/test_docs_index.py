@@ -43,6 +43,9 @@ KNOWN_ABSENT = {
     "docs/plan-integration.md",
     "docs/base.md", "docs/current.md", "docs/plan.md",  # tests/validation/test_history.py fixtures
     "docs/NOTES.md",                                 # tests/validation/test_mobile_versions.py fixture
+    # vendor/openraft/src/lib.rs: `include_str!("docs/docs.md")` is relative to
+    # that crate's src/, where the file exists; it is not this repo's docs/.
+    "docs/docs.md",
 }
 
 BINARY_SUFFIXES = {

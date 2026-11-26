@@ -1,6 +1,19 @@
 use super::*;
 
 impl VodServe {
+    /// An accepted control snapshot, never the diagnostic capability string.
+    pub(crate) async fn client_platform_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::playback_control::ClientPlatform> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let platform = session.control.lock().ok()?.client_platform();
+        platform
+    }
+}
+
+impl VodServe {
     #[cfg(test)]
     pub(crate) async fn source_control_observation_for_test(
         &self,
@@ -360,7 +373,9 @@ impl VodServe {
                 authority.before_acceptance().await;
                 if authority.validate().is_err()
                     || session.supersession_user
-                        != authority.assignment().binding().principal().owner_key()
+                        != crate::transcode::principal_supersession_scope(
+                            authority.assignment().binding().principal(),
+                        )
                     || !control_rendition
                         .source_owners
                         .contains_live_assignment(authority.assignment())
@@ -610,6 +625,16 @@ impl VodServe {
                         kind: session.kind,
                     });
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
+                    if source.is_none()
+                        && control.snapshot.demand
+                            == crate::playback_control::PlaybackDemand::Active
+                        && control.snapshot.render_state
+                            == crate::playback_control::RenderState::Rendering
+                    {
+                        self.shared
+                            .resume_predictions
+                            .confirm_rendered(&session.incarnation);
+                    }
                     #[cfg(target_os = "linux")]
                     if control.snapshot.seek_target_ms.is_some() {
                         if let Some(runtime) = session

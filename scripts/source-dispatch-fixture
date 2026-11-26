@@ -12,7 +12,7 @@ SOURCE_LEASES = Path("crates/plurx-core/src/store/source_leases.rs")
 MACRO_START = "macro_rules! subtitle_managed_admission"
 MACRO_END = "macro_rules! claim_maintenance_reader"
 ROOT_START = "macro_rules! root_dispatch_contenders"
-EXPECTED_MACROS = 13
+EXPECTED_MACROS = 14
 
 
 def block(source: str, anchor: str, *, after: int = 0) -> tuple[int, int]:

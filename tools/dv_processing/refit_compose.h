@@ -24,6 +24,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The refit mode cross-checks FFmpeg's parsed reshaping mapping against
+// libdovi's parse of the same RPU. libdovi keeps the bitstream's
+// pred_pivot_value deltas; FFmpeg's AVDOVIReshapingCurve.pivots are their
+// running sums. Comparing them element by element refused every title whose
+// luma curve has more than the two pivots 0 and 1023.
+static inline bool refit_pivots_agree(const uint16_t *deltas, size_t count,
+                                      const uint16_t *absolute, int num_pivots) {
+  if (!deltas || !absolute || num_pivots < 2 || count != (size_t)num_pivots)
+    return false;
+  uint32_t pivot = 0;
+  for (int i = 0; i < num_pivots; i++) {
+    pivot += deltas[i];
+    if (pivot > UINT16_MAX || pivot != absolute[i])
+      return false;
+  }
+  return true;
+}
+
 #define REFIT_CODES 1024
 #define REFIT_TERMS 22
 #define REFIT_MAX_PIECES 8

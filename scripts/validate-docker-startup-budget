@@ -99,19 +99,46 @@ def source_integer(source: str, name: str) -> int:
     return int(match.group(1).replace("_", ""))
 
 
-def source_duration(source: str, name: str) -> int:
-    match = re.search(
-        rf"(?m)^const {re.escape(name)}: Duration = Duration::from_secs\((\d+)\);$",
-        source,
+def source_duration(migration: str, timing: str, name: str) -> int:
+    """Read a startup policy only after proving the migration uses that alias.
+
+    This intentionally recognizes the current, narrow Rust source contract,
+    rather than evaluating Rust or falling back to a copied deployment value.
+    Unexpected expressions and ambiguous definitions require source review.
+    """
+    aliases = re.findall(
+        rf"(?m)^const {re.escape(name)}: Duration =\s*([^;]+);$", migration
     )
-    if match is None:
-        raise BudgetError(f"could not read Rust startup phase {name}")
-    return int(match.group(1))
+    expected = f"crate::cluster::timing::startup::{name}"
+    declarations = re.findall(
+        rf"(?m)^[ \t]*(?:pub )?const {re.escape(name)}\b", migration
+    )
+    if len(declarations) != 1 or aliases != [expected]:
+        raise BudgetError(f"expected exactly one startup timing alias for {name}")
+    modules = re.findall(r"(?ms)^pub mod startup \{\n(.*?)^\}", timing)
+    if len(modules) != 1 or "{" in modules[0] or "}" in modules[0]:
+        raise BudgetError("expected exactly one flat startup timing module")
+    definitions = re.findall(
+        rf"(?m)^    pub const {re.escape(name)}: Duration = ([^;]+);$",
+        modules[0],
+    )
+    declarations = re.findall(
+        rf"(?m)^[ \t]*(?:pub )?const {re.escape(name)}\b", modules[0]
+    )
+    if len(declarations) != 1 or len(definitions) != 1:
+        raise BudgetError(f"expected exactly one canonical startup phase {name}")
+    literal = re.fullmatch(r"Duration::from_secs\(([\d_]+)\)", definitions[0])
+    if literal is None:
+        raise BudgetError(f"could not read canonical Rust startup phase {name}")
+    return int(literal.group(1).replace("_", ""))
 
 
 def load_source_limits(root: Path = ROOT) -> SourceLimits:
     config = (root / "crates/plurx-core/src/config.rs").read_text(encoding="utf-8")
     migration = (root / "crates/plurx-core/src/cluster/migration.rs").read_text(
+        encoding="utf-8"
+    )
+    timing = (root / "crates/plurx-core/src/cluster/timing.rs").read_text(
         encoding="utf-8"
     )
     return SourceLimits(
@@ -143,7 +170,7 @@ def load_source_limits(root: Path = ROOT) -> SourceLimits:
             config, "MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS"
         ),
         phase_seconds=tuple(
-            (name, source_duration(migration, name)) for name in PHASE_NAMES
+            (name, source_duration(migration, timing, name)) for name in PHASE_NAMES
         ),
     )
 

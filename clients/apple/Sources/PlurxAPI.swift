@@ -145,6 +145,11 @@ struct PlurxAPI {
         return comps.url
     }
 
+    // Thin same-file seams for CustomTags.swift's extension.
+    func getTagsJSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T { try await get(path, query: query) }
+    func putTagsJSON<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T { try await put(path, body: body) }
+    func postTagsJSON<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T { try await post(path, body: body) }
+
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)
@@ -502,9 +507,14 @@ struct PlurxAPI {
         caps: DeviceCaps,
         query: [URLQueryItem],
         legacyQuery: () -> [URLQueryItem],
-        fileContext: PlaybackFileContext? = nil
+        fileContext: PlaybackFileContext? = nil,
+        speculative: Bool = false
     ) async throws -> Decision {
         let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
+        if speculative {
+            return try await post(try context.apiPath("hls/startup-decision"),
+                                  query: query, body: DecisionBody(caps: caps))
+        }
         do {
             return try await post(
                 try context.apiPath("decision"),
@@ -636,6 +646,14 @@ struct PlurxAPI {
         return Self.acceptHlsSessionPresentation(started)
     }
 
+    func prepareHlsStartup(fileId: Int, body: CreateSessionRequest) async throws {
+        let context = try PlaybackFileContext.local(fileId)
+        var request = try jsonRequest(try context.apiPath("hls/prepare-startup"), body: body)
+        Session.shared.authorize(&request)
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: preparationSession)
+        try Self.check(response, data: data)
+    }
+
     // MARK: - Library channels
 
     func libraryChannels(management: Bool = false) async throws -> [LibraryChannel] {
@@ -757,6 +775,24 @@ struct PlurxAPI {
         try await get("developer/readiness")
     }
 
+    /// A Developer switch is a named `PUT /settings` field (the readiness
+    /// item's `setting`); the server answers with the saved settings.
+    func setDeveloperSwitch(field: String, enabled: Bool) async throws {
+        struct Saved: Decodable {}
+        let _: Saved = try await put("settings", body: [field: enabled])
+    }
+
+    /// `DELETE /developer/dv-refit/spool`: this node's F+ statistics spool.
+    func clearDolbyVisionRefitSpool() async throws -> Int {
+        struct Cleared: Decodable { let removed: Int }
+        guard let url = makeURL("developer/dv-refit/spool") else { throw APIError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        Session.shared.authorize(&req)
+        let cleared: Cleared = try await run(req)
+        return cleared.removed
+    }
+
     /// `vod` describes the presentation the server selected; it is not a
     /// client compatibility gate. During index recovery the same HLS contract
     /// is served by the retained live engine and arrives as `vod: false`.
@@ -766,6 +802,15 @@ struct PlurxAPI {
 
     func hlsStatus(sessionId: String) async throws -> PlaybackSessionStatus {
         try await get("hls/\(sessionId)/status")
+    }
+
+    /// Off-only: tell a running session to stop keeping a reusable copy (204).
+    func retainHlsOutputOff(sessionId: String) async throws {
+        let req = try jsonRequest("hls/\(sessionId)/retain-output", body: RetainOutputRequest())
+        var authorized = req
+        Session.shared.authorize(&authorized)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: authorized, using: session)
+        try Self.check(resp)
     }
 
     /// DELETE the session the moment playback ends. Without it the encoder

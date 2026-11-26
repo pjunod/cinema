@@ -128,3 +128,42 @@ test("mobile reader centers full pages and distinguishes section navigation",asy
     await page.evaluate(()=>READER.navigator.destroy());
   }finally{await browser.close();}
 });
+
+test("dark reader overrides publisher chapter colors and restores them in light mode",async()=>{
+  const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
+  try{
+    const page=await browser.newPage();
+    const chapter=`<html xmlns="http://www.w3.org/1999/xhtml">
+      <head><title>Chapter one</title><link rel="stylesheet" href="publisher.css" /></head>
+      <body><h1>Chapter one</h1>
+        <p><span style="color:black">Chapter text</span> <a href="#note"><span>Note</span></a></p>
+        <svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="currentColor" style="color:red" /></svg>
+      </body>
+    </html>`;
+    await page.route("http://reader.test/",route=>route.fulfill({contentType:"text/html",body:'<iframe sandbox="allow-same-origin"></iframe>'}));
+    await page.route("http://reader.test/chapter.xhtml",route=>route.fulfill({contentType:"application/xhtml+xml",body:chapter}));
+    await page.route("http://reader.test/publisher.css",route=>route.fulfill({
+      contentType:"text/css",
+      body:"@layer publisher { body, h1, p, a span { color:black !important; } p { background:white linear-gradient(red, blue) !important; } }",
+    }));
+    await page.goto("http://reader.test/");
+    await page.addScriptTag({content:fs.readFileSync(path.join(root,"reader.js"),"utf8")});
+    await page.evaluate(async()=>{
+      window.chapterNavigator=new PlurxReaderCore.FrameNavigator(document.querySelector("iframe"));
+      await chapterNavigator.load("/chapter.xhtml","chapter.xhtml",0,1,{theme:"dark"});
+    });
+    const chapterFrame=page.frameLocator("iframe");
+    const css=(selector,property)=>chapterFrame.locator(selector).evaluate((el,key)=>getComputedStyle(el)[key],property);
+    assert.equal(await css("body","backgroundColor"),"rgb(23, 23, 21)");
+    assert.equal(await css("h1","color"),"rgb(233, 227, 216)");
+    assert.equal(await css("p > span","color"),"rgb(233, 227, 216)");
+    assert.equal(await css("p","backgroundColor"),"rgba(0, 0, 0, 0)");
+    assert.equal(await css("p","backgroundImage"),"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))");
+    assert.equal(await css("a span","color"),"rgb(157, 178, 255)");
+    assert.equal(await css("rect","fill"),"rgb(255, 0, 0)");
+    await page.evaluate(()=>chapterNavigator.applyPrefs({theme:"light"}));
+    assert.equal(await css("body","backgroundColor"),"rgb(255, 253, 248)");
+    assert.equal(await css("p > span","color"),"rgb(0, 0, 0)");
+    assert.equal(await css("p","backgroundColor"),"rgb(255, 255, 255)");
+  }finally{await browser.close();}
+});

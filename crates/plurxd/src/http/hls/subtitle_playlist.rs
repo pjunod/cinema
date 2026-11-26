@@ -649,7 +649,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
     )
     .await
     .map_err(|_| response_publication_timeout())?;
-    let (bytes, cache_control, slice_timeline) = match tokio::time::timeout_at(
+    let (bytes, cache_control) = match tokio::time::timeout_at(
         tokio::time::Instant::from_std(publication_deadline),
         source.read_whole(&state.subs_dir, &file, index),
     )
@@ -668,7 +668,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                 start_seconds = context.start_seconds,
                 "serving native HLS WebVTT subtitle"
             );
-            (bytes, "private, max-age=3600", true)
+            (bytes, "private, max-age=3600")
         }
         Ok(None) | Err(_) => {
             // The whole-track sidecar is not there yet. Before falling back to
@@ -750,7 +750,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                 // `no-store`: a window covers this position and not the next
                 // one, and the whole-track sidecar will supersede it. Letting
                 // a player pin these bytes would pin a partial answer.
-                (bytes, "no-store", true)
+                (bytes, "no-store")
             } else {
                 // AVPlayer gives a subtitle segment only about two seconds to
                 // answer and blocks the muxed video while it waits. Extracting
@@ -855,7 +855,9 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                 // control, not the media transport. AVPlayer stalls video on
                 // a terminal subtitle 503; the native/text selection remains
                 // attached while the control path reports unavailable.
-                (b"WEBVTT\n\n".to_vec(), "no-store", false)
+                // Use the same segment timestamp map as ready cues. Safari can
+                // receive A/V but never preroll with an unmapped first segment.
+                (b"WEBVTT".to_vec(), "no-store")
             }
         }
     };
@@ -871,19 +873,12 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
         // request made them lead the picture by up to a whole GOP (1–6 s on a
         // 4K film) on every resumed or seeked copy session, which is the
         // flagship Apple path.
-        if slice_timeline {
-            slice_webvtt(
-                &bytes,
-                context.media_origin_seconds,
-                segment_start,
-                segment_end,
-            )
-        } else {
-            // Keep the cold-cache fallback byte-for-byte minimal. It carries
-            // no cues to shift, and this exact body is the acceptance handle
-            // proving the request escaped before either producer finished.
-            bytes
-        },
+        slice_webvtt(
+            &bytes,
+            context.media_origin_seconds,
+            segment_start,
+            segment_end,
+        ),
     )
         .into_response();
     let object_name = format!("subs/{index}/{segment}");

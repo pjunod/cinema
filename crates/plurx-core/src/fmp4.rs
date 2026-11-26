@@ -147,6 +147,68 @@ pub fn avc_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>
     }))
 }
 
+/// Facts of a copied source's one AVC sample entry. A copy carries whatever
+/// the source signalled: `avc1` or `avc3`, and a colour record only when the
+/// source had one. Absent colour is reported as ITU-T H.273 "unspecified"
+/// (2), never invented; the encoder's stricter contract stays above.
+pub fn avc_copy_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>, Fmp4Error> {
+    let Some(codec) = avc_rfc6381_codec(init)? else {
+        return Ok(None);
+    };
+    let video = init.video().expect("AVC codec requires video");
+    let (count, entries) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    if count != 1 || entries.len() != 1 || !matches!(&entries[0].sample_entry, b"avc1" | b"avc3") {
+        return Err(Fmp4Error::Unsupported(
+            "copied AVC requires one avc1 or avc3 sample entry".into(),
+        ));
+    }
+    let entry = &entries[0];
+    let header = peek_box(&init.bytes, entry.entry.start)?
+        .ok_or_else(|| Fmp4Error::Malformed("missing AVC sample entry".into()))?;
+    let body = entry.entry.start + entry.entry.header_len;
+    let end = entry.entry.start + header.size;
+    if end < body + 78 {
+        return malformed("copied AVC sample entry is truncated");
+    }
+    let width = u16::from_be_bytes([init.bytes[body + 24], init.bytes[body + 25]]);
+    let height = u16::from_be_bytes([init.bytes[body + 26], init.bytes[body + 27]]);
+    if width == 0 || height == 0 {
+        return malformed("copied AVC has an empty raster");
+    }
+    let unspecified = (2, 2, 2, false);
+    let colors = find_children(&init.bytes, body + 78..end, b"colr")?;
+    let (primaries, transfer, matrix, full_range) = match colors.as_slice() {
+        [(at, color)] => {
+            let data = &init.bytes[at.start + color.header_len..at.start + color.size];
+            if data.len() == 11 && &data[..4] == b"nclx" {
+                (
+                    u16::from_be_bytes([data[4], data[5]]),
+                    u16::from_be_bytes([data[6], data[7]]),
+                    u16::from_be_bytes([data[8], data[9]]),
+                    data[10] & 0x80 != 0,
+                )
+            } else {
+                unspecified
+            }
+        }
+        [] => unspecified,
+        _ => {
+            return Err(Fmp4Error::Unsupported(
+                "copied AVC has ambiguous colour records".into(),
+            ))
+        }
+    };
+    Ok(Some(AvcSampleEntryFacts {
+        codec,
+        width,
+        height,
+        color_primaries: primaries,
+        color_transfer: transfer,
+        color_matrix: matrix,
+        full_range,
+    }))
+}
+
 /// Actual configuration of the initial shared soundtrack family. This parser
 /// accepts the production AAC-LC/48 kHz/1024-sample shape, not an arbitrary
 /// audio entry whose filename happens to end in MP4.
@@ -452,13 +514,60 @@ impl Init {
     }
 }
 
+/// The `ftyp` payload as the video track determines it: major brand, minor
+/// version, then the compatible brands as the set ISO/IEC 14496-12 defines
+/// (first occurrence kept, repeats dropped). FFmpeg's MP4 muxer adds `dby1`
+/// for an AC-3, E-AC-3 or TrueHD track as well as for a Dolby Vision record,
+/// so over a video entry with no Dolby Vision record that brand is the
+/// audio's and is dropped; [`replace_dolby_file_type_brand`]'s `iso6` stand-in
+/// for it is then a repeat and drops too.
+fn video_file_type_brands(payload: &[u8], dolby_vision: bool) -> Result<Vec<u8>, Fmp4Error> {
+    if payload.len() < 8 || !(payload.len() - 8).is_multiple_of(4) {
+        return malformed("copy init ftyp is malformed");
+    }
+    let mut brands = payload[..8].to_vec();
+    let mut seen: Vec<&[u8]> = Vec::new();
+    for brand in payload[8..].chunks_exact(4) {
+        if (brand == b"dby1" && !dolby_vision) || seen.contains(&brand) {
+            continue;
+        }
+        seen.push(brand);
+        brands.extend_from_slice(brand);
+    }
+    Ok(brands)
+}
+
+/// Which `ftyp` bytes a copy init digest covers.
+#[derive(Clone, Copy)]
+enum FileTypeBrands {
+    /// The payload exactly as written: the persisted contract.
+    Exact,
+    /// [`video_file_type_brands`]: what canonical and AV outputs share.
+    Video,
+}
+
 /// Decoder/timing identity for a copy output, independent of global muxer
 /// metadata such as `udta`'s Lavf version. Call after the shared init
 /// normalization/promotion recipe. This hashes the selected video sample
 /// entries (including codec/color/DV records), ftyp, timescale and track
 /// defaults; only the visual entry's descriptive compressor name is omitted.
-/// It is not a source attestation or a media-sample digest.
+/// It is not a source attestation or a media-sample digest. Sealed indexes
+/// and Analysis fills persist it, so its bytes never change; compare a
+/// canonical output with its AV companion by
+/// [`copy_video_companion_init_sha256`] instead.
 pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error> {
+    copy_video_init_digest(init, FileTypeBrands::Exact)
+}
+
+/// [`copy_video_init_contract_sha256`] over only the file-type brands the
+/// video determines. The canonical output carries video alone and the AV
+/// output carries audio too, so nothing an audio track contributes to `ftyp`
+/// may separate the two. Never persisted.
+pub fn copy_video_companion_init_sha256(init: &Init) -> Result<String, Fmp4Error> {
+    copy_video_init_digest(init, FileTypeBrands::Video)
+}
+
+fn copy_video_init_digest(init: &Init, brands: FileTypeBrands) -> Result<String, Fmp4Error> {
     use sha2::{Digest, Sha256};
     let video = init
         .video()
@@ -481,12 +590,18 @@ pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error>
     digest.update([video.nal_length_size, u8::from(video.dolby_vision_config)]);
     let (ftyp_at, ftyp) = find_child(&init.bytes, 0..init.bytes.len(), b"ftyp")?
         .ok_or_else(|| Fmp4Error::Malformed("copy init has no ftyp".into()))?;
-    let ftyp_bytes = &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size];
-    if ftyp_bytes.len() < 8 || !(ftyp_bytes.len() - 8).is_multiple_of(4) {
-        return malformed("copy init ftyp is malformed");
-    }
+    let ftyp_payload = &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size];
+    let ftyp_bytes = match brands {
+        FileTypeBrands::Exact => {
+            if ftyp_payload.len() < 8 || !(ftyp_payload.len() - 8).is_multiple_of(4) {
+                return malformed("copy init ftyp is malformed");
+            }
+            ftyp_payload.to_vec()
+        }
+        FileTypeBrands::Video => video_file_type_brands(ftyp_payload, video.dolby_vision_config)?,
+    };
     digest.update((ftyp_bytes.len() as u64).to_be_bytes());
-    digest.update(ftyp_bytes);
+    digest.update(&ftyp_bytes);
     let (moov_at, moov) = find_child(&init.bytes, 0..init.bytes.len(), b"moov")?
         .ok_or_else(|| Fmp4Error::Malformed("copy init has no moov".into()))?;
     let moov_body = moov_at.start + moov.header_len..moov_at.start + moov.size;
@@ -582,6 +697,76 @@ mod copy_init_contract_tests {
             panic!("missing init");
         };
         init
+    }
+
+    fn ftyp(brands: &[&[u8; 4]]) -> Vec<u8> {
+        let mut payload = b"iso5\0\0\x02\0".to_vec();
+        for brand in brands {
+            payload.extend_from_slice(*brand);
+        }
+        payload
+    }
+
+    /// A video-only init whose Dolby Vision record is stripped repeats `iso6`
+    /// (the record's `dby1` rewritten). Sealed copy indexes and Analysis fills
+    /// persist this digest, so it stays byte-exact: the value below is the one
+    /// computed before the companion form existed. The companion digest drops
+    /// the repeat and so differs.
+    #[test]
+    fn copy_init_contract_of_a_stripped_dolby_vision_init_is_persisted_exactly() {
+        let mut init = fixture();
+        assert!(remove_dolby_vision_record(&mut init).expect("strip"));
+        let (at, header) = find_child(&init.bytes, 0..init.bytes.len(), b"ftyp")
+            .expect("ftyp")
+            .expect("ftyp present");
+        assert_eq!(
+            &init.bytes[at.start + header.header_len..at.start + header.size],
+            ftyp(&[b"iso5", b"iso6", b"iso6", b"mp41"]).as_slice()
+        );
+        let contract = copy_video_init_contract_sha256(&init).expect("contract");
+        assert_eq!(
+            contract,
+            "a40f167d3dfa43415506bcaf5e7e77aa429207d385a07cd8eec0a2c4eec8db54"
+        );
+        assert_ne!(
+            copy_video_companion_init_sha256(&init).expect("companion"),
+            contract
+        );
+    }
+
+    /// FFmpeg's AV output of an E-AC-3 or TrueHD title adds `dby1` beside
+    /// SDR or HDR10 video, and the shared normalization rewrites it to `iso6`;
+    /// the video-only canonical output has neither. Both are one companion
+    /// video identity, which is what failed every such shared range Start.
+    #[test]
+    fn copy_init_companion_brands_leave_out_what_audio_adds() {
+        let head = ftyp(&[b"iso5", b"iso6", b"mp41"]);
+        let brands = |payload: &[u8], dolby_vision| {
+            video_file_type_brands(payload, dolby_vision).expect("brands")
+        };
+        assert_eq!(
+            brands(&head, false),
+            head,
+            "an init with neither keeps its exact payload"
+        );
+        assert_eq!(
+            brands(&ftyp(&[b"iso5", b"iso6", b"dby1", b"mp41"]), false),
+            head
+        );
+        assert_eq!(
+            brands(&ftyp(&[b"iso5", b"iso6", b"iso6", b"mp41"]), false),
+            head
+        );
+        // Over a Dolby Vision entry the brand is the video's own claim.
+        let dolby = ftyp(&[b"iso5", b"iso6", b"dby1", b"mp41"]);
+        assert_eq!(brands(&dolby, true), dolby);
+        // Any other brand change still changes the contract.
+        assert_ne!(brands(&ftyp(&[b"iso5", b"iso6"]), false), head);
+        assert_ne!(
+            brands(&ftyp(&[b"iso5", b"iso6", b"avc1", b"mp41"]), false),
+            head
+        );
+        assert!(video_file_type_brands(b"iso5\0\0\x02\0iso", false).is_err());
     }
 
     #[test]
@@ -1491,6 +1676,40 @@ pub fn rewrite_video_samples<F>(
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Fmp4Error>,
 {
+    rewrite_timed_video_samples(fragment, tracks, video_track, |sample, _| rewrite(sample))
+}
+
+/// When one video sample presents, in its track's timescale: the fragment's
+/// `tfdt`, plus the durations of the samples before it in the fragment's
+/// runs, plus its own composition offset. Nothing else contributes, so a
+/// caller that knows where the track's timeline sits in the source can place
+/// the sample exactly, whatever window or seek the fragment came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleTime {
+    /// Decode time: `tfdt` plus the preceding samples' durations.
+    pub decode: u64,
+    /// Composition offset (pts − dts), as the `trun` carries it.
+    pub cto: i64,
+}
+
+impl SampleTime {
+    /// Presentation time, `decode + cto`, in track ticks.
+    pub fn presentation(self) -> i128 {
+        i128::from(self.decode) + i128::from(self.cto)
+    }
+}
+
+/// [`rewrite_video_samples`], handing `rewrite` each sample's [`SampleTime`]
+/// beside its bytes. Same contract: every size fixed, all or nothing.
+pub fn rewrite_timed_video_samples<F>(
+    fragment: &mut Fragment,
+    tracks: &[Track],
+    video_track: u32,
+    mut rewrite: F,
+) -> Result<bool, Fmp4Error>
+where
+    F: FnMut(&[u8], SampleTime) -> Result<Vec<u8>, Fmp4Error>,
+{
     let has_default_sizes = fragment
         .track(video_track)
         .is_some_and(|track| track.samples().any(|sample| sample.size_at.is_none()));
@@ -1518,7 +1737,7 @@ fn rewrite_video_samples_explicit<F>(
     rewrite: &mut F,
 ) -> Result<bool, Fmp4Error>
 where
-    F: FnMut(&[u8]) -> Result<Vec<u8>, Fmp4Error>,
+    F: FnMut(&[u8], SampleTime) -> Result<Vec<u8>, Fmp4Error>,
 {
     // Collect the edits before applying any, so a refusal partway through
     // leaves the fragment exactly as it was. A half-rewritten fragment is a
@@ -1534,9 +1753,19 @@ where
         if track.track_id != video_track {
             continue;
         }
+        let mut decode = track.base_decode_time;
         for run in &track.runs {
             let mut at = run.data_offset;
             for sample in &run.samples {
+                let time = SampleTime {
+                    decode,
+                    cto: sample.cto,
+                };
+                decode = decode
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or_else(|| {
+                        Fmp4Error::Unsupported("a video sample's decode time overflows".into())
+                    })?;
                 let size = sample.size as usize;
                 let end = at
                     .checked_add(size)
@@ -1551,7 +1780,7 @@ where
                         "a video sample size was not materialized before rewrite".into(),
                     ));
                 };
-                let replacement = rewrite(&fragment.bytes[at..end])?;
+                let replacement = rewrite(&fragment.bytes[at..end], time)?;
                 // Recorded whenever the bytes differ at all, not only when the
                 // length does: a same-length rewrite still has to be written,
                 // and answering "nothing changed" for one would leave the
@@ -2842,8 +3071,8 @@ pub struct CopyVideoSampleEntryFacts {
 }
 
 /// Read actual container declarations, not catalog tags or encoder arguments.
-/// High-profile AVC needs its explicit avcC depth/chroma extension; this API
-/// does not infer missing extension fields from an unparsed SPS. In-band
+/// High-profile AVC reads its avcC depth/chroma extension, or the SPS's own
+/// depth and chroma fields when an avcC omits that optional extension. In-band
 /// parameter-set changes require an independent bitstream inspection.
 pub fn copy_video_sample_entry_facts(init: &Init) -> Result<CopyVideoSampleEntryFacts, Fmp4Error> {
     let video = init
@@ -3061,11 +3290,13 @@ fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8
     if sps_count == 0 {
         return Err(Fmp4Error::Unsupported("avcC has no SPS declaration".into()));
     }
+    let mut first_sps = None;
     for _ in 0..sps_count {
         let nal = copy_avcc_nal(record, &mut pos, 7)?;
         if nal.len() < 4 || nal[1..4] != record[1..4] {
             return malformed("avcC SPS profile disagrees with header");
         }
+        first_sps.get_or_insert(nal);
     }
     let count = *record
         .get(pos)
@@ -3088,24 +3319,35 @@ fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8
                 "unknown AVC profile depth/chroma semantics".into(),
             ));
         }
-        let ext = record
-            .get(pos..pos + 4)
-            .ok_or_else(|| Fmp4Error::Unsupported("AVC depth/chroma extension absent".into()))?;
-        if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
-            return malformed("invalid AVC depth/chroma extension");
+        // The High-profile extension is optional in practice: an avcC copied
+        // from a Matroska CodecPrivate often ends after its PPS. Then the SPS
+        // itself is the declaration, read with the same depth rules.
+        if pos == record.len() {
+            let sps = first_sps
+                .ok_or_else(|| Fmp4Error::Unsupported("avcC has no SPS declaration".into()))?;
+            video_splice_format::avc_sps_depth_chroma(sps).ok_or_else(|| {
+                Fmp4Error::Unsupported("unequal or unsupported AVC bit depths".into())
+            })?
+        } else {
+            let ext = record.get(pos..pos + 4).ok_or_else(|| {
+                Fmp4Error::Malformed("truncated AVC depth/chroma extension".into())
+            })?;
+            if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
+                return malformed("invalid AVC depth/chroma extension");
+            }
+            if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
+                return Err(Fmp4Error::Unsupported(
+                    "unequal or unsupported AVC bit depths".into(),
+                ));
+            }
+            let facts = (8 + (ext[1] & 7), ext[0] & 3);
+            let count = ext[3];
+            pos += 4;
+            for _ in 0..count {
+                copy_avcc_nal(record, &mut pos, 13)?;
+            }
+            facts
         }
-        if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
-            return Err(Fmp4Error::Unsupported(
-                "unequal or unsupported AVC bit depths".into(),
-            ));
-        }
-        let facts = (8 + (ext[1] & 7), ext[0] & 3);
-        let count = ext[3];
-        pos += 4;
-        for _ in 0..count {
-            copy_avcc_nal(record, &mut pos, 13)?;
-        }
-        facts
     };
     if pos != record.len() {
         return malformed("trailing copy avcC bytes");
@@ -5176,7 +5418,7 @@ impl Plan {
     }
 }
 
-fn visit_length_prefixed_hevc_nals(
+pub(crate) fn visit_length_prefixed_hevc_nals(
     sample: &[u8],
     length_size: u8,
     mut visit: impl FnMut(&[u8], Option<u8>),
@@ -5212,6 +5454,97 @@ fn visit_length_prefixed_hevc_nals(
     Ok(())
 }
 
+/// Identity of one source base-layer coded picture in four-byte HEVC
+/// framing. P7 enhancement and RPU units and all non-picture units are
+/// excluded so the lossless P8 copy and verified FEL input can witness the
+/// same source picture despite different metadata packaging.
+pub fn hevc_base_layer_vcl_sha256(sample: &[u8]) -> Result<[u8; 32], Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    visit_base_layer_vcl_picture(sample, |framed, _| hash.update(framed))?;
+    Ok(hash.finalize().into())
+}
+
+/// Identity and exact byte count of a base-layer picture as produced by
+/// FFmpeg's VCL-only HEVC filter. Compare this with the clock output from
+/// the same copy process before associating its timestamp with a muxed sample.
+pub fn hevc_cbs_base_layer_vcl_identity(sample: &[u8]) -> Result<([u8; 32], usize), Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut len = 0;
+    let mut invalid = false;
+    visit_base_layer_vcl_picture(sample, |_, nal| {
+        let start_code: &[u8] = if len == 0 { &[0, 0, 0, 1] } else { &[0, 0, 1] };
+        invalid |= nal.windows(3).any(|bytes| bytes == [0, 0, 1]);
+        hash.update(start_code);
+        hash.update(nal);
+        // Each Annex B delimiter is at most as long as the sample's
+        // four-byte length prefix, so this sum cannot exceed sample.len().
+        len += start_code.len() + nal.len();
+    })?;
+    if invalid {
+        return malformed("source witness contains an unescaped Annex-B delimiter");
+    }
+    Ok((hash.finalize().into(), len))
+}
+
+fn visit_base_layer_vcl_picture(
+    sample: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]),
+) -> Result<(), Fmp4Error> {
+    let mut picture = None;
+    let mut malformed_header = false;
+    visit_length_prefixed_hevc_nals(sample, 4, |framed, kind| {
+        let nal = &framed[4..];
+        if nal.len() < 2 || nal[0] & 0x81 != 0 || nal[1] & 0xf8 != 0 || nal[1] & 7 == 0 {
+            malformed_header = true;
+            return;
+        }
+        if let Some(kind) = kind.filter(|kind| *kind < 32) {
+            let Some(header) = nal.get(2) else {
+                malformed_header = true;
+                return;
+            };
+            let identity = (kind, nal[1] & 7);
+            let first_slice = header & 0x80 != 0;
+            match picture {
+                None if first_slice => picture = Some(identity),
+                Some(previous) if !first_slice && previous == identity => {}
+                _ => malformed_header = true,
+            }
+            visit(framed, nal);
+        }
+    })?;
+    if malformed_header || picture.is_none() {
+        return malformed("source witness requires exactly one layer-zero coded picture");
+    }
+    Ok(())
+}
+
+/// Hash HEVC EBSP payloads in FFmpeg CBS Annex-B framing, preserving every
+/// byte and NAL order. CBS emits four-byte delimiters for the first NAL and
+/// types32–34, three otherwise (FFmpeg n8.0.1 cbs_h2645.c1686–1756).
+/// No payload unescaping or re-encoding is performed.
+pub fn hevc_cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u8; 32], Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    if !matches!(length_size, 1 | 2 | 4) || sample.is_empty() {
+        return malformed("fitted packet identity has invalid HEVC sample framing");
+    }
+    let mut hash = Sha256::new();
+    let mut invalid = false;
+    visit_cbs_annex_b_units(sample, length_size, |start_code, nal, kind| {
+        if kind.is_none() || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) {
+            invalid = true;
+        }
+        hash.update(start_code);
+        hash.update(nal);
+    })?;
+    if invalid {
+        return malformed("fitted packet has a truncated header or unescaped Annex-B delimiter");
+    }
+    Ok(hash.finalize().into())
+}
+
 /// The length a length-prefixed HEVC sample's NAL units have as the Annex B
 /// packet FFmpeg's coded-bitstream writer emits for them.
 ///
@@ -5226,18 +5559,40 @@ fn visit_length_prefixed_hevc_nals(
 /// unit, with a four-byte length prefix.
 pub fn hevc_sample_cbs_annex_b_len(sample: &[u8], length_size: u8) -> Result<usize, Fmp4Error> {
     let mut len = 0usize;
+    visit_cbs_annex_b_units(sample, length_size, |start_code, nal, _| {
+        len = len
+            .saturating_add(start_code.len())
+            .saturating_add(nal.len());
+    })?;
+    Ok(len)
+}
+
+/// Visit each NAL unit of a length-prefixed HEVC sample as FFmpeg's CBS
+/// writer frames it in Annex B: the start code it writes (`00 00 00 01` for
+/// the access unit's first unit and for VPS/SPS/PPS, whose `zero_byte`
+/// `cbs_h2645_unit_requires_zero_byte` requires; `00 00 01` otherwise), the
+/// unit's bytes unchanged, and its type. Both the F+ packet identity and the
+/// copy packet clock use this one framing rule. A sample with no unit is
+/// malformed.
+fn visit_cbs_annex_b_units(
+    sample: &[u8],
+    length_size: u8,
+    mut visit: impl FnMut(&'static [u8], &[u8], Option<u8>),
+) -> Result<usize, Fmp4Error> {
     let mut units = 0usize;
     visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
-        let zero_byte = units == 0 || matches!(kind, Some(32..=34));
-        len = len
-            .saturating_add(framed.len() - usize::from(length_size))
-            .saturating_add(3 + usize::from(zero_byte));
+        let start_code: &'static [u8] = if units == 0 || matches!(kind, Some(32..=34)) {
+            &[0, 0, 0, 1]
+        } else {
+            &[0, 0, 1]
+        };
+        visit(start_code, &framed[usize::from(length_size)..], kind);
         units += 1;
     })?;
     if units == 0 {
         return malformed("HEVC sample carries no NAL unit");
     }
-    Ok(len)
+    Ok(units)
 }
 
 fn hevc_sample_without_parameter_sets_len(
@@ -7021,6 +7376,10 @@ pub fn playlist_entry(seconds: f64, name: &str) -> String {
 pub fn segment_name(index: u64) -> String {
     format!("seg{index:05}.m4s")
 }
+
+pub mod track_projection;
+pub mod video_splice;
+mod video_splice_format;
 
 #[cfg(test)]
 mod tests;

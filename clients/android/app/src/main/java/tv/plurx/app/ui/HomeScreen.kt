@@ -54,6 +54,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tv.plurx.app.data.Features
+import tv.plurx.app.data.HomeSection
+import tv.plurx.app.data.homeSections
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.Library
@@ -123,6 +125,7 @@ fun HomeScreen(
     onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
     onOpenSharedLibraries: () -> Unit = {},
+    onOpenRow: (id: Long, title: String) -> Unit = { _, _ -> },
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
@@ -171,24 +174,46 @@ fun HomeScreen(
                 // between the hub shelves and the library shelves while their
                 // up/down pointed straight past it at each other, so the only
                 // way to change the grouping was to have a touchscreen.
+                val sections = remember(state.homeRows) { homeSections(state.homeRows) }
+                val builtIns = sections.filterIsInstance<HomeSection.BuiltIn>().map { it.key }.toSet()
                 val visibleShelfKeys = buildList {
-                    if (continueShelfItems.isNotEmpty()) add("continue")
-                    if (state.hubs.next_up.isNotEmpty()) add("next")
-                    if (state.watchlist.isNotEmpty()) add("watchlist")
-                    if (state.favorites.isNotEmpty()) add("favorites")
-                    if (state.hubs.recently_added.isNotEmpty()) add("recent")
-                    if (state.libraries.isNotEmpty()) add(GROUPING_KEY)
-                    collections.filter { it.items.isNotEmpty() }.forEach {
-                        add("collection-${it.title}")
+                    sections.forEach { section ->
+                        when (section) {
+                            is HomeSection.CustomRow -> if (section.row.items.isNotEmpty()) add("custom-${section.id}")
+                            is HomeSection.BuiltIn -> when (section.key) {
+                                "continue_watching" -> if (continueShelfItems.isNotEmpty()) add("continue")
+                                "next_up" -> if (state.hubs.next_up.isNotEmpty()) add("next")
+                                "watchlist" -> if (state.watchlist.isNotEmpty()) add("watchlist")
+                                "favorites" -> if (state.favorites.isNotEmpty()) add("favorites")
+                                "recently_added" -> if (state.hubs.recently_added.isNotEmpty()) add("recent")
+                                "libraries" -> {
+                                    if (state.libraries.isNotEmpty()) add(GROUPING_KEY)
+                                    collections.filter { it.items.isNotEmpty() }.forEach { add("collection-${it.title}") }
+                                }
+                            }
+                        }
                     }
                 }
                 RemoteOrder(buildList {
                     if (meridian) addAll(listOf("meridian:feature:play", "meridian:feature:details")) else addAll(homeHeaderRemoteKeys(features))
-                    listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Watchlist" to state.watchlist, "Favorites" to state.favorites, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
-                    add("choice:Group by")
-                    collections.forEach { collection ->
-                        val key = "collection:" + collection.libraries.joinToString(",") { it.id.toString() }
-                        add("row:" + key + ":all"); collection.items.forEach { add("row:" + key + ":item:" + it.id) }
+                    sections.forEach { section ->
+                        when (section) {
+                            is HomeSection.CustomRow -> section.row.items.forEach { add("row:custom-" + section.id + ":item:" + it.id) }
+                            is HomeSection.BuiltIn -> when (section.key) {
+                                "continue_watching" -> continueShelfItems.forEach { add("row:Continue watching:item:" + it.id) }
+                                "next_up" -> state.hubs.next_up.forEach { add("row:Next up:item:" + it.id) }
+                                "watchlist" -> state.watchlist.forEach { add("row:Watchlist:item:" + it.id) }
+                                "favorites" -> state.favorites.forEach { add("row:Favorites:item:" + it.id) }
+                                "recently_added" -> state.hubs.recently_added.forEach { add("row:Recently added:item:" + it.id) }
+                                "libraries" -> {
+                                    add("choice:Group by")
+                                    collections.forEach { collection ->
+                                        val key = "collection:" + collection.libraries.joinToString(",") { it.id.toString() }
+                                        add("row:" + key + ":all"); collection.items.forEach { add("row:" + key + ":item:" + it.id) }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }.distinct().take(16384))
                 val shelfFocus = remember(visibleShelfKeys) {
@@ -250,11 +275,31 @@ fun HomeScreen(
                         .padding(bottom = 32.dp)
                 ) {
                     if (meridian || formFactor == FormFactor.Compact) {
-                        (state.hubs.continue_watching.firstOrNull() ?: state.hubs.recently_added.firstOrNull())?.let { featured ->
+                        ((state.hubs.continue_watching.takeIf { "continue_watching" in builtIns })?.firstOrNull() ?: (state.hubs.recently_added.takeIf { "recently_added" in builtIns })?.firstOrNull())?.let { featured ->
                             if (meridian) MeridianFeature(featured, side, featureFocus = featureFocus, onPlay = { onPlayFeatured(featured.id) }, onDetails = { onOpenItem(featured.id) })
                             else CompactContinueHero(item = featured, side = side, onOpen = { onOpenItem(featured.id) })
                         }
                     }
+                    sections.forEach { section ->
+                        when (section) {
+                            is HomeSection.CustomRow -> {
+                                val rowKey = "custom-${section.id}"
+                                MediaRow(
+                                    title = section.row.title,
+                                    remoteKey = rowKey,
+                                    items = section.row.items,
+                                    posterWidth = posterWidth,
+                                    onViewAll = if (section.row.total > section.row.items.size) {
+                                        { onOpenRow(section.id, section.row.title) }
+                                    } else null,
+                                    rowFocusRequester = shelfFocus[rowKey],
+                                    previousRowFocusRequester = previousShelf(rowKey),
+                                    nextRowFocusRequester = nextShelf(rowKey),
+                                    onOpen = { onOpenItem(it.id) },
+                                )
+                            }
+                            is HomeSection.BuiltIn -> when (section.key) {
+                                "continue_watching" -> {
                     MediaRow(
                         "Continue watching",
                         continueShelfItems,
@@ -265,6 +310,8 @@ fun HomeScreen(
                         nextRowFocusRequester = nextShelf("continue"),
                         onOpen = { onOpenItem(it.id) },
                     )
+                                }
+                                "next_up" -> {
                     MediaRow(
                         "Next up",
                         state.hubs.next_up,
@@ -274,6 +321,8 @@ fun HomeScreen(
                         nextRowFocusRequester = nextShelf("next"),
                         onOpen = { onOpenItem(it.id) },
                     )
+                                }
+                                "watchlist" -> {
                     MediaRow(
                         "Watchlist",
                         state.watchlist,
@@ -283,6 +332,8 @@ fun HomeScreen(
                         nextRowFocusRequester = nextShelf("watchlist"),
                         onOpen = { onOpenItem(it.id) },
                     )
+                                }
+                                "favorites" -> {
                     MediaRow(
                         "Favorites",
                         state.favorites,
@@ -292,6 +343,8 @@ fun HomeScreen(
                         nextRowFocusRequester = nextShelf("favorites"),
                         onOpen = { onOpenItem(it.id) },
                     )
+                                }
+                                "recently_added" -> {
                     MediaRow(
                         "Recently added",
                         state.hubs.recently_added,
@@ -302,7 +355,8 @@ fun HomeScreen(
                         nextRowFocusRequester = nextShelf("recent"),
                         onOpen = { onOpenItem(it.id) },
                     )
-
+                                }
+                                "libraries" -> {
                     if (state.libraries.isNotEmpty()) {
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = side, vertical = 12.dp),
@@ -341,6 +395,11 @@ fun HomeScreen(
                             nextRowFocusRequester = nextShelf(key),
                             onOpen = { onOpenItem(it.id) },
                         )
+                    }
+                                }
+                                else -> Unit
+                            }
+                        }
                     }
 
                     val empty = state.hubs.continue_watching.isEmpty() &&

@@ -18,7 +18,7 @@ struct InvitationSettingsSections: View {
         Section("Screen invitations") {
             Text("Receive a generic notification when a paired screen is ready. Opening it checks your current sign-in and opens the remote; taking control is a separate action.").font(.caption)
             if !remoteEnabled {
-                Text("Invitations are a separate saved choice. Enable Cinema remote in Developer settings before opening one to control a screen. Turning invitations OFF and removing this installation remain available.").font(.caption)
+                Text("Invitations are a separate saved choice. Enable Cinema remote in Remotes & devices settings before opening one to control a screen. Turning invitations OFF and removing this installation remain available.").font(.caption)
             }
             ForEach(receiverIDs, id: \.self) { receiver in
                 let key = receiver.uuidString.lowercased()

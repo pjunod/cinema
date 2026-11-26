@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "id": "protocol-m7-michael5400-20261119",
+  "status": "frozen-before-candidate",
+  "scope": "One blind experimental NP1 comparison on the recovered Michael5400 fixture. This protocol does not approve replacement, deployment, storage or delivery feasibility.",
+  "source": {
+    "fixture": "michael5400-contiguous",
+    "sha256": "c29a0e5576974a320f017dcc4c68803f9a138e32930296283f9be847a5eff496",
+    "presentation_frames": 310,
+    "video_index": 0,
+    "time_base": "1/1000",
+    "presentation_census_sha256": "83dd1d83c2e66b05adddcfee52b8aa6144d54fcaaafe115431692bbd7b04b93e"
+  },
+  "served_baseline": {
+    "name": "served_Fplus",
+    "curve_digest": "6373ab9d580701c4f8189510304260d157234fa5a36eb7ff75907fe20551325c",
+    "authority": "Exact RPU readback from the original fitted Profile 8.1 copy publication or its byte-identical successor. Bind the actual init, fragments, per-picture RPU, retained BL payload and exact source PTS in the extraction receipt. Do not substitute an identity or newly solved curve.",
+    "calibration": [
+      {
+        "ordinals": [0, 47],
+        "window": ["125/1000", "2127/1000"],
+        "result_sha256": "ca887e522b88e4757cf4319ec08c145860396f1d8b90e4476df685007ea09412",
+        "readback_sha256": "93331b57663baced8ed9eff81cd8c9db8e2f0a38b4b7ef43d35273e49f114c82",
+        "served_receipt_sha256": "8c1949bdf6a416b283e14cb30fb4df7da6e5166dd8aeb2cc3958e0b2cf9fee46",
+        "model_mean_spread_delta_itp": 0.01950731803050232
+      },
+      {
+        "ordinals": [96, 143],
+        "window": ["4129/1000", "6131/1000"],
+        "result_sha256": "c6655f60a01f0e7f9730fcd6ee214334d91d9db0f51082cbbd885b757ad2ed4f",
+        "readback_sha256": "dcffefe69e5e2f1ff3eb73f9b6121d544b3a6612c3fea0d0f837dd8a46912b8c",
+        "served_receipt_sha256": "96fca8541aa5bb402667f1dd034a95bbb2daaad34591fb583ce02d3c4699de39",
+        "model_mean_spread_delta_itp": 0.0476612877492959
+      }
+    ]
+  },
+  "evaluation": {
+    "ordinals": [192, 239],
+    "window": ["8133/1000", "10135/1000"],
+    "role": "The only evaluation window. Inclusive presentation ordinals and a half-open source PTS interval. Exclude both calibration windows from the evaluation aggregate and retain failures.",
+    "frames": 48,
+    "raster": [3840, 2160],
+    "active_roi_xyxy": [0, 32, 3840, 2128],
+    "fixed_lattice": {
+      "stride": 8,
+      "x_phases_relative_to_roi_origin": [0, 1],
+      "y_phases_relative_to_roi_origin": [0, 1]
+    },
+    "models": ["A", "B", "C", "D"],
+    "reference_luminance_bands_nits": [[0, 0.1], [0.1, 1], [1, 10], [10, 100], [100, null]],
+    "reference": "Canonical decoded BL/EL and per-picture source RPU, bound to the exact CPU helper composition and frozen four models. Both compared arms use identical source frames, lattice coordinates and reference-defined masks within each model.",
+    "clock_binding": "Join canonical capture and actual served F+ to the exact original source PTS census. The candidate encoder starts at relative zero on the exact 24000/1001 grid. Its frame n is bound to absolute ordinal 192+n and that ordinal's original source PTS and RPU. Preserve both clock domains and the explicit ordinal map through authoring and decoding. Require exact packet/frame counts and exact clock identities in their own domains. No tolerance, lag search, or claim that the encoded grid is an affine transform of source PTS."
+  },
+  "encoder_input": {
+    "representation": "plurx-composed-model-b-topleft-v1",
+    "exporter": "../../segment_decode_render.c",
+    "exporter_mode": "--export-composed-topleft",
+    "packing": "../../refit_topleft.h",
+    "verifier": "verify_topleft_export.py",
+    "verifier_sha256": "6c20c3fa33c7a393c4c482d1c31cadbcb925b1772e4a36c41e62b97f73b5fb8f",
+    "calibration": {
+      "ordinals": [96, 143],
+      "verified_bundle_manifest_sha256": "8d27dc642c08829bf1aba1446ac50f4401a409913d7b3aad02228e27b48eb314",
+      "verified_helper_sha256": "19d4e184a21551a675de21f7f3e23610486011568ef22bb1d35f0cdc7ca319f8",
+      "raw_export_sha256": "a98d79b4f62bfdddfeef4fe85dc418d8dc6228c3a98918dc64ea26a0ebaf75df",
+      "raw_export_receipt_sha256": "833a7ce45ed9f8ce05714c6b79cd1663ca4d910edfbb590537614bd52553ca82",
+      "verification_sha256": "aedc5cf1ac25f68ec3dc356673199670ec4ce6937bc179d2de79292d979f545c",
+      "nut_receipt_sha256": "18be2a6ea1ee6695d4a5dc1559710a45970131dff4b54d6132b3a2e1248989a3",
+      "nut_sha256": "68b6abca09a6e4ad67e8778c1e09c0479bff9328a90a1b5751c1cc7acf83df85"
+    },
+    "evaluation_requirement": "Reproduce the new representation for the evaluation interval with an exact source, export and verification receipt. Package as 48 rawvideo NUT packets on the relative encoder grid, verifying each payload SHA-256 with the corresponding verified export frame. Bind explicit limited-range yuv420p10le, BT.2020 primaries, SMPTE ST 2084, BT.2020 NCL and TopLeft type 2 in the sidecar and encoder configuration. The sidecar is authoritative when the NUT codec fields are absent. Do not use calibration NUT as held-out input or claim recovered historical PRE bytes."
+  },
+  "baseline_recipe": {
+    "driver": "encode_spatial_control.py",
+    "driver_sha256": "c1772345fbf6298100c2f8c383a2df3e292dd7aefd6e9ec2a9ae3f2180d43931",
+    "variant": "hdr-off-chroma9",
+    "encoder": "libx265",
+    "preset": "slow",
+    "profile": "main10",
+    "cadence": "24000/1001",
+    "initial_target_kbps": 115000,
+    "maxrate_kbps": 125000,
+    "bufsize_kbit": 136000,
+    "gop": {
+      "frames": 48,
+      "keyint_min": 48,
+      "bframes": 0,
+      "closed": true,
+      "scenecut": 0,
+      "force_keyframes": "expr:eq(mod(n,48),0)"
+    },
+    "pixel_format": "yuv420p10le",
+    "color": {"range": "tv", "primaries": "bt2020", "transfer": "smpte2084", "matrix": "bt2020nc", "chroma_sample_loc_type": 2},
+    "filter": "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le,settb=expr=1/24000,setpts=N*1001",
+    "enc_time_base": "1/24000",
+    "fps_mode": "passthrough",
+    "sample_entry": "hvc1",
+    "video_only": true,
+    "movflags": "+empty_moov+default_base_moof+frag_keyframe+frag_discont",
+    "x265_params": "hdr10=1:hdr10-opt=0:aq-mode=2:repeat-headers=1:open-gop=0:bframes=0:level-idc=5.1:high-tier=1:hrd=1:chromaloc=2:scenecut=0:pools=none:frame-threads=1:wpp=0:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=464,147:cbqpoffs=-9:crqpoffs=-9:qg-size=32",
+    "static_hdr_authority": {
+      "receipt_sha256": "e13f9f21cb3df475eb21ea1948872324eece269b138702e65c2088fe0055210f",
+      "scope": "First original source AU and matching retained catalogue peak/CLL/FALL observation. P3-D65 mastering range 0.0001–1000 nits, MaxCLL 464 and MaxFALL 147. Deliberately retain the inherited encoder recipe values."
+    }
+  },
+  "dark_offset": "−6 QP (quantOffsets -6/63), zero-mean compatibility map",
+  "harness_modes": {
+    "NP1": {"mode": "lumazfsp", "threshold_nits": 1.0, "qp_offset": -6}
+  },
+  "np1": {
+    "driver": "encode_roi_control.py",
+    "driver_sha256": "44bd8e55a2b477711030a3ba9bff94571f2bec8e412ee834d410f6182881eda8",
+    "harness_source": "roi_encode.c",
+    "harness_source_sha256": "569c56ae3bda8e4d8c1308512f9edfbcacc8decc43e38557e45087118471e601",
+    "grid": 16,
+    "qg_size": 32,
+    "x265_params_append": "cbqpoffs=-9:crqpoffs=-12:aq-strength=0",
+    "psy": "Untouched inherited slow preset. Record active values, without overriding them.",
+    "controls": "Require none and zero gates on the same evaluation input and same baseline MP4, using the same executable and loaded libavcodec/libx265 closure. Both gates must reproduce the baseline elementary stream byte-for-byte before attempts.",
+    "limits": "Only NP1. Do not run NP2, P1 or tune quality parameters based on the evaluation window."
+  },
+  "rate_admission": {
+    "unit": "decimal Mb/s of authored video packet payload over the exact encoded window",
+    "experimental_band_mbps_inclusive": [128.5, 130.0],
+    "rate_only": true,
+    "method": "Historical rate-only secant with the inherited overhead estimate only for predicting the next rate. Evaluate the final authored stream's actual average for admission.",
+    "initial_target_kbps": 115000,
+    "maximum_target_kbps": 125000,
+    "maximum_attempts": 4,
+    "fixed_maxrate_kbps": 125000,
+    "fixed_bufsize_kbit": 136000,
+    "author_overhead_estimate_mbps": 0.03,
+    "bounds": "Change only the ABR target. A proposed target above 125000 kb/s is inadmissible with the fixed peak cap. Record inconclusive before invoking an encode for that proposal. Do not clamp the proposed value, relax the buffer/peak cap or repeat a rejected target. Exhausting the attempt cap or missing the final authored band is inconclusive. No storage or delivery rate is approved."
+  },
+  "candidate_authoring": {
+    "scored_bytes": "Decode the final authored Profile 8.1 candidate. Compare the encoded VCL payload before and after authoring, and reject changes or a clock/ordinal discrepancy.",
+    "rpu_and_color": "Use the original same-frame source RPU's admitted DM color and timing associations, remove source reshaping and FEL residual mapping for the processed BL, signal BL compatibility 1 without EL, and read it all back. Verify the authored bitstream independently signals BT.2020 primaries, SMPTE ST 2084, BT.2020 NCL, limited range and TopLeft chroma sample location type 2. The encoded BL picture payload must remain unmodified.",
+    "coverage": "Require one decoded authored frame and one original-clock association per source ordinal; record all AU, RPU, VCL and decoded-plane hashes."
+  },
+  "acceptance": {
+    "minimum_mean_delta_itp_gain": 0.05,
+    "mean_rule": "F+ mean minus NP1 mean must be at least 0.05 for each evaluation window, for all four models and for each model's aggregate over evaluation samples. Calibration windows are excluded. Do not average the four models together.",
+    "margin_authority": "Round the largest observed calibration F+ model span, 0.0476612877492959, upward to the next 0.01. This is a conservative model-spread policy. It is not measured numerical repeatability, statistical significance or an optical or perceptual threshold.",
+    "tail_rule": "For each model and evaluation window, require NP1 <= F+ for pooled mean and p99 below 0.1 nit, largest per-frame p99 below 0.1 nit, and pooled p99 at 0.1–1 nit. A missing comparison mask leaves the corresponding required outcome unresolved. No numeric regression allowance.",
+    "readouts": "Every model, every frame and evaluation window; counts, source/relative PTS, full and band mean/p95/p99/max, largest frame shadow p99, F+ and NP1 paired deltas, grain proxy, actual authored rate, and terminal disposition. Identity is descriptive only.",
+    "result_limit": "Passing this single fixture authorizes no replacement. Record losing and inconclusive trials."
+  },
+  "frozen_operators": {
+    "four_model_audit.py": "5269e01224be889a45a657fb346984db584186a8935c038fe9520261a8bf1380",
+    "vector_metrics.py": "b8c4afd3bb6d2ad8fa6389f7d443233d2da53df9b113786a14b27c5931ae63c6",
+    "served_refit_eval.py": "81a642ceb2481573d0443c2f315ee5112ea5e990095e341f17e201f4033d6bea"
+  },
+  "sealed_run_binding": {
+    "required_before_execution": true,
+    "parameters": "Bind this protocol, source/census/window, exact helper/export verifier/NUT input, original F+ publication and readback, all executable paths and SHA-256 values, actual loaded libavcodec/libx265 closure and ABI, harness source/binary, baseline recipe, none/zero receipts before NP1, current Rust author/request, relevant threading/scalars, compiled versions, bounded rate guard, nominal and actual metadata, and immutable output paths.",
+    "provenance": "Machine-specific paths and media belong only in the private binding. The trial does not claim historical binary or candidate byte identity."
+  }
+}

@@ -36,11 +36,15 @@ pub(super) struct Rendition {
     pub(super) working_set_budget: u64,
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
+    /// Seconds a generation's transfer input reads before epoch pacing.
+    pub(super) source_burst_secs: f64,
     pub(super) manifest: Mutex<Manifest>,
     pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     /// Immutable storage domain. Job release cannot turn private bytes ordinary.
     pub(super) private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
+    pub(super) resume_preparation:
+        StdMutex<Option<super::resume_preparation::ResumePreparationDispatch>>,
     pub(super) preparation_epoch: AtomicU64,
     /// Identity of the complete output already handed to retained assembly
     /// (in flight or assembled). Maintenance never re-offers it.
@@ -96,7 +100,7 @@ pub(super) struct Rendition {
     /// index counts from, measured once by the first landing probe that needs
     /// it ([`super::generation::LandingProbe`]). The held source cannot change
     /// under the rendition, so neither can this.
-    pub(super) landing_origin: tokio::sync::OnceCell<f64>,
+    pub(super) landing_origin: tokio::sync::OnceCell<super::generation::LandingPacket>,
     /// The capacity hold this rendition is under, if any, retained across the
     /// producer that was terminated for it.
     ///
@@ -853,6 +857,10 @@ pub(super) struct Session {
     /// Private video/audio readers share this parent's authority and cleanup.
     /// They never allocate additional public playback sessions or captions.
     pub(super) children: Vec<ParentMediaReader>,
+    /// The soundtrack this viewer asked for. A split copy's shared video
+    /// recipe belongs to whichever viewer created it, so its master marks
+    /// this session's own choice as DEFAULT.
+    pub(super) requested_audio_index: Option<i64>,
     /// Keeps a prepared root admitted without adding a stale private reader.
     /// A running worker retains its own clone until physical reap.
     pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
@@ -879,9 +887,6 @@ pub(super) struct Session {
     /// viewer's `playback_id` can never end another viewer's session.
     pub(super) supersession_user: String,
     pub(super) block_budget: Duration,
-    /// `playback.sdr_master_codecs` as read when this incarnation was
-    /// created. The master reads this, never the live setting.
-    pub(super) sdr_master_codecs: bool,
     /// Serializes authority-checked control with terminal/reap transitions for
     /// this session only. Keeping the gate on the session avoids making an
     /// unrelated rolling or VOD control wait behind node-wide Store I/O.

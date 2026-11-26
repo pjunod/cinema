@@ -27,7 +27,7 @@ fn valid_id(id: &str) -> Result<(), ApiError> {
         .map_err(|_| ApiError::BadRequest("invalid job identity".into()))
 }
 
-fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
+pub(crate) fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
     let kind = job
         .payload
         .get("kind")
@@ -54,7 +54,8 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "retry_deadline_ms": job.retry_deadline_ms,
         "retry_supported": matches!(job.state, JobState::Failed | JobState::Cancelled)
             && matches!(job.supported_payload(), Ok(JobPayload::TranscodePrepare { .. }
-                | JobPayload::FragmentIndexBuild { .. } | JobPayload::ArtifactHydrate { .. })),
+                | JobPayload::FragmentIndexBuild { .. } | JobPayload::ArtifactHydrate { .. }
+                | JobPayload::DvRefit { .. })),
         "observation": "durable_state", "observed_at_ms": now_ms,
     })
 }
@@ -181,10 +182,17 @@ pub async fn list(
         "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 
+#[derive(Default, Deserialize)]
+pub struct DetailQuery {
+    #[serde(default)]
+    explain: bool,
+}
+
 pub async fn detail(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<DetailQuery>,
 ) -> Result<Json<Value>, ApiError> {
     valid_id(&id)?;
     let job = state
@@ -202,6 +210,34 @@ pub async fn detail(
         state.store.job_labels(std::slice::from_ref(&id))
     )?;
     let mut observed = summary(&job, crate::state::clock_ms());
+    if query.explain {
+        let now_ms = crate::state::clock_ms();
+        let verdict = match job.supported_payload() {
+            Ok(payload) => {
+                state
+                    .store
+                    .explain_job_claim(plurx_core::store::background_jobs::ClaimJob {
+                        job_id: id.clone(),
+                        expected_revision: job.revision,
+                        node_id: state.node_id.clone(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        claim_id: uuid::Uuid::new_v4().to_string(),
+                        kind: payload.kind(),
+                        payload_version: job.payload_version,
+                        now_ms,
+                        dispatched_at_ms: now_ms,
+                    })
+                    .await?
+            }
+            Err(_) => None,
+        };
+        observed["claim_predicates"] = json!({
+            "node_id": state.node_id,
+            "observed_at_ms": now_ms,
+            "evaluated": verdict.is_some(),
+            "first_block": verdict.and_then(|v| v.block).map(|b| b.as_str()),
+        });
+    }
     if let Some(label) = labels.first() {
         observed["title"] = json!(label.title);
         observed["library"] = json!(label.library);
@@ -369,7 +405,9 @@ pub async fn retry(
     }
     if !matches!(
         payload,
-        JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+        JobPayload::TranscodePrepare { .. }
+            | JobPayload::ArtifactHydrate { .. }
+            | JobPayload::DvRefit { .. }
     ) {
         return Err(ApiError::Conflict(
             "this job requires its domain retry action".into(),

@@ -290,6 +290,10 @@ private struct HomeDashboard: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var featurePresentation = HomeFeaturePresentation()
     @AppStorage("plurx.tvHomeLayout") private var tvHomeLayoutRaw = TvHomeLayout.classic.rawValue
+    #if os(tvOS)
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var featureTarget: PresentationTarget?
+    #endif
 
     private var theaterFeature: TvTheaterFeature? {
         #if os(tvOS)
@@ -304,6 +308,52 @@ private struct HomeDashboard: View {
         )
     }
 
+    #if os(tvOS)
+    /// What the theater feature's direct Resume depends on; a change re-offers
+    /// preparation for the window that Resume will now request.
+    private struct FeaturePreparationKey: Equatable {
+        let itemId: Int
+        let positionMs: Int
+        let target: PresentationTarget?
+        let quality: PlaybackQuality
+        let authorizationGeneration: UInt64
+        let routeV1: Bool
+        let deviceSubtitlesOff: Bool
+        let subtitleReadiness: SubtitleReadiness
+        let active: Bool
+        /// Play (or its detail fetch) has begun: the key changes, so SwiftUI
+        /// cancels an in-flight preparation before the real HLS create.
+        let playing: Bool
+    }
+
+    private func featurePreparationKey(_ feature: TvTheaterFeature) -> FeaturePreparationKey? {
+        guard feature.isContinueWatching else { return nil }
+        return FeaturePreparationKey(
+            itemId: feature.item.id, positionMs: feature.item.watch?.positionMs ?? 0,
+            target: featureTarget, quality: model.playbackQuality,
+            authorizationGeneration: Session.shared.playbackAuthorization.generation,
+            routeV1: model.displayAwareAuto && model.displayAwareAutoProtocol == "route-v1",
+            deviceSubtitlesOff: model.subLang == "off", subtitleReadiness: model.subtitleReadiness,
+            active: scenePhase == .active,
+            playing: featurePresentation.startsPlayback
+        )
+    }
+
+    /// The theater feature plays Continue Watching without title detail, so it
+    /// offers the same startup preparation title detail does for that Resume.
+    private func prepareFeature(_ feature: TvTheaterFeature) async {
+        guard let key = featurePreparationKey(feature), key.active, !key.playing,
+              let detail = try? await model.itemDetail(feature.item.id),
+              !Task.isCancelled,
+              let context = TvHomeLayoutPolicy.playbackContext(detail),
+              context.startMs > 0,
+              let preparation = TVStartupPreparation.offer(
+                for: context, model: model, presentationTarget: featureTarget
+              ) else { return }
+        await preparation.run(using: model)
+    }
+    #endif
+
     private var featured: Item? {
         (model.hubs.continueWatching ?? []).first
             ?? (model.hubs.nextUp ?? []).first
@@ -317,20 +367,15 @@ private struct HomeDashboard: View {
                 #if os(iOS)
                 homeHeader
                 #endif
-                #if os(tvOS)
-                if model.layout == .standard {
-                HStack {
-                    Button("Libraries") { remoteNavigation.selectedTab = .libraries; remoteNavigation.synchronizeRoute() }
-                        .remoteControl("tab:libraries", label: "Libraries") { remoteNavigation.selectedTab = .libraries; remoteNavigation.synchronizeRoute() }
-                    Button("Search") { remoteNavigation.selectedTab = .search; remoteNavigation.synchronizeRoute() }
-                        .remoteControl("tab:search", label: "Search") { remoteNavigation.selectedTab = .search; remoteNavigation.synchronizeRoute() }
-                }
-                .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
-                .padding(.horizontal, screenHPad)
-                }
-                #endif
+                // Libraries and Search are destinations of the app's own
+                // navigation; Home no longer repeats them above the shelves.
                 if let error = model.homeError {
+                    #if os(tvOS)
+                    HomeRecoveryRow(error: error, scope: "home",
+                                    returnFocus: remoteKeys.first { $0.hasPrefix("shelf:") || $0.hasPrefix("home-feature:") })
+                    #else
                     HomeRecoveryRow(error: error, scope: "home", returnFocus: remoteKeys.first { $0.hasPrefix("shelf:") } ?? "tab:libraries")
+                    #endif
                 }
                 if model.homeLoading && featured == nil {
                     ProgressView().tint(Palette.accent)
@@ -387,18 +432,16 @@ private struct HomeDashboard: View {
     private var remoteKeys: [String] {
         // Shelf ids are stable names, not positions: the list rows sit after
         // Next Up on screen but keep their own ids so Coming Soon stays shelf 3.
-        let shelves: [(Int, [Item])] = [(0, HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])),
-                                       (1, model.hubs.nextUp ?? []), (4, model.watchlist), (5, model.favorites),
-                                       (2, model.hubs.recentlyAdded ?? [])]
-        #if os(tvOS)
-        let tabs = model.layout == .standard ? ["tab:libraries", "tab:search"] : []
-        #else
-        let tabs: [String] = []
-        #endif
+        let visible = Set(HomeSectionOrder.sections(rows: model.homeRows))
+        let all: [(Int, HomeSection, [Item])] = [
+            (0, .continueWatching, HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])),
+            (1, .nextUp, model.hubs.nextUp ?? []), (4, .watchlist, model.watchlist), (5, .favorites, model.favorites),
+            (2, .recentlyAdded, model.hubs.recentlyAdded ?? [])]
+        let shelves: [(Int, [Item])] = all.filter { visible.contains($0.1) }.map { ($0.0, $0.2) }
         let featureKeys = theaterFeature == nil ? [] : ["home-feature:play", "home-feature:details"]
-        return tabs + featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
+        return featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
-        } + model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id }
+        } + (visible.contains(.comingSoon) ? model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id } : [])
     }
     private func updateRemoteOrder() { remoteNavigation.setOrder(scope: "home", keys: remoteKeys, columns: 1) }
 
@@ -432,6 +475,18 @@ private struct HomeDashboard: View {
         if let theaterFeature {
             TvTheaterHero(feature: theaterFeature, presentation: featurePresentation)
                 .padding(.bottom, 12)
+                #if os(tvOS)
+                .background {
+                    if model.displayAwareAuto, scenePhase == .active {
+                        TVFullscreenTargetProbe { target in
+                            if featureTarget != target { featureTarget = target }
+                        }
+                    }
+                }
+                .task(id: featurePreparationKey(theaterFeature)) {
+                    await prepareFeature(theaterFeature)
+                }
+                #endif
         }
         if model.layout == .standard && HomeLayoutPolicy.usesFeaturedHero, let featured {
             FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)
@@ -441,41 +496,9 @@ private struct HomeDashboard: View {
                 .padding(.bottom, 12)
         }
 
-        MediaRow(
-            title: "Continue Watching",
-            remoteShelf: "shelf:0",
-            items: continueWatchingItems,
-            style: .landscape,
-            landscapeCopyStyle: HomeLayoutPolicy.continueWatchingCopyStyle
-        )
-        .id("shelf:0")
-        MediaRow(
-            title: "Next Up",
-            remoteShelf: "shelf:1",
-            items: model.hubs.nextUp ?? [],
-            style: .landscape
-        )
-        .id("shelf:1")
-        MediaRow(
-            title: "Watchlist",
-            remoteShelf: "shelf:4",
-            items: model.watchlist
-        )
-        .id("shelf:4")
-        MediaRow(
-            title: "Favorites",
-            remoteShelf: "shelf:5",
-            items: model.favorites
-        )
-        .id("shelf:5")
-        MediaRow(
-            title: "Recently Added",
-            remoteShelf: "shelf:2",
-            items: model.hubs.recentlyAdded ?? []
-        )
-        .id("shelf:2")
-        ComingSoonRow(entries: model.comingSoon)
-            .id("shelf:3")
+        ForEach(HomeSectionOrder.sections(rows: model.homeRows), id: \.self) { section in
+            homeSection(section)
+        }
 
         if featured == nil,
            (model.hubs.nextUp ?? []).isEmpty,
@@ -487,6 +510,41 @@ private struct HomeDashboard: View {
             )
             .frame(maxWidth: .infinity)
             .padding(.top, 80)
+        }
+    }
+
+    @ViewBuilder
+    private func homeSection(_ section: HomeSection) -> some View {
+        switch section {
+        case .continueWatching:
+            MediaRow(
+                title: "Continue Watching",
+                remoteShelf: "shelf:0",
+                items: continueWatchingItems,
+                style: .landscape,
+                landscapeCopyStyle: HomeLayoutPolicy.continueWatchingCopyStyle
+            )
+            .id("shelf:0")
+        case .nextUp:
+            MediaRow(title: "Next Up", remoteShelf: "shelf:1", items: model.hubs.nextUp ?? [], style: .landscape)
+                .id("shelf:1")
+        case .watchlist:
+            MediaRow(title: "Watchlist", remoteShelf: "shelf:4", items: model.watchlist)
+                .id("shelf:4")
+        case .favorites:
+            MediaRow(title: "Favorites", remoteShelf: "shelf:5", items: model.favorites)
+                .id("shelf:5")
+        case .recentlyAdded:
+            MediaRow(title: "Recently Added", remoteShelf: "shelf:2", items: model.hubs.recentlyAdded ?? [])
+                .id("shelf:2")
+        case .comingSoon:
+            ComingSoonRow(entries: model.comingSoon)
+                .id("shelf:3")
+        case .row(let id):
+            if let body = model.homeRows?.rows[String(id)] {
+                CustomRowRail(rowId: id, body_: body)
+                    .id("row:\(id)")
+            }
         }
     }
 
@@ -604,7 +662,7 @@ private struct LibrariesDashboard: View {
         HStack {
             Text("Libraries")
                 #if os(tvOS)
-                .font(.title3.weight(.semibold))
+                .font(.system(size: 30, weight: .semibold))
                 #else
                 .font(.headline.weight(.semibold))
                 #endif
@@ -776,7 +834,7 @@ private struct FeaturedHero: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(item.showTitle ?? item.title)
                     #if os(tvOS)
-                    .font(.system(size: 52, weight: .bold))
+                    .font(.system(size: 78, weight: .bold))
                     #else
                     .font(compact ? .title.bold() : .largeTitle.bold())
                     #endif
@@ -784,21 +842,38 @@ private struct FeaturedHero: View {
                     .lineLimit(2)
                 if item.showTitle != nil {
                     Text(episodeSubtitleForHero(item))
+                        #if os(tvOS)
+                        .font(.system(size: 26, weight: .medium))
+                        #else
                         .font(.headline)
+                        #endif
                         .foregroundColor(.white.opacity(0.82))
                         .lineLimit(1)
                 }
                 if !heroMetadata.isEmpty {
                     Text(heroMetadata)
+                        #if os(tvOS)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundColor(Palette.muted)
+                        #else
                         .font(.system(.callout, design: .monospaced).weight(.semibold))
                         .foregroundColor(.white.opacity(0.72))
+                        #endif
                         .lineLimit(1)
                 }
+                #if os(tvOS)
+                Label(heroAction, systemImage: "play.fill")
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundColor(Palette.onBg)
+                    .padding(.horizontal, 20).padding(.vertical, 10)
+                    .background(Palette.surfaceHi, in: Capsule())
+                #else
                 Label(heroAction, systemImage: "play.fill")
                     .font(.system(.headline, design: .monospaced).weight(.bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16).padding(.vertical, 10)
                     .background(Palette.accent, in: Capsule())
+                #endif
             }
             .padding(.horizontal, screenHPad)
             .padding(.bottom, 24)

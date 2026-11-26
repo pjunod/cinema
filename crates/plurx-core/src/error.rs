@@ -25,6 +25,9 @@ pub enum StoreError {
     #[error("storage task failed: {0}")]
     Task(String),
 
+    #[error("{0}")]
+    AnalysisAdmission(AnalysisAdmissionRefusal),
+
     #[error("cluster identity error: {0}")]
     Identity(String),
 
@@ -43,6 +46,23 @@ pub enum StoreError {
         owner_node_id: String,
         fence: u64,
     },
+}
+
+/// Reason an exact analysis enqueue could neither insert nor join a request.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum AnalysisAdmissionRefusal {
+    #[error("the analysis source size or modification time changed, or the file was removed")]
+    SourceChanged,
+    #[error("the prediction no longer authorizes this analysis request")]
+    PredictionExpired,
+    #[error("the runnable analysis queue is full for this priority")]
+    QueueFull,
+    #[error("the analysis backlog has reached its hard bound for this priority")]
+    BacklogFull,
+    #[error("the admitted analysis request or its source changed before it could be returned")]
+    StateChanged,
+    #[error("no matching analysis generation is available to join")]
+    GenerationConflict,
 }
 
 impl From<rusqlite::Error> for StoreError {

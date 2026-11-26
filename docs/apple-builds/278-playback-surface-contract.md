@@ -1,6 +1,5 @@
 # The playback surface is one projection of the player, not four fields
 
-Build: 147
 Issue: #278
 
 Tracked by issue #278 (the defect) and delivered by PR #280 (M2 of the

@@ -14,6 +14,7 @@ mod background_jobs;
 mod cache;
 mod classification;
 mod coordination;
+mod curation;
 mod dv_conversion;
 mod dvr;
 mod file_grants;
@@ -1367,9 +1368,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_title_jobs::MIGRATION_V2,
     // v133: optional scoped application login, separate from native sessions.
     super::delegation::SCHEMA,
-    // v134: source leases expand: one lease row per source reader.
+    // v134: F+ curve fits for Profile 7 FEL titles, written by `dv_refit` jobs.
+    super::dv_refit_jobs::SCHEMA,
+    // v135: person-curated tags, saved rows, Home layouts and curation grants.
+    super::library_curation_schema::SCHEMA,
+    // v136: live title qualification takes precedence over manual library turns.
+    super::background_job_turns::LIVE_TITLE_MIGRATION,
+    // v137: a per-file background job reads only the library root holding its file.
+    super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
+    // v138: a per-file analysis request reads only the library root holding its file.
+    super::analysis_source_scope::SCHEMA,
+    // v139: source leases expand: one lease row per source reader. It
+    // replaces the v137/v138 resource views with root-keyed projections that
+    // keep their per-file root narrowing.
     super::source_leases::EXPAND,
-    // v135: source leases contract: the v1 source-owner objects go. A
+    // v140: source leases contract: the v1 source-owner objects go. A
     // single SQLite process has no older binary to wait for.
     super::source_leases::CONTRACT,
 ];
@@ -1672,6 +1685,10 @@ impl SqliteStore {
         // planning generation too. An idempotent extension, not a migration:
         // `user_version` stays where it is, so an older binary still opens it.
         super::playback_input_keys::install_sqlite(&conn)?;
+        super::fragment_publication::install_sqlite(&conn)?;
+        // Each signed-in device's capability record, owned by its token. The
+        // same additive extension shape as the planning keys.
+        super::playback_device_caps::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
@@ -1864,6 +1881,15 @@ impl SqliteStore {
             if version == super::subtitle_managed_schema::PUBLISH_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
             }
+            if version == 136 {
+                super::background_job_turns::verify_catalog(&tx, false)?;
+            }
+            if version == super::subtitle_managed_schema::FILE_ROOT_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_file_root_predecessor(&tx)?;
+            }
+            if version == 138 {
+                super::analysis_source_scope::verify_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1965,15 +1991,19 @@ impl SqliteStore {
             tracing::info!(version, "applied schema migration");
         }
 
+        super::background_job_turns::verify_catalog(conn, true)?;
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
+        super::library_curation_schema::verify_sqlite(conn)?;
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
         super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
+        super::dv_refit_jobs::verify_sqlite(conn)?;
+        super::analysis_source_scope::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

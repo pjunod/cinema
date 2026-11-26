@@ -274,6 +274,16 @@ delegation tail and validate that neither rewrite discards owned data.
 The import inventory combines delegation's three durable tables with the
 lease replacement's net removal of one table (two owners become one lease table).
 
+### Port onto main `8724851ba` (2026-11-26)
+
+Main had moved 1,645 commits on before the batch could land. The port merges main and resolves every conflict in main's favour where the two designs meet. Lease behaviour is then re-expressed on top of the result, so none of main's work is reverted.
+
+- **Ordinals.** Main published v134–v138: F+ fits, curation, live-title turns, the managed v7 view, and the analysis source scope. The lease expand and contract are now v139/v140, and the replicated store installs the lease schema last. The managed v7 and analysis-scope (v1) verifiers accept only their exact objects, or those objects exactly as the expand or contract left them. Historical fixtures rewind leases first, from v140 to v138, restoring main's v137/v138 views.
+- **#1947's root scoping.** A per-file job or analysis still reserves only the root that holds its file. It now does so through the lease root keys (`source_io:root/…`) and that root's mapped domain.
+- **Viewer preparation** (main `40609d31e`, `0fec6b022`). A read attestation is admitted without counting analysis or job holders. While a preparation lease's authority is live (no grace), analysis and jobs are refused continuation, resume and byte service. This uses `claim_preparation_window`, which the old-binary resume trigger shares.
+- **Previous reader** (main `2d4a8e30c`, named `claim_previous_reader` as in #1955). A job is not claimed at a new fence while any non-paused lease of its own is within expiry plus grace. This replaces the earlier rule that let a successor skip its own ghost lease. The claimant's own leases are still left out of the holder counts.
+- **Settings.** Main's Developer cleanup (#1802) moved the source diagnostics card to System. The read-only launch-verification card now lives there.
+
 The claim's lease terms remain the same macros used by source registration,
 analysis and resume. Claim, replica verdict and candidate listing wrap those
 terms in the same three admission groups; no local decision grants authority

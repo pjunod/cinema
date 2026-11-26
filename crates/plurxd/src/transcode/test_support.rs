@@ -21,6 +21,7 @@ enum DeliveryFixtureKind {
     Hooked,
     Unhooked,
     ProcessFree,
+    NativeSplit,
 }
 
 #[cfg(test)]
@@ -169,6 +170,44 @@ impl HlsDeliveryFixture {
         session_id: &str,
     ) -> Self {
         Self::publish_with_takeover(dir, session_id, None, true, true).await
+    }
+
+    pub(crate) async fn publish_native_split_actor_managed(
+        dir: &std::path::Path,
+        session_id: &str,
+    ) -> (Self, crate::copyseg::NativeSplitInitIds) {
+        let fixture = Self::publish_with_takeover_and_state_root(
+            dir,
+            dir,
+            session_id,
+            None,
+            true,
+            true,
+            DeliveryFixtureKind::NativeSplit,
+        )
+        .await;
+        fixture.mark_started().await;
+        let ids = fixture
+            .session
+            .native_split
+            .as_ref()
+            .expect("split fixture")
+            .seed_for_http_test(13);
+        let mut raw = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n".to_owned();
+        use std::fmt::Write as _;
+        for index in 0..12 {
+            let _ = writeln!(raw, "#EXTINF:4.0,\nseg{index:05}.m4s");
+        }
+        fixture
+            .session
+            .publication
+            .lock()
+            .await
+            .served
+            .as_mut()
+            .expect("split served window")
+            .raw = Arc::from(raw.into_bytes());
+        (fixture, ids)
     }
 
     pub(crate) async fn publish_takeover(
@@ -325,6 +364,10 @@ impl HlsDeliveryFixture {
             !matches!(fixture_kind, DeliveryFixtureKind::ProcessFree),
         );
         raw_session.takeover = takeover;
+        if matches!(fixture_kind, DeliveryFixtureKind::NativeSplit) {
+            raw_session.native_split =
+                Some(Arc::new(crate::copyseg::NativeSplitInventory::default()));
+        }
         raw_session.file_id = file_id;
         if copy {
             raw_session.kind = SessionKind::Copy {
@@ -349,7 +392,10 @@ impl HlsDeliveryFixture {
                 file_id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
-                codecs: "avc1.640034,mp4a.40.2".into(),
+                codecs: match fixture_kind {
+                    DeliveryFixtureKind::NativeSplit => "hvc1.2.4.L153.B0,mp4a.40.2".into(),
+                    _ => "avc1.640034,mp4a.40.2".into(),
+                },
                 supplemental_codecs: None,
                 frame_rate: None,
             },
@@ -782,6 +828,7 @@ fn test_session_with_optional_child(
         // Historical flow/retention controls explicitly retain the old cushion.
         // Production and new startup regressions bind the short phase below.
         publication: Mutex::new(RollingPublicationClock::historical_control_for_test()),
+        native_split: None,
         publication_worker_started: AtomicBool::new(false),
         flow_worker_started: AtomicBool::new(false),
         file_id: 1,

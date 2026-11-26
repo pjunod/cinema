@@ -283,15 +283,23 @@ async fn adopt_local_art(
 ) -> Option<String> {
     let stem = media.file_stem()?.to_string_lossy().into_owned();
     let dir = media.parent()?;
-    for suffix in ["-thumb", "-poster"] {
-        for ext in ["jpg", "jpeg", "png"] {
-            let candidate = dir.join(format!("{stem}{suffix}.{ext}"));
-            if candidate.is_file() {
-                return copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await;
-            }
-        }
-    }
-    None
+    let candidates = ["-thumb", "-poster"]
+        .into_iter()
+        .flat_map(|suffix| {
+            ["jpg", "jpeg", "png"].map(|ext| dir.join(format!("{stem}{suffix}.{ext}")))
+        })
+        .collect();
+    let candidate = first_existing_file(candidates).await?;
+    copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await
+}
+
+/// The first of `candidates` that is a regular file. The candidates sit
+/// beside the media, so the checks run on the media-I/O pool.
+async fn first_existing_file(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    crate::media_io::blocking(move || candidates.into_iter().find(|candidate| candidate.is_file()))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Local art for a folder: `poster.jpg`/`folder.jpg` inside the directory.
@@ -302,15 +310,12 @@ async fn adopt_folder_art(
     dir: &Path,
     expected: Option<&[String]>,
 ) -> Option<String> {
-    for name in ["poster", "folder"] {
-        for ext in ["jpg", "jpeg", "png"] {
-            let candidate = dir.join(format!("{name}.{ext}"));
-            if candidate.is_file() {
-                return copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await;
-            }
-        }
-    }
-    None
+    let candidates = ["poster", "folder"]
+        .into_iter()
+        .flat_map(|name| ["jpg", "jpeg", "png"].map(|ext| dir.join(format!("{name}.{ext}"))))
+        .collect();
+    let candidate = first_existing_file(candidates).await?;
+    copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await
 }
 
 async fn copy_into_cache(
@@ -788,31 +793,19 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_a_thumbnail_reaps_the_encoder() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::num::NonZeroU32;
         use std::time::Duration;
 
         let dir = canonical_tempdir();
-        let script = dir.path().join("hung-ffmpeg");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/metadata/fixtures/ffmpeg-partial-thumbnail");
         let pid_file = dir.path().join("encoder.pid");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf partial > \"$output\"\necho $$ > \"{}\"\nexec sleep 30\n",
-                pid_file.display()
-            ),
-        )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
-
-        let task_script = script.clone();
         let task_artwork = dir.path().to_path_buf();
         let task_media = dir.path().join("video.mp4");
         let task = tokio::spawn(async move {
             generate_thumb_with(
                 None,
-                task_script.as_os_str(),
+                script.as_os_str(),
                 ThumbnailRequest {
                     artwork_dir: &task_artwork,
                     item_id: 7,
@@ -833,8 +826,11 @@ mod tests {
         // no signal, and a red build that teaches people to re-run.
         let pid_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let pid = loop {
-            if let Ok(value) = std::fs::read_to_string(&pid_file) {
-                break value.trim().to_owned();
+            let published = std::fs::read_to_string(&pid_file).ok();
+            if let Some(value) =
+                published.and_then(|value| value.strip_suffix('\n')?.parse::<NonZeroU32>().ok())
+            {
+                break value.to_string();
             }
             assert!(
                 tokio::time::Instant::now() < pid_deadline,

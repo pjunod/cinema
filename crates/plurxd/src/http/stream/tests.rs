@@ -542,6 +542,7 @@ fn android_dv_delivery_native_progressive_mux_retains_record_and_rpus() {
                             plurx_core::transcode::dvconvert::convert_length_prefixed(
                                 sample,
                                 nal_length_size,
+                                None,
                                 &mut converted,
                             )
                             .expect("convert fixture RPUs to P8.1");
@@ -832,7 +833,7 @@ fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
         file.dolby_vision.profile = Some(8);
         file.dolby_vision.rpu_present = Some(true);
         serde_json::to_value(DecisionResponse {
-            enhancement: direct_enhancement(&file, &decision, &delivery),
+            enhancement: direct_enhancement(&file, &decision, &delivery, None),
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -914,6 +915,72 @@ fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
     );
 }
 
+/// The decision's enhancement reads the complete-title scan from the probe
+/// document: a Profile 7 MEL title (Gran Turismo 2023's remux) says MEL, and
+/// the same file before its scan does not claim FEL.
+#[test]
+fn direct_enhancement_names_the_scanned_layer_kind() {
+    use plurx_core::playback::enhancement::{EnhancementBadge, TitleScanFacts};
+    use plurx_core::scan::dv_title::{
+        DvTitleStats, TitleConstant, TitleElKind, PROBE_FIELD, SCHEMA,
+    };
+    let mut file = hevc_file(Some("dolby_vision"));
+    file.dolby_vision.profile = Some(7);
+    file.dolby_vision.rpu_present = Some(true);
+    file.dolby_vision.el_present = Some(true);
+    let mut decision = planned(playback::PlaybackMethod::DirectPlay);
+    decision.preserve_dolby_vision = true;
+    decision.convert_dolby_vision = false;
+    decision.delivered_dynamic_range = "dolby_vision";
+    decision.delivered_dolby_vision_profile = Some(7);
+    let (_, delivery) = delivery_plan(file.id, &decision, None, false);
+    let probe = |el_kind| {
+        serde_json::json!({ PROBE_FIELD: DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(3079),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+            el_kind,
+        }})
+        .to_string()
+    };
+    let layer_row = |document: Option<String>| {
+        let title = TitleScanFacts::from_probe(document.as_deref());
+        let enhancement = direct_enhancement(&file, &decision, &delivery, Some(&title))
+            .expect("preserved Profile 7 Dolby Vision");
+        let row = enhancement
+            .details
+            .iter()
+            .find(|detail| detail.badge == EnhancementBadge::Fel)
+            .expect("layer row")
+            .text
+            .clone();
+        (
+            row,
+            serde_json::to_value(&enhancement).expect("serialize")["el_kind"].clone(),
+        )
+    };
+    let (mel, kind) = layer_row(Some(probe(TitleConstant::Consistent(TitleElKind::Mel))));
+    assert!(mel.starts_with("MEL: minimal enhancement layer"), "{mel}");
+    assert_eq!(kind, serde_json::json!("mel"));
+    let (fel, kind) = layer_row(Some(probe(TitleConstant::Consistent(TitleElKind::Fel))));
+    assert_eq!(fel, "FEL: delivered for the display to decode");
+    assert_eq!(kind, serde_json::json!("fel"));
+    for unscanned in [None, Some(probe(TitleConstant::Unknown))] {
+        let (row, kind) = layer_row(unscanned);
+        assert!(
+            !row.starts_with("FEL:") && !row.starts_with("MEL:"),
+            "{row}"
+        );
+        assert!(kind.is_null());
+    }
+}
+
 #[test]
 fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     use plurx_core::playback::enhancement::EnhancementBadge;
@@ -923,7 +990,7 @@ fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     file.dolby_vision.el_present = Some(false);
     let decision = planned(playback::PlaybackMethod::DirectPlay);
     let (_, delivery) = delivery_plan(file.id, &decision, None, false);
-    let enhancement = direct_enhancement(&file, &decision, &delivery)
+    let enhancement = direct_enhancement(&file, &decision, &delivery, None)
         .expect("preserved original Dolby Vision exposes dynamic metadata");
     assert_eq!(enhancement.active, vec![EnhancementBadge::Dyn]);
     assert!(!enhancement.requires_effective_processing);
@@ -940,27 +1007,27 @@ fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     for rpu_present in [None, Some(false)] {
         let mut unknown_metadata = file.clone();
         unknown_metadata.dolby_vision.rpu_present = rpu_present;
-        assert!(direct_enhancement(&unknown_metadata, &decision, &delivery).is_none());
+        assert!(direct_enhancement(&unknown_metadata, &decision, &delivery, None).is_none());
     }
     let mut unknown_profile = file.clone();
     unknown_profile.dolby_vision.profile = None;
-    assert!(direct_enhancement(&unknown_profile, &decision, &delivery).is_none());
+    assert!(direct_enhancement(&unknown_profile, &decision, &delivery, None).is_none());
     let mut ordinary_hdr = file.clone();
     ordinary_hdr.hdr = Some("hdr10".into());
-    assert!(direct_enhancement(&ordinary_hdr, &decision, &delivery).is_none());
+    assert!(direct_enhancement(&ordinary_hdr, &decision, &delivery, None).is_none());
 
     let mut fallback = decision.clone();
     fallback.delivered_dynamic_range = "hdr10";
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
     fallback = decision.clone();
     fallback.preserve_dolby_vision = false;
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
     fallback = decision.clone();
     fallback.delivered_dolby_vision_profile = Some(5);
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
     fallback = decision.clone();
     fallback.convert_dolby_vision = true;
-    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    assert!(direct_enhancement(&file, &fallback, &delivery, None).is_none());
 
     for method in [
         playback::PlaybackMethod::Remux,
@@ -968,8 +1035,8 @@ fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     ] {
         let session_decision = planned(method);
         let (_, session_delivery) = delivery_plan(file.id, &session_decision, None, true);
-        assert!(direct_enhancement(&file, &session_decision, &session_delivery).is_none());
-        assert!(direct_enhancement(&file, &decision, &session_delivery).is_none());
+        assert!(direct_enhancement(&file, &session_decision, &session_delivery, None).is_none());
+        assert!(direct_enhancement(&file, &decision, &session_delivery, None).is_none());
     }
 }
 
@@ -2719,7 +2786,7 @@ fn a_marker_in_the_wrong_half_of_the_runtime_is_rejected() {
 async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_backfill() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     let (_, state) = super::super::tests::test_app_with_state();
-    let directory = tempfile::tempdir().expect("Source marker fixture");
+    let directory = crate::test_tempdir().expect("Source marker fixture");
     let path = directory.path().join("legacy-source.mp4");
     std::fs::write(&path, b"Source marker presence fixture").expect("actual presence");
     let library = state
@@ -2772,15 +2839,14 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
         .await
         .expect("file read")
         .expect("file");
-    let pause = pause_next_marker_fallback_for_test(&path);
-    let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
+    let caps: playback::DeviceCaps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         decision_for_source_file(
             &state,
             file.clone(),
             Caps {
-                caps_v2: Some(caps),
+                caps_v2: Some(caps.clone()),
                 ..Default::default()
             },
         ),
@@ -2788,10 +2854,33 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
     .await
     .expect("Source never enters the paused live-probe fallback")
     .expect("actual Source engine");
+    assert!(
+        decision.markers.is_empty(),
+        "unobserved chapters are unknown"
+    );
+    let user = state
+        .store
+        .create_user("startup-preview", "hash", true)
+        .await
+        .expect("preview user");
+    let Json(preview) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        startup_decision_post(
+            AuthUser(user),
+            State(state.clone()),
+            AxPath(id),
+            Query(Caps::default()),
+            HeaderMap::new(),
+            crate::http::network::RemoteAddress(None),
+            Json(DecisionBody { caps }),
+        ),
+    )
+    .await
+    .expect("startup preview never enters the paused live-probe fallback")
+    .expect("authenticated startup preview");
     assert_eq!(
-        serde_json::to_value(&decision.markers).expect("markers"),
-        serde_json::to_value(markers_from_chapters(&[], file.duration_ms))
-            .expect("stored evidence only")
+        serde_json::to_value(&preview.markers).expect("preview markers"),
+        serde_json::to_value(&decision.markers).expect("source markers"),
     );
     assert_eq!(
         state
@@ -2810,19 +2899,18 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
             .is_none(),
         "decision must not backfill an annotation set"
     );
-    // The ordinary Local fallback still enters its existing owned seam.
-    let local_state = state.clone();
-    let local_file = file.clone();
-    let local = tokio::spawn(async move { markers_for(&local_state, &local_file).await });
-    tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait())
+    assert!(state
+        .store
+        .analysis_requests(10)
         .await
-        .expect("Local fallback retained");
-    local.abort();
-    let _ = local.await;
-    marker_fallback_pauses()
-        .lock()
-        .expect("pause registry")
-        .remove(path.to_str().expect("path"));
+        .expect("analysis requests")
+        .is_empty());
+    let ambiguous = annotation_set_from_markers(annotation_source_identity(&file), &[]);
+    state
+        .store
+        .put_timeline_annotation_set(id, 600_000, &ambiguous)
+        .await
+        .expect("legacy fallback set without chapter evidence");
     let chapters =
         serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("scan chapters");
     state
@@ -2845,7 +2933,7 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
     );
     state
         .store
-        .put_timeline_annotation_set_if_missing(id, 600_000, &manual)
+        .put_timeline_annotation_set(id, 600_000, &manual)
         .await
         .expect("persisted annotation fixture");
     assert_eq!(
@@ -2905,13 +2993,22 @@ async fn chapters_backfill_into_the_stored_probe() {
 
     let chapters = serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("json");
     store
-        .merge_file_probe_chapters(legacy, &chapters)
+        .merge_file_probe_chapters_if_missing(legacy, 1, 1, &chapters)
         .await
         .expect("merge");
     store
-        .merge_file_probe_chapters(unprobed, &chapters)
+        .merge_file_probe_chapters_if_missing(unprobed, 1, 1, &chapters)
         .await
         .expect("merge on a null probe is a no-op, not an error");
+
+    store
+        .merge_file_probe_chapters_if_missing(legacy, 1, 2, "[]")
+        .await
+        .expect("merge file probe chapters if missing");
+    store
+        .merge_file_probe_chapters_if_missing(legacy, 1, 1, "[]")
+        .await
+        .expect("merge file probe chapters if missing");
 
     let raw = store
         .get_file_probe_json(legacy)

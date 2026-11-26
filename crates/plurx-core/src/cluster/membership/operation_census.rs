@@ -38,6 +38,7 @@ use std::collections::BTreeSet;
 /// keeps this list complete.
 const SOURCES: &[(&str, &str)] = &[
     ("membership.rs", include_str!("../membership.rs")),
+    ("membership/access.rs", include_str!("access.rs")),
     ("membership/directory.rs", include_str!("directory.rs")),
     ("membership/lifecycle.rs", include_str!("lifecycle.rs")),
     (
@@ -61,6 +62,7 @@ const RAW_CLIENT_FUNCTIONS: &[&str] = &[
     "sharing_session_principal_floor_ready",
     "sharing_catalogue_item_identity_floor_ready",
     "sharing_member_floor_ready",
+    "sharing_member_serving_floor_ready",
     "bootstrap_purpose_admission_schema_for_contract",
     "observe_purpose_key_members_for_contract",
     "observe_source_admission_members_for_contract",

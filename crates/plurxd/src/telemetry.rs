@@ -1529,11 +1529,6 @@ pub(crate) struct NetworkIdentity {
     pub(crate) user_id: Option<i64>,
 }
 
-/// The paired effective-settings answer: the raw
-/// `telemetry.retain_days` and `playback.network_priors` values, read
-/// together so one consistent read serves both.
-type SettingPair = (Option<String>, Option<String>);
-
 /// What the bounded writer needs from durable storage.
 ///
 /// A narrow seam rather than `Arc<dyn Store>`, because the three things this
@@ -1544,16 +1539,16 @@ type SettingPair = (Option<String>, Option<String>);
 /// this file.
 trait WriterStore: Send + Sync + 'static {
     /// One node-local connection lease for the retained events AND the folded
-    /// prior observations. Either slice may be empty; the two opt-ins are
-    /// independent and the lease is shared.
+    /// prior observations. The events slice is empty when retention is off;
+    /// network priors are always on. The lease is shared.
     fn write_batch<'a>(
         &'a self,
         events: &'a [PlaybackEvent],
         observations: &'a [NetworkPriorObservation],
     ) -> BoxFuture<'a, Result<u64, StoreError>>;
 
-    /// Both telemetry settings in one consistent read.
-    fn setting_pair(&self) -> BoxFuture<'_, Result<SettingPair, StoreError>>;
+    /// The raw `telemetry.retain_days` value.
+    fn retain_days(&self) -> BoxFuture<'_, Result<Option<String>, StoreError>>;
 }
 
 struct DurableWriterStore(Arc<dyn Store>);
@@ -1567,9 +1562,8 @@ impl WriterStore for DurableWriterStore {
         self.0.record_playback_batch(events, observations)
     }
 
-    fn setting_pair(&self) -> BoxFuture<'_, Result<SettingPair, StoreError>> {
-        self.0
-            .get_setting_pair(keys::TELEMETRY_RETAIN_DAYS, keys::PLAYBACK_NETWORK_PRIORS)
+    fn retain_days(&self) -> BoxFuture<'_, Result<Option<String>, StoreError>> {
+        self.0.get_setting(keys::TELEMETRY_RETAIN_DAYS)
     }
 }
 
@@ -1718,7 +1712,6 @@ struct TelemetrySink {
 #[derive(Clone, Copy)]
 struct EffectiveSettings {
     retain: bool,
-    priors: bool,
     read_at: Option<Instant>,
 }
 
@@ -1772,7 +1765,6 @@ fn new_sink(metrics: &'static QueueMetrics) -> Arc<TelemetrySink> {
         stopped: Notify::new(),
         settings: RwLock::new(EffectiveSettings {
             retain: true,
-            priors: false,
             read_at: None,
         }),
         metrics,
@@ -1860,8 +1852,8 @@ impl TelemetrySink {
         if !force && !due {
             return Ok(());
         }
-        match store.setting_pair().await {
-            Ok((retain, priors)) => {
+        match store.retain_days().await {
+            Ok(retain) => {
                 *self
                     .settings
                     .write()
@@ -1871,7 +1863,6 @@ impl TelemetrySink {
                         .and_then(|value| value.trim().parse::<i64>().ok())
                         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
                         > 0,
-                    priors: priors.as_deref() == Some("1"),
                     read_at: Some(Instant::now()),
                 };
                 Ok(())
@@ -2017,14 +2008,12 @@ async fn process_batch(store: &Arc<dyn WriterStore>, sink: &TelemetrySink, jobs:
         };
         // One batch, one lease: the priors are folded by the same Store call
         // that writes the retained rows rather than one call per event, which
-        // is what kept the per-event sidecar contention alive.
-        let observations = if settings.priors {
-            jobs.iter()
-                .filter_map(|job| prior_observation(&job.event, job.network.as_ref()))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        // is what kept the per-event sidecar contention alive. Network
+        // priors are always on.
+        let observations = jobs
+            .iter()
+            .filter_map(|job| prior_observation(&job.event, job.network.as_ref()))
+            .collect::<Vec<_>>();
         (events, observations, jobs.len())
     };
     let outcome = if events.is_empty() && observations.is_empty() {

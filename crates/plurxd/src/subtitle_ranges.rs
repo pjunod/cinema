@@ -10,7 +10,7 @@ use plurx_core::domain::MediaFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
+use crate::http::peer_transport::PeerAuthMode;
 use crate::subtitle_source::StoreAccess;
 
 pub(crate) const PATH: &str = "/internal/media/subtitle-range";
@@ -208,26 +208,34 @@ async fn prefetch(
     anchor: i64,
     span: i64,
 ) -> Result<(), String> {
-    let Some(membership) = access.membership() else {
+    let (Some(transport), Some(directory)) = (access.calls(), access.directory()) else {
         return Ok(());
     };
     let node_id = access.node_id().unwrap_or_default();
-    let peers = tokio::time::timeout(Duration::from_secs(2), membership.media_peers()).await;
+    let peers = tokio::time::timeout(
+        Duration::from_secs(2),
+        directory.peers(crate::cluster::Purpose::MediaWorkers),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
     let peers: Vec<_> = peers
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|peer| peer.reachable && peer.node_id != node_id && peer.http_base.is_some())
-        .take(2)
-        .collect();
+        .as_ref()
+        .map(|peers| {
+            peers
+                .reachable()
+                .filter(|peer| peer.node_id != node_id && peer.http_base.is_some())
+                .take(2)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     if peers.is_empty() {
         return Ok(());
     }
     let attested =
         crate::fragment_index_cluster::attest_source(node_id, file, None, &|_| {}).await?;
     let digest = attested.observation.source_sha256.clone();
-    let transport = PeerTransport::new(membership.clone());
     let mut ahead = FuturesUnordered::new();
     for (offset, peer) in peers.into_iter().enumerate() {
         let next = anchor.saturating_add(span.saturating_mul(offset as i64 + 1));

@@ -254,6 +254,7 @@ func playbackInfoGroup(_ section: String) -> String {
 
 func playbackInfoExplanation(_ id: String) -> String? {
     switch id {
+    case "dv_refit": return "Held-out squared code error removed by the served mapping, relative to identity curves. A display may ignore this mapping."
     case "decode_resolution": return "Player presentation dimensions; not encoded frame dimensions."
     case "source_resolution": return "Source frame metadata or probe."
     case "stream_frame": return "Planned output or eligible stream sample; see provenance."

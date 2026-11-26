@@ -92,6 +92,7 @@ import tv.plurx.app.ui.components.formatTime
 import tv.plurx.app.ui.components.imageUrl
 import tv.plurx.app.ui.components.safeDisplayInsets
 import tv.plurx.app.ui.components.detailMediaFacts
+import tv.plurx.app.ui.components.playsOnLines
 import tv.plurx.app.ui.components.audioPreferredLanguageLine
 import tv.plurx.app.ui.components.audioStreamLabel
 import tv.plurx.app.ui.components.subtitlePreferredLanguageLine
@@ -105,8 +106,10 @@ import tv.plurx.app.player.preplaySubtitleNotice
 import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Bg
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.ui.theme.OnBg
 import tv.plurx.app.ui.theme.Outline
 import tv.plurx.app.ui.theme.SurfaceHi
+import tv.plurx.app.ui.theme.Warning
 import tv.plurx.app.data.offline.OfflineBooks
 import tv.plurx.app.data.offline.OfflineDownloads
 import tv.plurx.app.data.offline.needsExplicitResume
@@ -286,6 +289,7 @@ private fun DetailContent(
                                 ratings.forEach { RatingChip(it) }
                             }
                         }
+                        if (item.kind == "movie" || item.kind == "show") ItemTagsSection(vm, item.id)
                     }
                 }
                 item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
@@ -320,7 +324,7 @@ private fun DetailContent(
                         style = MaterialTheme.typography.titleMedium,
                     )
                     if (item.isPlayableVideo && detail.files.size > 1 && best != null) {
-                        ChoicePicker(label = "Version", value = best, options = detail.files, optionLabel = { it.filename }, onSelect = { selectedVersion = it.id })
+                        ChoicePicker(label = "Version", value = best, options = detail.files, optionLabel = { it.filename }, onSelect = { selectedVersion = it.id }, optionDetail = { it.dv_facts })
                     }
                     (if (item.isPlayableVideo && best != null) listOf(best) else detail.files).forEachIndexed { index, file ->
                         val chosen = trackChoices[file.id] ?: PreplayTracks.NONE
@@ -838,6 +842,17 @@ private fun VersionCard(
             if (showPlay) TvOutlinedButton(onClick = { onPlay(playStartMs) }) { Text("Play") }
         }
         Text(detailMediaFacts(file).joinToString(" · ") { it.label }, style = MaterialTheme.typography.bodyMedium)
+        file.dv_facts?.let { Text("Dolby Vision · $it", style = MaterialTheme.typography.bodyMedium) }
+        val playsOn = playsOnLines(file)
+        if (playsOn.isNotEmpty()) {
+            Text("Plays on", style = MaterialTheme.typography.labelLarge)
+            playsOn.forEach { line ->
+                Row(Modifier.fillMaxWidth()) {
+                    Text(line.device, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Text(line.outcome, style = MaterialTheme.typography.bodyMedium, color = if (line.caution) Warning else OnBg)
+                }
+            }
+        }
         Text(file.filename, color = Muted, style = MaterialTheme.typography.labelMedium)
         Text(fileSpecLine(file), color = Muted, style = MaterialTheme.typography.bodyMedium)
         if (!file.available) {

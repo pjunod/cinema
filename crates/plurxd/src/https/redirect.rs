@@ -50,6 +50,7 @@ fn machine_endpoint(path: &str) -> bool {
             | "/identity"
             | "/api/v1/server"
             | "/api/v1/server/node"
+            | "/api/v1/server/discovery"
             | "/api/v1/cluster/join/redeem"
             | "/api/v1/cluster/join/finalize"
             | "/api/v1/cluster/learner/join/redeem"
@@ -209,6 +210,7 @@ mod tests {
             "/identity",
             "/api/v1/server",
             "/api/v1/server/node",
+            "/api/v1/server/discovery",
             "/internal/media",
             "/_internal/clock",
             "/api/v1/internal/operations",

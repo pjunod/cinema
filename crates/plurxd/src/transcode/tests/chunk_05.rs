@@ -1213,8 +1213,6 @@
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
         store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(
             Arc::clone(&store), work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu,
@@ -1274,6 +1272,7 @@
         };
         let rates = artifact.bandwidth().expect("complete mux rates");
         assert!(rates.average_bps > 0 && rates.peak_bps >= rates.average_bps);
+        assert!(!artifact.covers_resume(13.0), "retained media cannot serve a seek past its actual end");
         let next = manager.start_copy(file_id, 0.0, None, options, "owner", "second")
             .await.expect("compatible new attachment");
         let second = manager.sessions.lock().await.get(&next.session_id).cloned().expect("second owner");
@@ -1287,7 +1286,48 @@
         let body = manager.segment(&next.session_id, &media_name).await.expect("verified GET")
             .expect("retained media ready");
         drop(body);
+        let resume = manager.start_copy(file_id, 4.0, None, options, "owner", "resume")
+            .await.expect("resume from the same completed output");
+        let resumed = manager.sessions.lock().await.get(&resume.session_id).cloned().expect("resume owner");
+        assert!(resume.vod);
+        assert_eq!(resume.start_seconds, 4.0);
+        assert_eq!(resume.media_origin_seconds, 0.0);
+        assert_eq!(resumed.start_seconds, 4.0);
+        assert_eq!(resumed.media_origin_seconds, 0.0);
+        assert!(Arc::ptr_eq(resumed.rolling_artifact.as_ref().expect("retained resume"), &artifact));
+        assert!(resumed.child.lock().await.is_none(), "resume must not start a second remux");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (resume_playlist, owner) = manager.playlist_with_owner_before(&resume.session_id, deadline)
+            .await.map_err(|failure| failure.error).expect("resume playlist");
+        assert_eq!(playlist, resume_playlist, "resume keeps the complete zero-origin timeline");
+        let retained_windows: Vec<_> = std::str::from_utf8(&resume_playlist).expect("playlist")
+            .lines()
+            .filter_map(|line| line.strip_prefix("#EXTINF:"))
+            .scan(0.0, |cursor, duration| {
+                let start = *cursor;
+                *cursor += duration.trim_end_matches(',').parse::<f64>().expect("duration");
+                Some((start, *cursor))
+            })
+            .collect();
+        let (sequence, &(start, end)) = retained_windows.iter().enumerate()
+            .find(|(_, (start, end))| *start <= 4.0 && 4.0 < *end)
+            .expect("resume segment");
+        // Hold the dynamic index so an asynchronous refresh cannot satisfy
+        // the first subtitle window request.
+        let dynamic_index = resumed.segments.lock().await;
+        let window = manager.segment_window_for_owner_before(&resume.session_id, sequence as i64, &owner, deadline)
+            .await.expect("retained subtitle window");
+        let (window_start, window_end) = window.expect("subtitle window");
+        assert!((window_start - start).abs() < 0.0000005);
+        assert!((window_end - end).abs() < 0.0000005);
+        assert!(manager.segment_window_for_owner_before(&next.session_id, sequence as i64, &owner, deadline)
+            .await.is_err(), "the window is scoped to the retained session owner");
+        drop(dynamic_index);
+        let &(last_start, _) = retained_windows.last().expect("EOF segment");
+        assert!(!artifact.covers_resume((last_start * 1_000_000.0).round() / 1_000_000.0),
+            "the final cut needs explicit evidence of video coverage");
         assert!(first.rolling_artifact.is_none(), "already-issued cold owner is never rebound");
+        manager.stop_session(&resume.session_id, "test_done").await;
         manager.stop_session(&next.session_id, "test_done").await;
         manager.stop_session(&initial.session_id, "test_done").await;
     }
@@ -1307,8 +1347,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced producer");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
@@ -1359,8 +1397,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
@@ -1411,8 +1447,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         // Obtain the complete retained fixture before testing its revocation;
         // optional capture contention belongs to the dedicated busy-owner test.
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
@@ -1480,8 +1514,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced writer");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
@@ -1537,9 +1569,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        if retention {
-            store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        }
         store.put_setting(keys::HLS_READRATE, readrate).await.expect("pacing");
         // The default 90 s burst consumes this entire 12 s fixture before
         // retention can be abandoned; pacing needs a zero burst as well.
@@ -1548,12 +1577,30 @@
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
             EncoderCaps::default(), Pipeline::Cpu));
         manager.record_retained_headroom(1 << 50);
-        let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
+        let (info, session) = d3_start(&manager, file_id, retention, "d3").await;
+        (manager, session, info, file_id, media, work)
+    }
+
+    /// One copy start of the d3 fixture. Rolling retention is always on;
+    /// `retention: false` is the viewer's per-playback opt-out
+    /// (`SessionRequest::retain_output`).
+    async fn d3_start(
+        manager: &Arc<TranscodeManager>,
+        file_id: i64,
+        retention: bool,
+        playback_id: &str,
+    ) -> (StartInfo, Arc<Session>) {
+        let supersession_user = serde_json::json!(["username", "owner"]).to_string();
+        let info = manager.start_copy_with_audio_offset(file_id, 0.0, None, 0, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
             dual_layer_as_copied: false,
-        }, "owner", "d3").await.expect("ordinary start");
+        }, "owner", &supersession_user, None, None, None, playback_id, false, None,
+            (!retention).then_some(false), false, false, None,
+            #[cfg(target_os = "linux")]
+            None,
+        ).await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
-        (manager, session, info, file_id, media, work)
+        (info, session)
     }
 
     async fn d3_wait_for_links(directory: &std::path::Path) {
@@ -1568,10 +1615,45 @@
     }
 
     #[tokio::test]
-    async fn rolling_retention_off_by_default_with_budget_set() {
+    async fn a_playback_that_declines_retention_collects_nothing() {
         let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", false).await;
         assert!(session.rolling_collection.is_none(),
-            "cache.max_gb alone no longer turns rolling retention on");
+            "retain_output: Some(false) keeps this playback's output out of the retained cache");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    /// The opt-out stops this playback collecting, never its reuse of a
+    /// retained copy that already exists.
+    #[tokio::test]
+    async fn an_opted_out_start_still_reuses_an_existing_retained_copy() {
+        let (manager, session, info, file_id, _media, _work) = d3_copy_session("1", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while manager.vod.acquire_rolling_output(production).is_none() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("the first playback published its retained copy");
+        manager.stop_session(&info.session_id, "test_done").await;
+        drop(session);
+        let (declined, reused) = d3_start(&manager, file_id, false, "d3-declined").await;
+        assert!(reused.rolling_artifact.is_some(),
+            "an opted-out start is served from the existing retained copy");
+        assert!(reused.rolling_collection.is_none(), "and collects nothing of its own");
+        manager.stop_session(&declined.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn rolling_retention_is_on_by_default_and_the_viewer_can_stop_it_mid_playback() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = session.rolling_collection.as_ref()
+            .expect("with a cache budget, rolling retention needs no switch");
+        assert!(!collection.abandoned());
+        assert!(!manager.output_retention_refused(&info.session_id));
+        manager.stop_output_retention(&info.session_id).await;
+        assert!(collection.abandoned(), "turning it off mid-playback abandons the collection");
+        assert!(manager.output_retention_refused(&info.session_id));
+        // Idempotent.
+        manager.stop_output_retention(&info.session_id).await;
         manager.stop_session(&info.session_id, "test_done").await;
     }
 
@@ -1862,8 +1944,6 @@
                 container: Some("mp4".into()), video_codec: Some("h264".into()),
                 width: Some(160), height: Some(120), ..Default::default() }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
@@ -2367,7 +2447,7 @@
     include!("../../vodencode_manager_tests.rs");
 
     async fn seed_file(store: &Arc<dyn Store>) -> i64 {
-        seed_file_at(store, &placeholder_source().await).await
+        seed_file_at(store, placeholder_source()).await
     }
 
     /// The stand-in, not FFmpeg, is what the start spawned. Its marker is
@@ -2423,68 +2503,31 @@
     /// against a process exit, and a loaded runner lost it in about one
     /// transcode test per full run.
     ///
-    /// One frame every fifty seconds keeps the encode to 120 4K frames, about
-    /// a second with libx265 ultrafast and under a megabyte. The file lives
-    /// at one fixed, shape-named path under the system temp dir and is
-    /// reused by every later test process on the host; it is encoded to a
-    /// process-private name and renamed into place, so two processes
-    /// starting at once cannot read a half-written file, and nothing is
-    /// left behind but that one file.
-    async fn placeholder_source() -> String {
-        static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
-        SOURCE
-            .get_or_init(|| async {
-                let dir = std::fs::canonicalize(std::env::temp_dir())
-                    .expect("canonical system temporary directory");
-                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s.mkv");
-                if std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
-                    return path.to_string_lossy().into_owned();
+    /// Embed the sparse 4K HEVC source so parallel test processes can
+    /// open it without competing for an encoder during startup.
+    fn placeholder_source() -> &'static str {
+        static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        const VIDEO: &[u8] = include_bytes!("placeholder-4k-hevc.mkv");
+        SOURCE.get_or_init(|| {
+            use std::io::Write;
+
+            let dir = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical system temporary directory");
+            let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s-v2.mkv");
+            if !path.exists() {
+                let mut staging = tempfile::NamedTempFile::new_in(&dir)
+                    .expect("create a private placeholder source");
+                staging.write_all(VIDEO).expect("write the placeholder source");
+                if let Err(error) = staging.persist_noclobber(&path) {
+                    assert_eq!(error.error.kind(), std::io::ErrorKind::AlreadyExists);
                 }
-                let staging = dir.join(format!(
-                    "plurxd-placeholder-source-{}.mkv.part",
-                    std::process::id()
-                ));
-                let mut command = tokio::process::Command::new(
-                    std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
-                );
-                command
-                    .kill_on_drop(true)
-                    .args([
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "color=c=black:size=3840x2160:rate=0.02:duration=6000",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:v",
-                        "libx265",
-                        "-preset",
-                        "ultrafast",
-                        "-x265-params",
-                        "log-level=none:keyint=1:pools=none",
-                        "-f",
-                        "matroska",
-                        "-y",
-                    ])
-                    .arg(&staging);
-                let output =
-                    tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
-                        .await
-                        .expect("placeholder source encode exceeded its deadline")
-                        .expect("failed to start the placeholder source encode");
-                assert!(
-                    output.status.success(),
-                    "placeholder source encode failed — this suite needs an ffmpeg with libx265: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                std::fs::rename(&staging, &path).expect("placeholder source rename");
-                path.to_string_lossy().into_owned()
-            })
-            .await
-            .clone()
+            }
+            assert_eq!(
+                std::fs::read(&path).expect("read the placeholder source"),
+                VIDEO
+            );
+            path.to_string_lossy().into_owned()
+        })
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {

@@ -243,6 +243,69 @@ fn publish(
     }
 }
 
+/// An admitted copy build can publish and release its slot even when unrelated
+/// maintenance has filled all remaining slots during the build.
+#[tokio::test]
+async fn copy_publication_drains_an_admitted_request_at_capacity() {
+    let fixture = fixture(true).await;
+    let limit = super::MAX_ACTIVE_ANALYSIS_REQUESTS;
+    sql(&fixture).execute(
+        "WITH RECURSIVE n(i) AS (VALUES (1) UNION ALL SELECT i+1 FROM n WHERE i < ?1)
+         INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,
+             video_identity,force_rebuild,target_node_id,state,not_before_ms,created_at_ms,updated_at_ms)
+         SELECT 'queued-'||i,100,4096,77,'fragment_index','v-'||i,0,'other','queued',0,0,0 FROM n",
+        [limit - 1],
+    ).expect("fill remaining slots");
+    let next = NewAnalysisRequest {
+        request_id: "next-copy".into(),
+        file_id: 100,
+        source_size: 4096,
+        source_mtime: 77,
+        component: "fragment_index".into(),
+        pipeline_version: fixture.source.pipeline_marker(),
+        video_identity: fixture.source.video_marker(),
+        requested_generation: "next-generation".into(),
+        priority: "normal".into(),
+        trigger: "background".into(),
+        force_rebuild: false,
+        target_node_id: NODE.into(),
+        created_at_ms: NOW,
+        not_before_ms: NOW,
+    };
+    assert!(matches!(
+        fixture.store.enqueue_analysis_request(&next).await,
+        Err(crate::error::StoreError::AnalysisAdmission(
+            crate::error::AnalysisAdmissionRefusal::QueueFull
+        ))
+    ));
+    let artifact = artifact('a', 'b');
+    let token = publisher(&fixture, &artifact).await;
+    assert!(matches!(
+        fixture
+            .store
+            .publish_copy_index_v3(publish(&fixture, &token, &artifact, NOW + 1))
+            .await
+            .expect("publish at capacity"),
+        JobPublishOutcome::Published { .. }
+    ));
+    let settled = fixture
+        .store
+        .analysis_request(&fixture.claim.request_id)
+        .await
+        .expect("read")
+        .expect("retained history");
+    assert_eq!(settled.state, "ready");
+    assert_eq!(
+        fixture
+            .store
+            .enqueue_analysis_request(&next)
+            .await
+            .expect("freed slot")
+            .request_id,
+        next.request_id
+    );
+}
+
 #[tokio::test]
 async fn publication_adopts_the_candidate_and_settles_analysis_job_and_location() {
     let fixture = fixture(true).await;

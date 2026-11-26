@@ -352,6 +352,9 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             # sentence is raised through `showPlaybackNotice`, i.e. the one
             # surface; this flag only chooses menu rows.
             "qualityChangeRetained",
+            # The reusable-copy preference and request status drive the local
+            # playback menu control and its inline feedback.
+            "retainOutput", "retainOutputFailed",
             "selectedAudio", "selectedHeight", "selectedQualityIsOriginal",
             "selectedSubtitle", "sessionStatus", "stagedSurfacePlayer", "surface",
             # Not a second surface: the live wait sentence the view draws

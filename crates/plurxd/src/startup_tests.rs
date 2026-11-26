@@ -135,13 +135,15 @@ async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepali
         tokio::net::TcpListener::bind(address).await.is_err(),
         "the same listener stays reserved before startup consumes it"
     );
-    owner
-        .start(
+    crate::cluster::StartupClock::start(
+        &*owner,
+        crate::cluster::startup_clock(
             plurx_core::cluster::membership::MembershipManager::unavailable(),
-            "pending-node".into(),
-        )
-        .await
-        .expect("pending socket");
+        ),
+        "pending-node".into(),
+    )
+    .await
+    .expect("pending socket");
     assert!(
         tokio::net::TcpListener::bind(address).await.is_err(),
         "pending phase owns the one bound socket"
@@ -220,13 +222,15 @@ async fn pending_socket_answers_starting_not_not_found() {
         tokio::net::TcpListener::bind(address).await.is_err(),
         "the same listener stays reserved before startup consumes it"
     );
-    owner
-        .start(
+    crate::cluster::StartupClock::start(
+        &*owner,
+        crate::cluster::startup_clock(
             plurx_core::cluster::membership::MembershipManager::unavailable(),
-            "pending-node".into(),
-        )
-        .await
-        .expect("pending socket");
+        ),
+        "pending-node".into(),
+    )
+    .await
+    .expect("pending socket");
     let app = owner.router.read().expect("router").clone();
     for path in ["/api/v1/server", "/healthz", "/web/index.html"] {
         let response = tower::ServiceExt::oneshot(
@@ -308,24 +312,6 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         FinalizeJoinRequest, MembershipManager, RedeemJoinRequest,
     };
     use plurx_core::cluster::migration::select_daemon_store_observing;
-    fn config(root: &std::path::Path) -> Config {
-        let listeners: Vec<_> = (0..3)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("port"))
-            .collect();
-        let addresses: Vec<_> = listeners
-            .iter()
-            .map(|listener| listener.local_addr().expect("address"))
-            .collect();
-        let mut config = Config::default();
-        config.storage.data_dir = root.into();
-        config.server.bind = addresses[0];
-        config.cluster.raft_bind = addresses[1];
-        config.cluster.api_bind = addresses[2];
-        config.cluster.advertise_host = "localhost".into();
-        config.cluster.join_url = format!("http://{}", config.server.bind);
-        config.cluster.artwork_url = config.cluster.join_url.clone();
-        config
-    }
     async fn redeem(
         State(manager): State<MembershipManager>,
         Json(request): Json<RedeemJoinRequest>,
@@ -357,9 +343,10 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         source: MembershipManager,
         raft_id: u64,
         observed: Arc<AtomicBool>,
+        standing: Arc<std::sync::Mutex<Option<crate::cluster::StandingWatch>>>,
         origin: String,
     }
-    impl StartupClockObserver for AuditObserver {
+    impl plurx_core::cluster::migration::StartupClockObserver for AuditObserver {
         fn start(
             &self,
             membership: MembershipManager,
@@ -373,7 +360,9 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         > {
             Box::pin(async move {
                 let roster = membership
-                    .clock_peers()
+                    .cluster_access()
+                    .clock_protocol()
+                    .prove_roster()
                     .await
                     .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?
                     .membership
@@ -383,9 +372,37 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                     !roster.voters.contains(&self.raft_id),
                     "desired voter must still be a committed learner at observation entry"
                 );
-                self.owner.start(membership, node_id.clone()).await?;
-                let response = crate::http::peer_transport::PeerTransport::new(self.source.clone())
-                    .clock_request(&node_id, &self.origin)
+                // Only the actual joining manager supplies standing. The SQLite
+                // monitor/fence scaffold is unused by this membership observation;
+                // this assertion does not qualify joining-node serving authority.
+                let replication =
+                    plurx_core::cluster::migration::status::ReplicationMonitor::sqlite();
+                let fence = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+                let facade =
+                    crate::cluster::Cluster::new(fence, membership.clone(), replication, None);
+                let standing = facade.standing_watch();
+                assert_eq!(standing.current(), crate::cluster::Standing::Learner);
+                *self.standing.lock().expect("standing slot") = Some(standing);
+                crate::cluster::StartupClock::start(
+                    &*self.owner,
+                    crate::cluster::startup_clock(membership),
+                    node_id.clone(),
+                )
+                .await?;
+                let response = crate::cluster::test_calls(self.source.clone())
+                    // This probes authenticated route availability, not timing.
+                    // The actual observer owns timing qualification; a second
+                    // capture here races its legitimate clock publication.
+                    .request(
+                        &node_id,
+                        &self.origin,
+                        reqwest::Method::GET,
+                        crate::http::internal_clock::PATH,
+                        Vec::new(),
+                        tokio::time::Instant::now() + Duration::from_secs(2),
+                        1024,
+                        crate::cluster::calls::PeerAuthMode::ExactRequestAndMemberResponse,
+                    )
                     .await
                     .map_err(|error| {
                         plurx_core::error::StoreError::Database(format!("{error:?}"))
@@ -395,21 +412,34 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                     reqwest::StatusCode::OK,
                     "pending learner serves authenticated clock observation before promotion"
                 );
+                let probe: crate::http::internal_clock::ClockResponse =
+                    serde_json::from_slice(&response.body)
+                        .expect("signed pending-learner clock response");
+                assert_eq!(probe.node_id, node_id);
+                assert!(
+                    response.clock_timing.is_none(),
+                    "route probe must not mint timing evidence"
+                );
                 self.observed.store(true, Ordering::SeqCst);
                 Ok(())
             })
         }
     }
     let source_root = crate::test_tempdir().expect("source");
-    let source_config = config(source_root.path());
+    let (source_config, source_http) = crate::owned_loopback_config(source_root.path());
     drop(
         plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
             .expect("SQLite source"),
     );
-    let source_owner = Arc::new(StartupObservationHttp::new(source_config.server.bind));
-    let source = select_daemon_store_observing(&source_config, Some(source_owner.as_ref()))
-        .await
-        .expect("source activation");
+    let source_owner = Arc::new(
+        StartupObservationHttp::from_std_listener(source_http).expect("owned HTTP socket"),
+    );
+    let source = select_daemon_store_observing(
+        &source_config,
+        Some(&crate::cluster::StartupClockAdapter(source_owner.as_ref())),
+    )
+    .await
+    .expect("source activation");
     let manager = source.membership_manager();
     let clock = axum::Router::new()
         .route(
@@ -417,7 +447,7 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
             axum::routing::get(http::internal_clock::observation_snapshot),
         )
         .with_state(http::internal_clock::ObservationContext {
-            membership: manager.clone(),
+            clock: cluster::startup_clock(manager.clone()),
             node_id: source.identity.node_id.clone(),
             observer: source_owner.observer().await.expect("source clock owner"),
         });
@@ -438,26 +468,44 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
             })
             .await
     });
+    // This case asserts a refusal, while production defaults to advisory.
+    // Select enforcement before acquisition so the original is a strict
+    // singleton proof and the later assertion measures membership invalidation.
+    manager.clock_guard().set_enforced(true);
     let original = manager
         .clock_guard()
         .acquire_owned_for(plurx_core::cluster::clock::ClockDecision::MembershipChange)
         .expect("actual singleton clock proof");
+    // A mode cycle alone must preserve the original strict ticket. The join
+    // itself uses the normal advisory startup policy; this case is not an
+    // enforced-clock finalization/convergence test.
+    manager.clock_guard().set_enforced(false);
+    manager.clock_guard().set_enforced(true);
+    assert!(
+        original.revalidate().is_ok(),
+        "enforcement changes alone preserve the singleton proof"
+    );
+    manager.clock_guard().set_enforced(false);
     let token = manager
         .issue_token(Duration::from_secs(120))
         .await
         .expect("voter intent");
     let joining_root = crate::test_tempdir().expect("joiner");
-    let mut joining_config = config(joining_root.path());
+    let (mut joining_config, joining_http) = crate::owned_loopback_config(joining_root.path());
     let token_path = joining_root.path().join("join.token");
     std::fs::write(&token_path, format!("{}\n", token.token)).expect("test token");
     joining_config.cluster.join_token_file = token_path.clone();
-    let joining_owner = Arc::new(StartupObservationHttp::new(joining_config.server.bind));
+    let joining_owner = Arc::new(
+        StartupObservationHttp::from_std_listener(joining_http).expect("owned HTTP socket"),
+    );
     let observed = Arc::new(AtomicBool::new(false));
+    let standing = Arc::new(std::sync::Mutex::new(None));
     let observer = AuditObserver {
         owner: Arc::clone(&joining_owner),
         source: manager.clone(),
         raft_id: token.raft_id,
         observed: Arc::clone(&observed),
+        standing: Arc::clone(&standing),
         origin: joining_config.cluster.artwork_url.clone(),
     };
     let joined = tokio::time::timeout(
@@ -475,6 +523,21 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         .expect("watch")
         .membership_snapshot();
     assert!(applied.committed && applied.voters.contains(&token.raft_id));
+    let mut standing = standing
+        .lock()
+        .expect("standing slot")
+        .take()
+        .expect("watch created as actual learner");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), standing.changed())
+            .await
+            .expect("applied promotion notification"),
+        Some(crate::cluster::Standing::Voter)
+    );
+    assert_eq!(standing.current(), crate::cluster::Standing::Voter);
+    drop(standing);
+
+    manager.clock_guard().set_enforced(true);
     assert!(
         original.revalidate().is_err(),
         "actual member/promotion changes invalidate the original singleton proof"
@@ -1905,6 +1968,12 @@ async fn identity_server(body: &'static str) -> (String, tokio::task::JoinHandle
         "/api/v1/server",
         axum::routing::get(move || async move { ([("content-type", "application/json")], body) }),
     );
+    let app = app.route(
+        crate::discovery::PATH,
+        axum::routing::get(|| async {
+            axum::Json(crate::discovery::Eligibility { advertise: true })
+        }),
+    );
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -2052,7 +2121,7 @@ async fn a_discovery_daemon_that_cannot_be_withdrawn_still_drains_cleanly() {
         JellyfinStandardListener::default(),
         https::Serving::default(),
         progress,
-        Some(daemon),
+        Some(discovery::Owner::with_advertisement_for_test(daemon)),
         async move {
             let _ = stopped.await;
         },
@@ -2198,7 +2267,15 @@ async fn gdm_answers_a_search_and_ignores_everything_else() {
         .expect("bind server");
     let server_addr = server.local_addr().expect("addr");
     let responder = tokio::spawn(async move {
-        let _ = gdm_serve(&server, "instance-id", None, "Living Room", 32400).await;
+        let _ = gdm_serve(
+            &server,
+            "instance-id",
+            None,
+            "Living Room",
+            32400,
+            &standalone_discovery(),
+        )
+        .await;
     });
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
@@ -2554,8 +2631,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         "test-cluster".to_owned(),
         Arc::new(plurx_core::secrets::CredentialKey::generate()),
         None,
-        plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-        plurx_core::cluster::membership::MembershipManager::unavailable(),
+        crate::cluster::ClusterParts::standalone(),
         catalogue,
         applied,
         store,
@@ -2597,11 +2673,13 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             store: handle.store,
             catalogue,
             applied,
-            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            cluster_parts: crate::cluster::ClusterParts::from_handles(
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             identity: handle.identity,
             credential_key: handle.credential_key,
-            backup_client: None,
+            backup_source: None,
             dirs: create_dirs(root.path()).expect("dirs"),
             encoder_caps: Default::default(),
             system: Default::default(),
@@ -2644,18 +2722,27 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
             .await
             .expect("reserve TLS port");
         let tls_address = reservation.local_addr().expect("TLS address");
+        // Released on purpose, unlike the HTTP socket: the observation phase
+        // must refuse TLS connections, and the TLS server binds by address.
+        // Another socket can still take the port before that bind.
         drop(reservation);
         let mut plain_socket = Some(plain_socket);
         let observer = if observed {
-            drop(plain_socket.take());
-            let owner = Arc::new(StartupObservationHttp::new(plain_address));
-            owner
-                .start(
-                    plurx_core::cluster::membership::MembershipManager::unavailable(),
-                    "pending-node".into(),
+            let owner = Arc::new(
+                StartupObservationHttp::from_listener(
+                    plain_socket.take().expect("plain HTTP socket"),
                 )
-                .await
-                .expect("pending owner");
+                .expect("owned HTTP socket"),
+            );
+            crate::cluster::StartupClock::start(
+                &*owner,
+                crate::cluster::startup_clock(
+                    plurx_core::cluster::membership::MembershipManager::unavailable(),
+                ),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending owner");
             let pending = reqwest::Client::builder()
                 .no_proxy()
                 .build()
@@ -3049,36 +3136,35 @@ fn split_children_log_under_their_parent_target() {
             files.len() > 1,
             "{directory}: the walk reached no child modules"
         );
-        let pinned = format!("target: \"{target}\",");
+        let pinned = format!("\"{target}\",");
         for path in files {
             let source = std::fs::read_to_string(&path).expect("a readable child");
             for level in ["trace", "debug", "info", "warn", "error"] {
                 let call = format!("tracing::{level}!(");
                 for (at, _) in source.match_indices(&call) {
                     let arguments = source[at + call.len()..].trim_start();
-                    // Three diagnostic channels are deliberately separate from
-                    // their parent target so an operator can enable them
-                    // alone: the hashed retained-output reuse facts
-                    // (CONTINUOUS-QUALITY-BUILD) and the typed Auto
-                    // preparation outcomes (2ed23494f), and source-fenced FEL
-                    // qualification (681d628f6d). Each is admitted
-                    // only in the files that own it, and still requires an
-                    // explicit target, never a child default.
+                    let explicit = arguments.strip_prefix("target:").unwrap_or("").trim_start();
+                    // These files also emit explicitly routed diagnostic events.
+                    // Native FEL qualification uses the DV channel. Segment
+                    // publication and confirmed presentation use the HLS channel.
                     let relative = path.strip_prefix(&src).expect("split child under src");
                     let dedicated = [
                         ("plurxd::retained_reuse", "transcode/manager/create.rs"),
                         ("plurxd::retained_reuse", "vod/retained.rs"),
                         ("plurxd::dv", "transcode/manager/create.rs"),
+                        ("plurxd::dv", "transcode/manager/native_fel.rs"),
+                        ("plurxd::http::hls", "transcode/manager/describe.rs"),
+                        ("plurxd::http::hls", "transcode/manager/publication.rs"),
                         ("plurxd::auto_prepare", "http/hls/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/preparation.rs"),
                     ]
                     .iter()
                     .any(|(channel, owner)| {
                         relative == std::path::Path::new(owner)
-                            && arguments.starts_with(&format!("target: \"{channel}\","))
+                            && explicit.starts_with(&format!("\"{channel}\","))
                     });
                     assert!(
-                        arguments.starts_with(&pinned) || dedicated,
+                        explicit.starts_with(&pinned) || dedicated,
                         "{}: the `{call}` at byte {at} logs under its own module path, \
                              not `{target}`",
                         path.display()
@@ -3314,7 +3400,14 @@ async fn a_loopback_server_starts_no_discovery_at_all() {
     let tmp = crate::test_tempdir().expect("tempdir");
     let config = config_in(tmp.path());
     assert!(
-        start_discovery(&config, "instance-1", None, advertiser_that_fails).is_none(),
+        start_discovery(
+            &config,
+            "instance-1",
+            None,
+            advertiser_that_fails,
+            standalone_discovery()
+        )
+        .is_none(),
         "a loopback bind must not be advertised"
     );
 }
@@ -3464,11 +3557,13 @@ async fn boot_serve_and_drain_in_runtime(
             store: handle.store,
             catalogue,
             applied,
-            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            cluster_parts: crate::cluster::ClusterParts::from_handles(
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             identity: handle.identity,
             credential_key: handle.credential_key,
-            backup_client: None,
+            backup_source: None,
             dirs: create_dirs(root).expect("dirs"),
             encoder_caps: Default::default(),
             system: Default::default(),
@@ -3633,6 +3728,45 @@ async fn an_unconfigured_node_does_not_claim_the_conversion_key() {
     std::env::remove_var("PLURX_DV_CONVERT");
 }
 
+/// The always-on switches are written on once, overwriting an old `0`, so
+/// an older binary in a rolling deploy agrees with this one; a later boot
+/// (after an operator or old node wrote `0` again) changes nothing.
+#[tokio::test]
+async fn always_on_playback_settings_are_seeded_once() {
+    let store: Arc<dyn plurx_core::store::Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting("playback.display_aware_auto", "0")
+        .await
+        .expect("an old operator choice");
+    seed_always_on_playback_settings(&store)
+        .await
+        .expect("seed");
+    for key in ALWAYS_ON_PLAYBACK_SETTINGS {
+        assert_eq!(
+            store.get_setting(key).await.expect("read").as_deref(),
+            Some("1"),
+            "{key}"
+        );
+    }
+    store
+        .put_setting("playback.auto_abr", "0")
+        .await
+        .expect("written after the seed");
+    seed_always_on_playback_settings(&store)
+        .await
+        .expect("reseed");
+    assert_eq!(
+        store
+            .get_setting("playback.auto_abr")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("0"),
+        "the seed runs once per cluster, not once per boot"
+    );
+}
+
 /// The settings page and every session read this record, so the encoder it
 /// names has to be the one the probe actually chose.
 #[test]
@@ -3669,6 +3803,7 @@ fn the_system_record_reports_the_encoder_the_probe_selected() {
             },
             dovi_rpu: true,
             dovi_reshape: true,
+            dovi_reshape_hardware: Vec::new(),
             dovi_passthrough: true,
             dovi_passthrough_qsv: true,
             hdr10_passthrough: true,
@@ -3997,7 +4132,14 @@ async fn a_lan_server_answers_plex_searches_on_the_configured_port() {
 
     // The full boot-time wiring: discovery starts the responder, and the
     // stub advertiser keeps Bonjour off the network.
-    assert!(start_discovery(&config, "instance-1", None, advertiser_that_fails).is_none());
+    let discovery = start_discovery(
+        &config,
+        "instance-1",
+        None,
+        advertiser_that_fails,
+        standalone_discovery(),
+    )
+    .expect("owned GDM responder");
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -4026,6 +4168,7 @@ async fn a_lan_server_answers_plex_searches_on_the_configured_port() {
     assert!(reply.contains("Name: Loft"), "{reply}");
     assert!(reply.contains("Port: 32400"), "{reply}");
     assert!(reply.contains("Resource-Identifier: instance-1"), "{reply}");
+    discovery.shutdown().await;
     std::env::remove_var("PLURX_GDM_PORT");
 }
 
@@ -4277,7 +4420,17 @@ async fn a_gdm_port_that_cannot_be_bound_is_a_warning_not_a_failure() {
     let _capture = capturing(&logs);
     // The responder is spawned, not awaited — a bind that fails must not be
     // something the caller waits on.
-    spawn_gdm_responder(&config, "instance-1".to_owned(), None, taken);
+    let discovery = discovery::Owner::start(
+        standalone_discovery(),
+        || None,
+        Some(discovery::Gdm {
+            instance_id: "instance-1".into(),
+            node_id: None,
+            name: config.server.name.clone(),
+            http_port: config.server.bind.port(),
+            port: taken,
+        }),
+    );
     for _ in 0..50 {
         if !logs.tail("warn", 8).is_empty() {
             break;
@@ -4299,6 +4452,7 @@ async fn a_gdm_port_that_cannot_be_bound_is_a_warning_not_a_failure() {
         "the operator needs the reason, not just the symptom: {}",
         line.message
     );
+    discovery.shutdown().await;
 }
 
 /// The one line an operator reads to confirm which server, which node, and
@@ -4992,7 +5146,7 @@ fn explicit_bind_advertises_only_that_address() {
 fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
     let source = include_str!("main.rs");
     assert_eq!(
-        source.matches(".handoff_for_shutdown()").count(),
+        source.matches(".hand_off_leadership_for_stop()").count(),
         1,
         "the daemon has exactly one stop-time handoff call"
     );
@@ -5008,7 +5162,7 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         .find("\n        }\n")
         .expect("the signal/leave select ends the future's first statement");
     let handoff = future
-        .find("membership_shutdown.handoff_for_shutdown().await;")
+        .find("operations_shutdown.hand_off_leadership_for_stop().await;")
         .expect("the shutdown future hands leadership off");
     let first_await = future[select_end..]
         .find(".await")
@@ -5016,12 +5170,12 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         .expect("the drain awaits");
     assert_eq!(
         first_await,
-        handoff + "membership_shutdown.handoff_for_shutdown()".len(),
+        handoff + "operations_shutdown.hand_off_leadership_for_stop()".len(),
         "the handoff is the drain's first await"
     );
     for later in [
         "leave_shutdown.cancel();",
-        "begin_restart_preparation_until(",
+        "prepare_restart_fence(",
         "public_listener_stop.cancel();",
         "jellyfin_stop.cancel();",
     ] {
@@ -5031,14 +5185,40 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         assert!(handoff < at, "the handoff must run before {later}");
     }
     let clone = source
-        .find("let membership_shutdown = state.membership.clone();")
-        .expect("the handoff owns a membership clone");
+        .find("let operations_shutdown = state.cluster.operations();")
+        .expect("the handoff owns the facade operations");
     let router = source
         .find("let app = http::router(state);")
         .expect("the router takes the state");
     assert!(
         clone < router,
-        "clone membership before the router takes the state"
+        "take the facade operations before the router takes the state"
+    );
+    // The facade's two drain delegates reach the original mechanisms.
+    let facade: String = include_str!("cluster.rs").split_whitespace().collect();
+    let handoff = facade
+        .split_once("pub(crate)asyncfnhand_off_leadership_for_stop(")
+        .expect("the facade's stop-time handoff")
+        .1
+        .split_once("pub(crate)")
+        .expect("the handoff delegate ends")
+        .0;
+    assert!(
+        handoff.contains("self.cluster.membership.handoff_for_shutdown().await"),
+        "the drain's handoff is the manager's one bounded handoff"
+    );
+    let fence = facade
+        .split_once("pub(crate)asyncfnprepare_restart_fence(")
+        .expect("the facade's restart fence")
+        .1
+        .split_once("pub(crate)")
+        .expect("the restart fence delegate ends")
+        .0;
+    assert!(
+        fence.contains(
+            "self.cluster.fence.begin_restart_preparation_until(expires_at_unix_ms).await"
+        ),
+        "the drain's media fence is the fence's own restart preparation"
     );
 }
 
@@ -5048,10 +5228,21 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
 #[test]
 fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
     assert!(
-        exit_after_drain(None).is_ok(),
+        exit_after_drain(None, Ok(())).is_ok(),
         "a signal's drain exits zero"
     );
-    let error = exit_after_drain(Some(&"database or disk is full".to_owned()))
+    let serving = exit_after_drain(None, Err(anyhow::anyhow!("listener failed")))
+        .expect_err("a serving error still fails a signal's drain");
+    assert!(!drained_a_dead_core(&Err(serving)));
+    let both = exit_after_drain(
+        Some(&"database or disk is full".to_owned()),
+        Err(anyhow::anyhow!("listener failed")),
+    );
+    assert!(
+        drained_a_dead_core(&both),
+        "a dead core's verdict survives a serving error in the same drain"
+    );
+    let error = exit_after_drain(Some(&"database or disk is full".to_owned()), Ok(()))
         .expect_err("a dead core's drain exits non-zero");
     assert!(format!("{error:#}").contains("database or disk is full"));
     let drained = Err(error.context("serving"));
@@ -5102,7 +5293,7 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
     assert!(arm.contains("raft_core_fatal_drain.set(error)"));
     assert_eq!(source.matches("state.cluster.core_failure()").count(), 1);
     assert!(
-        source.contains("exit_after_drain(raft_core_fatal.get())"),
+        source.contains("exit_after_drain(raft_core_fatal.get(), served.map(drop))"),
         "the drained boot ends with the recorded verdict"
     );
     assert!(
@@ -5134,4 +5325,8 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
         "the runtime drops before the process exits"
     );
     assert_eq!(source.matches("std::process::exit(code)").count(), 1);
+}
+
+fn standalone_discovery() -> tokio::sync::watch::Receiver<crate::cluster::Standing> {
+    tokio::sync::watch::channel(crate::cluster::Standing::Standalone).1
 }

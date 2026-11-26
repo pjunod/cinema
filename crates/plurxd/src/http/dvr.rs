@@ -461,7 +461,7 @@ pub(crate) async fn overview(
         .await
         .ok()
         .map(|settings| LiveTvConfig::from_snapshot(&settings, &state.node_id).owner_node_id);
-    let peers = if state.cluster_advertisement && state.membership.is_replicated() {
+    let peers = if state.cluster_advertisement && state.cluster.role().is_clustered() {
         match owner.filter(|owner| owner != &state.node_id) {
             Some(owner) => state
                 .peer_activity
@@ -660,7 +660,7 @@ pub(crate) async fn status(
     Ok(Json(DvrStatus {
         enabled: dvr.enabled,
         owner_node_id: live_tv.owner_node_id.clone(),
-        free_bytes: crate::live_tv::free_space_bytes(&dvr.root),
+        free_bytes: crate::live_tv::free_space_bytes(&dvr.root).await,
         floor_bytes: (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000),
         slots: DvrSlots {
             max: live_tv.max_sessions,

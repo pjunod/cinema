@@ -247,7 +247,7 @@ async fn membership_status_cache_is_fresh_for_five_seconds_then_expires() {
 #[tokio::test(start_paused = true)]
 async fn unclustered_membership_cache_loop_exits_without_refresh_or_retry() {
     let (_app, state) = crate::http::tests::test_app_with_state();
-    assert!(!state.membership.is_replicated());
+    assert!(!state.cluster.role().is_clustered());
     let cache = state.membership_status_cache.clone();
     let shutdown = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(membership_status_cache_loop(state, shutdown));
@@ -271,7 +271,7 @@ fn automatic_activation_runs_outside_the_membership_projection() {
         .split_once("pub(crate) async fn peer_status_cache_loop")
         .expect("membership cache loop end")
         .0;
-    assert!(source.contains("cache_admin_revocation_ready()"));
+    assert!(source.contains("revocation_capable()"));
     assert!(!source.contains("activate_if_ready"));
     assert!(include_str!("../../main.rs")
         .contains("internal_auth_revocation::cache_admin_revocation_activation_loop"));
@@ -816,10 +816,11 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     // request that reaches MembershipManager::status cannot succeed, and
     // its current peer directory is empty. Seed only the two node-owned
     // projections that GET and support are allowed to consume.
-    assert!(state.membership.status().await.is_err());
+    assert!(state.cluster.test_membership().status().await.is_err());
     assert!(state
-        .membership
-        .operations_peers()
+        .cluster
+        .operations()
+        .fresh_targets()
         .await
         .expect("unclustered peer directory")
         .is_empty());
@@ -1100,7 +1101,7 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
         .expect("planned-outage acquisition end")
         .0;
     let prepared_claim = acquisition
-        .find("prepare_restart_preparation_claim")
+        .find("prepare_restart_claim")
         .expect("prepare exact claim before commit");
     let guard = acquisition
         .find("PlannedOutageLeaseGuard::new")
@@ -1109,7 +1110,7 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
         .find("run_planned_outage_task(async move")
         .expect("detach replicated acquisition owner");
     let replicated_commit = acquisition
-        .find("commit_cluster_operation_lease(lease.claim())")
+        .find("commit_outage_claim(lease.claim())")
         .expect("commit the guard-owned exact claim");
     assert!(prepared_claim < guard && guard < detached_owner && detached_owner < replicated_commit);
     let exact_release = source
@@ -1123,7 +1124,7 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
         .find("retain_local_fence()")
         .expect("synchronous unresolved-release latch");
     let replicated_release = exact_release
-        .find("release_exact_claim_with_retry(&self.membership, lease, &self.shutdown)")
+        .find("release_exact_claim_with_retry(&self.operations, lease, &self.shutdown)")
         .expect("bounded replicated exact release owner");
     assert!(local_latch < replicated_release);
     let release_retry = source
@@ -1133,7 +1134,7 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
         .split_once("async fn release_current_restart_with_retry(")
         .expect("exact-release retry owner end")
         .0;
-    assert!(release_retry.contains("release_cluster_operation_lease(lease)"));
+    assert!(release_retry.contains("release_outage_claim(lease)"));
     assert!(release_retry.contains("wait_for_planned_outage_cleanup_retry"));
     let current_collector = source
         .split_once("pub(crate) async fn collect_current_aggregate(")
@@ -1142,11 +1143,34 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
         .split_once("async fn collect_current_aggregate_with_sources")
         .expect("current preflight collector end")
         .0;
-    assert!(current_collector.contains("membership_for_status"));
-    assert!(current_collector.contains(".status()"));
-    assert!(current_collector.contains("membership_for_directory"));
-    assert!(current_collector.contains(".operations_peers()"));
-    assert!(current_collector.contains("PeerTransport::new"));
+    assert!(current_collector.contains("operations_for_status"));
+    assert!(current_collector.contains(".topology()"));
+    assert!(current_collector.contains("operations_for_directory"));
+    assert!(current_collector.contains(".fresh_targets()"));
+    let capability = include_str!("../../cluster.rs");
+    let fresh_targets = capability
+        .split_once("pub(crate) async fn fresh_targets(")
+        .expect("fresh administrative target capability")
+        .1
+        .split_once("pub(crate) async fn revocation_capable(")
+        .expect("fresh administrative target capability end")
+        .0;
+    assert!(fresh_targets.contains("self.cluster.access.administrative().targets().await"));
+    let core_capability = include_str!("../../../../plurx-core/src/cluster/membership/access.rs");
+    let administrative = core_capability
+        .split_once("impl AdministrativeObservation {")
+        .expect("core administrative observation service")
+        .1
+        .split_once("#[cfg(test)]")
+        .expect("core administrative observation service end")
+        .0;
+    let targets = administrative
+        .split_once("pub fn targets(")
+        .expect("fresh core target observation")
+        .1;
+    assert!(targets.contains("self.manager.operations_peers()"));
+    assert!(!targets.contains("snapshot("));
+    assert!(current_collector.contains("state.cluster.calls()"));
     assert!(current_collector.contains("collect_peer_statuses("));
     let restart = source
         .split_once("pub(crate) async fn prepare_restart(")
@@ -1173,7 +1197,7 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
     assert!(maintenance.contains("PlannedOutageOperation::Maintenance"));
     assert!(maintenance.contains("lease.arm_local_fence(local_fence)"));
     assert!(maintenance.contains("run_serialized_planned_outage_task"));
-    assert!(maintenance.contains("reconcile_local_maintenance_commit()"));
+    assert!(maintenance.contains("reconcile_maintenance()"));
     assert!(maintenance.contains("lease.release().await"));
     assert!(maintenance.contains("lease.disarm()"));
 }
@@ -1346,12 +1370,15 @@ async fn cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner() {
         let finish_first = finish_first.clone();
         let first_finished = first_finished.clone();
         async move {
-            run_serialized_planned_outage_task(&serving, async move {
-                first_started.notify_one();
-                finish_first.notified().await;
-                first_finished.notify_one();
-                Ok::<_, ApiError>(())
-            })
+            run_serialized_planned_outage_task(
+                &Operations::for_local_fence_test(serving.clone()),
+                async move {
+                    first_started.notify_one();
+                    finish_first.notified().await;
+                    first_finished.notify_one();
+                    Ok::<_, ApiError>(())
+                },
+            )
             .await
         }
     });
@@ -1364,10 +1391,13 @@ async fn cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner() {
 
     for _ in 0..1_024 {
         let second_started = second_started.clone();
-        let error = run_serialized_planned_outage_task(&serving, async move {
-            second_started.store(true, std::sync::atomic::Ordering::Release);
-            Ok::<_, ApiError>(())
-        })
+        let error = run_serialized_planned_outage_task(
+            &Operations::for_local_fence_test(serving.clone()),
+            async move {
+                second_started.store(true, std::sync::atomic::Ordering::Release);
+                Ok::<_, ApiError>(())
+            },
+        )
         .await
         .expect_err("a contending request must fail fast");
         assert!(matches!(
@@ -1386,10 +1416,13 @@ async fn cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner() {
     finish_first.notify_one();
     first_finished.notified().await;
     let admitted_second = second_started.clone();
-    run_serialized_planned_outage_task(&serving, async move {
-        admitted_second.store(true, std::sync::atomic::Ordering::Release);
-        Ok::<_, ApiError>(())
-    })
+    run_serialized_planned_outage_task(
+        &Operations::for_local_fence_test(serving.clone()),
+        async move {
+            admitted_second.store(true, std::sync::atomic::Ordering::Release);
+            Ok::<_, ApiError>(())
+        },
+    )
     .await
     .expect("second serialized operation after owner completion");
     assert!(second_started.load(std::sync::atomic::Ordering::Acquire));
@@ -1621,7 +1654,7 @@ fn restart_preparation_claims_and_releases_the_replicated_outage_slot() {
         .find("preparation_expiry_unix_ms")
         .expect("committed lease bounds local fence");
     let local_fence = source
-        .find("begin_restart_preparation")
+        .find("prepare_restart_fence")
         .expect("local admission fence");
     let commands = source
         .find("restart_preparation_response")
@@ -1629,7 +1662,7 @@ fn restart_preparation_claims_and_releases_the_replicated_outage_slot() {
     assert!(claim < bound && bound < local_fence && local_fence < commands);
     assert!(source.contains("lease.release().await"));
     assert!(source.contains("lease.disarm()"));
-    assert!(source.contains("retain_restart_cancellation"));
+    assert!(source.contains("retain_restart_cancel"));
     assert!(source.contains("run_serialized_planned_outage_task"));
     assert!(source.contains("release_current_restart_with_retry"));
 }

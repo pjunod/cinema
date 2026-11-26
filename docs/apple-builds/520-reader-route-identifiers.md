@@ -1,6 +1,5 @@
 # Preserve native reader route identifiers
 
-Build: 80
 Issue: #520
 
 Native reader item and file identifiers are quoted before the JavaScript

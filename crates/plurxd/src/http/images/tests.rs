@@ -26,7 +26,22 @@ async fn sharing_art_opened_digest_refuses_symlinks_and_rehashes_inode_changes()
     .expect("read")
     .expect("asset");
     assert_eq!(first.digest, <[u8; 32]>::from(Sha256::digest(bytes)));
-    std::fs::write(&path, b"\x89PNG\r\n\x1a\nother").expect("same inode same size rewrite");
+    assert!(first.still_current().await);
+    // The filesystem clock can give two writes the same change timestamp.
+    // Ensure the fixture supplies a new identity on the same path first.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            std::fs::write(&path, b"\x89PNG\r\n\x1a\nother").expect("same inode same size rewrite");
+            let identity =
+                artwork_file_identity(&std::fs::metadata(&path).expect("rewritten asset"));
+            if identity != first.identity {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("filesystem recorded a change to the rewritten asset");
     assert!(!first.still_current().await);
     drop(first);
     let second = shared_opened_art(

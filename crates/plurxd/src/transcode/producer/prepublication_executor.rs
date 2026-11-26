@@ -619,6 +619,7 @@ pub(super) fn spawn_copy_reader_owner(
     source: plurx_core::domain::MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
     grants: Option<crate::copyseg::WriteGrants>,
+    #[cfg(target_os = "linux")] picture_clock: Option<crate::copyseg::CopyPicturePipe>,
 ) {
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
@@ -639,6 +640,7 @@ pub(super) fn spawn_copy_reader_owner(
             .lock()
             .expect("copy observation lock") = Some(Arc::clone(&measurement));
         let retained = session.rolling_collection.clone();
+        let native_split = session.native_split.clone();
         let worker_measurement = Arc::clone(&measurement);
         let measurement_dir = dir.clone();
         // The completion barrier is installed *before* the worker is spawned
@@ -691,6 +693,10 @@ pub(super) fn spawn_copy_reader_owner(
                 grants,
                 Some(worker_measurement),
                 retained,
+                native_split,
+                #[cfg(target_os = "linux")]
+                picture_clock,
+                None,
             )
             .await
         });

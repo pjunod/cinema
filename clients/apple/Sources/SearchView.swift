@@ -102,7 +102,11 @@ struct SearchView: View {
             .frame(maxWidth: .infinity)
         } else if !results.isEmpty {
             Text("\(results.count) \(results.count == 1 ? "result" : "results")")
+                #if os(tvOS)
+                .font(.system(size: 22, weight: .medium))
+                #else
                 .font(.system(.subheadline, design: .monospaced))
+                #endif
                 .foregroundColor(Palette.muted)
             LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                 ForEach(results) { item in

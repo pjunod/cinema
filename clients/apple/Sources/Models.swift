@@ -496,6 +496,13 @@ struct MediaFile: Codable, Identifiable {
     /// always been on `FileDto`; the detail screen now shows them.
     var hdr: String? = nil
     var hdrFormat: String? = nil
+    /// The version's Dolby Vision facts as the one line the server words for
+    /// every client ("Profile 7 · FEL · full enhancement layer · level 6 ·
+    /// HDR10 base"). Shown as sent; never rebuilt here. Absent without DV.
+    var dvFacts: String? = nil
+    /// How this version plays on each of the account's signed-in devices,
+    /// the verdict Play would reach there. Absent until a device reports.
+    var playsOn: [PlaysOn]? = nil
     var bitrate: Int? = nil
     var audioStreams: [AudioTrack]? = nil
     var subtitleStreams: [SubtitleStream]? = nil
@@ -517,6 +524,22 @@ struct MediaFile: Codable, Identifiable {
         container?.lowercased() == "epub"
             || filename?.lowercased().hasSuffix(".epub") == true
     }
+}
+
+/// One device's line in a version's "how it plays" list, judged and worded
+/// by the server. A fallback (a base layer, a tone-map) or a dropped
+/// enhancement layer reads as a caution.
+struct PlaysOn: Codable, Equatable, Identifiable {
+    let id: String
+    var device: String? = nil
+    var client: String? = nil
+    var label: String = ""
+    var method: String? = nil
+    var elDropped: Bool? = nil
+    var fullQuality: Bool? = nil
+
+    var deviceName: String { device ?? client ?? "Device" }
+    var isCaution: Bool { fullQuality == false || elDropped == true }
 }
 
 enum ReaderAction: String, Codable, Equatable {
@@ -1012,6 +1035,9 @@ struct EffectiveProcessingReport: Equatable, Codable {
     var appliedOperations: [String]
     /// Some, but not every, served frame applied creative trims.
     var creativeTrimsPartial: Bool = false
+    /// Server-written Playback info rows riding this report; they clear with it.
+    var dvMetadata: DolbyVisionMetadataRows?
+    var displayTarget: DisplayTargetRows?
 
     func matches(generation active: String?, delivered: String?) -> Bool {
         ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) && active == generation
@@ -1044,7 +1070,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
             name = "DisplayTargetMapping:\(nits)"
         }
     }
-    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial }
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial, dvMetadata, displayTarget }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
@@ -1054,6 +1080,8 @@ struct EffectiveProcessingReport: Equatable, Codable {
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
         appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
         creativeTrimsPartial = (try? values?.decode(Bool.self, forKey: .creativeTrimsPartial)) == true
+        dvMetadata = try? values?.decode(DolbyVisionMetadataRows.self, forKey: .dvMetadata)
+        displayTarget = try? values?.decode(DisplayTargetRows.self, forKey: .displayTarget)
         if appliedOperations.contains(where: { $0.hasPrefix("DisplayTargetMapping:") && ($0 == "DisplayTargetMapping:100") != sdrProcessed }) { appliedOperations = [] }
     }
 
@@ -1064,6 +1092,59 @@ struct EffectiveProcessingReport: Equatable, Codable {
         self.felContributed = felContributed
         self.appliedOperations = appliedOperations
     }
+}
+
+/// The server-written text of one Playback info sub-row. Only the text is
+/// read; the levels beside it are the server's own bookkeeping.
+struct ServerRowText: Equatable, Codable {
+    var text: String?
+    private enum CodingKeys: String, CodingKey { case text }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        text = try? values?.decode(String.self, forKey: .text)
+    }
+    init(text: String?) { self.text = text }
+}
+
+/// `dv_metadata`: the three sub-rows of the Dolby Vision metadata row.
+struct DolbyVisionMetadataRows: Equatable, Codable {
+    var inFile: ServerRowText?
+    var applied: ServerRowText?
+    var leftForDisplay: ServerRowText?
+    private enum CodingKeys: String, CodingKey { case inFile, applied, leftForDisplay }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        inFile = try? values?.decode(ServerRowText.self, forKey: .inFile)
+        applied = try? values?.decode(ServerRowText.self, forKey: .applied)
+        leftForDisplay = try? values?.decode(ServerRowText.self, forKey: .leftForDisplay)
+    }
+    init(inFile: String?, applied: String?, leftForDisplay: String?) {
+        self.inFile = ServerRowText(text: inFile)
+        self.applied = ServerRowText(text: applied)
+        self.leftForDisplay = ServerRowText(text: leftForDisplay)
+    }
+    /// Sub-row texts in contract order: in the file, applied, left for the display.
+    var texts: [String?] { [inFile?.text, applied?.text, leftForDisplay?.text] }
+}
+
+/// `display_target`: the three sub-rows of the Display target row.
+struct DisplayTargetRows: Equatable, Codable {
+    var reportedPeakText: String?
+    var mappedForText: String?
+    var titlePeakText: String?
+    private enum CodingKeys: String, CodingKey { case reportedPeakText, mappedForText, titlePeakText }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        reportedPeakText = try? values?.decode(String.self, forKey: .reportedPeakText)
+        mappedForText = try? values?.decode(String.self, forKey: .mappedForText)
+        titlePeakText = try? values?.decode(String.self, forKey: .titlePeakText)
+    }
+    init(reportedPeakText: String?, mappedForText: String?, titlePeakText: String?) {
+        self.reportedPeakText = reportedPeakText
+        self.mappedForText = mappedForText
+        self.titlePeakText = titlePeakText
+    }
+    var texts: [String?] { [reportedPeakText, mappedForText, titlePeakText] }
 }
 
 /// A bounded owner-authored reason why this session's optional enhancement
@@ -1135,8 +1216,10 @@ struct PlaybackEnhancement: Equatable, Codable {
     /// while the player holds a current, generation-matching
     /// `EffectiveProcessingReport`. Omitted by the server when false.
     var requiresEffectiveProcessing: Bool
+    /// The Playback info `Dolby Vision metadata` row of an unprocessed delivery.
+    var dvMetadata: DolbyVisionMetadataRows?
 
-    private enum CodingKeys: String, CodingKey { case active, details, requiresEffectiveProcessing }
+    private enum CodingKeys: String, CodingKey { case active, details, requiresEffectiveProcessing, dvMetadata }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         var seen = Set<Badge>()
@@ -1145,12 +1228,15 @@ struct PlaybackEnhancement: Equatable, Codable {
             .filter { seen.insert($0).inserted }
         details = (try? values?.decode([Detail].self, forKey: .details)) ?? []
         requiresEffectiveProcessing = (try? values?.decode(Bool.self, forKey: .requiresEffectiveProcessing)) ?? false
+        dvMetadata = try? values?.decode(DolbyVisionMetadataRows.self, forKey: .dvMetadata)
     }
 
-    init(active: [Badge], details: [Detail], requiresEffectiveProcessing: Bool = false) {
+    init(active: [Badge], details: [Detail], requiresEffectiveProcessing: Bool = false,
+         dvMetadata: DolbyVisionMetadataRows? = nil) {
         self.active = active
         self.details = details
         self.requiresEffectiveProcessing = requiresEffectiveProcessing
+        self.dvMetadata = dvMetadata
     }
 
     func explainingSkip(_ skip: ProcessingSkip?, generation: String?) -> PlaybackEnhancement {
@@ -1213,6 +1299,8 @@ struct HlsStart: Codable {
     /// Source-timeline timestamp represented by player-local time zero.
     /// Optional so this client remains compatible with older servers.
     var mediaOriginMs: Int?
+    /// The source-timeline position covered by this create's VOD preparation.
+    var startupSeekReadyMs: Int?
     var encoder: String?
     var vod: Bool?
     var ladder: [QualityRung]?
@@ -1248,12 +1336,36 @@ struct HlsStart: Codable {
     /// either way the client simply does not report, which is the passive
     /// M2 behaviour rather than a failure.
     var control: ControlBootstrap?
+
+    func isStartupSeekReady(at positionMs: Int) -> Bool {
+        positionMs > 0 && startupSeekReadyMs == positionMs
+    }
+}
+
+/// The mapping actually carried by this served generation, not a new fit
+/// published during playback. Gain is held-out squared code error removed.
+struct DolbyVisionRefitPlaybackReport: Codable {
+    var state: String
+    var gain: Double?
+    var reason: String?
+
+    var label: String? {
+        switch state {
+        case "fitted":
+            guard let gain, gain.isFinite, (0...1).contains(gain) else { return "fitted" }
+            return String(format: "fitted, −%.1f%%", gain * 100)
+        case "identity":
+            return "identity (\(reason ?? "no fitted mapping in this generation"))"
+        default: return nil
+        }
+    }
 }
 
 /// Live HLS telemetry used by the web client's playback-info panel and now by
 /// the Apple client too. All changing measurements remain optional because a
 /// session has not necessarily produced its first segment when first polled.
 struct PlaybackSessionStatus: Codable {
+    var dolbyVisionRefit: DolbyVisionRefitPlaybackReport?
     var activeEncodeMilliRealtime: Int?
     var activeEncodeAgeMs: Int?
     var activeEncodeActiveMs: Int?
@@ -1359,6 +1471,18 @@ struct MediaIntentEnvelope: Codable {
     var selection: MediaIntentSelection
 }
 
+/// Per-playback overrides of server settings. `retainOutput == false` means
+/// this playback queues no complete-output preparation and keeps no rolling
+/// output. Only ever sent as false; absent follows the server setting.
+struct SessionOverrides: Codable, Equatable {
+    var retainOutput: Bool?
+}
+
+/// Body for `POST /hls/{session_id}/retain-output` (off-only).
+struct RetainOutputRequest: Codable, Equatable {
+    var retainOutput: Bool = false
+}
+
 struct CreateSessionRequest: Codable {
     var intent: MediaIntentEnvelope? = nil
     /// Stable for one player instance; supersession is keyed by it.
@@ -1419,6 +1543,8 @@ struct CreateSessionRequest: Codable {
     /// AVPlayer's device-specific first-byte measurement is still pending;
     /// the server's measured conservative default applies until then.
     var blockBudgetSecs: Double?
+    /// Per-playback overrides; nil unless the viewer turned a switch off.
+    var overrides: SessionOverrides?
 }
 
 struct ProgressRequest: Codable {

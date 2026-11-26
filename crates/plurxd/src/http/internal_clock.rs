@@ -29,29 +29,9 @@ mod causal_tests {
         StartupMembershipAdmission,
     };
     use plurx_core::cluster::migration::select_daemon_store_observing;
-    use plurx_core::config::Config;
     use std::borrow::Cow;
     use std::sync::Arc;
     use std::time::Duration;
-
-    fn config(root: &std::path::Path) -> Config {
-        let held: Vec<_> = (0..3)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
-            .collect();
-        let addresses: Vec<_> = held
-            .iter()
-            .map(|socket| socket.local_addr().expect("owned fixture invariant"))
-            .collect();
-        let mut config = Config::default();
-        config.storage.data_dir = root.into();
-        config.server.bind = addresses[0];
-        config.cluster.raft_bind = addresses[1];
-        config.cluster.api_bind = addresses[2];
-        config.cluster.advertise_host = "localhost".into();
-        config.cluster.join_url = format!("http://{}", addresses[0]);
-        config.cluster.artwork_url = config.cluster.join_url.clone();
-        config
-    }
 
     fn clock_app(
         manager: MembershipManager,
@@ -61,10 +41,13 @@ mod causal_tests {
         axum::Router::new()
             .route(PATH, axum::routing::get(observation_snapshot))
             .with_state(ObservationContext {
-                membership: manager,
+                clock: crate::cluster::startup_clock(manager),
                 node_id: node,
                 observer,
             })
+            .layer(axum::middleware::from_fn(
+                crate::cluster::calls::auth_refusal_response,
+            ))
     }
 
     async fn send(
@@ -166,17 +149,21 @@ mod causal_tests {
 
     async fn real_signed_learner_fixture() {
         let source_root = crate::test_tempdir().expect("owned leader root");
-        let source_config = config(source_root.path());
+        let (source_config, source_http) = crate::owned_loopback_config(source_root.path());
         drop(
             plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
                 .expect("schema"),
         );
-        let startup = Arc::new(crate::StartupObservationHttp::new(
-            source_config.server.bind,
-        ));
-        let selected = select_daemon_store_observing(&source_config, Some(startup.as_ref()))
-            .await
-            .expect("actual singleton activation within production phase");
+        let startup = Arc::new(
+            crate::StartupObservationHttp::from_std_listener(source_http)
+                .expect("owned HTTP socket"),
+        );
+        let selected = select_daemon_store_observing(
+            &source_config,
+            Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
+        )
+        .await
+        .expect("actual singleton activation within production phase");
         startup.stop_probe().await;
         let leader = selected.membership_manager();
         let token = leader
@@ -185,7 +172,7 @@ mod causal_tests {
             .expect("real token");
         let payload = decode_join_token(&token.token).expect("owned token");
         let learner_root = crate::test_tempdir().expect("owned learner root");
-        let learner_config = config(learner_root.path());
+        let (learner_config, learner_socket) = crate::owned_loopback_config(learner_root.path());
         let learner_id = uuid::Uuid::new_v4().to_string();
         let (protocol_min, protocol_max) = payload.declared_protocol_range();
         leader
@@ -218,6 +205,20 @@ mod causal_tests {
             .map(hiqlite::Node::from)
             .collect();
         nodes.push(hiqlite::Node::from(&local));
+        // The learner starts directly, not through store selection, so it
+        // borrows the config's sockets itself instead of binding their ports.
+        let learner_listeners = learner_config
+            .cluster
+            .listeners
+            .lend(
+                learner_config.cluster.raft_bind,
+                learner_config.cluster.api_bind,
+            )
+            .expect("lend the learner's sockets")
+            .map(|owned| hiqlite::NodeListeners {
+                raft: owned.raft,
+                api: owned.api,
+            });
         let learner_client = tokio::time::timeout(
             Duration::from_secs(45),
             Box::pin(hiqlite::start_node_for_clock_observation(
@@ -226,6 +227,7 @@ mod causal_tests {
                     nodes,
                     listen_addr_api: Cow::Borrowed("127.0.0.1"),
                     listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                    listeners: learner_listeners,
                     data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
                     filename_db: Cow::Borrowed("clock-causal.db"),
                     secret_raft: payload.secrets().raft.clone(),
@@ -279,7 +281,7 @@ mod causal_tests {
         );
         assert!(leadership.membership.members.contains(&token.raft_id));
 
-        let observer = ClockObserver::new(leader.clone());
+        let observer = ClockObserver::new(crate::cluster::startup_clock(leader.clone()));
         observer.test_hold_periodic(true);
         let stop = tokio_util::sync::CancellationToken::new();
         let owner = {
@@ -297,15 +299,15 @@ mod causal_tests {
             );
             tokio::spawn(async move { startup.serve_normal(app, stop.cancelled()).await })
         };
-        let learner_observer = ClockObserver::new(learner.clone());
+        let learner_observer = ClockObserver::new(crate::cluster::startup_clock(learner.clone()));
         let learner_app = clock_app(
             learner.clone(),
             learner_id.clone(),
             learner_observer.clone(),
         );
-        let learner_listener = tokio::net::TcpListener::bind(learner_config.server.bind)
-            .await
-            .expect("learner HTTP");
+        learner_socket.set_nonblocking(true).expect("learner HTTP");
+        let learner_listener =
+            tokio::net::TcpListener::from_std(learner_socket).expect("learner HTTP");
         let learner_http = {
             let stop = stop.clone();
             let app = learner_app.clone();
@@ -521,9 +523,16 @@ mod causal_tests {
                     .map(|peer| (peer.node_id.clone(), peer.raft_id, peer.http_base.clone()))
                     .collect::<Vec<_>>()
             };
-            let proved = leader.clock_peers().await.expect("consistent clock roster");
+            let proved = leader
+                .cluster_access()
+                .clock_protocol()
+                .prove_roster()
+                .await
+                .expect("consistent clock roster");
             let hinted = leader
-                .clock_peers_hint()
+                .cluster_access()
+                .clock_protocol()
+                .applied_hint()
                 .await
                 .expect("replica clock roster");
             assert_eq!(hinted.membership, proved.membership);
@@ -688,8 +697,8 @@ pub(crate) async fn snapshot(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    snapshot_for_membership(
-        &state.membership,
+    snapshot_for_clock(
+        &state.cluster.operations().clock(),
         &state.clock_observer,
         &state.node_id,
         request,
@@ -701,7 +710,7 @@ pub(crate) async fn snapshot(
 /// normal service. This context deliberately owns no application services.
 #[derive(Clone)]
 pub(crate) struct ObservationContext {
-    pub(crate) membership: plurx_core::cluster::membership::MembershipManager,
+    pub(crate) clock: crate::cluster::ClockOperations,
     pub(crate) node_id: String,
     pub(crate) observer: crate::clock_offset::ClockObserver,
 }
@@ -710,11 +719,11 @@ pub(crate) async fn observation_snapshot(
     State(state): State<ObservationContext>,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    snapshot_for_membership(&state.membership, &state.observer, &state.node_id, request).await
+    snapshot_for_clock(&state.clock, &state.observer, &state.node_id, request).await
 }
 
-async fn snapshot_for_membership(
-    membership: &plurx_core::cluster::membership::MembershipManager,
+async fn snapshot_for_clock(
+    clock: &crate::cluster::ClockOperations,
     observer: &crate::clock_offset::ClockObserver,
     node_id: &str,
     request: Request<Body>,
@@ -723,7 +732,7 @@ async fn snapshot_for_membership(
     #[cfg(all(test, feature = "cluster-integration-tests"))]
     let received_unix_ms = received_unix_ms + observer.test_response_skew_ms();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    let guard = membership.clock_guard();
+    let guard = clock.guard();
     let clock_generation = guard.ticket().clock_generation;
     let auth = super::peer_transport::exact_auth_from_headers(request.headers())
         .ok_or(StatusCode::UNAUTHORIZED)?;
@@ -734,7 +743,7 @@ async fn snapshot_for_membership(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if !tokio::time::timeout_at(
         deadline,
-        membership.authorize_internal_peer_request(&auth, "GET", PATH, &[]),
+        clock.authorize_clock_request(&auth, "GET", PATH, &[]),
     )
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
@@ -742,7 +751,7 @@ async fn snapshot_for_membership(
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if !observer.belongs_to(membership) {
+    if !observer.belongs_to(clock) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let barrier = tokio::time::timeout_at(deadline, observer.learner_barrier(&auth.node_id))
@@ -766,9 +775,7 @@ async fn snapshot_for_membership(
     // t2/t3 and is subtracted from RTT by the unchanged four-stamp arithmetic.
     if tokio::time::Instant::now() >= deadline
         || guard.ticket().clock_generation != clock_generation
-        || !membership
-            .authenticated_clock_request_still_fresh(&auth)
-            .unwrap_or(false)
+        || !clock.request_still_fresh(&auth).unwrap_or(false)
     {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -782,8 +789,8 @@ async fn snapshot_for_membership(
     })
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let payload = super::peer_transport::signed_response_payload(StatusCode::OK.as_u16(), &body);
-    let signature = membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PATH, &payload)
+    let signature = clock
+        .sign_clock_reply(&auth.node_id, &auth.nonce, PATH, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
         .status(StatusCode::OK)

@@ -144,6 +144,7 @@ macro_rules! root_resume_admission {
       "AND required.resource_key LIKE 'source_io%') AND NOT EXISTS(SELECT 1 FROM background_job_required_resources required ",
       "WHERE required.job_id=job.id AND required.resource_key LIKE 'source_io%' AND (",
       claim_foreground_window!("required.resource_key","json_extract(NEW.request_json,'$.now_ms')")," OR ",
+      claim_preparation_window!("required.resource_key","json_extract(NEW.request_json,'$.now_ms')")," OR ",
       claim_source_holders!("required.resource_key","job.owner_node_id","json_extract(NEW.request_json,'$.now_ms')"),
       " OR (NOT ",live_job_interest!("job.id","job.fence","json_extract(NEW.request_json,'$.now_ms')")," AND ",
       claim_maintenance_reader!("required.resource_key","job.owner_node_id","json_extract(NEW.request_json,'$.now_ms')"),
@@ -229,8 +230,8 @@ pub(crate) const CONTRACT: &str = concat!(
 /// The claim-effects trigger the expand rewrites; part of the lease shape.
 pub(crate) const CLAIM_EFFECTS: &str = "background_job_claim_effects";
 /// SQLite schema version before the expand and after it.
-pub(crate) const PRE_LEASE_VERSION: usize = 133;
-pub(crate) const EXPANDED_VERSION: usize = 134;
+pub(crate) const PRE_LEASE_VERSION: usize = 138;
+pub(crate) const EXPANDED_VERSION: usize = 139;
 /// The SQLite schema that first carries `source_leases` (import plans).
 pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = EXPANDED_VERSION as i64;
 
@@ -250,6 +251,15 @@ pub(crate) fn live(now: &str) -> String {
 pub(crate) fn foreground_window(key: &str, now: &str) -> String {
     format!(
         claim_foreground_window!("{key}", "{now}"),
+        key = key,
+        now = now
+    )
+}
+/// A live viewer read-preparation lease overlaps source key `key`; analysis
+/// and jobs yield to it.
+pub(crate) fn preparation_window(key: &str, now: &str) -> String {
+    format!(
+        claim_preparation_window!("{key}", "{now}"),
         key = key,
         now = now
     )

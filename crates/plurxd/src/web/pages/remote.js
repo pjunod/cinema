@@ -33,7 +33,7 @@ async function viewRemote(generation){
   cinemaRemoteCancelPairFlow();cinemaRemoteControllerRetire();CINEMA_REMOTE_SELECTED=null;CINEMA_REMOTE_DEVICES=[];const operation=++CINEMA_REMOTE_PAGE_GENERATION;
   layoutChrome("remote",'<div class="adminwrap cinema-remote-page" id="cinema-phone-page"><h1>Phone remote</h1><div id="cinema-screen-picker"><p>Choose a foreground Cinema screen on this server.</p><button class="ghost" onclick="cinemaRemoteRefreshScreens(event)">Refresh screens</button><div id="cinema-screen-list" role="status">Loading screens…</div></div><div id="cinema-phone-pair"></div><div id="cinema-remote-controls"></div></div>');
   setPagePhase(location.hash,generation,"shell");
-  if(!cinemaRemoteLocalEnabled("companion")){document.getElementById("cinema-screen-list").innerHTML='<p>Enable the phone remote in <a href="#/settings/developer">Developer → Preferences for this device</a>.</p>';setPagePhase(location.hash,generation,"settled");return;}
+  if(!cinemaRemoteLocalEnabled("companion")){document.getElementById("cinema-screen-list").innerHTML='<p>Enable the phone remote in <a href="#/settings/remotes">Settings → Remotes &amp; devices</a>.</p>';setPagePhase(location.hash,generation,"settled");return;}
   const client=new CinemaRemoteClient();CINEMA_REMOTE_DISCOVERY?.retire();CINEMA_REMOTE_DISCOVERY=client;
   try{
     const reply=await client.request("receivers",{method:"GET"});if(operation!==CINEMA_REMOTE_PAGE_GENERATION||location.hash!=="#/remote"||!client.current())return;

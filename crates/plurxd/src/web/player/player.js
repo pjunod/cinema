@@ -26,18 +26,20 @@
  * @property {string} [decidedMethod]      the DECISION's method; never mutated (sessionHeight)
  * @property {any} [capsSnapshot]          the capability document the decision was asked with
  * @property {boolean} [requiresHls]       the delivery can only be served as HLS
+ * @property {{index:number,track:number,hls:any}|null} [requestedAudio] a pending in-place soundtrack switch, until hls.js confirms it
  * @property {any} [decodeRetest]          a learned decode limit this open is re-testing
  * @property {any} [learnedLimit]          the learned decode-limit view the decision was rerouted by
  * @property {string[]} [reasons]          the decision's reasons, for the stats panel
  * @property {number} [declared]           the container's declared audio offset, ms
  * @property {boolean} [transcodeAudio]
  * @property {boolean} [preserveDolbyVision]
+ * @property {boolean} [retainOutputOff]  this playback opted out of keeping a reusable copy
  * @property {boolean} [requestHdr10]      what `/decision` asked the session to preserve; survives reopens
  * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
  * @property {number|null} deliveredDvProfile
  * @property {any} [effectiveProcessing] the accepted current-generation DV processing report behind HDR10-E, or null
  * @property {any} [processingSkip] the current-generation optional-upgrade refusal shown as the FEL/RPU skip reason, or null
- * @property {{active:string[],details:{badge:string,active:boolean,text:string}[],requires_effective_processing:boolean}|null} [enhancement] this session's server-computed DV enhancement (FEL / RPU / DYN), or null
+ * @property {{active:string[],details:{badge:string,active:boolean,text:string}[],requires_effective_processing:boolean,dv_metadata:object|null}|null} [enhancement] this session's server-computed DV enhancement (FEL / RPU / DYN), or null
  * @property {boolean} [copyHls]           the HLS session copies the video stream
  * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
  * @property {boolean} [rangePresentation] the session presents a bounded range of a growing title, so its playlist end is not the title end
@@ -704,8 +706,10 @@ function concludeNativeHlsObservation(player,episode){
     message:diagnosis.detail},playbackContext()));
   return true;
 }
-function exhaustHlsStartup(player,reason){
+function exhaustHlsStartup(player,reason,sourceOwner=null){
   const episode=player&&player.hlsStartup;
+  if(sourceOwner&&(sourceOwner.player!==player||sourceOwner.episode!==episode
+    ||!sourceOwner.current())) return false;
   if(episode?.transport==='native'&&['deadline','paused_past_deadline'].includes(reason)
     &&performance.now()>=episode.deadlineMs&&concludeNativeHlsObservation(player,episode)) return true;
   if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting'
@@ -722,7 +726,19 @@ function exhaustHlsStartup(player,reason){
     abortHlsStartupLoaders(episode,true);
     try{episode.hls.stopLoad()}catch(e){}
   }
-  setTimeout(()=>stallDiagnose().catch(()=>{}),0);
+  const seekSequence=player.controlSeekSequence||0;
+  const diagnose=()=>{
+    if(!hlsStartupCurrent(player,episode)
+      ||(player.controlSeekSequence||0)!==seekSequence) return;
+    // Pause can land after the terminal response but before this task. Keep
+    // its source and seek fences intact when Play consumes the same result.
+    if(sourceOwner&&player.wantsPlayback===false){
+      episode.native.deferredDiagnosis=diagnose;
+      return;
+    }
+    stallDiagnose(sourceOwner).catch(()=>{});
+  };
+  setTimeout(diagnose,0);
   return true;
 }
 function armHlsStartupRetry(video,player,episode){
@@ -899,6 +915,12 @@ function resumePausedStartupSeek(video,player,pending){
 function resumeHlsStartup(video,player){
   const episode=player&&player.hlsStartup;
   if(!episode||!hlsStartupCurrent(player,episode)) return false;
+  if(episode.state==='exhausted'&&episode.native?.deferredDiagnosis&&player.wantsPlayback!==false){
+    const diagnose=episode.native.deferredDiagnosis;
+    episode.native.deferredDiagnosis=null;
+    diagnose();
+    return true;
+  }
   if(['presenting','observation_unavailable'].includes(episode.state)){
     const suspended=episode.establishedSuspension;
     if(!suspended||suspended.attachment!==player.mediaAttachment
@@ -952,7 +974,9 @@ function resumeHlsStartup(video,player){
   episode.intentGeneration=player.controlIntentGeneration||0;
   if(episode.transport==='native'){
     episode.state='active';
-    if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'paused_past_deadline');
+    if(performance.now()>=episode.deadlineMs)
+      return exhaustHlsStartup(player,'paused_past_deadline',
+        nativeHlsSourceOwner(video,player,episode,episode.native.execution));
     armNativeHlsDeadline(player,episode);
     if(!episode.native.attached) armNativeHlsReadiness(video,player,episode);
     else if(episode.native.pendingError?.execution===episode.native.execution&&!episode.native.classifying){
@@ -1388,6 +1412,13 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
     if(observesCurrent()&&startup.manifestState!=='parsed') startup.manifestState='loaded';
   });
   resetPlaybackTransportEvents(video);
+  if(Hls.Events.AUDIO_TRACK_SWITCHED) hls.on(Hls.Events.AUDIO_TRACK_SWITCHED,(_,data)=>{
+    if(observesCurrent()) splitAudioSwitched(attachedPlayer,hls,data&&data.id);
+  });
+  hls.on(Hls.Events.ERROR,(_,data)=>{
+    if(observesCurrent()&&data&&data.details===Hls.ErrorDetails.AUDIO_TRACK_LOAD_ERROR)
+      splitAudioRefused(attachedPlayer,hls,attachedPlayer.requestedAudio&&attachedPlayer.requestedAudio.track);
+  });
   // A subtitle chosen before the rendition list arrived is dropped on the
   // floor: `hls.subtitleTrack = n` with no tracks yet sets nothing, and
   // nothing re-applies it. That is one of the ways a viewer selects a
@@ -1713,8 +1744,9 @@ function armNativeHlsDeadline(player,episode){
   clearTimeout(episode.native.deadlineTimer);
   episode.native.deadlineTimer=setTimeout(()=>{
     episode.native.deadlineTimer=null;
-    if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player,true)&&episode.state==='active')
-      exhaustHlsStartup(player,'deadline');
+    if(episode.state==='active')
+      exhaustHlsStartup(player,'deadline',
+        nativeHlsSourceOwner(episode.native.video,player,episode,episode.native.execution));
   },Math.max(0,episode.deadlineMs-performance.now()));
 }
 // Source-execution authority is independent of presentation observations.
@@ -1865,13 +1897,13 @@ function nativeHlsAuthenticationRefused(player,episode,sourceOwner){
 }
 async function runNativeHlsReadiness(video,player,episode){
   if(episode.native.busy||episode.state!=='active'||!hlsStartupCurrent(player,episode)) return;
-  if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
+  const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
+  const sourceOwner=nativeHlsSourceOwner(video,player,episode,execution);
+  if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline',sourceOwner);
   // An asynchronous handover may still be pending at the first wakeup.
   // Retain one bounded retry under the original deadline; do not dispatch
   // for a player that does not yet own the media, or abandon its startup.
   if(!playbackOwnsAttachedMedia(player,true)) return armNativeHlsReadiness(video,player,episode);
-  const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
-  const sourceOwner=nativeHlsSourceOwner(video,player,episode,execution);
   if(!sourceOwner.current()) return;
   const readinessAt=performance.now();
   episode.native.busy=true;
@@ -1907,7 +1939,7 @@ async function runNativeHlsReadiness(video,player,episode){
     if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
     if(nativeHlsAuthenticationRefused(player,episode,sourceOwner)) return;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
-      exhaustHlsStartup(player,'native_readiness_refused');}
+      exhaustHlsStartup(player,'native_readiness_refused',sourceOwner);}
     else if(!error.cancelled) armNativeHlsReadiness(video,player,episode);
   }finally{
     episode.native.busy=false;
@@ -1930,7 +1962,7 @@ async function classifyNativeHlsError(video,player,code,message,sourceOwner=null
     // deadline. It must not be swallowed by the concluded sensor outcome.
     episode.decoderFailed=true;
     episode.latestFailure={message:message||'The native decoder rejected the stream.'};
-    return exhaustHlsStartup(player,'native_media_error');
+    return exhaustHlsStartup(player,'native_media_error',owner);
   }
   if(episode.native.classifying) return true;
   if(episode.state==='paused'||player.wantsPlayback===false){
@@ -1957,14 +1989,14 @@ async function classifyNativeHlsError(video,player,code,message,sourceOwner=null
       runNativeHlsReadiness(video,player,episode).catch(()=>{});
       return true;
     }
-    if(player.triedFallback) return exhaustHlsStartup(player,'fallback_spent');
+    if(player.triedFallback) return exhaustHlsStartup(player,'fallback_spent',owner);
     if(!qualityCatalogSelectionCurrent(player)||!Array.isArray(player.qualityCandidates)){
       episode.latestFailure={message:'The compatible route could not be verified for this selection.'};
-      return exhaustHlsStartup(player,'compatible_route_unverified');
+      return exhaustHlsStartup(player,'compatible_route_unverified',owner);
     }
     const encode=player.qualityCandidates.some(row=>row?.route==='encode'&&row.decoder_compatible===true);
     if(!encode){episode.latestFailure={message:'No compatible encode route is available for this selection.'};
-      return exhaustHlsStartup(player,'candidate_encode_route_unavailable');}
+      return exhaustHlsStartup(player,'candidate_encode_route_unavailable',owner);}
     player.triedFallback=true;
     const evidence=video.readyState>=1||video.videoWidth>0
       ||(video.getVideoPlaybackQuality?.().totalVideoFrames||0)>episode.native.frameBaseline;
@@ -1984,7 +2016,7 @@ async function classifyNativeHlsError(video,player,code,message,sourceOwner=null
     }
     if(nativeHlsAuthenticationRefused(player,episode,owner)) return true;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
-      exhaustHlsStartup(player,'native_readiness_refused');}
+      exhaustHlsStartup(player,'native_readiness_refused',owner);}
     else if(!error.cancelled){
       episode.native.execution++;episode.native.attached=false;
       abortHlsStartupLoaders(episode,true);

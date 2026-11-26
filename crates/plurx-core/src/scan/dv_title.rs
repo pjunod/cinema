@@ -12,6 +12,19 @@ use serde::{Deserialize, Serialize};
 pub const PROBE_FIELD: &str = "plurx_dv_title_v1";
 pub const SCHEMA: u32 = 1;
 
+/// Enhancement layer declaration across every displayed RPU of this source.
+/// Old schema-1 documents lack the field and remain unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleElKind {
+    Fel,
+    Mel,
+}
+
+fn unknown_el_kind() -> TitleConstant<TitleElKind> {
+    TitleConstant::Unknown
+}
+
 /// A title constant cannot be selected by taking the last frame's value.
 /// Missing metadata anywhere leaves it unknown; conflicting observations leave
 /// it inconsistent. Neither can supply an endpoint or mastering declaration.
@@ -57,6 +70,8 @@ pub struct DvTitleStats {
     pub max_l1_pq: Option<u16>,
     pub mastering_luminance: TitleConstant<MasteringLuminance>,
     pub mastering_primaries: TitleConstant<MasteringPrimaries>,
+    #[serde(default = "unknown_el_kind")]
+    pub el_kind: TitleConstant<TitleElKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +106,17 @@ impl TitleEligibility {
 }
 
 impl DvTitleStats {
+    /// The enhancement-layer kind, when every displayed RPU declared the same
+    /// one. The scanner reads it from each RPU's NLQ: an identity residual
+    /// (zero offset, dead-zone slope and threshold) is a minimal layer (MEL),
+    /// anything else a full one (FEL).
+    pub fn consistent_el_kind(self) -> Option<TitleElKind> {
+        match self.el_kind {
+            TitleConstant::Consistent(kind) => Some(kind),
+            TitleConstant::Unknown | TitleConstant::Inconsistent => None,
+        }
+    }
+
     pub fn eligibility(self) -> TitleEligibility {
         let total = self
             .valid_l1_frames
@@ -144,10 +170,21 @@ impl DvTitleStats {
 
     /// Old or future probe documents are unknown, never eligible by default.
     pub fn from_probe_json(document: &str) -> Option<Self> {
-        let document: serde_json::Value = serde_json::from_str(document).ok()?;
+        Self::from_probe_value(&serde_json::from_str(document).ok()?)
+    }
+
+    /// The same, from a probe document a caller already parsed.
+    pub fn from_probe_value(document: &serde_json::Value) -> Option<Self> {
         let stats: Self = serde_json::from_value(document.get(PROBE_FIELD)?.clone()).ok()?;
         (stats.schema == SCHEMA).then_some(stats)
     }
+}
+
+/// The enhancement-layer kind the complete-title scan recorded in a probe
+/// document; `None` before the scan, for an unreadable record, or when the
+/// title's RPUs disagree.
+pub fn title_el_kind_from_probe(document: Option<&str>) -> Option<TitleElKind> {
+    DvTitleStats::from_probe_json(document?)?.consistent_el_kind()
 }
 
 #[cfg(test)]
@@ -165,6 +202,7 @@ mod tests {
             max_l1_pq: Some(0),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: TitleConstant::Unknown,
         }
     }
 
@@ -264,6 +302,18 @@ mod tests {
         assert!(DvTitleStats::from_probe_json("{}").is_none());
         let mut doc = serde_json::json!({ PROBE_FIELD: good });
         assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
+        doc[PROBE_FIELD]
+            .as_object_mut()
+            .expect("probe fixture object")
+            .remove("el_kind");
+        assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
+        doc[PROBE_FIELD]["el_kind"] = serde_json::json!({"state":"consistent","value":"fel"});
+        assert_eq!(
+            DvTitleStats::from_probe_json(&doc.to_string())
+                .expect("valid FEL probe fixture")
+                .el_kind,
+            TitleConstant::Consistent(TitleElKind::Fel)
+        );
         doc[PROBE_FIELD]["schema"] = serde_json::json!(2);
         assert!(DvTitleStats::from_probe_json(&doc.to_string()).is_none());
     }

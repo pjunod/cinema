@@ -9,7 +9,9 @@ mod analysis;
 mod analysis_reconcile;
 pub(crate) mod annotations;
 mod auth;
-mod background_jobs;
+pub(crate) mod background_jobs;
+pub(crate) mod curation;
+pub(crate) mod playback_devices;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
@@ -118,7 +120,7 @@ use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::{header, HeaderValue, Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -388,18 +390,27 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/auth/logout"
         | "/api/v1/users"
         | "/api/v1/users/{id}"
+        | "/api/v1/users/{id}/grants"
         // The device inventory and per-device revocation are account
         // administration on the same rows as login and logout, so they are
         // attributed here rather than opening a group of their own.
         | "/api/v1/me/devices"
         | "/api/v1/me/devices/{prefix}"
+        // The same sign-ins, with the capabilities each last reported.
+        | "/api/v1/playback/devices"
         | "/api/v1/users/{id}/devices"
         | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"
         | "/api/v1/keys/{id}" => 0,
 
         // Home projections.
-        "/api/v1/home/previews" | "/api/v1/hubs" | "/api/v1/features" | "/hubs/search" => 1,
+        "/api/v1/home/previews"
+        | "/api/v1/hubs"
+        | "/api/v1/features"
+        | "/hubs/search"
+        | "/api/v1/home/rows"
+        | "/api/v1/home/layout"
+        | "/api/v1/home/default-layout" => 1,
 
         // Library management, catalogue pages and schedules.
         "/api/v1/libraries"
@@ -447,6 +458,18 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/watchlist"
         | "/api/v1/items/{id}/favorite"
         | "/api/v1/lists/{list}"
+        | "/api/v1/items/{id}/tags"
+        | "/api/v1/tags"
+        | "/api/v1/tags/{id}"
+        | "/api/v1/tags/{id}/merge"
+        | "/api/v1/tags/{id}/items"
+        | "/api/v1/tags/{id}/suggestions"
+        | "/api/v1/tags/{id}/rejected"
+        | "/api/v1/tags/{id}/item-ids"
+        | "/api/v1/rows"
+        | "/api/v1/rows/preview"
+        | "/api/v1/rows/{id}"
+        | "/api/v1/rows/{id}/items"
         | "/api/v1/files/{id}/preparation"
         | "/api/v1/files/{id}/analysis"
         | "/api/v1/files/{id}/dv-conversion"
@@ -531,6 +554,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
         | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
@@ -570,6 +594,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/hls/continuous-sessions"
         | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/files/{id}/hls/prepare-startup"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
         | "/api/v1/offline/packages/{id}/complete"
@@ -588,6 +613,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/status"
         | "/api/v1/hls/{session}/quality-control"
         | "/api/v1/hls/{session}/quality-schedule"
+        | "/api/v1/hls/{session}/retain-output"
         | "/api/v1/hls/{session}/quality-family"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
@@ -620,6 +646,7 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/server/node"
+        | crate::discovery::PATH
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
@@ -638,6 +665,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-transcription/jobs/{id}"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
+        | "/api/v1/developer/dv-refit/spool"
         | "/api/v1/developer/source-launch"
         | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/system/video-processing/reprobe"
@@ -725,6 +753,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
+        | internal_activity::SOURCE_STOP_PATH
         | activity_starts::PEER_PATH
         | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
@@ -752,6 +781,7 @@ fn http_route_group(path: &str) -> usize {
         | crate::media_sessions::RELAY_PATH
         | hls::QUALITY_CONTROL_PATH
         | hls::QUALITY_SCHEDULE_PATH
+        | hls::RETAIN_OUTPUT_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }
@@ -787,11 +817,11 @@ async fn http_store_attribution(
         .extensions()
         .get::<MatchedPath>()
         .map_or(8, |path| http_route_group(path.as_str()));
-    let raft = state.replication.metrics_handle().snapshot();
+    let raft = state.cluster.observations().raft();
     let role = http_node_role(
         raft.local_source,
         raft.watermark_source,
-        state.membership.local_serving_role().await.map_err(|_| ()),
+        state.cluster.admission_role().await.map_err(|_| ()),
     );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
     // The by-method split is folded when the last holder of these counts is
@@ -1664,6 +1694,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_library::viewer_router(state.clone()))
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
+        .route("/server/discovery", get(system::discovery_eligibility))
         .route("/server/node", get(system::server_node))
         .nest("/delegation", delegation::router())
         .route("/me", get(auth::me))
@@ -1681,6 +1712,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .route(
+            "/developer/dv-refit/spool",
+            get(developer::refit_spool).delete(developer::clear_refit_spool),
+        )
         .route("/developer/source-launch", get(developer::source_launch))
         .route(
             "/developer/macos-video-processing/reprobe",
@@ -1806,6 +1841,49 @@ pub fn router(state: AppState) -> Router {
             put(annotations::add_to_favorites).delete(annotations::remove_from_favorites),
         )
         .route("/lists/{list}", get(annotations::list_items))
+        // Custom tags, saved rows and the Home layout (CUSTOM-TAGS-PLAN.md).
+        .route("/tags", get(curation::list_tags).post(curation::create_tag))
+        .route(
+            "/tags/{id}",
+            patch(curation::update_tag).delete(curation::delete_tag),
+        )
+        .route("/tags/{id}/merge", post(curation::merge_tag))
+        .route(
+            "/tags/{id}/items",
+            get(curation::tag_items).post(curation::tag_members),
+        )
+        .route(
+            "/tags/{id}/suggestions",
+            get(curation::tag_suggestions).post(curation::review_suggestions),
+        )
+        .route("/tags/{id}/rejected", get(curation::rejected_items))
+        .route("/tags/{id}/item-ids", get(curation::tag_item_ids))
+        .route(
+            "/items/{id}/tags",
+            get(curation::item_tags).put(curation::put_item_tags),
+        )
+        .route("/rows", get(curation::list_rows).post(curation::create_row))
+        .route("/rows/preview", post(curation::preview_row))
+        .route(
+            "/rows/{id}",
+            patch(curation::update_row).delete(curation::delete_row),
+        )
+        .route("/rows/{id}/items", get(curation::row_items))
+        .route("/home/rows", get(curation::home_rows))
+        .route(
+            "/home/layout",
+            get(curation::home_layout)
+                .put(curation::put_home_layout)
+                .delete(curation::reset_home_layout),
+        )
+        .route(
+            "/home/default-layout",
+            put(curation::put_default_layout).delete(curation::reset_default_layout),
+        )
+        .route(
+            "/users/{id}/grants",
+            get(curation::user_grants).put(curation::put_user_grants),
+        )
         // Watch
         // A playback handoff token may report progress for its file's item.
         .route(
@@ -1882,6 +1960,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/logout", post(auth::logout))
         .route("/me/devices", get(users::list_my_devices))
+        .route("/playback/devices", get(playback_devices::list))
         .route("/me/devices/{prefix}", delete(users::revoke_my_device))
         .route("/users/{id}/devices", get(users::list_user_devices))
         .route(
@@ -2249,6 +2328,14 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
+            "/files/{id}/hls/prepare-startup",
+            post(hls::prepare_startup).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/startup-decision",
+            post(stream::startup_decision_post).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/files/{id}/hls/continuous-candidates",
             post(hls::continuous_candidates).layer(DefaultBodyLimit::max(64 * 1024)),
         )
@@ -2289,6 +2376,10 @@ pub fn router(state: AppState) -> Router {
             "/hls/{session}/quality-schedule",
             post(hls::quality_schedule)
                 .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
+        .route(
+            "/hls/{session}/retain-output",
+            post(hls::retain_output).layer(DefaultBodyLimit::max(hls::RETAIN_OUTPUT_MAX_BYTES)),
         )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
@@ -2421,6 +2512,10 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            internal_activity::SOURCE_STOP_PATH,
+            post(internal_activity::stop_source_processed).layer(DefaultBodyLimit::max(256)),
+        )
         .route(
             activity_starts::PEER_PATH,
             post(activity_starts::peer).layer(DefaultBodyLimit::max(1_024)),
@@ -2581,6 +2676,11 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
         )
         .route(
+            hls::RETAIN_OUTPUT_PATH,
+            post(internal_media_sessions::retain_output)
+                .layer(DefaultBodyLimit::max(hls::RETAIN_OUTPUT_MAX_BYTES)),
+        )
+        .route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
@@ -2635,6 +2735,9 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             desktop_http_admission_gate,
         ))
+        .layer(axum::middleware::from_fn(
+            crate::cluster::calls::auth_refusal_response,
+        ))
         .layer(axum::middleware::from_fn(http_request_metrics))
         // Outermost: every layer inside reads the id back out of the request
         // headers, so this one has to have written it first.
@@ -2677,12 +2780,14 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/cluster/nodes"
+                | crate::discovery::PATH
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2691,6 +2796,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -2719,6 +2827,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 // node in maintenance keeps streaming it, so it must keep
                 // honouring the viewer's quality changes too.
                 | hls::QUALITY_SCHEDULE_PATH
+                // So is turning output retention off for one playback.
+                | hls::RETAIN_OUTPUT_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2752,7 +2862,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 "v1",
                 "hls",
                 _,
-                "control" | "quality-control" | "quality-schedule"
+                "control" | "quality-control" | "quality-schedule" | "retain-output"
             ]
         ))
         || (method == Method::DELETE
@@ -2807,10 +2917,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/cluster/nodes"
+                | crate::discovery::PATH
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2821,6 +2933,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`
@@ -2868,6 +2983,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     // A learner can own a continuous session; every schedule
                     // relayed to it arrives here.
                     | hls::QUALITY_SCHEDULE_PATH
+                    | hls::RETAIN_OUTPUT_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2950,7 +3066,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 // node-local, write-nothing POST as the caps-v2 decision.
                 | ["api", "v1", "files", _, "hls", "continuous-sessions" | "continuous-candidates"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule"]
+                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule" | "retain-output"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers
@@ -2977,6 +3093,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
 /// (`capacity_role_refusal`) and any sender choosing peers for an internal
 /// route use this one predicate, so they cannot drift apart.
 fn serving_role_admits(role: LocalServingRole, method: &Method, path: &str) -> bool {
+    if method == Method::GET && path == crate::discovery::PATH {
+        return true;
+    }
     match role {
         LocalServingRole::Unclustered | LocalServingRole::Voter => true,
         LocalServingRole::Learner => learner_route_eligible(method, path),
@@ -2989,6 +3108,11 @@ fn capacity_role_refusal(
     method: &Method,
     path: &str,
 ) -> Option<Response> {
+    // Discovery reports standing, never serving authority. Even a fenced or
+    // unreadable admission projection must be able to withdraw a LAN record.
+    if method == Method::GET && path == crate::discovery::PATH {
+        return None;
+    }
     match role {
         Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
         Some(role @ LocalServingRole::Learner) if serving_role_admits(role, method, path) => None,
@@ -3035,13 +3159,13 @@ async fn cluster_capacity_gate(
     next: Next,
 ) -> Response {
     if let Some(refusal) = capacity_maintenance_refusal(
-        state.membership.local_maintenance_active(),
+        state.cluster.maintenance_active(),
         request.method(),
         request.uri().path(),
     ) {
         return refusal;
     }
-    let role = state.membership.local_serving_role().await.ok();
+    let role = state.cluster.admission_role().await.ok();
     if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
         return refusal;
     }
@@ -3124,7 +3248,7 @@ pub(crate) struct ReadinessEvaluation {
 /// skewed node would take every node's `/readyz` down. The measurement stays
 /// visible in the Developer readiness rows and the clock metrics either way.
 fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
-    let guard = state.membership.clock_guard();
+    let guard = state.cluster.clock();
     (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
         ReadinessEvaluation {
             ready: false,
@@ -3138,7 +3262,7 @@ fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
 /// Replicated nodes use only the passive serving fence. A local SQLite node
 /// retains its existing bounded Store ping because it has no quorum proof.
 pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
-    if state.membership.local_maintenance_active() {
+    if state.cluster.maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::Maintenance),
@@ -3147,8 +3271,8 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // A fresh quorum watermark is already a recent replicated-store proof.
     // Do not turn readiness into another multi-second Store request exactly
     // when an isolated node needs to self-fence promptly.
-    if state.serving.is_quorum_managed() {
-        return if state.serving.is_ready() {
+    if state.cluster.quorum_managed() {
+        return if state.cluster.ready() {
             clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
@@ -3217,12 +3341,17 @@ async fn desktop_http_admission_gate(
         || path == internal_clock::PATH
         || matches!(
             path,
-            "/healthz" | "/readyz" | "/metrics" | "/api/v1/server" | "/api/v1/server/node"
+            "/healthz"
+                | "/readyz"
+                | "/metrics"
+                | "/api/v1/server"
+                | "/api/v1/server/node"
+                | crate::discovery::PATH
         );
     if control_plane {
         return next.run(request).await;
     }
-    let Some(admission) = state.serving.try_desktop_http_admission().await else {
+    let Some(admission) = state.cluster.desktop_admission().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [
@@ -3304,7 +3433,7 @@ async fn mutable_media_serving_gate(
         return serving_gate(&state, request, next).await;
     };
     let path = request.uri().path().to_owned();
-    hls::fence::observe_hls_session_response(&state.serving, route, &path, async {
+    hls::fence::observe_hls_session_response(state.cluster.authority(), route, &path, async {
         if route.existing_session_read {
             hls::fence::hold_for_outage_resolution(&state).await;
         }
@@ -3318,12 +3447,12 @@ async fn serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
+    let starts_media = crate::cluster::Cluster::starts_mutable_media(
         request.method().as_str(),
         request.uri().path(),
     );
     let restart_admission = if starts_media {
-        match state.serving.try_restart_admission().await {
+        match state.cluster.try_restart_admission().await {
             Some(admission) => Some(admission),
             None => {
                 let mut response = (
@@ -3344,7 +3473,7 @@ async fn serving_gate(
     } else {
         None
     };
-    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+    let Some(policy) = state.cluster.http_refusal(request.uri().path()) else {
         let response = next.run(request).await;
         return response
             .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, restart_admission)));

@@ -50,6 +50,12 @@ struct DirectSession {
     path: std::path::PathBuf,
 }
 
+async fn stable_direct_fixture() -> RealSourceStartFixture {
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    fixture
+}
+
 async fn started(fixture: &RealSourceStartFixture) -> DirectSession {
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     started_with(fixture, recipe).await
@@ -190,7 +196,18 @@ async fn assert_matches_local(
             )
             .await;
             let label = format!("{method} {values:?} if_range={if_range} h2={h2}");
-            assert_eq!(source.status(), local.status(), "{label}");
+            let source_status = source.status();
+            let local_status = local.status();
+            if source_status != local_status {
+                let bytes = axum::body::to_bytes(source.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .expect("bounded Source refusal");
+                panic!(
+                    "{label}: Source status {source_status}, Local status {local_status}; Source refusal: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            assert_eq!(source_status, local_status, "{label}");
             for name in [
                 header::CONTENT_TYPE,
                 header::ACCEPT_RANGES,
@@ -225,7 +242,7 @@ async fn assert_matches_local(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_start_requires_actual_direct_decision() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let fixture = stable_direct_fixture().await;
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     // The player cannot take this container: A recomputes the decision with
     // the real caps and refuses; B's word that it is direct counts for nothing.
@@ -280,7 +297,12 @@ async fn sharing_source_direct_start_requires_actual_direct_decision() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_counts_grant_and_source_slots() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    // Retain the production refusal stage when this real Source start fails.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plurx::sharing=warn")
+        .with_test_writer()
+        .try_init();
+    let fixture = stable_direct_fixture().await;
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     for n in 0..4 {
         let mut next = recipe.clone();
@@ -310,7 +332,7 @@ async fn sharing_source_direct_counts_grant_and_source_slots() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_range_matches_local_serve_file_range() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let fixture = stable_direct_fixture().await;
     let session = started(&fixture).await;
     let peer = peer(&fixture, None).await;
     let len = session.length;
@@ -337,7 +359,7 @@ async fn sharing_source_direct_range_matches_local_serve_file_range() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_if_range_ignores_range_like_local() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let fixture = stable_direct_fixture().await;
     let session = started(&fixture).await;
     let peer = peer(&fixture, None).await;
     let s = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
@@ -473,7 +495,7 @@ async fn sharing_source_direct_read_join_before_end_receipt() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_symlink_or_resized_file_refuses() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let fixture = stable_direct_fixture().await;
     let session = started(&fixture).await;
     let peer = peer(&fixture, None).await;
     let url = direct_url(peer.address, &fixture, &session, "direct");

@@ -93,26 +93,27 @@ A status record that also lives at this level:
 
 Assets and generated records also live at this level:
 [`img/`](img/) (README screenshots) · [`apple-builds/`](apple-builds/README.md)
-(one note per Apple build, read by `validation/apple_build.py`) ·
+(one note per Apple change, read by `validation/apple_build.py`) ·
 [`mockups/`](mockups/) · [`evidence/`](evidence/).
 
 ## Subject folders
 
-One row per folder; the folder index lists every document in it. Counts are
-index rows by status as of 2026-10-17 — the folder index is authoritative.
+One row per folder; the folder index lists every document in it and its
+status. This page carries no per-folder counts: a stored count changed with
+every new document, so every pull request that added one conflicted here.
 
-| Folder | What it holds | Rows |
-|---|---|---|
-| [playback-control/](playback-control/README.md) | The playback control rewrite: explicit demand, one owner per stream, prepared handoffs. | 27 open · 22 built · 13 done · 10 superseded |
-| [streaming/](streaming/README.md) | Delivery: VOD presentation, capability negotiation, Dolby Vision, decoder selection, stall investigations. | 1 live · 121 open · 19 built · 25 done |
-| [cluster/](cluster/README.md) | Phase 4 clustering: replication, membership, recovery, and replicated-failure diagnoses. | 24 open · 5 built · 9 done |
-| [clients/](clients/README.md) | Apple, Android and the web player: parity, the input contract, subtitles, overlays, layouts. | 7 live · 73 open · 28 built · 19 done |
-| [server/](server/README.md) | The HTTP layer, scanning, images, auth and observability. | 7 open · 2 built |
-| [performance/](performance/README.md) | Where the seconds go: performance rounds and the video-quality programme. | 4 open · 1 built · 7 done |
-| [ci/](ci/README.md) | The build, the gate, and the agents that use it. | 4 live · 16 open · 3 done |
-| [features/](features/README.md) | Whole capabilities planned end to end, including the project backlog. | 4 live · 41 open · 13 built · 6 done |
-| [reviews/](reviews/README.md) | Pull-request and effort review records. | 2 live · 10 open · 8 done · 1 superseded |
-| [archive/](archive/README.md) | Finished work, kept for history. | 3 rows |
+| Folder | What it holds |
+|---|---|
+| [playback-control/](playback-control/README.md) | The playback control rewrite: explicit demand, one owner per stream, prepared handoffs. |
+| [streaming/](streaming/README.md) | Delivery: VOD presentation, capability negotiation, Dolby Vision, decoder selection, stall investigations. |
+| [cluster/](cluster/README.md) | Phase 4 clustering: replication, membership, recovery, and replicated-failure diagnoses. |
+| [clients/](clients/README.md) | Apple, Android and the web player: parity, the input contract, subtitles, overlays, layouts. |
+| [server/](server/README.md) | The HTTP layer, scanning, images, auth and observability. |
+| [performance/](performance/README.md) | Where the seconds go: performance rounds and the video-quality programme. |
+| [ci/](ci/README.md) | The build, the gate, and the agents that use it. |
+| [features/](features/README.md) | Whole capabilities planned end to end, including the project backlog. |
+| [reviews/](reviews/README.md) | Pull-request and effort review records. |
+| [archive/](archive/README.md) | Finished work, kept for history. |
 
 ## Adding a document
 

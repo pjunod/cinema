@@ -26,6 +26,7 @@ pub mod coordination;
 #[cfg(feature = "hiqlite-store")]
 pub mod membership;
 pub mod migration;
+pub mod timing;
 
 pub const NODE_ID_FILENAME: &str = "node.id";
 /// The M0/M2 path starts with one voter; later membership assigns other ids.

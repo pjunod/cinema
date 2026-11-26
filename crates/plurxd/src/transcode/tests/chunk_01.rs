@@ -2252,12 +2252,15 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         Pipeline::Cpu,
     ));
     let req = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2322,12 +2325,15 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
 
 fn snapshot_probe_request() -> SessionRequest {
     SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2581,15 +2587,6 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
         Pipeline::Cpu,
     );
     let mut req = snapshot_probe_request();
-    // S-10: absent is off, carried in the same settings batch.
-    assert!(
-        !manager
-            .vod_settings(&req)
-            .await
-            .expect("snapshot")
-            .expect("enabled")
-            .sdr_master_codecs
-    );
     store
         .put_settings(&[
             (keys::VOD_PRESENTATION, "1"),
@@ -2598,7 +2595,6 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "42"),
             (keys::CACHE_MAX_GB, "3"),
             (keys::VOD_BLOCKED_GET_CAP, "512"),
-            (keys::PLAYBACK_SDR_MASTER_CODECS, "1"),
         ])
         .await
         .expect("one settings update");
@@ -2613,7 +2609,6 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(12));
     assert_eq!(settings.materialize_budget, Duration::from_secs(42));
     assert_eq!(settings.blocked_get_cap, 512);
-    assert!(settings.sdr_master_codecs, "read in the same batch");
 
     store
         .put_settings(&[
@@ -2622,7 +2617,6 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "999"),
             (keys::CACHE_MAX_GB, "invalid"),
             (keys::VOD_BLOCKED_GET_CAP, "999999"),
-            (keys::PLAYBACK_SDR_MASTER_CODECS, " OFF "),
         ])
         .await
         .expect("invalid and excessive budgets");
@@ -2637,7 +2631,6 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(2));
     assert_eq!(settings.materialize_budget, Duration::from_secs(300));
     assert_eq!(settings.blocked_get_cap, 4096);
-    assert!(!settings.sdr_master_codecs, "a hand-written OFF is off");
 
     store
         .put_setting(keys::VOD_PRESENTATION, " 0 ")
@@ -3490,7 +3483,7 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
         .with_dovi_reshape(true);
     manager
         .dovi_proofs
-        .insert(TranscodeManager::dovi_proof_key(&file), true);
+        .record(TranscodeManager::dovi_proof_key(&file), true);
     let encoder = manager
         .encoder_for_file(&file, crate::process_control::ChildClass::Background)
         .await
@@ -3510,6 +3503,56 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
     assert_eq!(opts.pipeline, Pipeline::DoviTonemapx);
     assert_eq!(opts.tone_map, ToneMap::Tonemapx);
     assert_eq!(manager.auto_height_for_file(Some(&file), None).await, 720);
+}
+
+/// A Profile 5 reshape on a node whose preferred encoder is hardware reads
+/// the boot-measured pairing and spawns no capability probe. It used to probe
+/// the pairing lazily on the first reshape: an unattributed child that no
+/// session or job owned, on the Source exactly as locally.
+#[tokio::test]
+async fn the_first_profile5_reshape_on_a_hardware_node_spawns_no_capability_probe() {
+    use plurx_core::store::SqliteStore;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_settings(&[(keys::HWACCEL, "qsv")])
+        .await
+        .expect("prefer QSV");
+    let dir = crate::test_tempdir().expect("work");
+    let caps = EncoderCaps {
+        qsv: true,
+        ..EncoderCaps::default()
+    };
+    let file = profile5_file();
+    let probes = || {
+        crate::process_control::priority::spawns_of(crate::ffmpeg::DOVI_RESHAPE_CAPABILITY_PROBE)
+    };
+    for (proved, expected) in [(Vec::new(), Encoder::Software), (vec![Encoder::Qsv], Encoder::Qsv)] {
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().join(expected.label()),
+            caps.clone(),
+            Pipeline::VppQsv,
+        )
+        .with_dovi_reshape(true)
+        .with_dovi_reshape_hardware(proved);
+        manager
+            .dovi_proofs
+            .record(TranscodeManager::dovi_proof_key(&file), true);
+        let before = probes();
+        let encoder = manager
+            .encoder_for_file(&file, crate::process_control::ChildClass::Realtime)
+            .await
+            .expect("proved source");
+        assert_eq!(encoder, expected, "the boot record decides the encoder");
+        assert_eq!(
+            manager
+                .dovi_reshape_encoder_advisory_with_preference(&file, "qsv")
+                .await,
+            expected
+        );
+        assert_eq!(probes(), before, "a session start spawns no capability probe");
+    }
 }
 
 /// P-02: a Profile 5 pixel proof that did not finish is not a verdict. The
@@ -3628,7 +3671,7 @@ async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
 
     // No verdict yet answers what the reshape reaches once proved, the only
     // outcome in which a rung is served.
-    manager.dovi_proofs.insert(key.clone(), true);
+    manager.dovi_proofs.record(key.clone(), true);
     assert_eq!(
         manager
             .capability_height_ceiling_for_request(Some(&file), false)
@@ -3648,7 +3691,7 @@ async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
     refuted.mtime = 2;
     manager
         .dovi_proofs
-        .insert(TranscodeManager::dovi_proof_key(&refuted), false);
+        .record(TranscodeManager::dovi_proof_key(&refuted), false);
     assert_eq!(
         manager
             .dovi_reshape_encoder_advisory_with_preference(&refuted, "")
@@ -3910,7 +3953,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
     .with_dovi_passthrough(true);
     manager
         .dovi_proofs
-        .insert(TranscodeManager::dovi_proof_key(&file), true);
+        .record(TranscodeManager::dovi_proof_key(&file), true);
 
     // Everything proved, and asked for.
     assert_eq!(
@@ -4059,12 +4102,15 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 #[test]
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -4089,10 +4135,12 @@ fn the_grade_is_part_of_a_request_identity() {
     };
     let hdr10 = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -4356,7 +4404,7 @@ async fn profile5_hdr10_keeps_the_proved_vaapi_encoder_and_grade() {
             EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
             .with_dovi_reshape(true).with_dovi_passthrough(renderer)
             .with_hdr10_passthrough_vaapi(hardware);
-        manager.dovi_proofs.insert(TranscodeManager::dovi_proof_key(&file), source_proved);
+        manager.dovi_proofs.record(TranscodeManager::dovi_proof_key(&file), source_proved);
         if !source_proved {
             assert!(manager.hdr10_grade_for_with_preference(&file, true, HDR10_HEIGHT,
                 Encoder::Vaapi, false, Encoder::Vaapi).await.is_err(), "unproved source is refused");

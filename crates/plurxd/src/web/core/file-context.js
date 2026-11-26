@@ -288,15 +288,24 @@ function sharedPlaybackStatusMetrics(value,reply){
     ||SHARED_STATUS_WORDS.some(k=>status[k]!=null&&!sharedPlaybackStatusToken(status[k]))) return null;
   return status;
 }
+// Whether a Start request advertised the bounded-range timeline, exactly as B
+// reads it (`receiver_presentation::client_supports_range`).
+function sharedPlaybackRequestBoundedRange(request){
+  const transports=request&&request.caps&&request.caps.transports;
+  return Array.isArray(transports)&&transports.includes("hls")&&transports.includes("hls-bounded-range-v1");
+}
 // Ordinary complete B Start reply, bound to the authenticated signed-file
 // request. This validates routing metadata; it is not Source producer evidence.
-function sharedPlaybackStartContext(value,response){
+// A bounded view (`vod: false`, the Source's growing copy) binds only for a
+// request that advertised the bounded-range timeline, with its signed origin.
+function sharedPlaybackStartContext(value,response,request=null){
   const c=playbackFileContext(value);
   if(c.source_ref.kind==="local"||c.session_id||!response||typeof response!=="object") playbackFileReject();
   const id=response.session_id,control=response.control;
+  const bounded=response.vod===false&&sharedPlaybackRequestBoundedRange(request)&&Number.isSafeInteger(response.media_origin_ms);
   if(typeof id!=="string"||id.length!==36||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
     ||!sharedPlaybackSessionPlaylist(response.playlist_url,id)
-    ||response.vod!==true||!Number.isFinite(response.start_seconds)||response.start_seconds<0
+    ||response.vod!==true&&!bounded||!Number.isFinite(response.start_seconds)||response.start_seconds<0
     ||response.start_seconds>9007199254740
     ||response.duration_ms!=null&&(!Number.isSafeInteger(response.duration_ms)||response.duration_ms<0)
     ||response.media_origin_ms!=null&&!Number.isSafeInteger(response.media_origin_ms)

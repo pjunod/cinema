@@ -47,7 +47,7 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
         remote.press(.menu)
         XCTAssertFalse(pause.exists)
         remote.press(.menu)
-        XCTAssertTrue(app.buttons["detail:about"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["detail:more"].waitForExistence(timeout: 10), app.debugDescription)
     }
 
     func testLocalMovieTimelineSelectCommitsForwardAndBackwardPreview() throws {

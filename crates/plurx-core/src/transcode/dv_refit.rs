@@ -39,10 +39,9 @@ use dolby_vision::rpu::dovi_rpu::DoviRpu;
 use dolby_vision::rpu::rpu_data_mapping::{DoviMMRCurve, DoviMappingMethod, DoviPolynomialCurve};
 use serde::{Deserialize, Serialize};
 
-/// Names the fitting method. Stored curves carry it, and anything serving
-/// them folds it into the output identity, so a change of method is a change
-/// of bytes that caches can see.
-pub const FIT_VERSION: &str = "dv-refit-safe-v1";
+/// Names the fitting and publication method. Stored tables and work identities
+/// carry it; a change demands replacement fits without rewriting pinned digests.
+pub const FIT_VERSION: &str = "dv-refit-safe-v2-mmr12";
 
 /// Luma pieces: eight equal-width pieces over the 10-bit base-layer code.
 pub const LUMA_PIECES: usize = 8;
@@ -63,6 +62,10 @@ const RIDGE_PER_SAMPLE: f64 = 1e-5;
 const LUMA_FLOOR_SHARE: f64 = 0.01;
 /// The RPU's coefficient precision for the fixtures (`coefficient_log2_denom` 23).
 const FIT_QUANT: f64 = 8_388_608.0; // 2^23
+/// The common MMR coefficient grid qualified against the native decoder.
+/// Keep the RPU denominator at 23; these values have eleven zero low bits.
+/// This is a publication contract, not a claim about a decoder's internals.
+const SERVED_MMR_QUANT: f64 = 4096.0; // 2^12
 
 /// Polynomial degree of each MMR term, in basis order (used for domain conversion).
 const MMR_DEGREE: [i32; MMR_TERMS] = [
@@ -366,9 +369,23 @@ impl RefitStats {
     /// Squared error of `curves` on these samples, in 12-bit codes², from the
     /// sufficient statistics alone: Σ(c − f(b))² = Σc² − 2f(b)Σc + n·f(b)²
     /// per luma code, and yᵀy − 2βᵀXᵀy + βᵀXᵀXβ for the chroma MMR. `None`
-    /// when the statistics carry no second moments.
+    /// when the statistics carry no second moments or publication is nonfinite.
+    /// The model uses the actual published coefficient precision, before output
+    /// clipping/rounding; it does not score the finer optimizer coefficients.
     pub fn squared_error(&self, curves: &RefitCurves) -> Option<SquaredError> {
         if !self.second_moments {
+            return None;
+        }
+        // Qualification must measure the coefficients that publication writes,
+        // including the common MMR grid, rather than the finer optimizer result.
+        let written = curves.publication_composer();
+        if written
+            .luma
+            .iter()
+            .flatten()
+            .chain(written.chroma.iter().flatten())
+            .any(|v| !v.is_finite())
+        {
             return None;
         }
         let mut luma = [0.0; LUMA_PIECES];
@@ -378,14 +395,23 @@ impl RefitStats {
             if n == 0.0 {
                 continue;
             }
-            let f = curves.luma_at(code);
             let piece = code / 128;
+            let c = written.luma[piece];
+            let x = code as f64 / 1024.0;
+            let f = (c[0] + c[1] * x + c[2] * x * x) * 4096.0;
             luma[piece] += (self.ysq[code] - 2.0 * f * self.ysum[code] + n * f * f).max(0.0);
             luma_samples[piece] += n;
         }
         let mut chroma = 0.0;
         for ch in 0..2 {
-            let beta: Vec<f64> = (0..MMR_TERMS).map(|i| curves.mmr[i][ch]).collect();
+            // The sufficient statistics use code/1023 and value/4095.
+            // Express the exact written composer coefficients in that domain.
+            let beta: Vec<f64> = (0..MMR_TERMS)
+                .map(|i| {
+                    written.chroma[ch][i]
+                        / ((OUT_SCALE / 4096.0) * (1024.0 / IN_SCALE).powi(MMR_DEGREE[i]))
+                })
+                .collect();
             let cross: f64 = (0..MMR_TERMS).map(|i| beta[i] * self.xty[2 * i + ch]).sum();
             let quad: f64 = (0..MMR_TERMS)
                 .map(|i| {
@@ -599,9 +625,8 @@ const PIECE_JUDGED_FROM: f64 = 1000.0;
 /// …and may not be worse than identity by more than this share there.
 const PIECE_WORSE_ALLOWED: f64 = 0.05;
 /// Slack per sample, in 12-bit codes², for a part (chroma, a luma piece)
-/// that identity already serves exactly: rounding the fit to 2^-23 and the
-/// ridge's pull cost a fraction of a code, and that must not refuse a scene
-/// whose gain is elsewhere.
+/// that identity already serves exactly. The ridge and publication rounding
+/// must stay within this unchanged budget, even when the gain is elsewhere.
 const SLACK_PER_SAMPLE: f64 = 0.25;
 
 /// Scores `curves` and the identity curves on held-out samples (samples
@@ -685,23 +710,89 @@ impl ServableCurves {
     pub fn curves(&self) -> &ComposerCurves {
         &self.0
     }
+
+    /// The coefficients exactly as [`apply_to_rpu`] writes them.
+    pub fn quantised(&self) -> QuantisedCurves {
+        let n = |v: f64| {
+            let (int, frac) = split(v, 23).expect("servable curves are writable");
+            int * (1i64 << 23) + frac as i64
+        };
+        QuantisedCurves {
+            luma: self.0.luma.map(|piece| piece.map(n)),
+            chroma: self.0.chroma.map(|component| component.map(n)),
+        }
+    }
+
+    /// Curves rebuilt from stored coefficients, checked again as they will be
+    /// written: writable, the luma curve rising without flattening, and both
+    /// curves within bounds of identity, measured on the composer's own
+    /// reshape (the fit-domain diagnostics need curves this store does not
+    /// keep; the two domains differ by under a code at these bounds).
+    pub fn from_quantised(q: &QuantisedCurves) -> Result<Self, Unservable> {
+        let limit = 64i64 << 23;
+        if q.luma
+            .iter()
+            .flatten()
+            .chain(q.chroma.iter().flatten())
+            .any(|&n| !(-limit..63i64 << 23).contains(&n))
+        {
+            return Err(Unservable::Unwritable);
+        }
+        let v = |n: i64| n as f64 / FIT_QUANT;
+        let composer = ComposerCurves {
+            luma: q.luma.map(|piece| piece.map(v)),
+            chroma: q.chroma.map(|component| component.map(v)),
+        };
+        luma_shape(&composer)?;
+        let identity = RefitCurves::identity().composer();
+        let mid = 512u16;
+        let luma = (0..CODES as u16)
+            .map(|c| {
+                (f64::from(composer.reshape([c, mid, mid])[0])
+                    - f64::from(identity.reshape([c, mid, mid])[0]))
+                .abs()
+            })
+            .fold(0.0, f64::max);
+        if luma > LUMA_DEPARTURE_LIMIT {
+            return Err(Unservable::LumaDeparture(luma));
+        }
+        let grid: Vec<u16> = (0..17)
+            .map(|i| (1023.0 * i as f64 / 16.0).round() as u16)
+            .collect();
+        let mut chroma = 0.0f64;
+        for &y in &grid {
+            for &u in &grid {
+                for &w in &grid {
+                    let (got, want) = (composer.reshape([y, u, w]), identity.reshape([y, u, w]));
+                    for ch in 1..3 {
+                        chroma = chroma.max((f64::from(got[ch]) - f64::from(want[ch])).abs());
+                    }
+                }
+            }
+        }
+        if chroma > CHROMA_DEPARTURE_LIMIT {
+            return Err(Unservable::ChromaDeparture(chroma));
+        }
+        Ok(Self(composer))
+    }
 }
 
-/// Checks the shape of a fit as it will be written: coefficients writable
-/// at 2^-23, luma rising everywhere and never flattening a 32-code span,
-/// and both curves within bounds of identity. Stored curves are checked
-/// again here when they are loaded for serving.
-pub fn servable(curves: &RefitCurves) -> Result<ServableCurves, Unservable> {
-    let composer = curves.composer();
-    if composer
-        .luma
-        .iter()
-        .flatten()
-        .chain(composer.chroma.iter().flatten())
-        .any(|&v| split(v, 23).is_err())
-    {
-        return Err(Unservable::Unwritable);
-    }
+/// A scene's served composer coefficients as stored and digested: each the
+/// numerator over 2^23 that [`apply_to_rpu`] writes (the integer part and
+/// the 23-bit fraction [`split`] makes, joined). `n / 2^23` is exact in
+/// binary64, so curves rebuilt from these write the same RPU bits. New fits
+/// use Q12 MMR values (numerators divisible by 2048); retained older tables
+/// keep their original Q23 coefficients and digest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuantisedCurves {
+    pub luma: [[i64; 3]; LUMA_PIECES],
+    pub chroma: [[i64; MMR_TERMS]; 2],
+}
+
+/// The luma curve as a decoder applies it rises everywhere and rises at
+/// least a quarter of identity's slope across every 32-code span.
+fn luma_shape(composer: &ComposerCurves) -> Result<(), Unservable> {
     let mid = 512u16;
     let luma: Vec<f64> = (0..CODES as u16)
         .map(|c| f64::from(composer.reshape([c, mid, mid])[0]))
@@ -717,16 +808,28 @@ pub fn servable(curves: &RefitCurves) -> Result<ServableCurves, Unservable> {
     {
         return Err(Unservable::Flattens(rise));
     }
-    let d = curves.diagnostics();
-    if d.luma_max_abs_minus_identity > LUMA_DEPARTURE_LIMIT {
-        return Err(Unservable::LumaDeparture(d.luma_max_abs_minus_identity));
+    Ok(())
+}
+
+/// Checks the exact coefficients publication will write. The optimizer remains
+/// on its fine grid; publication uses Q23 luma and the qualified Q12 MMR grid.
+/// The same stored-curve checks apply here and when retained curves are loaded.
+pub fn servable(curves: &RefitCurves) -> Result<ServableCurves, Unservable> {
+    let raw = curves.composer();
+    let composer = curves.publication_composer();
+    if raw
+        .luma
+        .iter()
+        .flatten()
+        .chain(raw.chroma.iter().flatten())
+        .chain(composer.luma.iter().flatten())
+        .chain(composer.chroma.iter().flatten())
+        .any(|&v| split(v, 23).is_err())
+    {
+        return Err(Unservable::Unwritable);
     }
-    if d.chroma_max_abs_minus_identity_on_grid > CHROMA_DEPARTURE_LIMIT {
-        return Err(Unservable::ChromaDeparture(
-            d.chroma_max_abs_minus_identity_on_grid,
-        ));
-    }
-    Ok(ServableCurves(composer))
+    // Do not regrid from_quantised: old pinned digests must retain their bytes.
+    ServableCurves::from_quantised(&ServableCurves(composer).quantised())
 }
 
 /// A scene's fitted curves in the fit's domain (code/1023 in, value/4095 out).
@@ -826,8 +929,27 @@ impl RefitCurves {
         }
     }
 
-    /// Converts to the normative domain: input x = code/1024 instead of
-    /// code/1023, output scaled by 4096 instead of 4095.
+    /// The exact coefficient grid used by qualification, storage and writing.
+    /// First normalize to the Q23 wire representation, then round MMR values
+    /// to the common Q12 grid; this makes the native reference independent of
+    /// unqualified low coefficient bits. Luma retains its Q23 precision.
+    fn publication_composer(&self) -> ComposerCurves {
+        let mut written = self.composer();
+        for piece in &mut written.luma {
+            for value in piece {
+                *value = quantise(*value);
+            }
+        }
+        for component in &mut written.chroma {
+            for value in component {
+                *value = (quantise(*value) * SERVED_MMR_QUANT).round() / SERVED_MMR_QUANT;
+            }
+        }
+        written
+    }
+
+    /// Converts the optimizer result to the normative domain, before publication
+    /// quantization: input code/1024, output scaled by 4096 instead of 4095.
     pub fn composer(&self) -> ComposerCurves {
         let k = OUT_SCALE / 4096.0;
         let rs = 1024.0 / IN_SCALE;
@@ -1019,6 +1141,10 @@ pub struct RefitScene {
     pub first_pts: i64,
     pub end_pts: i64,
     pub time_base: String,
+    /// The lengths of the RPU's own scenes pooled into this one, in order.
+    /// They sum to `frames`; with them a resumed run's scenes and the
+    /// scenes before it rebuild the whole title's summary ([`summarise`]).
+    pub rpu_scene_frames: Vec<u64>,
     pub fit: RefitStats,
     pub held_out: RefitStats,
 }
@@ -1031,6 +1157,9 @@ impl RefitScene {
             || scene.end_pts <= scene.first_pts
             || !time_base_valid(&scene.time_base)
             || scene.fit.samples() < scene.frames as f64
+            || scene.rpu_scene_frames.is_empty()
+            || scene.rpu_scene_frames.contains(&0)
+            || scene.rpu_scene_frames.iter().sum::<u64>() != scene.frames
         {
             return Err(RefitError::Output("scene bounds"));
         }
@@ -1080,6 +1209,20 @@ impl RefitSummary {
 /// every pooled scene at least 24 frames unless it is the only one, and the
 /// summary's totals equal to the scenes' sums.
 pub fn check_refit_run(scenes: &[RefitScene], summary: &RefitSummary) -> Result<(), RefitError> {
+    if summarise(scenes)? != *summary {
+        return Err(RefitError::Output("summary disagrees with the scenes"));
+    }
+    Ok(())
+}
+
+/// The summary an uninterrupted run writes after `scenes`, from the scenes
+/// alone: their frames, samples and span, and the RPU scene lengths they
+/// carry for the median. Refused unless the scenes are contiguous, rise in
+/// presentation time, share one time base and are each at least 24 frames
+/// long (unless there is only one). A resumed run's scenes appended to the
+/// ones written before the interruption summarise to the uninterrupted
+/// run's summary.
+pub fn summarise(scenes: &[RefitScene]) -> Result<RefitSummary, RefitError> {
     let (first, last) = match (scenes.first(), scenes.last()) {
         (Some(f), Some(l)) => (f, l),
         _ => return Err(RefitError::Output("no scenes")),
@@ -1095,20 +1238,36 @@ pub fn check_refit_run(scenes: &[RefitScene], summary: &RefitSummary) -> Result<
             "a pooled scene is shorter than 24 frames",
         ));
     }
-    let frames: u64 = scenes.iter().map(|s| s.frames).sum();
-    let fit: f64 = scenes.iter().map(|s| s.fit.samples()).sum();
-    let held_out: f64 = scenes.iter().map(|s| s.held_out.samples()).sum();
-    if scenes.iter().any(|s| s.time_base != summary.time_base)
-        || summary.scenes != scenes.len() as u64
-        || summary.frames != frames
-        || summary.fit_samples as f64 != fit
-        || summary.held_out_samples as f64 != held_out
-        || summary.first_pts != first.first_pts
-        || summary.end_pts != last.end_pts
-    {
-        return Err(RefitError::Output("summary disagrees with the scenes"));
+    if scenes.iter().any(|s| s.time_base != first.time_base) {
+        return Err(RefitError::Output("scenes disagree on the time base"));
     }
-    Ok(())
+    let mut lengths: Vec<u64> = scenes
+        .iter()
+        .flat_map(|s| s.rpu_scene_frames.iter().copied())
+        .collect();
+    lengths.sort_unstable();
+    let n = lengths.len();
+    // The helper's median: the middle length, or the mean of the two middle
+    // ones. Both are exact in binary64 for any frame count.
+    let median_scene_frames = if n % 2 == 1 {
+        lengths[n / 2] as f64
+    } else {
+        (lengths[n / 2 - 1] as f64 + lengths[n / 2] as f64) / 2.0
+    };
+    let whole = |v: f64| v as u64;
+    Ok(RefitSummary {
+        kind: "refit_summary".into(),
+        frames: scenes.iter().map(|s| s.frames).sum(),
+        scenes: scenes.len() as u64,
+        rpu_scenes: n as u64,
+        median_scene_frames,
+        degenerate: median_scene_frames < MIN_SCENE_FRAMES as f64,
+        fit_samples: whole(scenes.iter().map(|s| s.fit.samples()).sum()),
+        held_out_samples: whole(scenes.iter().map(|s| s.held_out.samples()).sum()),
+        first_pts: first.first_pts,
+        end_pts: last.end_pts,
+        time_base: first.time_base.clone(),
+    })
 }
 
 #[cfg(test)]

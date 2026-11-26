@@ -219,12 +219,12 @@ impl VodServe {
                     || rendition
                         .source
                         .as_ref()
-                        .is_some_and(|source| !source.unchanged())
+                        .is_some_and(|source| !source.unchanged_in_place())
             }) {
                 return Err("controlled source changed during admission".into());
             }
             let permits = if needs_reservation {
-                Some(Self::reserve_media_group(&media, Some(priority)).await?)
+                Some(Self::reserve_media_group(&media, priority).await?)
             } else {
                 None
             };

@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use super::internal_activity::{ActivityDelivery, PeerActivityOutcome, SharedPeerActivity};
+use super::internal_activity::{
+    ActivityDelivery, PeerActivityOutcome, ReceiverProcessedRow, SharedPeerActivity,
+    SourceProcessedRow,
+};
 use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
@@ -61,6 +64,18 @@ pub struct ServerInfo {
     pub display_mode_match: bool,
 }
 
+/// Store-free discovery policy, available even while a learner cannot serve identity.
+pub(crate) async fn discovery_eligibility(
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(crate::discovery::Eligibility {
+            advertise: crate::discovery::visible(state.cluster.role().standing),
+        }),
+    )
+}
+
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
 ///
 /// It stays credential-free in both directions: a client probing an unknown
@@ -72,16 +87,6 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     let name = configured_server_name(&state).await?;
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
-    let playback_auto_abr = state
-        .applied
-        .setting(keys::PLAYBACK_AUTO_ABR)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
-    let playback_display_aware_auto = state
-        .applied
-        .setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
     let display_mode_match = state
         .applied
         .setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
@@ -98,13 +103,14 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         node_id: state.node_id.clone(),
         cluster_advertisement: state.cluster_advertisement,
         cluster_enabled: state
-            .membership
-            .cluster_enabled(state.cluster_advertisement),
+            .cluster
+            .deployment_enabled(state.cluster_advertisement),
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
-        playback_auto_abr,
-        playback_display_aware_auto,
+        // Always on. Still emitted so shipped clients keep their Auto path.
+        playback_auto_abr: true,
+        playback_display_aware_auto: true,
         display_mode_match,
     }))
 }
@@ -414,7 +420,7 @@ pub async fn system_info(
     let last = requests.last();
     let (by_trigger, notifications) = state.jobs.metrics().snapshot();
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
-    let replication = state.replication.status().await;
+    let replication = state.cluster.replication_status().await;
     let hwaccel_requested = state
         .applied
         .setting(&crate::state::node_hwaccel_key(&state.node_id))
@@ -1067,6 +1073,11 @@ pub struct ClientLog {
     pub reason: Option<String>,
     /// Seconds of decoded video ahead of the playhead at the moment reported.
     pub runway: Option<f64>,
+    /// The playhead (`currentTime`) in seconds at the moment reported.
+    pub position: Option<f64>,
+    /// The media element's buffered ranges, `start-end` in seconds, comma
+    /// separated, at most eight.
+    pub buffered: Option<String>,
     /// Time from click to first frame, in ms (the `ttff` event).
     pub ms: Option<i64>,
     /// hls.js's bandwidth estimate, in kb/s.
@@ -1334,41 +1345,6 @@ pub(super) fn pause_next_client_log_after_capture(
     (captured_rx, release_tx)
 }
 
-#[cfg(test)]
-static CLIENT_LOG_DETACHED_HOOK: std::sync::Mutex<
-    Option<(&'static str, tokio::sync::oneshot::Sender<()>)>,
-> = std::sync::Mutex::new(None);
-
-/// Fires its sender when the last holder drops it: the handler and every
-/// detached task it spawned for one client-log request.
-#[cfg(test)]
-struct ClientLogDetachedDone(Option<tokio::sync::oneshot::Sender<()>>);
-
-#[cfg(test)]
-impl Drop for ClientLogDetachedDone {
-    fn drop(&mut self) {
-        if let Some(done) = self.0.take() {
-            let _ = done.send(());
-        }
-    }
-}
-
-/// Resolves once the next client-log request whose message is `message` has
-/// returned AND every detached task it spawned (the link-sample claim, the
-/// measured-Link fold, the playback-event emit) has finished. A test that
-/// asserts something durable was *not* written awaits this instead of
-/// yielding and hoping, so a late write is caught rather than raced.
-#[cfg(test)]
-pub(super) fn notify_when_client_log_detached_work_finishes(
-    message: &'static str,
-) -> tokio::sync::oneshot::Receiver<()> {
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    *CLIENT_LOG_DETACHED_HOOK
-        .lock()
-        .expect("client-log detached hook lock") = Some((message, done_tx));
-    done_rx
-}
-
 /// POST /api/v1/client-log — any signed-in user. Records one browser playback
 /// error into the server log ring so it surfaces in `Settings → Logs`. Bounded
 /// by per-field clipping and by a global rate limit (this is diagnostics, not an
@@ -1392,21 +1368,6 @@ pub async fn client_log(
         return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
-    #[cfg(test)]
-    let detached_done = {
-        let mut hook = CLIENT_LOG_DETACHED_HOOK
-            .lock()
-            .expect("client-log detached hook lock");
-        if hook
-            .as_ref()
-            .is_some_and(|(message, _)| *message == ev.message)
-        {
-            hook.take()
-                .map(|(_, done)| Arc::new(ClientLogDetachedDone(Some(done))))
-        } else {
-            None
-        }
-    };
 
     // Both WARN and ERROR clear the default `info` filter, so either shows in
     // the admin log without the operator touching PLURX_LOG.
@@ -1523,15 +1484,11 @@ pub async fn client_log(
     if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
-        #[cfg(test)]
-        let detached_done = detached_done.clone();
         tokio::spawn(async move {
-            #[cfg(test)]
-            let _detached_done = detached_done;
-            // The claim itself is the owner's in-memory receipt and needs no
-            // opt-in: it is what later proves a fresh transfer (an upgrade)
-            // or backs a Link negative's acknowledgement (D6). Only keeping
-            // it as per-network history is `playback.network_priors`.
+            // The claim itself is the owner's in-memory receipt: it is what
+            // later proves a fresh transfer (an upgrade) or backs a Link
+            // negative's acknowledgement (D6). It is also kept as
+            // per-network history.
             let Some(sample) = link_sample else {
                 return;
             };
@@ -1542,21 +1499,19 @@ pub async fn client_log(
             else {
                 return;
             };
-            if super::hls::link_receipts::network_priors_enabled(&proof_state).await {
-                // A client-reported link sample is a prior, not a
-                // record anything waits on: losing one costs a
-                // slightly staler estimate, so the failure is counted
-                // and rate-limit logged rather than propagated to a
-                // detached task nobody joins.
-                crate::store_result::observe(
-                    crate::store_result::Operation::ObserveCandidateLink,
-                    crate::store_result::Discard::BestEffort,
-                    proof_state
-                        .store
-                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                        .await,
-                );
-            }
+            // A client-reported link sample is a prior, not a
+            // record anything waits on: losing one costs a
+            // slightly staler estimate, so the failure is counted
+            // and rate-limit logged rather than propagated to a
+            // detached task nobody joins.
+            crate::store_result::observe(
+                crate::store_result::Operation::ObserveCandidateLink,
+                crate::store_result::Discard::BestEffort,
+                proof_state
+                    .store
+                    .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                    .await,
+            );
         });
     }
     #[cfg(test)]
@@ -1590,11 +1545,7 @@ pub async fn client_log(
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
     let user_id = user.id;
-    #[cfg(test)]
-    let emit_done = detached_done.clone();
     tokio::spawn(async move {
-        #[cfg(test)]
-        let _detached_done = emit_done;
         if let Some(observation) = measured_link_prior {
             crate::store_result::observe(
                 crate::store_result::Operation::ObserveMeasuredLinkPrior,
@@ -2296,6 +2247,20 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     if let Some(r) = runway.filter(|v| v.is_finite() && *v >= 0.0) {
         line.push_str(&format!(" runway={r:.1}s"));
     }
+    if let Some(position) = ev.position.filter(|v| v.is_finite() && *v >= 0.0) {
+        line.push_str(&format!(" position={position:.2}s"));
+    }
+    // Digits, dots, dashes and commas only: the ranges a media element can
+    // report, never free text from the page.
+    if let Some(buffered) = ev.buffered.as_deref().filter(|ranges| {
+        !ranges.is_empty()
+            && ranges.len() <= 128
+            && ranges
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b','))
+    }) {
+        line.push_str(&format!(" buffered={buffered}"));
+    }
     if let Some(b) = bandwidth.filter(|v| *v > 0) {
         line.push_str(&format!(" bw={b}kbps"));
     }
@@ -2475,7 +2440,8 @@ pub struct SettingsDto {
     /// may still be VBR when a family refuses quality mode; `/system`
     /// capabilities and boot logs carry that validation result.
     pub transcode_rate_mode: Option<String>,
-    /// Requested content-aware encoding and its advisory scorer applicability.
+    /// Content-aware encoding is always on; kept as constant `true` for
+    /// clients that still read it. Its advisory scorer applicability follows.
     pub content_aware_encoding: bool,
     pub content_encoding_scorer_ready: Option<bool>,
     pub content_encoding_applicability: serde_json::Value,
@@ -2538,11 +2504,6 @@ pub struct SettingsDto {
     pub decoder_health_qualified_artifacts: bool,
     /// Explicit operator override, applied to new copy starts.
     pub hevc_unverified_copy: bool,
-    /// Print `CODECS` on SDR HLS master variants (S-10). Off by default, which
-    /// is the pre-S-10 master. Fixed when a session is created; a session
-    /// rebuilt after an owner takeover or VOD resurrection reads the current
-    /// value. Developer readiness is advisory only.
-    pub playback_sdr_master_codecs: bool,
     /// Advisory engine observation, never used to authorize a settings save.
     pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
@@ -2559,6 +2520,11 @@ pub struct SettingsDto {
     pub dolby_vision_hdr_processing: bool,
     pub dolby_vision_display_target: bool,
     pub dolby_vision_fel_reencode: bool,
+    /// F+ curves per client platform, default off (Developer).
+    pub dolby_vision_refit_web: bool,
+    pub dolby_vision_refit_apple: bool,
+    pub dolby_vision_refit_android: bool,
+    pub dolby_vision_refit_linux: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -2623,8 +2589,9 @@ pub struct SettingsDto {
     /// Developer switch: which complete-output preparation a VOD start may
     /// queue — `off` (the default), `copy`, or `copy_and_encoded`.
     pub vod_output_preparation: &'static str,
-    /// Developer switch: retain a rolling session's complete output as a
-    /// reusable artifact. Off by default.
+    /// Rolling retention is always on; kept as constant `true` for clients
+    /// that still read it. A playback can opt out with
+    /// `CreateOverrides::retain_output`.
     pub vod_rolling_retention: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
@@ -2644,11 +2611,9 @@ pub struct SettingsDto {
     pub cache_used_bytes: i64,
     /// Node-local playback event retention. Default 30 days; 0 is fully off.
     pub telemetry_retain_days: i64,
-    /// Use coarse, node-local playback history to seed Auto quality.
-    /// Explicit opt-in; missing is false.
+    /// Network priors, adaptive Auto and display-aware Auto are always on;
+    /// kept as constant `true` for clients that still read them.
     pub playback_network_priors: bool,
-    /// Let the web client's Auto controller change rungs after playback starts.
-    /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
     pub playback_display_aware_auto: bool,
     /// Android television same-resolution refresh matching. The Developer
@@ -2858,12 +2823,6 @@ async fn settings_dto(
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
         .max(0);
-    let playback_network_priors =
-        setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
-    let playback_auto_abr =
-        setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
-    let playback_display_aware_auto =
-        setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO).is_some_and(|value| value.trim() == "1");
     let playback_display_mode_match =
         setting(keys::PLAYBACK_DISPLAY_MODE_MATCH).is_some_and(|value| value.trim() == "1");
     // One parser owns the stored string. Three copies of this negated match
@@ -2935,8 +2894,6 @@ async fn settings_dto(
     let vod_output_preparation =
         crate::vodserve::OutputPreparation::parse(setting(keys::VOD_OUTPUT_PREPARATION).as_deref())
             .as_str();
-    let vod_rolling_retention =
-        plurx_core::store::stored_switch(setting(keys::VOD_ROLLING_RETENTION).as_deref(), false);
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
         setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
     );
@@ -3006,7 +2963,7 @@ async fn settings_dto(
         default_sub_lang: prefs.sub_lang,
         sub_mode: prefs.sub_mode.as_str().to_owned(),
         stream_readrate,
-        content_aware_encoding: setting(keys::CONTENT_AWARE_ENCODING).as_deref() == Some("1"),
+        content_aware_encoding: true,
         content_encoding_scorer_ready: state.transcode.content_encoding_scorer_ready(),
         content_encoding_applicability: state
             .transcode
@@ -3059,10 +3016,6 @@ async fn settings_dto(
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
             false,
         ),
-        playback_sdr_master_codecs: plurx_core::store::stored_switch(
-            setting(keys::PLAYBACK_SDR_MASTER_CODECS).as_deref(),
-            false,
-        ),
         hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
@@ -3086,6 +3039,22 @@ async fn settings_dto(
         ),
         dolby_vision_fel_reencode: plurx_core::store::stored_switch(
             setting(keys::DV_FEL_REENCODE).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_web: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_WEB).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_apple: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_APPLE).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_android: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_ANDROID).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_linux: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_LINUX).as_deref(),
             false,
         ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
@@ -3139,7 +3108,7 @@ async fn settings_dto(
         cluster_session_takeover_enabled,
         cluster_clock_guard_enforced,
         vod_output_preparation,
-        vod_rolling_retention,
+        vod_rolling_retention: true,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -3147,9 +3116,9 @@ async fn settings_dto(
         cache_max_gb,
         cache_used_bytes,
         telemetry_retain_days,
-        playback_network_priors,
-        playback_auto_abr,
-        playback_display_aware_auto,
+        playback_network_priors: true,
+        playback_auto_abr: true,
+        playback_display_aware_auto: true,
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
@@ -3375,12 +3344,15 @@ pub struct UpdateSettings {
     pub macos_hevc_output_enabled: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
-    pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub dolby_vision_hdr_processing: Option<bool>,
     pub dolby_vision_display_target: Option<bool>,
     pub dolby_vision_fel_reencode: Option<bool>,
+    pub dolby_vision_refit_web: Option<bool>,
+    pub dolby_vision_refit_apple: Option<bool>,
+    pub dolby_vision_refit_android: Option<bool>,
+    pub dolby_vision_refit_linux: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -3412,8 +3384,7 @@ pub struct UpdateSettings {
     /// back to each encoder family's code default (absent = unchanged).
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_rate_mode: Option<Option<String>>,
-    /// Content-aware and reorder requests retain their independent validation.
-    pub content_aware_encoding: Option<bool>,
+    /// Reorder requests retain their independent validation.
     pub vod_reorder_frames: Option<u8>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
@@ -3441,7 +3412,6 @@ pub struct UpdateSettings {
     /// `off`, `copy` or `copy_and_encoded`. Never refused by readiness;
     /// turning it off cancels queued rows of the kinds it no longer admits.
     pub vod_output_preparation: Option<String>,
-    pub vod_rolling_retention: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -3449,9 +3419,6 @@ pub struct UpdateSettings {
     pub cache_produce_mins: Option<i64>,
     pub cache_max_gb: Option<i64>,
     pub telemetry_retain_days: Option<i64>,
-    pub playback_network_priors: Option<bool>,
-    pub playback_auto_abr: Option<bool>,
-    pub playback_display_aware_auto: Option<bool>,
     pub playback_display_mode_match: Option<bool>,
     /// Encoder capacity. Bounded rather than free-form, because both numbers
     /// buy hardware that does not exist if they are wrong: a hardware cap
@@ -3557,12 +3524,15 @@ impl UpdateSettings {
             || self.macos_hevc_output_enabled.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
-            || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.dolby_vision_hdr_processing.is_some()
             || self.dolby_vision_display_target.is_some()
             || self.dolby_vision_fel_reencode.is_some()
+            || self.dolby_vision_refit_web.is_some()
+            || self.dolby_vision_refit_apple.is_some()
+            || self.dolby_vision_refit_android.is_some()
+            || self.dolby_vision_refit_linux.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -3584,7 +3554,6 @@ impl UpdateSettings {
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
             || self.stream_readrate.is_some()
-            || self.content_aware_encoding.is_some()
             || self.vod_reorder_frames.is_some()
             || self.transcode_rate_mode.is_some()
             || self.transcode_quality.is_some()
@@ -3598,16 +3567,12 @@ impl UpdateSettings {
             || self.cluster_session_takeover_enabled.is_some()
             || self.cluster_clock_guard_enforced.is_some()
             || self.vod_output_preparation.is_some()
-            || self.vod_rolling_retention.is_some()
             || self.probe_retry_mins.is_some()
             || self.artwork_retry_mins.is_some()
             || self.transcode_cleanup_mins.is_some()
             || self.cache_produce_mins.is_some()
             || self.cache_max_gb.is_some()
             || self.telemetry_retain_days.is_some()
-            || self.playback_network_priors.is_some()
-            || self.playback_auto_abr.is_some()
-            || self.playback_display_aware_auto.is_some()
             || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
@@ -4307,15 +4272,6 @@ pub async fn update_settings(
             }
         }
     }
-    if let Some(enabled) = req.content_aware_encoding {
-        state
-            .store
-            .put_setting(
-                keys::CONTENT_AWARE_ENCODING,
-                if enabled { "1" } else { "0" },
-            )
-            .await?;
-    }
     if let Some(frames) = req.vod_reorder_frames {
         state
             .store
@@ -4633,15 +4589,6 @@ pub async fn update_settings(
             .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
             .await?;
     }
-    if let Some(on) = req.playback_sdr_master_codecs {
-        // Saved unconditionally: the device re-qualification row on the
-        // Developer card is advice, not a precondition. New sessions read the
-        // value at create; running sessions keep the master they started with.
-        state
-            .store
-            .put_setting(keys::PLAYBACK_SDR_MASTER_CODECS, if on { "1" } else { "0" })
-            .await?;
-    }
     if let Some(on) = req.decoder_health_qualified_artifacts {
         state
             .store
@@ -4687,6 +4634,30 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DV_FEL_REENCODE, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_web {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_WEB, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_apple {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_APPLE, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_android {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_ANDROID, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_linux {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_LINUX, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(output) = live_tv_deinterlace_output {
@@ -4780,12 +4751,6 @@ pub async fn update_settings(
             .put_setting(keys::VOD_OUTPUT_PREPARATION, mode)
             .await?;
     }
-    if let Some(enabled) = req.vod_rolling_retention {
-        state
-            .store
-            .put_setting(keys::VOD_ROLLING_RETENTION, if enabled { "1" } else { "0" })
-            .await?;
-    }
     if let Some(enabled) = req.cluster_clock_guard_enforced {
         state
             .store
@@ -4797,7 +4762,7 @@ pub async fn update_settings(
         // Apply on this node now; every other node picks the replicated value
         // up on its next enforcement look after it applies the save
         // (`clock_offset::follow_stored_enforcement`).
-        state.membership.clock_guard().set_enforced(enabled);
+        state.cluster.clock().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -4836,32 +4801,8 @@ pub async fn update_settings(
             .put_setting(keys::TELEMETRY_RETAIN_DAYS, &days.to_string())
             .await?;
     }
-    if let Some(enabled) = req.playback_network_priors {
-        state
-            .store
-            .put_setting(
-                keys::PLAYBACK_NETWORK_PRIORS,
-                if enabled { "1" } else { "0" },
-            )
-            .await?;
-    }
-    if req.telemetry_retain_days.is_some() || req.playback_network_priors.is_some() {
+    if req.telemetry_retain_days.is_some() {
         crate::telemetry::invalidate_settings(&state.store);
-    }
-    if let Some(enabled) = req.playback_display_aware_auto {
-        state
-            .store
-            .put_setting(
-                keys::PLAYBACK_DISPLAY_AWARE_AUTO,
-                if enabled { "1" } else { "0" },
-            )
-            .await?;
-    }
-    if let Some(enabled) = req.playback_auto_abr {
-        state
-            .store
-            .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
-            .await?;
     }
     if let Some(enabled) = req.playback_display_mode_match {
         state
@@ -4930,6 +4871,9 @@ pub async fn update_settings(
             .await?;
     }
     if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let proof_revocation =
+            super::internal_auth_revocation::ClusterCacheRevocation::begin_token_policy(&state)
+                .await?;
         let mut values: Vec<(&str, String)> = Vec::new();
         if let Some(days) = req.auth_token_idle_days {
             values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
@@ -4962,7 +4906,16 @@ pub async fn update_settings(
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        state.store.put_settings(&borrowed).await?;
+        let changed = state
+            .store
+            .put_auth_token_policy(&borrowed, proof_revocation.mutation_claim())
+            .await?;
+        proof_revocation.finish(&state).await?;
+        if !changed {
+            return Err(ApiError::Conflict(
+                "token policy lost its cache-revocation exclusion; retry the request".to_owned(),
+            ));
+        }
     }
     if let Some(on) = req.cinema_remote_invitations {
         // Readiness never rejects or rewrites the administrator's choice.
@@ -5092,7 +5045,7 @@ impl ClusterDelivery {
             title: delivery.title,
             started_unix: delivery.started_unix,
             idle_seconds: delivery.idle_seconds,
-            session_id: None,
+            session_id: delivery.session_id,
             delivered_bytes: delivery.delivered_bytes,
             delivered_bps: delivery.delivered_bps,
             node_id,
@@ -5117,7 +5070,7 @@ pub(super) async fn node_hostnames(state: &AppState, permitted: bool) -> BTreeMa
     if !permitted {
         return BTreeMap::new();
     }
-    match state.membership.node_hostnames().await {
+    match state.cluster.node_names().await {
         Ok(hostnames) => hostnames,
         Err(error) => {
             tracing::warn!(?error, "roster machine names unavailable");
@@ -5130,7 +5083,7 @@ async fn peer_activity(state: &AppState) -> PeerActivityRead {
     // `advertise_host` is the explicit first step toward peer membership.
     // Keeping this guard outside `snapshots()` means the overwhelmingly common
     // SQLite and never-joined paths do not even read the peer directory.
-    if !state.cluster_advertisement || !state.membership.is_replicated() {
+    if !state.cluster_advertisement || !state.cluster.role().is_clustered() {
         return PeerActivityRead::LocalOnly;
     }
     match state.peer_activity.snapshots().await {
@@ -5146,6 +5099,7 @@ fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
         PeerActivityOutcome::Unhealthy => "unhealthy",
         PeerActivityOutcome::Unsupported => "unsupported",
         PeerActivityOutcome::Unreachable => "unreachable",
+        PeerActivityOutcome::LocalUnavailable => "local_unavailable",
         PeerActivityOutcome::TimedOut => "timed_out",
         PeerActivityOutcome::Refused => "refused",
         PeerActivityOutcome::HttpError => "http_error",
@@ -5225,6 +5179,115 @@ fn clustered_deliveries(
             .then(left.node_id.cmp(&right.node_id))
     });
     out
+}
+
+fn clustered_source_processed(
+    mut local: Vec<SourceProcessedRow>,
+    peers: &PeerActivityRead,
+) -> Vec<SourceProcessedRow> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.source_processed.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| {
+        right
+            .started_unix
+            .cmp(&left.started_unix)
+            .then(left.stop_id.cmp(&right.stop_id))
+    });
+    local.truncate(128);
+    local
+}
+
+fn clustered_receiver_processed(
+    mut local: Vec<ReceiverProcessedRow>,
+    peers: &PeerActivityRead,
+) -> Vec<ReceiverProcessedRow> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.receiver_processed.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| left.stop_id.cmp(&right.stop_id));
+    local.truncate(128);
+    local
+}
+
+fn receiver_processed_owner<'a>(
+    peers: &'a PeerActivityRead,
+    stop_id: &str,
+) -> Result<Option<&'a str>, ()> {
+    let PeerActivityRead::Peers(outcomes) = peers else {
+        return match peers {
+            PeerActivityRead::LocalOnly => Ok(None),
+            PeerActivityRead::DirectoryUnavailable => Err(()),
+            PeerActivityRead::Peers(_) => unreachable!(),
+        };
+    };
+    let mut owner = None;
+    let mut incomplete = false;
+    for (node_id, outcome) in outcomes.iter() {
+        match outcome {
+            PeerActivityOutcome::Answered(snapshot) => {
+                if snapshot
+                    .receiver_processed
+                    .iter()
+                    .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
+                {
+                    return Err(());
+                }
+            }
+            _ => incomplete = true,
+        }
+    }
+    if owner.is_none() && incomplete {
+        Err(())
+    } else {
+        Ok(owner)
+    }
+}
+
+/// Resolve one signed Stop target only from an answered, node-checked Activity
+/// snapshot. Silence and duplicate ownership cannot become a guessed address.
+fn source_processed_owner<'a>(
+    peers: &'a PeerActivityRead,
+    stop_id: &str,
+) -> Result<Option<&'a str>, ()> {
+    let PeerActivityRead::Peers(outcomes) = peers else {
+        return match peers {
+            PeerActivityRead::LocalOnly => Ok(None),
+            PeerActivityRead::DirectoryUnavailable => Err(()),
+            PeerActivityRead::Peers(_) => unreachable!(),
+        };
+    };
+    let mut owner = None;
+    let mut incomplete = false;
+    for (node_id, outcome) in outcomes.iter() {
+        match outcome {
+            PeerActivityOutcome::Answered(snapshot) => {
+                if snapshot
+                    .source_processed
+                    .iter()
+                    .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
+                {
+                    return Err(());
+                }
+            }
+            _ => incomplete = true,
+        }
+    }
+    if owner.is_none() && incomplete {
+        Err(())
+    } else {
+        Ok(owner)
+    }
 }
 
 fn clustered_live_tv(
@@ -5414,7 +5477,7 @@ pub async fn activity(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Activity>>, ApiError> {
-    if !state.cluster_advertisement || !state.membership.is_replicated() {
+    if !state.cluster_advertisement || !state.cluster.role().is_clustered() {
         return Ok(Json(local_activity(&state).await?));
     }
 
@@ -5845,21 +5908,52 @@ pub async fn activity_detail(
     // The roster's machine names ride in the same wave rather than following
     // it. This page polls every few seconds; a name read that waits for the
     // peer fan-out to finish would add its latency to every poll for nothing.
-    let replicated = state.cluster_advertisement && state.membership.is_replicated();
-    let ((sessions, deliveries), peers, hostnames) = if replicated {
-        let (local, peers, hostnames) = tokio::join!(
-            deliveries(&state),
-            peer_activity(&state),
-            node_hostnames(&state, user.0.is_admin)
-        );
-        (local, peers, hostnames)
-    } else {
-        (
-            deliveries(&state).await,
-            PeerActivityRead::LocalOnly,
-            BTreeMap::new(),
-        )
-    };
+    let replicated = state.cluster_advertisement && state.cluster.role().is_clustered();
+    let ((sessions, deliveries), peers, hostnames, source_processed, receiver_processed) =
+        if replicated {
+            let (local, peers, hostnames, source_processed, receiver_processed) = tokio::join!(
+                deliveries(&state),
+                peer_activity(&state),
+                node_hostnames(&state, user.0.is_admin),
+                async {
+                    if user.0.is_admin {
+                        super::internal_activity::local_source_processed(&state).await
+                    } else {
+                        Vec::new()
+                    }
+                },
+                async {
+                    if user.0.is_admin {
+                        super::internal_activity::local_receiver_processed(&state).await
+                    } else {
+                        Vec::new()
+                    }
+                },
+            );
+            (
+                local,
+                peers,
+                hostnames,
+                source_processed,
+                receiver_processed,
+            )
+        } else {
+            (
+                deliveries(&state).await,
+                PeerActivityRead::LocalOnly,
+                BTreeMap::new(),
+                if user.0.is_admin {
+                    super::internal_activity::local_source_processed(&state).await
+                } else {
+                    Vec::new()
+                },
+                if user.0.is_admin {
+                    super::internal_activity::local_receiver_processed(&state).await
+                } else {
+                    Vec::new()
+                },
+            )
+        };
     // Topology is configuration, not the number of peers answering this read.
     let clustered = replicated;
     let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
@@ -5958,6 +6052,12 @@ pub async fn activity_detail(
     // This is folded into the existing page read rather than making the web
     // client add a second polling loop beside /activity/detail.
     if user.0.is_admin {
+        response["source_processed"] =
+            serde_json::to_value(clustered_source_processed(source_processed, &peers))
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["receiver_processed"] =
+            serde_json::to_value(clustered_receiver_processed(receiver_processed, &peers))
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
         response["analysis"] = match super::analysis::activity_summary(&state).await {
             Ok(mut summary) => {
                 summary["progress"] = serde_json::Value::Array(clustered_analysis_progress(
@@ -6009,7 +6109,8 @@ pub async fn activity_detail(
 /// through the pidfd taken at spawn, so a number that has since been reused
 /// by an unrelated process cannot be hit. The child's owner sees an ordinary
 /// exit: a playback producer's session reports it as it reports a crashed
-/// encoder, a background probe records a failed probe.
+/// encoder; an index pass or probe records an interrupted attempt and
+/// retries it within its retry window (`ffmpeg::killed_externally`).
 pub async fn stop_process(
     _admin: AdminUser,
     axum::extract::Path(pid): axum::extract::Path<u32>,
@@ -6081,6 +6182,77 @@ pub async fn stop_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if id.starts_with("receiver-s-") {
+        match state
+            .sharing
+            .receiver_starts
+            .stop_processed_activity(std::sync::Arc::new(state.clone()), &id)
+            .await
+        {
+            Ok(true) => return Ok(Json(serde_json::json!({ "ok": true }))),
+            Err(()) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "receiver Source End is still settling".to_owned(),
+                ))
+            }
+            Ok(false) => {}
+        }
+        let peers = peer_activity(&state).await;
+        let owner = receiver_processed_owner(&peers, &id).map_err(|_| {
+            ApiError::ServiceUnavailable(
+                "the receiver owner could not be resolved from current Activity".to_owned(),
+            )
+        })?;
+        let Some(owner) = owner else {
+            return Err(ApiError::NotFound("receiver processed session"));
+        };
+        return match state.peer_activity.stop_processed_on(owner, &id).await {
+            Ok(StatusCode::NO_CONTENT) => Ok(Json(serde_json::json!({ "ok": true }))),
+            Ok(StatusCode::NOT_FOUND) => Err(ApiError::NotFound("receiver processed session")),
+            _ => Err(ApiError::ServiceUnavailable(
+                "receiver Source End is still settling".to_owned(),
+            )),
+        };
+    }
+    if id.starts_with("source-s-") {
+        match state.transcode.stop_source_processed_session(&id).await {
+            Ok(true) => return Ok(Json(serde_json::json!({ "ok": true }))),
+            Err(_) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "Source processed work is still settling".to_owned(),
+                ))
+            }
+            Ok(false) => {}
+        }
+        let peers = peer_activity(&state).await;
+        let owner = source_processed_owner(&peers, &id).map_err(|_| {
+            ApiError::ServiceUnavailable(
+                "the Source owner could not be resolved from current Activity".to_owned(),
+            )
+        })?;
+        if let Some(owner) = owner {
+            let status = state
+                .peer_activity
+                .stop_processed_on(owner, &id)
+                .await
+                .map_err(|_| {
+                    ApiError::ServiceUnavailable(
+                        "the Source node did not confirm the stop".to_owned(),
+                    )
+                })?;
+            return match status {
+                StatusCode::NO_CONTENT => Ok(Json(serde_json::json!({ "ok": true }))),
+                StatusCode::NOT_FOUND => Err(ApiError::NotFound("Source processed session")),
+                StatusCode::SERVICE_UNAVAILABLE => Err(ApiError::ServiceUnavailable(
+                    "Source processed work is still settling".to_owned(),
+                )),
+                _ => Err(ApiError::Internal(
+                    "unexpected Source stop status".to_owned(),
+                )),
+            };
+        }
+        return Err(ApiError::NotFound("Source processed session"));
+    }
     let mut candidates = state.transcode.active_session_ids().await;
     // VOD sessions live in their own registry; without them here the
     // Terminal::AdminStop arm is unreachable from its only intended caller.
@@ -6151,11 +6323,9 @@ pub(crate) struct MetricsState {
     analysis: Arc<crate::state::AnalysisRuntimeMetrics>,
     node_id: String,
     store_metrics: StoreMetricsCache,
-    passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
-    passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
+    cluster_observations: crate::cluster::Observations,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
-    live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
     plex_census: Arc<super::PlexCensus>,
     start_attempts: Arc<crate::playstart::StartAttempts>,
@@ -6167,7 +6337,7 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
-            clock: state.membership.clock_guard(),
+            clock: state.cluster.clock(),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -6175,13 +6345,11 @@ impl FromRef<AppState> for MetricsState {
             analysis: state.jobs.analysis_metrics_handle(),
             node_id: state.node_id.clone(),
             store_metrics: state.store_metrics.clone(),
-            passive_raft: state.replication.metrics_handle(),
-            passive_membership: state.membership.metrics_handle(),
+            cluster_observations: state.cluster.observations(),
             // Taken per request, which `FromRef` is, so it addresses the pool
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
-            live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
             plex_census: Arc::clone(&state.plex_census),
             start_attempts: Arc::clone(&state.start_attempts),
@@ -6190,6 +6358,37 @@ impl FromRef<AppState> for MetricsState {
             cluster_directory: state.cluster.directory(),
         }
     }
+}
+
+/// Correlatable timing signals, not Raft authority or physical delivery evidence.
+fn render_cluster_timing_metrics(
+    observations: &crate::cluster::Observations,
+    uptime: std::time::Duration,
+) -> String {
+    let append = observations.append_timing();
+    let wake = observations.monitor_wake();
+    let mut out = format!("# HELP plurx_cluster_timing_epoch_info Process-local timing observation epoch.\n# TYPE plurx_cluster_timing_epoch_info gauge\nplurx_cluster_timing_epoch_info{{epoch=\"{:016x}\"}} 1\nplurx_cluster_timing_uptime_seconds {}\nplurx_cluster_append_observation_evictions_total {}\n", append.process_epoch, uptime.as_secs_f64(), append.evictions);
+    for row in append.rows {
+        let labels = format!("group=\"db\",stage=\"{}\",local=\"{}\",remote=\"{}\",source=\"{}\",term=\"{}\",endpoint=\"{:016x}\"", row.stage.label(), row.local_node, row.remote_node, row.source_epoch, row.term, row.endpoint_fingerprint);
+        for (name, value) in [
+            ("samples_total", row.samples as f64),
+            ("heartbeats_total", row.heartbeats as f64),
+            ("errors_total", row.errors as f64),
+            ("gap_samples_total", row.gap_samples as f64),
+            ("gap_seconds_sum", row.gap_sum_seconds),
+            ("gap_seconds_max", row.gap_max_seconds),
+            ("elapsed_seconds_sum", row.elapsed_sum_seconds),
+            ("elapsed_seconds_max", row.elapsed_max_seconds),
+            ("last_sample_age_seconds", row.since_last_seconds),
+        ] {
+            out.push_str(&format!(
+                "plurx_cluster_append_observation_{name}{{{labels}}} {value}\n"
+            ));
+        }
+    }
+    let labels = format!("source=\"{}\"", wake.instance);
+    out.push_str(&format!("plurx_cluster_serving_monitor_wake_samples_total{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_sum{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_max{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_last{{{labels}}} {}\n",wake.samples,wake.total.as_secs_f64(),wake.maximum.as_secs_f64(),wake.last.as_secs_f64()));
+    out
 }
 
 fn render_passive_membership_metrics(
@@ -6411,7 +6610,7 @@ fn render_cluster_directory_metrics(
 /// against. Loaded at scrape time from atomics; no Store read, no timer.
 fn render_applied_view_metrics(
     observation: &plurx_core::store::AppliedViewObservation,
-    wait: &hiqlite::DbReadPoolWait,
+    wait: &crate::cluster::ReadPoolWait,
 ) -> String {
     let mut out = String::from(
         "# HELP plurx_applied_view_reads_total Applied-view reads by view and by what answered: view is this node's own replica (on SQLite, the only copy), authority a quorum read, with the reason the view could not answer.\n\
@@ -6470,13 +6669,10 @@ fn render_applied_view_metrics(
         "# HELP plurx_hiqlite_read_pool_wait_seconds Time a local replicated-store query waited for a read-pool connection before it ran.\n\
          # TYPE plurx_hiqlite_read_pool_wait_seconds histogram\n",
     );
-    for (bound, count) in hiqlite::DB_READ_POOL_WAIT_BOUNDS_NANOS
-        .iter()
-        .zip(wait.cumulative_buckets)
-    {
+    for (bound, count) in wait.buckets {
         out.push_str(&format!(
             "plurx_hiqlite_read_pool_wait_seconds_bucket{{le=\"{}\"}} {count}\n",
-            prometheus_seconds_label(*bound)
+            prometheus_seconds_label(bound)
         ));
     }
     out.push_str(&format!(
@@ -6493,7 +6689,9 @@ fn render_applied_view_metrics(
 /// Hiqlite patch 32: replies the SQLite writer produced after the Raft apply
 /// or teardown that asked for them had stopped waiting. Fixed labels, loaded
 /// from atomics at scrape time.
-fn render_writer_abandoned_replies(rows: &[hiqlite::DbWriterAbandonedReplies]) -> String {
+fn render_writer_abandoned_replies(
+    rows: impl IntoIterator<Item = crate::cluster::WriterReplyObservation>,
+) -> String {
     let mut out = String::from(
         "# HELP plurx_hiqlite_writer_abandoned_replies_total Replicated-store writer replies whose requester (a cancelled Raft apply, or a teardown) had stopped waiting, by request and by whether the abandoned result was an error. The write itself committed or rolled back as usual; an error's text is in the node log.\n\
          # TYPE plurx_hiqlite_writer_abandoned_replies_total counter\n",
@@ -6792,11 +6990,16 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
-    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
-        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
-        + &render_writer_abandoned_replies(&hiqlite::db_writer_abandoned_replies())
-        + &render_cluster_directory_metrics(state.cluster_directory.reads());
-    let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
+    let raft_metrics = render_passive_raft_metrics(state.cluster_observations.raft())
+        + &render_applied_view_metrics(
+            &state.applied.observation(),
+            &state.cluster_observations.read_pool_wait(),
+        )
+        + &render_writer_abandoned_replies(state.cluster_observations.writer_replies())
+        + &render_cluster_directory_metrics(state.cluster_directory.reads())
+        + &render_cluster_timing_metrics(&state.cluster_observations, state.started_at.elapsed());
+    let membership_metrics =
+        render_passive_membership_metrics(state.cluster_observations.members());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
@@ -6829,7 +7032,7 @@ pub(crate) async fn metrics(
         crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus() + &crate::source_custody::launch_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
-    let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
+    let live_tv_metrics = state.live_tv.prometheus();
     let backup_metrics = state.backup.prometheus();
     let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 
@@ -6853,6 +7056,9 @@ pub(crate) async fn metrics(
          plurx_notify_received_total {notifications}\n"
     ));
     scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
+    // Reads atomics only. A hung media mount shows here as in-flight calls
+    // pinned while this scrape still answers.
+    scans.push_str(&plurx_core::media_io::prometheus());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\

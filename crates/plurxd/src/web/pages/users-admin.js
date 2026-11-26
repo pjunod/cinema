@@ -9,6 +9,8 @@ function userRow(u){
   const btns=[`<button class="ghost sm" aria-expanded="${devicesOpen?"true":"false"}"${devicesOpen?` aria-controls="devicedrawer-${u.id}"`:""} onclick="openDeviceDrawer(${u.id})">Devices</button>`,
     `<button class="ghost sm" aria-expanded="${open?"true":"false"}"${open?` aria-controls="userdrawer-${u.id}"`:""} onclick="openUserDrawer(${u.id})">Reset password</button>`];
   btns.push(`<button class="ghost sm" onclick="setAdmin(${u.id},${u.is_admin?0:1})">${u.is_admin?'Revoke admin':'Make admin'}</button>`);
+  // Admins hold every grant; for everyone else, filled in by paintUserGrants().
+  if(!u.is_admin) btns.push(`<span data-user-grants="${u.id}"></span>`);
   if(!me) btns.push(`<button class="ghost sm" onclick='delUser(${u.id},${esc(JSON.stringify(u.username))})'>Delete</button>`);
   return `<tr${open?' class="setopen"':""}><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>
     <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</div></td></tr>${open?userDrawerHtml(u):""}${devicesOpen?deviceDrawerHtml(u):""}`;

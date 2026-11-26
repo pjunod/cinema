@@ -85,8 +85,8 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
     // Every member gets a row, so an idle node's override can be set too.
     // The roster is display only; an unreadable one leaves this node's row.
     let members = state
-        .membership
-        .activity_peers()
+        .cluster
+        .voter_targets()
         .await
         .unwrap_or_default()
         .into_iter()

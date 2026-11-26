@@ -10,6 +10,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 | File | Answers | |
 |---|---|---|
+| [MEDIA-IO-ISOLATION-PLAN.md](MEDIA-IO-ISOLATION-PLAN.md) | Plan: a hung NFS media mount must not freeze the daemon — the 2026-11-23 84 s stall, its root cause, `plurx_core::media_io`, and the hung-FIFO regression test. | built |
 | [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | built; qualification pending |
 | [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) | Build plan and as-built record for source-lease steps 3 and 4: one `source_leases` table, per-node and per-domain source readers. | built |
 | [SOURCE-LEASE-AS-BUILT.md](SOURCE-LEASE-AS-BUILT.md) | As-built record of source-lease steps 3 and 4: every place the build differs from its plan, and why. | built |

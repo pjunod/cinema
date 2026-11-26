@@ -111,7 +111,7 @@ pub(crate) struct DeveloperReadiness {
 /// turn enforcement on with any of them unmet, and off at any time.
 fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
-    let guard = state.membership.clock_guard();
+    let guard = state.cluster.clock();
     let snapshot = guard.snapshot();
     let would_refuse = guard.check_evidence().err();
     let peers = snapshot.peers.len();
@@ -247,6 +247,42 @@ pub(crate) async fn reprobe_macos_video(
             "note": "A bounded worker-local compatibility observation is requested; saved preference and running plans are unchanged"
         })),
     )
+}
+
+/// `GET /api/v1/developer/dv-refit/spool` — admin: this node's F+
+/// statistics spool, one entry per file.
+pub(crate) async fn refit_spool(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let entries =
+        tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_entries(&root))
+            .await
+            .unwrap_or_default();
+    let bytes: u64 = entries
+        .iter()
+        .map(|e| e["bytes"].as_u64().unwrap_or(0))
+        .sum();
+    Json(serde_json::json!({"node_id": state.node_id, "entries": entries, "bytes": bytes}))
+}
+
+/// `DELETE /api/v1/developer/dv-refit/spool` — admin: deletes this node's
+/// F+ statistics spool. Stored curve tables are unaffected; a later fit of
+/// a title decodes it again, and a running fit restarts its title.
+pub(crate) async fn clear_refit_spool(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let removed =
+        tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_clear(&root))
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"node_id": state.node_id, "removed": removed}),
+    ))
 }
 
 /// Neutral admin entry point; saved Mac choices do not govern Linux probing.
@@ -500,13 +536,6 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
-    // Missing is off, exactly as the session-create reads parse it.
-    let sdr_master_codecs_on = plurx_core::store::stored_switch(
-        settings
-            .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
-            .map(String::as_str),
-        false,
-    );
     let clock_guard_enforced = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
@@ -525,6 +554,8 @@ pub(crate) async fn readiness(
         })
         .await?;
 
+    let [refit_web, refit_apple, refit_android, refit_linux] =
+        dolby_vision_refit(&state, &settings).await;
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
@@ -613,7 +644,6 @@ pub(crate) async fn readiness(
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
-            sdr_master_codecs(sdr_master_codecs_on),
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
@@ -633,186 +663,14 @@ pub(crate) async fn readiness(
             dolby_vision_fel_reencode(&state, plurx_core::store::stored_switch(
                 settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false),
                 convert_on).await,
+            refit_apple,
+            refit_web,
+            refit_android,
+            refit_linux,
             source_probe_comparison().await,
             output_preparation(&state, &settings).await,
-            rolling_retention(&state, &settings).await,
-            display_aware_auto(&state, &settings).await,
-            network_priors_item(playback_switch(
-                &settings,
-                plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS,
-            )),
         ],
     }))
-}
-
-/// The playback switches are parsed with `trim() == "1"` by every engine site
-/// that reads them (`system.rs`, `hls/create.rs`, `hls/link_receipts.rs`,
-/// `network.rs`), not with `stored_switch`. A row that accepted `true` here
-/// would report a switch on that the engine treats as off.
-fn playback_switch(settings: &std::collections::BTreeMap<String, String>, key: &str) -> bool {
-    settings.get(key).is_some_and(|value| value.trim() == "1")
-}
-
-/// How many nodes could own a playback session, as far as this node can read.
-/// `Ok(1)` for a standalone install, which has no roster to read.
-async fn session_owner_candidates(state: &AppState) -> Result<usize, String> {
-    if !state.membership.is_replicated() {
-        return Ok(1);
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(3), state.membership.status()).await {
-        Ok(Ok(status)) => Ok(status.nodes.len()),
-        Ok(Err(error)) => Err(format!("the local roster could not be read ({error})")),
-        Err(_) => Err(
-            "the local roster did not answer within the three-second observation budget".to_owned(),
-        ),
-    }
-}
-
-/// Fit Auto to display (`playback.display_aware_auto`), and what it silently
-/// depends on (defect D6). Five server paths that let Auto move *up* — link
-/// receipts, their acknowledgement, the candidate veto and the stored prior —
-/// return early unless `playback.network_priors` is `"1"`, so with priors off
-/// display-aware Auto can only move quality down. Receipts are accepted only
-/// by the node that owns the session, and network identity is IPv4-only.
-/// None of that is changed here: this card says it out loud. Every row is
-/// advisory and nothing reads it on Save.
-async fn display_aware_auto(
-    state: &AppState,
-    settings: &std::collections::BTreeMap<String, String>,
-) -> DeveloperEnableItem {
-    display_aware_auto_item(
-        playback_switch(
-            settings,
-            plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO,
-        ),
-        playback_switch(settings, plurx_core::store::keys::PLAYBACK_AUTO_ABR),
-        playback_switch(settings, plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS),
-        session_owner_candidates(state).await,
-    )
-}
-
-fn display_aware_auto_item(
-    enabled: bool,
-    auto_abr_on: bool,
-    priors_on: bool,
-    owner_candidates: Result<usize, String>,
-) -> DeveloperEnableItem {
-    let (owner_status, owner_evidence) = match owner_candidates {
-        Ok(nodes) if nodes <= 1 => (
-            RequirementStatus::Met,
-            "One node: every session is placed on this node, which is the node that accepts \
-             its link receipts"
-                .to_owned(),
-        ),
-        Ok(nodes) => (
-            RequirementStatus::Unknown,
-            format!(
-                "{nodes} nodes in the local roster: sessions placed on a peer get no link \
-                 receipts, so for those sessions Auto behaves as if network priors were off. \
-                 This route cannot see where any one session was placed"
-            ),
-        ),
-        Err(error) => (
-            RequirementStatus::Unavailable,
-            format!("Whether sessions can be placed on a peer is unknown: {error}"),
-        ),
-    };
-    DeveloperEnableItem {
-        id: "display_aware_auto",
-        title: "Fit Auto to display",
-        enabled: Some(enabled),
-        setting: Some("playback_display_aware_auto"),
-        requirements: vec![
-            DeveloperRequirement {
-                id: "auto_abr",
-                title: "Adaptive Auto quality is on",
-                status: if auto_abr_on {
-                    RequirementStatus::Met
-                } else {
-                    RequirementStatus::Unmet
-                },
-                evidence: if auto_abr_on {
-                    "playback.auto_abr is on: clients may change rungs after playback starts"
-                        .to_owned()
-                } else {
-                    "playback.auto_abr is off: Fit Auto to display chooses the starting rung, \
-                     but nothing adapts during playback. Turning off one switch does not stop \
-                     the other"
-                        .to_owned()
-                },
-            },
-            DeveloperRequirement {
-                id: "network_priors",
-                title: "Network priors are on",
-                status: if priors_on {
-                    RequirementStatus::Met
-                } else {
-                    RequirementStatus::Unmet
-                },
-                evidence: if priors_on {
-                    "On: link receipts are accepted, so Auto may upgrade and a link stall may \
-                     step quality down"
-                        .to_owned()
-                } else {
-                    "Off: Auto never upgrades and a link stall retries the same quality; \
-                     producer and decoder recovery still work"
-                        .to_owned()
-                },
-            },
-            DeveloperRequirement {
-                id: "local_session_owner",
-                title: "Sessions are owned by the node that serves them",
-                status: owner_status,
-                evidence: owner_evidence,
-            },
-            DeveloperRequirement {
-                id: "ipv4_client",
-                title: "Clients reach the server over IPv4",
-                status: RequirementStatus::Unknown,
-                evidence: "Network identity is an IPv4 /24, from Forwarded, X-Forwarded-For or \
-                           X-Real-IP, otherwise the socket peer. A client that connects over \
-                           IPv6 with no forwarded IPv4 address gets no network identity, so it \
-                           never gets link evidence and Auto never upgrades for it. This route \
-                           cannot see which clients connect over IPv6"
-                    .to_owned(),
-            },
-        ],
-    }
-}
-
-/// `playback.network_priors`: the switch display-aware Auto needs in order to
-/// move up. Until now it had no Settings control at all. Both rows are
-/// statements about this build, not about the deployment.
-fn network_priors_item(enabled: bool) -> DeveloperEnableItem {
-    DeveloperEnableItem {
-        id: "network_priors",
-        title: "Network priors",
-        enabled: Some(enabled),
-        setting: Some("playback_network_priors"),
-        requirements: vec![
-            DeveloperRequirement {
-                id: "priors_history",
-                title: "What turning it on stores",
-                status: RequirementStatus::Met,
-                evidence: format!(
-                    "Per user, client class and IPv4 /24 network: a conservative throughput \
-                     estimate and the lowest rung that starved there, kept on this node for {} \
-                     days. Nothing new is folded in while this is off",
-                    plurx_core::store::keys::NETWORK_PRIOR_RETAIN_DAYS
-                ),
-            },
-            DeveloperRequirement {
-                id: "priors_cold_start",
-                title: "What it changes for Auto's starting rung",
-                status: RequirementStatus::Met,
-                evidence: "With history for the viewer's network, Auto starts below a rung that \
-                           starved there or at the highest peak-safe rung; with none it keeps \
-                           today's start. It also lets link receipts through, which is what \
-                           allows Fit Auto to display to upgrade"
-                    .to_owned(),
-            },
-        ],
-    }
 }
 
 fn gib(bytes: u64) -> String {
@@ -962,127 +820,6 @@ async fn output_preparation(
                   request (not one running on a peer), and the next play of that title \
                   may queue it again"
                     .to_owned(),
-            },
-        ],
-    }
-}
-
-/// Retaining a rolling session's complete output (`vod.rolling_retention`).
-async fn rolling_retention(
-    state: &AppState,
-    settings: &std::collections::BTreeMap<String, String>,
-) -> DeveloperEnableItem {
-    let enabled = plurx_core::store::stored_switch(
-        settings
-            .get(plurx_core::store::keys::VOD_ROLLING_RETENTION)
-            .map(String::as_str),
-        false,
-    );
-    let budget = crate::cachekeep::cache_budget(
-        settings
-            .get(plurx_core::store::keys::CACHE_MAX_GB)
-            .map(String::as_str),
-    );
-    let facts = state.transcode.rolling_retention_facts().await;
-    let live_bytes = facts
-        .rows
-        .iter()
-        .fold(0_u64, |sum, row| sum.saturating_add(row.bytes));
-    let reserve = crate::scratch_ledger::RETAINED_HEADROOM_RESERVE_BYTES;
-    DeveloperEnableItem {
-        id: "rolling_retention",
-        title: "Retain rolling sessions' complete output",
-        enabled: Some(enabled),
-        setting: Some("vod_rolling_retention"),
-        requirements: vec![
-            DeveloperRequirement {
-                id: "retention_same_filesystem",
-                title: "Session scratch and the retained namespace share a filesystem",
-                status: match facts.same_filesystem {
-                    Some(true) => RequirementStatus::Met,
-                    Some(false) => RequirementStatus::Unmet,
-                    None => RequirementStatus::Unavailable,
-                },
-                evidence: match facts.same_filesystem {
-                    Some(true) => "Same device: segments can be hard-linked".to_owned(),
-                    Some(false) if cfg!(windows) => {
-                        "Windows: no device identity to prove one filesystem, so retention \
-                          stays off on this node"
-                            .to_owned()
-                    }
-                    Some(false) => "Different devices: a link would fail with EXDEV, so a \
-                      collection is refused before it reserves anything"
-                        .to_owned(),
-                    None => "The scratch or namespace directory could not be read".to_owned(),
-                },
-            },
-            DeveloperRequirement {
-                id: "retention_budget",
-                title: "A retained-output budget",
-                status: if budget.is_some() {
-                    RequirementStatus::Met
-                } else {
-                    RequirementStatus::Unmet
-                },
-                evidence: match budget {
-                    Some(bytes) => format!(
-                        "cache.max_gb allows {} (unset means the 50 GB default)",
-                        gib(bytes)
-                    ),
-                    None => "cache.max_gb is 0: nothing can be retained".to_owned(),
-                },
-            },
-            DeveloperRequirement {
-                id: "retention_headroom",
-                title: "Free space beyond everything scratch may write",
-                status: match facts.admits {
-                    Ok(()) => RequirementStatus::Met,
-                    Err("headroom_unsampled") => RequirementStatus::Unknown,
-                    Err(_) => RequirementStatus::Unmet,
-                },
-                evidence: match facts.slack {
-                    Some(slack) => format!(
-                        "Slack {} against a {} reserve ({}); sampled every 30 s, and a sample \
-                          older than 60 s refuses",
-                        if slack < 0 {
-                            format!("-{}", gib(slack.unsigned_abs()))
-                        } else {
-                            gib(slack.unsigned_abs())
-                        },
-                        gib(reserve.unsigned_abs()),
-                        match facts.admits {
-                            Ok(()) => "captures may link",
-                            Err(reason) => reason,
-                        }
-                    ),
-                    None => {
-                        "No free-space sample yet: retention refuses until one exists".to_owned()
-                    }
-                },
-            },
-            DeveloperRequirement {
-                id: "retention_live_bytes",
-                title: "What retention holds on this node",
-                status: RequirementStatus::Met,
-                evidence: format!(
-                    "{} across {} artifacts; Activity lists each with a Stop (this node only)",
-                    gib(live_bytes),
-                    facts.rows.len()
-                ),
-            },
-            DeveloperRequirement {
-                id: "retention_cleanup_pending",
-                title: "Nothing waiting on the collector",
-                status: if facts.cleanup_pending == 0 {
-                    RequirementStatus::Met
-                } else {
-                    RequirementStatus::Unmet
-                },
-                evidence: format!(
-                    "{} orphan or retired directories still to delete; the collector spends up \
-                      to 250 ms per 30 s tick on them",
-                    facts.cleanup_pending
-                ),
             },
         ],
     }
@@ -1334,7 +1071,6 @@ pub(crate) fn create_plan(
 
 /// Facts only: these observations are never consulted by settings updates.
 async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
-    use plurx_core::cluster::coordination::ClusterJobAuthority;
     use plurx_core::store::background_jobs::JobKind;
     use RequirementStatus::{Met, Unavailable, Unknown, Unmet};
     let (queue_status, queue_evidence) = match tokio::time::timeout(
@@ -1354,7 +1090,7 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     };
     let capacity_idle = state.transcode.pretranscode_worker_idle();
     let (peer_status, peer_evidence) = match tokio::time::timeout(
-        std::time::Duration::from_secs(3), state.membership.media_peers()
+        std::time::Duration::from_secs(3), state.cluster.media_targets()
     ).await {
         Ok(Ok(peers)) => (Unknown, format!(
             "{} reachable media peers are reported. Reachability does not prove each job's payload version, source access or encoder recipe; workers check those individually.",
@@ -1364,8 +1100,8 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     };
     let (role_status, role_evidence) = match tokio::time::timeout(
         std::time::Duration::from_secs(3), async {
-            tokio::join!(state.membership.may_execute_job(JobKind::FragmentIndexBuild),
-                state.membership.may_run_cluster_jobs())
+            tokio::join!(state.cluster.job_allowed(JobKind::FragmentIndexBuild),
+                state.cluster.singleton_jobs_allowed())
         }
     ).await {
         Ok((artifact, catalogue)) => (if artifact { Met } else { Unmet }, format!(
@@ -1528,7 +1264,6 @@ async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
 /// keeps indexing its own requests, an idle one takes other nodes'. Nothing
 /// to switch; these rows say what this node's indexer may do right now.
 async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
-    use plurx_core::cluster::coordination::ClusterJobAuthority as _;
     use plurx_core::store::background_jobs::JobKind;
     use RequirementStatus::{Met, Unavailable, Unmet};
     let observe = std::time::Duration::from_secs(3);
@@ -1607,9 +1342,7 @@ async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
     };
     let (cross_status, cross_evidence) = match tokio::time::timeout(
         observe,
-        state
-            .membership
-            .may_execute_job(JobKind::FragmentIndexBuild),
+        state.cluster.job_allowed(JobKind::FragmentIndexBuild),
     )
     .await
     {
@@ -1686,7 +1419,7 @@ async fn subtitle_cluster_sources(
     } else {
         state.runtime_cache_dir.clone()
     };
-    let peers = state.membership.media_peers().await;
+    let peers = state.cluster.media_targets().await;
     let (peer_status, peer_evidence) = match peers {
         Ok(peers) if peers.iter().any(|peer| peer.reachable) => (
             RequirementStatus::Met,
@@ -2299,6 +2032,183 @@ async fn dolby_vision_fel_reencode(
     }
 }
 
+/// What the client platforms do with an 8.1 mapping they are served, as
+/// measured. Advisory: nothing reads it.
+pub(crate) const DV_REFIT_CLIENTS: &str = "measured: Apple app on macOS applies the 8.1 mapping (AVPlayerLayer); Lenovo TB322FC (Android) ignores it; iOS, tvOS, Google TV, web unobservable";
+
+/// The F+ curve fit's four per-platform switches (`playback.dolby_vision_refit_*`,
+/// in `ClientPlatform` order: web, apple, android, linux). The Apple row
+/// carries the node's readings; every row carries the measured client
+/// behaviour. All advisory: a switch saves whatever the rows say.
+async fn dolby_vision_refit(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> [DeveloperEnableItem; 4] {
+    let on =
+        |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
+    let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let helper = match crate::dv_tools::ToolSet::capture().await {
+        Ok(Some(tools)) => Ok(Some(format!(
+            "refit mode {}, decoder {}",
+            crate::dv_tools::REFIT_MODE_VERSION,
+            tools.decoder_abi()
+        ))),
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let helper: Result<Option<String>, String> = Ok(None);
+    let progress = state
+        .store
+        .dv_refit_progress()
+        .await
+        .map_err(|error| error.to_string());
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let spool = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_list(&root))
+        .await
+        .unwrap_or_default();
+    let [web, apple, android, linux] = dolby_vision_refit_items(
+        [on(keys[0]), on(keys[1]), on(keys[2]), on(keys[3])],
+        helper,
+        progress,
+        &spool,
+    );
+    [web, apple, android, linux]
+}
+
+fn dolby_vision_refit_items(
+    enabled: [bool; 4],
+    helper: Result<Option<String>, String>,
+    progress: Result<plurx_core::store::dv_refit_jobs::RefitProgress, String>,
+    spool: &[(bool, u64)],
+) -> [DeveloperEnableItem; 4] {
+    let clients = |id: &'static str| {
+        DeveloperRequirement {
+        id,
+        title: "Clients that apply the 8.1 mapping",
+        status: RequirementStatus::Unobservable,
+        evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
+    }
+    };
+    let timing = |id: &'static str| {
+        DeveloperRequirement {
+        id,
+        title: "Fitted copy qualification",
+        status: RequirementStatus::Unmet,
+        evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending. Fitted copies requiring retained in-band parameter sets are unsupported by the current muxer.".into(),
+    }
+    };
+    let helper = match helper {
+        Ok(Some(identity)) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Met,
+            evidence: format!("The DV processing bundle on this node was built from this build's sources ({identity})."),
+        },
+        Ok(None) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Unmet,
+            evidence: "No DV processing bundle on this node: it fits no titles. Other nodes may.".into(),
+        },
+        Err(error) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Unavailable,
+            evidence: format!("The DV processing bundle could not be read: {error}."),
+        },
+    };
+    let coverage = match progress {
+        Ok(p) => DeveloperRequirement {
+            id: "refit_coverage",
+            title: "Profile 7 FEL titles fitted",
+            status: if p.fitted + p.identity + p.refused >= p.fel_titles {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            evidence: format!(
+                "{} of {} Profile 7 FEL titles fitted for their current source ({} keep identity curves, {} refused by the helper). Fits run in the background while a switch is on.",
+                p.fitted, p.fel_titles, p.identity, p.refused
+            ),
+        },
+        Err(error) => DeveloperRequirement {
+            id: "refit_coverage",
+            title: "Profile 7 FEL titles fitted",
+            status: RequirementStatus::Unavailable,
+            evidence: format!("The fit counts could not be read: {error}."),
+        },
+    };
+    let (complete, partial, bytes) = spool.iter().fold((0, 0, 0u64), |(c, p, b), (done, size)| {
+        if *done {
+            (c + 1, p, b + size)
+        } else {
+            (c, p + 1, b + size)
+        }
+    });
+    let spool = DeveloperRequirement {
+        id: "refit_spool",
+        title: "Statistics spool on this node",
+        status: RequirementStatus::Met,
+        evidence: format!(
+            "{complete} complete and {partial} partial runs, {:.1} MiB, under the runtime cache's {} directory. Delete it from this card; a later fit decodes its title again.",
+            bytes as f64 / (1024.0 * 1024.0),
+            crate::source_probe::REFIT_SPOOL_DIR
+        ),
+    };
+    let item =
+        |id: &'static str, title: &'static str, enabled: bool, requirements| DeveloperEnableItem {
+            id,
+            title,
+            enabled: Some(enabled),
+            setting: Some(id),
+            requirements,
+        };
+    [
+        item(
+            "dolby_vision_refit_web",
+            "Dolby Vision F+ curves: web",
+            enabled[0],
+            vec![
+                clients("refit_web_clients"),
+                timing("refit_web_copy_timing"),
+            ],
+        ),
+        item(
+            "dolby_vision_refit_apple",
+            "Dolby Vision F+ curves: Apple",
+            enabled[1],
+            // The web card reads these Apple requirement IDs directly.
+            vec![
+                helper,
+                coverage,
+                clients("refit_clients"),
+                timing("refit_copy_timing"),
+                spool,
+            ],
+        ),
+        item(
+            "dolby_vision_refit_android",
+            "Dolby Vision F+ curves: Android",
+            enabled[2],
+            vec![
+                clients("refit_android_clients"),
+                timing("refit_android_copy_timing"),
+            ],
+        ),
+        item(
+            "dolby_vision_refit_linux",
+            "Dolby Vision F+ curves: Linux",
+            enabled[3],
+            vec![
+                clients("refit_linux_clients"),
+                timing("refit_linux_copy_timing"),
+            ],
+        ),
+    ]
+}
+
 /// What this node knows about the per-title FEL qualification.
 #[derive(Debug, Clone)]
 #[cfg(any(target_os = "linux", test))]
@@ -2847,7 +2757,7 @@ async fn cluster_api_requirement(state: &AppState) -> DeveloperRequirement {
     const ID: &str = "cluster_api_advertised";
     const TITLE: &str = "Authenticated diagnostics are reachable";
 
-    let status = match state.membership.status().await {
+    let status = match state.cluster.membership_status().await {
         Ok(status) => status,
         Err(MembershipError::Unavailable) => {
             return DeveloperRequirement {
@@ -2953,7 +2863,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
     const ID: &str = "cache_revocation_capability";
     const TITLE: &str = "Every committed node proves cache revocation";
 
-    if !state.membership.is_replicated() {
+    if !state.cluster.role().is_clustered() {
         return DeveloperRequirement {
             id: ID,
             title: TITLE,
@@ -2964,7 +2874,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
         };
     }
 
-    match state.membership.cache_admin_revocation_ready().await {
+    match state.cluster.revocation_ready().await {
         Ok(true) => DeveloperRequirement {
             id: ID,
             title: TITLE,
@@ -2988,10 +2898,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
         // on this fleet — where the guard has not activated — was a reading
         // the function never took.
         Ok(false) => {
-            let activated = state
-                .membership
-                .cache_admin_revocation_activated_locally()
-                .await;
+            let activated = state.cluster.revocation_activated().await;
             let evidence = match activated {
                 Ok(false) => "The credential guard has never activated on this cluster \
                               (`cluster_credential_guard_activation` is empty), which closes \
@@ -3091,33 +2998,6 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
         enabled: Some(advertised),
         setting: Some("playback_control_protocol_v1"),
         requirements: vec![reporters],
-    }
-}
-
-/// S-10's SDR master `CODECS`. The switch is the whole decision; its one row
-/// says what nobody has measured yet and never refuses the save. It is
-/// `unknown` by construction — no observation this daemon can make proves it:
-/// whether AVPlayer still offers every SDR variant once the master names its
-/// codecs is a physical-device result, and a daemon that served such a master
-/// has no way to see a rung the player silently dropped before fetching it.
-fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
-    DeveloperEnableItem {
-        id: "sdr_master_codecs",
-        title: "CODECS on SDR master playlists",
-        enabled: Some(enabled),
-        setting: Some("playback_sdr_master_codecs"),
-        requirements: vec![DeveloperRequirement {
-            id: "sdr_codecs_device_requalification",
-            title: "Apple TV and iPhone keep every SDR variant with CODECS printed",
-            status: RequirementStatus::Unknown,
-            evidence: "Not recorded: the S-10 device re-qualification \
-                       (HONEST-MASTER-PLAYLIST \u{a7}5.4) is a physical-device result this \
-                       daemon cannot read, and a variant AVPlayer drops on CODECS is never \
-                       fetched, so no server counter can see it. Advisory only. The value is \
-                       fixed when a session is created; a session rebuilt after an owner \
-                       takeover or VOD resurrection reads the current value."
-                .to_owned(),
-        }],
     }
 }
 
@@ -3335,7 +3215,7 @@ async fn dvr(
     let owner = live_tv.owner_node_id == state.node_id;
     let mut requirements = vec![
         root_writable(state, dvr, owner).await,
-        free_space(dvr, owner),
+        free_space(dvr, owner).await,
     ];
     requirements.push(guide_horizon(state, live_tv).await);
     requirements.push(tuner_reserve(live_tv, dvr));
@@ -3343,7 +3223,7 @@ async fn dvr(
         id: "every_node_mounts_root",
         title: "Every node can read the DVR root",
         status: RequirementStatus::Unobservable,
-        evidence: if state.membership.is_replicated() {
+        evidence: if state.cluster.role().is_clustered() {
             "The owner writes recordings and any node may serve them, so the root has to be a \
              mount every node has. This process can see its own filesystem and no peer's."
                 .to_owned()
@@ -3388,7 +3268,7 @@ async fn root_writable(
         // a hung NFS server would otherwise park a runtime worker for as long
         // as the mount stayed hung — on a *diagnostic* page.
         let root = dvr.root.clone();
-        match tokio::task::spawn_blocking(move || probe_root(&root)).await {
+        match plurx_core::media_io::blocking(move || probe_root(&root)).await {
             Ok(Ok(())) => (
                 RequirementStatus::Met,
                 format!("Created and removed a probe file under `{}`.", dvr.root),
@@ -3432,9 +3312,9 @@ fn probe_root(root: &str) -> std::io::Result<()> {
     std::fs::remove_file(&probe)
 }
 
-fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
+async fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
     let floor = dvr.free_floor_gb.max(0) as u64 * 1_000_000_000;
-    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root) {
+    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root).await {
         Some(free) if free >= floor => (
             RequirementStatus::Met,
             format!(
@@ -3628,7 +3508,7 @@ async fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem 
     // mutating the saved enablement choice.
     state
         .sharing
-        .observe_source_activation_current(state.membership.source_layout_ready().await.ok());
+        .observe_source_activation_current(state.cluster.source_layout_available().await.ok());
     let endpoints = sharing_endpoint_requirement(state.store.sharing_endpoint_manifest().await);
     let status = state.sharing.status();
     DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![
@@ -3764,6 +3644,46 @@ pub async fn source_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refit_platform_requirements_are_unique_and_preserve_web_lookup_ids() {
+        let items = dolby_vision_refit_items(
+            [false; 4],
+            Ok(None),
+            Ok(plurx_core::store::dv_refit_jobs::RefitProgress::default()),
+            &[],
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for item in &items {
+            for requirement in &item.requirements {
+                assert!(
+                    ids.insert(requirement.id),
+                    "{} repeats requirement {}",
+                    item.id,
+                    requirement.id
+                );
+            }
+        }
+        assert_eq!(ids.len(), 11);
+        let apple = items
+            .iter()
+            .find(|item| item.id == "dolby_vision_refit_apple")
+            .expect("web readiness source");
+        assert_eq!(
+            apple
+                .requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "refit_helper",
+                "refit_coverage",
+                "refit_clients",
+                "refit_copy_timing",
+                "refit_spool",
+            ]
+        );
+    }
 
     #[test]
     fn source_launch_names_unconfigured_roots_and_their_reason() {
@@ -4028,115 +3948,6 @@ mod tests {
             matched.requirements[0].status,
             RequirementStatus::Met
         ));
-    }
-
-    /// D6: display-aware Auto moves up only with `playback.network_priors`
-    /// on, and until this card that dependency was invisible. The card names
-    /// it, reads it, and the priors switch is a Developer switch of its own.
-    #[test]
-    fn display_aware_auto_lists_network_priors_and_reports_its_state() {
-        let priors_off = display_aware_auto_item(true, true, false, Ok(1));
-        assert_eq!(priors_off.id, "display_aware_auto");
-        assert_eq!(priors_off.setting, Some("playback_display_aware_auto"));
-        assert_eq!(
-            priors_off
-                .requirements
-                .iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            [
-                "auto_abr",
-                "network_priors",
-                "local_session_owner",
-                "ipv4_client"
-            ]
-        );
-        let priors_row = |item: &DeveloperEnableItem| {
-            item.requirements
-                .iter()
-                .find(|row| row.id == "network_priors")
-                .map(|row| (row.status, row.evidence.clone()))
-                .expect("the network priors row")
-        };
-        let (status, evidence) = priors_row(&priors_off);
-        assert_eq!(status, RequirementStatus::Unmet);
-        assert!(
-            evidence.contains("Auto never upgrades")
-                && evidence.contains("a link stall retries the same quality")
-                && evidence.contains("producer and decoder recovery still work"),
-            "{evidence}"
-        );
-
-        let priors_on = display_aware_auto_item(true, true, true, Ok(1));
-        assert_eq!(priors_row(&priors_on).0, RequirementStatus::Met);
-
-        // Adaptive Auto is read, not assumed.
-        assert_eq!(priors_on.requirements[0].status, RequirementStatus::Met);
-        assert_eq!(
-            display_aware_auto_item(true, false, true, Ok(1)).requirements[0].status,
-            RequirementStatus::Unmet
-        );
-
-        // A single node owns every session; a roster with peers cannot say
-        // where a given session landed, and an unreadable roster says so.
-        assert_eq!(priors_on.requirements[2].status, RequirementStatus::Met);
-        let clustered = display_aware_auto_item(true, true, true, Ok(3));
-        assert_eq!(clustered.requirements[2].status, RequirementStatus::Unknown);
-        assert!(
-            clustered.requirements[2]
-                .evidence
-                .contains("sessions placed on a peer get no link receipts"),
-            "{}",
-            clustered.requirements[2].evidence
-        );
-        let unread = display_aware_auto_item(true, true, true, Err("roster down".to_owned()));
-        assert_eq!(
-            unread.requirements[2].status,
-            RequirementStatus::Unavailable
-        );
-        assert!(unread.requirements[2].evidence.contains("roster down"));
-
-        // IPv6 is a limit this route cannot observe, whatever else is true.
-        assert_eq!(clustered.requirements[3].status, RequirementStatus::Unknown);
-        assert!(clustered.requirements[3].evidence.contains("IPv6"));
-
-        for saved in [false, true] {
-            let priors = network_priors_item(saved);
-            assert_eq!(priors.id, "network_priors");
-            assert_eq!(priors.setting, Some("playback_network_priors"));
-            assert_eq!(priors.enabled, Some(saved));
-            assert!(priors
-                .requirements
-                .iter()
-                .all(|row| row.evidence.len() > 20));
-        }
-    }
-
-    /// Readiness reports; it never decides. Every combination of red rows
-    /// leaves the switch where the operator saved it, in both directions.
-    #[test]
-    fn display_aware_auto_readiness_never_refuses_the_switch() {
-        for saved in [false, true] {
-            for auto_abr in [false, true] {
-                for priors in [false, true] {
-                    for owners in [Ok(1), Ok(4), Err("unreadable".to_owned())] {
-                        let item = display_aware_auto_item(saved, auto_abr, priors, owners);
-                        assert_eq!(
-                            item.enabled,
-                            Some(saved),
-                            "rows never move the saved switch (auto_abr {auto_abr}, \
-                             priors {priors})"
-                        );
-                        assert_eq!(
-                            item.setting,
-                            Some("playback_display_aware_auto"),
-                            "the switch stays a switch the readiness walk can write"
-                        );
-                        assert!(item.requirements.iter().all(|row| row.evidence.len() > 20));
-                    }
-                }
-            }
-        }
     }
 
     /// D3b: the Create plan row reports the planning view's share, an

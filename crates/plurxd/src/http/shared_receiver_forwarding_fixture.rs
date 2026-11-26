@@ -95,21 +95,20 @@ async fn actual_nonowner_b(
         .await
         .expect("B worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    drop(worker_listener); // Preserve the chosen origin for the startup socket owner.
     let fixture = real_receiver_fixture_at(
         address,
         SourceFixtureMode::Copy,
-        worker_address,
+        worker_listener,
         fixture_body_budget,
     )
     .await;
     let mut worker_membership =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
-            fixture.state.membership.clone(),
+            fixture.state.cluster.test_membership().clone(),
         );
     let mut worker_replication =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
-            fixture.state.replication.clone(),
+            fixture.state.cluster.test_replication().clone(),
         );
     let tls = Arc::new(
         LiveNodeTls::open(
@@ -180,7 +179,8 @@ async fn actual_nonowner_b(
     let second_address = second_listener.local_addr().expect("ingress address");
     let token = fixture
         .state
-        .membership
+        .cluster
+        .test_membership()
         .issue_token_for_role(Duration::from_secs(120), ClusterRole::Voter)
         .await
         .expect("actual coordinator token");
@@ -196,12 +196,16 @@ async fn actual_nonowner_b(
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = address.to_string();
-    drop((raft, api));
-    drop(second_listener);
-    let observation = Arc::new(crate::StartupObservationHttp::new(second_address));
+    // Keep the bound sockets: the voter and the startup observation serve on
+    // them, so no other socket can take any of these ports before they start.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    let observation = Arc::new(
+        crate::StartupObservationHttp::from_listener(second_listener)
+            .expect("owned B ingress observation listener"),
+    );
     let mut selected = Box::pin(select_daemon_store_observing(
         &config,
-        Some(observation.as_ref()),
+        Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
     ))
     .await
     .expect("actual second admitted B voter");
@@ -217,7 +221,7 @@ async fn actual_nonowner_b(
     ingress.node_id = selected.identity.node_id.clone();
     ingress.replace_membership(selected.membership_manager());
     ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        ingress.membership.clone(),
+        ingress.cluster.test_membership().clone(),
         Arc::clone(&ingress.store),
     );
     ingress.clock_observer = observation
@@ -225,7 +229,7 @@ async fn actual_nonowner_b(
         .await
         .expect("actual ingress clock observer");
     ingress.catalogue = selected.catalogue_reader();
-    ingress.replication = selected.replication_monitor();
+    ingress.replace_replication(selected.replication_monitor());
     ingress.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -237,24 +241,28 @@ async fn actual_nonowner_b(
     ));
     let mut ingress_replication =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
-            ingress.replication.clone(),
+            ingress.cluster.test_replication().clone(),
         );
     ingress
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(ingress.sharing.accepted_drivers.boot_id()));
     ingress
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual ingress boot");
     fixture
         .state
-        .membership
+        .cluster
+        .test_membership()
         .heartbeat()
         .await
         .expect("worker roster");
     ingress
-        .membership
+        .cluster
+        .test_membership()
         .heartbeat()
         .await
         .expect("ingress roster");
@@ -267,7 +275,7 @@ async fn actual_nonowner_b(
     // owned by the serving worker and all data traverses signed member HTTP.
     let mut ingress_membership =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
-            ingress.membership.clone(),
+            ingress.cluster.test_membership().clone(),
         );
     let ingress_server =
         ServerOwner::serve(Arc::clone(&observation), fixture_router(ingress.clone()));
@@ -372,6 +380,33 @@ async fn actual_nonowner_b(
         .await
         .expect("protected bytes");
     assert!(bytes.starts_with(b"#EXTM3U"));
+    // The native readiness shape through the non-owner ingress: the login
+    // token is dropped there and the forwarded resource is the playlist.
+    let native = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "http://{second_address}{playlist}{}token={}",
+            if playlist.contains('?') { '&' } else { '?' },
+            fixture.original_login
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", fixture.original_login),
+        )
+        .body(Body::empty())
+        .expect("native readiness resource");
+    let response = sender
+        .send_request(native)
+        .await
+        .expect("forwarded native readiness resource");
+    assert_eq!(response.status(), StatusCode::OK);
+    let native_bytes = axum::body::to_bytes(Body::new(response.into_body()), 1024 * 1024)
+        .await
+        .expect("native readiness bytes");
+    assert!(
+        native_bytes.starts_with(b"#EXTM3U"),
+        "the playlist, without the token"
+    );
     assert!(
         ingress
             .sharing

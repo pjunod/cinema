@@ -657,3 +657,181 @@ function saveHdrDisplayPeak(control){
     if(err)err.textContent="This browser could not save the HDR display peak.";
   }
 }
+// Graduated from Developer on 2026-11-18 (Paul): Dolby Vision and HDR
+// processing, server delivery choices and Jellyfin compatibility.
+function dolbyVisionHdrProcessingCard(settings,readiness){
+  return setCard(`${cardHead("Dolby Vision processing","Use supported Dolby Vision picture information when delivering HDR or display-targeted SDR.","")}
+    ${togRow("dv-hdr-processing","Process Dolby Vision for HDR and targeted SDR","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    <p class="hint">New playback attempts supported Dolby Vision processing when the worker has the required tools and resources. Unsupported sources or processing failures use compatible playback. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_backend_reference","Qualified backend and reference","Validate HDR output against an independent reference.")}
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_encoder_matrix","Production encoder matrix","Test processing with the encoders used by playback workers.")}
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates.")}
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_physical_playback","Physical playback validation","Test HDR display output, startup, seeking, fallback and sustained playback on supported devices.")}
+    </div></details>
+    <div class="err" id="dv-hdr-processing-error" role="alert"></div>${setCardFoot("saveDolbyVisionHdrProcessing")}`,{id:"dv-hdr-processing-card"});
+}
+async function saveDolbyVisionHdrProcessing(btn){
+  const card=document.getElementById("dv-hdr-processing-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-hdr-processing-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_hdr_processing:(/** @type {HTMLInputElement} */ (document.getElementById("dv-hdr-processing"))).checked}}));
+    if(!card||document.getElementById("dv-hdr-processing-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionHdrProcessingCard(saved,DEVELOPER_READINESS);
+    toast("Dolby Vision HDR preference saved; applies to new playback decisions");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+function dolbyVisionFelReencodeCard(settings,readiness){
+  return setCard(`${cardHead("FEL preservation for Profile 8.1","Use the enhancement layer when making a new Profile 8.1 picture.","")}
+    ${togRow("dv-fel-reencode","Preserve FEL when converting to Profile 8.1","Default off. Dolby Vision conversion must also be allowed.",!!settings.dolby_vision_fel_reencode)}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    <p class="hint">This preference never enables conversion by itself. New playback attempts FEL reconstruction for supported Profile 7 sources when the worker has the required tools and resources. Unsupported sources or processing failures keep the existing permitted conversion fallback. Native Dolby Vision is preserved. Readiness never prevents saving. A running movie is unchanged.</p>
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","The processing helper on this node, the conversion permission the reconstructed 8.1 replaces, and the composition proof against the helper's FEL master render.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_worker_budget","Worker CPU budget for one live reconstruction","Where this node's renderer decodes, and whether one FEL compose + encode graph fits its software budget.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_live_slot","Live reconstruction slot","One live FEL reconstruction per worker; a play beyond it gets the plain conversion with the reason.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_encoder_matrix","Production encoder matrix","Test reconstruction and conversion with the encoders used by playback workers.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates with the existing conversion.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_physical_playback","Physical playback validation","Test Profile 8.1 output, startup, seeking, fallback and sustained playback on supported Dolby Vision devices.")}
+    </div></details>
+    <div class="err" id="dv-fel-reencode-error" role="alert"></div>${setCardFoot("saveDolbyVisionFelReencode")}`,{id:"dv-fel-reencode-card"});
+}
+async function saveDolbyVisionFelReencode(btn){
+  const card=document.getElementById("dv-fel-reencode-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-fel-reencode-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_fel_reencode:(/** @type {HTMLInputElement} */ (document.getElementById("dv-fel-reencode"))).checked}}));
+    if(!card||document.getElementById("dv-fel-reencode-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionFelReencodeCard(saved,DEVELOPER_READINESS);
+    toast("FEL preservation preference saved; applies to new playback decisions");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+// F+ curves (FEL-RPU-REFIT-BUILD.md): one switch per client platform the
+// server can tell apart (playback_control::ClientPlatform). Any one on lets
+// nodes fit Profile 7 FEL titles in the background; copy playback (milestone
+// 4) serves the curves only to the platforms switched on.
+const DV_REFIT_PLATFORMS=[["web","Web"],["apple","Apple"],["android","Android"],["linux","Linux (plurx Player)"]];
+function dolbyVisionRefitCard(settings,readiness){
+  const rows=DV_REFIT_PLATFORMS.map(([key,label])=>togRow(`dv-refit-${key}`,`Serve F+ curves to ${label} clients`,"Default off.",!!settings[`dolby_vision_refit_${key}`])).join("");
+  return setCard(`${cardHead("Dolby Vision F+ curves","Fit each Profile 7 FEL title's Profile 8.1 mapping so copy playback carries its enhancement layer's effect.","")}
+    ${rows}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    <p class="hint">With any switch on, nodes fit Profile 7 FEL titles in the background, beside playback, and resume where they stopped when a viewer needs the capacity. A failed or cancelled title is not fitted again until its source changes or you retry it in Activity. Readiness never prevents saving.</p>
+    <p><button class="ghost sm" id="dv-refit-spool-clear" onclick="clearDolbyVisionRefitSpool(this)">Delete this node's spool</button></p>
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_helper","Helper on this node","Whether this node's DV processing bundle supports --refit-stats.")}
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_coverage","Titles fitted","How many Profile 7 FEL titles have a curve table for their current source.")}
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_clients","Clients that apply the mapping","What each client platform was measured to do with a served 8.1 mapping.")}
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_spool","Statistics spool on this node","The node-local helper output fits are solved from, kept so a new fit method need not decode again.")}
+    </div></details>
+    <div class="err" id="dv-refit-error" role="alert"></div>${setCardFoot("saveDolbyVisionRefit")}`,{id:"dv-refit-card"});
+}
+async function saveDolbyVisionRefit(btn){
+  const card=document.getElementById("dv-refit-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-refit-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    /** @type {Record<string, unknown>} */
+    const body={};
+    for(const [key] of DV_REFIT_PLATFORMS)body[`dolby_vision_refit_${key}`]=(/** @type {HTMLInputElement} */ (document.getElementById(`dv-refit-${key}`))).checked;
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body}));
+    if(!card||document.getElementById("dv-refit-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionRefitCard(saved,DEVELOPER_READINESS);
+    toast("F+ curve preferences saved");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+async function clearDolbyVisionRefitSpool(btn){
+  const err=document.getElementById("dv-refit-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const done=await api("/developer/dv-refit/spool",{method:"DELETE"});
+    toast(`Deleted ${Number(done&&done.removed||0)} spool files on this node`);
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+function displayTargetHdr10Card(settings,readiness){
+  return setCard(`${cardHead("Display-targeted HDR10-E / SDR","Map each shot to the viewer's display with Dolby display management and the title's creative trims.")}
+    ${togRow("dv-display-target","Display-targeted HDR10-E / SDR","Default off. New HDR10-E sessions use a supported peak; explicit SDR displays use 100-nit BT.709 gamma 2.4. Unknown HDR peaks keep the master grade; ineligible SDR titles keep ordinary tone mapping.",!!settings.dolby_vision_display_target)}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_helper","Helper installed and HDR10-E enabled","Readings describe this node and never disable this switch or its Save.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_peak","Client peak reports","Platform and viewer reports select the same bucket; the source is attribution only.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_scan","Complete-title L1 scan","A whole title must have valid L1; missing facts keep the existing HDR master or ordinary SDR route.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_cache","Bucket storage on this node","Targeted playback renders live. Pre-encodes and retained VOD stay master-only. Private roots retain existing reader and reservation fences.")}
+    </div></details>
+    <div class="err" id="dv-display-target-error" role="alert"></div>${setCardFoot("saveDisplayTargetHdr10")}`,{id:"dv-display-target-card"});
+}
+async function saveDisplayTargetHdr10(btn){
+  const card=document.getElementById("dv-display-target-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-display-target-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_display_target:(/** @type {HTMLInputElement} */ (document.getElementById("dv-display-target"))).checked}}));
+    if(!card||document.getElementById("dv-display-target-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=displayTargetHdr10Card(saved,DEVELOPER_READINESS);
+    toast("Display targeting saved; applies to new playback");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+
+// Complete-output preparation queued by VOD starts. Three-valued, so it has
+// its own selector rather than a readiness `setting` (the switch walk PUTs
+// booleans). Off by default: one play must not start a whole-title encode.
+function outputPreparationCard(settings,readiness){
+  const mode=["off","copy","copy_and_encoded"].includes(settings.vod_output_preparation)?settings.vod_output_preparation:"off";
+  const opt=(v,label)=>`<option value="${v}"${mode===v?" selected":""}>${label}</option>`;
+  return setCard(`${cardHead("Complete-output preparation","Prepare a reusable copy or encode of a title after a VOD play.",mode==="off"?`<span class="pill">off</span>`:`<span class="pill warn">${esc(mode)}</span>`)}
+    <label class="tog" for="vod-output-preparation"><span>What a VOD start may queue<small>Off queues nothing. Copy queues remux preparation. Copy and encoded also queues a whole-title background encode. Turning a kind off cancels its queued jobs within a minute.</small></span><select id="vod-output-preparation">${opt("off","Off")}${opt("copy","Copy")}${opt("copy_and_encoded","Copy and encoded")}</select></label>
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    ${devReq(readiness,"output_preparation","output_budget","A retained-output budget","Preparations publish into the retained registry, bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"output_preparation","output_jobs","Queued and running preparation","Every job is in Settings → Jobs, filtered by kind, with a Cancel.")}
+    ${devReq(readiness,"output_preparation","output_node_idle","This node's background encoder is idle","A claimed preparation yields to foreground and offline work.")}
+    ${devReq(readiness,"output_preparation","output_stop","What Stop in Activity does","Stop cancels the preparation running on the node that answers; the next play of the title may queue it again.")}
+    </div></details>
+    <div class="err" id="vod-output-preparation-error" role="alert"></div>${setCardFoot("saveOutputPreparation")}`,{id:"vod-output-preparation-card"});
+}
+async function saveOutputPreparation(btn){
+  const err=document.getElementById("vod-output-preparation-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_output_preparation:/** @type {HTMLSelectElement} */(document.getElementById("vod-output-preparation")).value}}));
+    const card=document.getElementById("vod-output-preparation-card");if(card)card.outerHTML=outputPreparationCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function vodReorderCard(settings){
+  return setCard(`${cardHead("Reordered VOD frames","Allow two B-frames in software x264 VOD encodes.","")}
+    ${togRow("vod-reorder","Enable reordered VOD frames","Saves the requested recipe directly. Other encoders retain their existing frame order.",Number(settings.vod_reorder_frames)===2)}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    ${devStaticReq("Supported encoder","software x264","Hardware encoder qualification is separate. Reordered frames require both decode and presentation timestamps in the VOD fragments.","")}
+    ${devStaticReq("Physical-client qualification","pending","Browser and native-client presentation continuity and measured compression receipts remain to be recorded.","warn")}
+    </div></details>
+    <div class="err" id="vod-reorder-error" role="alert"></div>${setCardFoot("saveVodReorder")}`,{id:"vod-reorder-card"});
+}
+async function saveVodReorder(btn){
+  const err=document.getElementById("vod-reorder-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:(/** @type {HTMLInputElement} */ (document.getElementById("vod-reorder"))).checked?2:0}}));
+    const card=document.getElementById("vod-reorder-card");if(card)card.outerHTML=vodReorderCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function jellyfinCompatibilityCard(settings,readiness){
+  const on=!!settings.jellyfin_compatibility_enabled;
+  const connection=new URL("/jellyfin",window.location.href).href;
+  const host=window.location.hostname;
+  return setCard(`${cardHead("Jellyfin client compatibility","Connect the tested Infuse and Jellyfin Android TV clients to this server.",`<span class="pill${on?" ok":""}">${on?"enabled":"off"}</span>`)}
+    <label class="checkrow"><input type="checkbox" id="jellyfin-compatibility-enabled" ${on?"checked":""}><span>Allow Jellyfin clients</span></label>
+    <p class="hint">In the client, enter just this server's address: <code>${esc(host)}</code>. Jellyfin clients add their standard port (8096) themselves. If port 8096 is not reachable, use <code>${esc(connection)}</code>, which always works. Sign in with a Plurx account.</p>
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    <p class="hint">Library posters and backdrops are served without sign-in while this is on: anyone who has an artwork link can read that image. A direct-play link for one title chosen after sign-in also works without a login header; it expires within 24 hours and stops working when playback stops or the login is revoked. Everything else requires sign-in.</p>
+    ${devReq(readiness,"jellyfin_compatibility","client_qualification","Pinned clients qualified","The complete browsing, playback, track and recovery matrix must pass on the frozen candidate.")}
+    ${devReq(readiness,"jellyfin_compatibility","standard_port","Reachable by host alone","Jellyfin clients given only a host connect to port 8096 at the server root.")}
+    <p class="devcheck-note">Readiness is advisory. Your saved choice controls the connection surface.</p></div></details>
+    <div class="err" id="jellyfin-compatibility-error" role="alert"></div>${setCardFoot("saveJellyfinCompatibility")}`,{id:"jellyfin-compatibility-settings"});
+}
+async function saveJellyfinCompatibility(btn){
+  const err=document.getElementById("jellyfin-compatibility-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:(/** @type {HTMLInputElement} */ (document.getElementById("jellyfin-compatibility-enabled"))).checked}}));
+    toast("Jellyfin compatibility saved");if(btn)setCardSaved(btn);
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}

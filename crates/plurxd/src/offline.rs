@@ -400,7 +400,7 @@ pub struct OfflineManager {
     node_id: String,
     activation: tokio::sync::Mutex<()>,
     active: tokio::sync::Mutex<HashMap<String, ActivePreparation>>,
-    serving: crate::serving_fence::ServingFence,
+    restart_admissions: crate::cluster::RestartAdmissions,
     metrics: Arc<OfflineMetrics>,
     /// A package this node just created for itself: claim it now rather
     /// than when the local hint or the forced claim would.
@@ -419,7 +419,7 @@ impl OfflineManager {
         store: Arc<dyn Store>,
         transcode: Arc<TranscodeManager>,
         node_id: String,
-        serving: crate::serving_fence::ServingFence,
+        restart_admissions: crate::cluster::RestartAdmissions,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -427,7 +427,7 @@ impl OfflineManager {
             node_id,
             activation: tokio::sync::Mutex::new(()),
             active: tokio::sync::Mutex::new(HashMap::new()),
-            serving,
+            restart_admissions,
             metrics: Arc::new(OfflineMetrics::new()),
             wake: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -617,7 +617,7 @@ impl OfflineManager {
             self.metrics.record_claim_tick(ClaimOutcome::Gated);
             return policy.delay();
         }
-        let Some(restart_admission) = self.serving.try_restart_admission().await else {
+        let Some(restart_admission) = self.restart_admissions.try_admit().await else {
             drop(activation);
             policy.gated(now);
             self.metrics.record_claim_tick(ClaimOutcome::Gated);
@@ -1166,10 +1166,10 @@ mod tests {
             Arc::clone(&store),
             transcode,
             "test-node".into(),
-            crate::serving_fence::ServingFence::new(
+            crate::cluster::RestartAdmissions::for_fence(crate::serving_fence::ServingFence::new(
                 plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
                     .metrics_handle(),
-            ),
+            )),
         );
         Fixture {
             manager,
@@ -1213,10 +1213,10 @@ mod tests {
             Arc::clone(&fixture.store),
             transcode,
             "test-node".into(),
-            crate::serving_fence::ServingFence::new(
+            crate::cluster::RestartAdmissions::for_fence(crate::serving_fence::ServingFence::new(
                 plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
                     .metrics_handle(),
-            ),
+            )),
         );
         fixture
     }
@@ -1675,17 +1675,22 @@ mod tests {
             .expect("replace package");
 
         let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
-        for _ in 0..40 {
-            tokio::task::yield_now().await;
-            if stored_package(&fixture, "changed-source").await.state == "failed" {
-                break;
+        let failed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let package = stored_package(&fixture, "changed-source").await;
+                if package.state == "failed" {
+                    return package;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }
-        let failed = stored_package(&fixture, "changed-source").await;
+        })
+        .await;
+        task.abort();
+        let _ = task.await;
+        let failed = failed.expect("the offline worker records the changed source as failed");
         assert_eq!(failed.state, "failed");
         assert_eq!(failed.phase, "waiting_for_source");
         assert_eq!(failed.error_code.as_deref(), Some("source_unavailable"));
-        task.abort();
     }
 
     #[tokio::test(start_paused = true)]

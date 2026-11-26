@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var authError: String?
 
     @Published var hubs = Hubs()
+    /// The reader's Home order and custom rows; nil leaves Home as it was.
+    @Published var homeRows: HomeRows?
+    private var homeRowsTask: Task<Void, Never>?
     /// The reader's lists, newest first; empty hides their Home rows.
     @Published var watchlist: [Item] = []
     @Published var favorites: [Item] = []
@@ -444,6 +447,12 @@ final class AppModel: ObservableObject {
         return authenticationGeneration
     }
 
+    private func ownsHomeLoadIgnoringCancel(_ owner: HomeLoadOwner) -> Bool {
+        let credentials = Session.shared.credentials
+        return authenticationGeneration == owner.generation
+            && origin == owner.origin && credentials.origin == owner.origin && credentials.token == owner.token
+    }
+
     private func ownsHomeLoad(_ owner: HomeLoadOwner) -> Bool {
         let credentials = Session.shared.credentials
         return !Task.isCancelled && authenticationGeneration == owner.generation
@@ -463,6 +472,16 @@ final class AppModel: ObservableObject {
             // Three independent requests, one round trip. Coming Soon is
             // started with the other two rather than after them: it is never
             // required for first paint, and waiting for it delayed the shelves.
+            // home/rows runs beside them and applies when it lands; it never
+            // gates the first paint, and any failure leaves Home as it was.
+            homeRowsTask?.cancel()
+            homeRowsTask = Task { [weak self] in
+                let rows = try? await api.homeRows()
+                guard let self, !Task.isCancelled, self.ownsHomeLoadIgnoringCancel(owner) else { return }
+                // A failed refresh keeps the order already shown; only a
+                // Home that never loaded one stays on the default.
+                if let rows { self.homeRows = rows }
+            }
             async let h = api.hubs()
             async let l = api.libraries()
             async let soon = api.comingSoon()
@@ -627,6 +646,8 @@ final class AppModel: ObservableObject {
         if !transientAuthentication { settings.userId = nil }
         AuthImageCache.shared.clear()
         hubs = Hubs()
+        homeRowsTask?.cancel(); homeRowsTask = nil
+        homeRows = nil
         // A person's lists are theirs: never shown to whoever signs in next.
         watchlist = []
         favorites = []
@@ -1217,7 +1238,8 @@ final class AppModel: ObservableObject {
         selection: PrePlaySelection = .none,
         quality: PlaybackQuality = .auto,
         audioOffsetMs: Int = 0,
-        fileContext: PlaybackFileContext? = nil
+        fileContext: PlaybackFileContext? = nil,
+        speculative: Bool = false
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
@@ -1231,11 +1253,12 @@ final class AppModel: ObservableObject {
                 caps: document,
                 query: query,
                 legacyQuery: { snapshot.legacyQuery + query },
-                fileContext: fileContext
+                fileContext: fileContext,
+                speculative: speculative
             )
             return (decision, document)
         } catch {
-            noteAuthFailure(error)
+            if !speculative { noteAuthFailure(error) }
             throw error
         }
     }
@@ -1331,6 +1354,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func prepareHlsStartup(fileId: Int, body: CreateSessionRequest) async throws {
+        try await requireAPI().prepareHlsStartup(fileId: fileId, body: body)
+    }
+
     func hlsStatus(_ sessionId: String) async throws -> PlaybackSessionStatus {
         do {
             return try await requireAPI().hlsStatus(sessionId: sessionId)
@@ -1338,6 +1365,12 @@ final class AppModel: ObservableObject {
             noteAuthFailure(error)
             throw error
         }
+    }
+
+    /// Throws on failure; the caller keeps playback going and shows a small notice.
+    func retainHlsOutputOff(_ sessionId: String) async throws {
+        do { try await requireAPI().retainHlsOutputOff(sessionId: sessionId) }
+        catch { noteAuthFailure(error); throw error }
     }
 
     /// Best-effort — the stream is over either way.

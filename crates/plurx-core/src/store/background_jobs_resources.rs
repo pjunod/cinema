@@ -226,6 +226,40 @@ pub(crate) fn foreground_blocks(resource: &str, now: &str) -> String {
         super::source_leases::foreground_window(resource, now)
     )
 }
+/// Viewer-initiated preparation (a bounded read-preparation lease: title
+/// detail, predicted resume, subtitle read attestation) ranks between
+/// foreground playback and background analysis or jobs. While its lease
+/// authority is live on an overlapping source domain, analysis and jobs
+/// yield exactly as they do to foreground playback. Only live authority
+/// counts, so an unsettled or stuck preparation cannot hold analysis back.
+fn preparation_blocks(resource: &str, now: &str) -> String {
+    format!(
+        "({resource} LIKE 'source_io%' AND {})",
+        super::source_leases::preparation_window(resource, now)
+    )
+}
+/// What stops analysis and job source service: foreground playback or live
+/// viewer preparation. Every gate that admits, continues or resumes analysis
+/// or job reads uses this one rule, so a job is never resumed into a refusal.
+pub(crate) fn analysis_blocks(resource: &str, now: &str) -> String {
+    format!(
+        "({} OR {})",
+        foreground_blocks(resource, now),
+        preparation_blocks(resource, now)
+    )
+}
+/// What stops this background owner's source service: foreground playback
+/// for every owner, and live viewer preparation for analysis and jobs.
+fn background_blocks(owner: &BackgroundSourceOwner, resource: &str, now: &str) -> String {
+    if matches!(
+        owner,
+        BackgroundSourceOwner::Analysis { .. } | BackgroundSourceOwner::Job { .. }
+    ) {
+        analysis_blocks(resource, now)
+    } else {
+        foreground_blocks(resource, now)
+    }
+}
 fn token_json() -> &'static str {
     "json_object('owner',json(owner_json),'fence',fence,'lease_expires_at_ms',expires_at_ms)"
 }
@@ -326,6 +360,9 @@ pub(super) async fn release_foreground<T: QueueSql>(
     let rows=store.queue_sql("DELETE FROM source_leases WHERE lease_id=json_extract($1,'$.owner.owner_id') AND owner_kind='playback' AND owner_json=json_extract($1,'$.owner') AND fence=json_extract($1,'$.fence') RETURNING 'true' AS result_json".into(),encode(&serde_json::json!(token))?,true,true).await?;
     Ok(!rows.is_empty())
 }
+
+/// How long past its expiry a source lease still holds capacity.
+pub use super::source_leases::SOURCE_LEASE_GRACE_MS;
 
 /// Lapse after which a lease still present means the sweep itself is not
 /// running: the grace plus two one-minute scheduler ticks. The metrics
@@ -459,7 +496,7 @@ pub(super) async fn resume_background<T: QueueSql>(
     let body = encode(
         &serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"token":token,"now_ms":now_ms}),
     )?;
-    let blocked = foreground_blocks("resource.value", "json_extract($1,'$.now_ms')");
+    let blocked = analysis_blocks("resource.value", "json_extract($1,'$.now_ms')");
     // The job's own lease is paused, so it is not counted here.
     let holders = super::source_leases::source_holders(
         "resource.value",
@@ -503,10 +540,14 @@ pub(super) async fn background_may_continue<T: QueueSql>(
     background_owner_key(&owner)?;
     let identity = background_owner_identity(&owner);
     let resources = background_owner_resources(&owner);
+    let blocked = background_blocks(
+        &owner,
+        "resource.resource_key",
+        "json_extract($1,'$.now_ms')",
+    );
     let mut body =
         serde_json::to_value(owner).map_err(|error| StoreError::Task(error.to_string()))?;
     body["now_ms"] = now_ms.into();
-    let blocked = foreground_blocks("resource.resource_key", "json_extract($1,'$.now_ms')");
     let rows=store.queue_sql(format!("SELECT CASE WHEN {identity} AND NOT EXISTS(SELECT 1 FROM ({resources}) resource WHERE resource.resource_key LIKE 'source_io%' AND {blocked}) THEN 'true' ELSE 'false' END AS result_json"),encode(&body)?,false,true).await?;
     rows.first()
         .map(|row| decode(row))
@@ -2223,6 +2264,133 @@ mod source_tests {
         );
     }
     #[tokio::test]
+    async fn viewer_preparation_outranks_running_analysis_on_the_same_source() {
+        let store = fixture();
+        let lease = crate::cluster::coordination::Lease {
+            resource: "subtitle-read-attest:worker:0".into(),
+            owner_node_id: "worker".into(),
+            fence: 1,
+            revision: 1,
+            expires_at_unix_ms: 30000,
+        };
+        let analysis = BackgroundSourceOwner::Analysis {
+            request_id: "index-other-title".into(),
+            node_id: "worker".into(),
+            fence: 1,
+        };
+        {
+            let connection = store.0.lock().expect("connection");
+            connection
+                .execute(
+                    "INSERT INTO job_leases VALUES(?1,'worker',1,1,30000,1000)",
+                    [&lease.resource],
+                )
+                .expect("bounded preparation lease");
+            connection.execute("INSERT INTO analysis_requests(request_id,owner_node_id,fence,state,cancel_requested,lease_expires_ms,requested_generation,file_id,source_size,source_mtime,priority,trigger,updated_at_ms,force_rebuild,component) VALUES('index-other-title','worker',1,'running',0,30000,'generation',1,100,1,'normal','admin',1000,0,'fragment_index')",[]).expect("running analysis");
+            connection
+                .execute(
+                    "INSERT INTO analysis_source_reservations VALUES('source_io','index-other-title',1,30000)",
+                    [],
+                )
+                .expect("analysis holds source I/O");
+        }
+        assert!(
+            background_may_continue(&store, analysis.clone(), 1000)
+                .await
+                .expect("analysis authority"),
+            "analysis runs while no viewer is preparing"
+        );
+        let read = BackgroundSourceOwner::ReadAttestation {
+            lease: lease.clone(),
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+        };
+        assert!(
+            matches!(
+                register_background_typed(&store, read.clone(), 1001)
+                    .await
+                    .expect("preparation admission"),
+                BackgroundSourceRegistration::Registered(_)
+            ),
+            "a running analysis no longer refuses viewer preparation"
+        );
+        assert!(
+            !background_may_continue(&store, analysis.clone(), 1002)
+                .await
+                .expect("analysis authority"),
+            "analysis yields while the preparation lease is live"
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute("UPDATE job_leases SET expires_at_ms=1500", [])
+            .expect("preparation lease ends");
+        assert!(
+            background_may_continue(&store, analysis, 2000)
+                .await
+                .expect("analysis authority"),
+            "an expired preparation cannot hold analysis back"
+        );
+    }
+    #[tokio::test]
+    async fn a_job_paused_for_viewer_preparation_stays_paused_until_the_lease_ends() {
+        let store = fixture();
+        let job = seed_job(&store);
+        assert!(pause_background(&store, job.clone(), 1000)
+            .await
+            .expect("verified pause"));
+        let lease = crate::cluster::coordination::Lease {
+            resource: "subtitle-read-attest:worker:0".into(),
+            owner_node_id: "worker".into(),
+            fence: 1,
+            revision: 1,
+            expires_at_unix_ms: 30000,
+        };
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO job_leases VALUES(?1,'worker',1,1,30000,1000)",
+                [&lease.resource],
+            )
+            .expect("bounded preparation lease");
+        let read = BackgroundSourceOwner::ReadAttestation {
+            lease,
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+        };
+        assert!(matches!(
+            register_background_typed(&store, read, 1001)
+                .await
+                .expect("preparation admission"),
+            BackgroundSourceRegistration::Registered(_)
+        ));
+        // Resume must apply the same rule as the next byte grant, or the job
+        // flaps between resume and refusal and spends its pause budget.
+        assert!(
+            !resume_background(&store, job.clone(), 1002)
+                .await
+                .expect("resume refused"),
+            "a live preparation lease keeps the paused job paused"
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute("UPDATE job_leases SET expires_at_ms=1500", [])
+            .expect("preparation lease ends");
+        assert!(
+            resume_background(&store, job, 2000)
+                .await
+                .expect("resume admitted"),
+            "an expired preparation cannot hold the job back"
+        );
+    }
+    #[tokio::test]
     async fn read_attestation_lease_yields_to_foreground_and_close_fences_delayed_registration() {
         let store = fixture();
         let lease = crate::cluster::coordination::Lease {
@@ -3108,8 +3276,22 @@ pub(super) async fn register_background_custody<T: QueueSql>(
     };
     let now = "json_extract($1,'$.now_ms')";
     let blocked = foreground_blocks("required.resource_key", now);
-    let maintenance = super::source_leases::maintenance_reader("required.resource_key", node, now);
-    let holders = super::source_leases::source_holders("required.resource_key", node, now);
+    // Viewer preparation outranks analysis and jobs: those holders yield to
+    // it (see `preparation_blocks`) instead of refusing it. Offline packages
+    // keep their ordinary admission.
+    let outranked = if kind == "lease" {
+        " AND held.owner_kind NOT IN ('analysis','job')"
+    } else {
+        ""
+    };
+    let maintenance = super::source_leases::maintenance_reader_except(
+        "required.resource_key",
+        node,
+        now,
+        outranked,
+    );
+    let holders =
+        super::source_leases::source_holders_except("required.resource_key", node, now, outranked);
     let rows=store.queue_sql(format!(r#"INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
       SELECT json_extract($1,'$.lease_id'),'{kind}',{work},{fence},{node},json_extract($1,'$.owner'),
         (SELECT json_group_array(resource_key) FROM ({resources})),'active',{now},{now},{expiry}
@@ -3204,7 +3386,7 @@ async fn claim_background_service_inner<T: QueueSql>(
     let owner_key = background_owner_key(&owner)?;
     let identity = background_owner_identity(&owner);
     let companion = matches!(&owner, BackgroundSourceOwner::Companion { .. });
-    let blocked = foreground_blocks("resource.value", "json_extract($1,'$.now_ms')");
+    let blocked = background_blocks(&owner, "resource.value", "json_extract($1,'$.now_ms')");
     let mut body = serde_json::to_value(&owner).map_err(|e| StoreError::Task(e.to_string()))?;
     body["id"] = uuid::Uuid::new_v4().to_string().into();
     body["owner_key"] = owner_key.into();

@@ -88,8 +88,6 @@ version = 1
 "retainManualQualityFailure::manualQualityRetention.retained?.viewerEpoch == viewerActionEpoch" = 1
 "retainManualQualityFailure::seekState.generation == retained.seekGeneration" = 1
 "retryNativeSubtitleAfterReadiness::self.viewerActionEpoch == actionEpoch" = 2
-"seekWhenReady::self.seekState.generation == owner.seekGeneration" = 1
-"seekWhenReady::self.viewerActionEpoch == owner.actionEpoch" = 1
 "selectAudio::actionEpoch == viewerActionEpoch" = 1
 "selectAudio::destination.generation == seekState.generation" = 1
 "selectOriginalQuality::actionEpoch == viewerActionEpoch" = 1
@@ -120,6 +118,7 @@ version = 1
 [fences]
 seekPresentationDeadline = { function = "beginSeekPresentationMonitor", scopes = ["open", "viewerAction", "seek"] }
 seekTelemetrySupersession = { function = "beginSeekPresentationMonitor", scopes = ["seek"] }
+seekPreparationDestination = { function = "ownsSeekPreparation", scopes = ["viewerAction", "seek"] }
 blackFrameDecodeFailure = { function = "queueBlackFrameRecovery", scopes = ["lifecycle", "viewerAction"] }
 stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }

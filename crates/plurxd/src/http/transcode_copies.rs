@@ -349,8 +349,8 @@ async fn prepare(
             .map_err(|error| error.to_string())?;
     }
     let peers = state
-        .membership
-        .operations_peers()
+        .cluster
+        .operation_targets()
         .await
         .map_err(|error| error.to_string())?;
     let holders = sources
@@ -661,7 +661,7 @@ async fn pass(
 }
 
 pub(crate) async fn run(state: AppState) {
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut pacing = crate::background_jobs::IdlePoll::new();

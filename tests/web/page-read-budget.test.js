@@ -205,7 +205,7 @@ test("Activity detail response keeps the shared header indicator current", () =>
   harness.paintActivity(harness.detailActivitySummary(detail, []));
   assert.match(activity.innerHTML, /Fetching metadata/);
   assert.doesNotMatch(activity.innerHTML, /Scanning library/);
-  assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,dels,recording\)\)/);
+  assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,watching,recording\)\)/);
 
   harness.paintActivity([]);
   assert.equal(working.at(-1), false);
@@ -618,7 +618,7 @@ test("Home render generations refuse out-of-order route completions", async () =
   const phases = [];
   const api = (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
   const harness = new Function(
-    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase", "registerLayoutPresentation",
+    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase", "registerLayoutPresentation", "homeRowsArrived",
     `let PAGE_RENDER_GENERATION=0,PHOTO_SET=[],LB_AT=-1;
      ${shippedTopLevelSource("viewHome")};
      return {viewHome,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
@@ -627,12 +627,13 @@ test("Home render generations refuse out-of-order route completions", async () =
     (batch, group) => ({ libs: batch.libraries.map((row) => row.library), group, sections: batch.libraries }),
     (_, inner) => { main.innerHTML = inner; }, (_, page) => JSON.stringify(page),
     () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }), () => {},
+    (page, value) => { page.homeRows = value; return false; },
   );
 
   const current = harness.viewHome();
   assert.deepEqual(phases, [{ generation: 1, phase: "shell" }],
     "the shell phase commits before any delayed endpoint resolves");
-  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon", "/lists/watchlist?limit=20", "/lists/favorite?limit=20"]);
+  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon", "/home/rows", "/lists/watchlist?limit=20", "/lists/favorite?limit=20"]);
   requests[1].resolve({ libraries: [{ library: { id: 7 }, items: [], total: 0 }] });
   await nextTurn();
   assert.match(main.innerHTML, /\"id\":7/);
@@ -642,8 +643,9 @@ test("Home render generations refuse out-of-order route completions", async () =
   assert.match(main.innerHTML, /\"id\":9/,
     "a later region commit preserves the preview region already received");
   requests[2].reject(new Error("optional dependency unavailable"));
-  requests[3].resolve({ items: [] });
+  requests[3].resolve({ layout: [], rows: {} });
   requests[4].resolve({ items: [] });
+  requests[5].resolve({ items: [] });
   await current;
   assert.deepEqual(phases, [
     { generation: 1, phase: "shell" },
@@ -656,18 +658,20 @@ test("Home render generations refuse out-of-order route completions", async () =
   harness.navigate("#/settings");
   harness.navigate("#/");
   const latest = harness.viewHome();
-  requests.slice(10, 15).forEach((request) => request.resolve(
+  requests.slice(12, 18).forEach((request) => request.resolve(
     request.url === "/home/previews" ? { libraries: [{ library: { id: 42 }, items: [], total: 0 }] }
       : request.url === "/hubs" ? { continue_watching: [{ id: 43 }], next_up: [], recently_added: [] }
         : request.url.startsWith("/lists/") ? { items: [] }
+          : request.url === "/home/rows" ? { layout: [], rows: {} }
           : { configured: false, entries: [] },
   ));
   await latest;
   const latestHtml = main.innerHTML;
-  requests.slice(5).forEach((request) => request.resolve(
+  requests.slice(6).forEach((request) => request.resolve(
     request.url === "/home/previews" ? { libraries: [] }
       : request.url === "/hubs" ? { continue_watching: [], next_up: [], recently_added: [] }
         : request.url.startsWith("/lists/") ? { items: [] }
+          : request.url === "/home/rows" ? { layout: [], rows: {} }
           : { configured: false, entries: [] },
   ));
   await stale;
@@ -680,11 +684,12 @@ test("Home render generations refuse out-of-order route completions", async () =
     request.url === "/home/previews" ? {libraries:cohort}
       : request.url === "/hubs" ? {continue_watching:[],next_up:[],recently_added:[]}
         : request.url.startsWith("/lists/") ? {items:[]}
+          : request.url === "/home/rows" ? {layout:[],rows:{}}
           : {configured:false,entries:[]},
   ));
   await fifty;
   assert.deepEqual(requests.slice(before).map((request)=>request.url),
-    ["/hubs","/home/previews","/coming-soon","/lists/watchlist?limit=20","/lists/favorite?limit=20"],
+    ["/hubs","/home/previews","/coming-soon","/home/rows","/lists/watchlist?limit=20","/lists/favorite?limit=20"],
     "fifty libraries retain the same fixed Home budget as one library (the two list reads are per person, not per library)");
 });
 
@@ -875,11 +880,12 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: [] },
+    system: { required: ["sys"], secondary: ["https", "sourceLaunch"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
-    sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
-    integrations: { required: ["settings", "trakt"], secondary: [] },
-    developer: { required: ["settings"], secondary: ["developerReadiness", "https", "sourceLaunch"] },
+    sharing: { required: ["settings", "sharingStatus", "sharingImports", "sharingExports"], secondary: ["developerReadiness"] },
+    integrations: { required: ["settings", "trakt"], secondary: ["developerReadiness"] },
+    remotes: { required: ["settings"], secondary: ["developerReadiness"] },
+    developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -1702,15 +1708,16 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:[]},
+    system:{required:["/system"],secondary:["/system/https","/developer/source-launch"]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
-    integrations:{required:["/settings","/trakt/status"],secondary:[]},
+    integrations:{required:["/settings","/trakt/status"],secondary:["/developer/readiness"]},
+    remotes:{required:["/settings"],secondary:["/developer/readiness"]},
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
-    developer:{required:["/settings"],secondary:["/developer/readiness","/system/https","/developer/source-launch"]},
+    developer:{required:["/settings"],secondary:["/developer/readiness"]},
     standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
     sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
@@ -2042,6 +2049,73 @@ test("marker actions emit bounded playback telemetry at the shipped controls", (
   assert.match(skip, /marker_manual_skip/);
   assert.match(skip, /event:"marker_prewarm",detail:"miss"/);
   assert.match(seek, /event:"marker_seek_back",detail:"undo"/);
+});
+
+test("a healthy Cluster tab reads the roster and the status once per 15 s gate, and nothing between", async () => {
+  // The tick runs every two seconds. On a healthy cluster it spends one
+  // /cluster/nodes and one /cluster/status per fifteen-second gate — the
+  // roster read was added on the status gate (2026-11-18) so "Nodes
+  // reachable", the strip's verdict and the heartbeats follow a voter that
+  // stops answering without a Refresh. That is the whole budget: one extra
+  // cheap read per gate, no new timer, no new endpoint.
+  const PANEL = require("../../crates/plurxd/src/web/cluster-panel.js");
+  const nodes = ["lab1", "lab2", "lab3"].map((host, index) => ({
+    node_id: `node-${index + 1}`, hostname: host, raft_id: index + 1, role: "voter", is_voter: true,
+    is_leader: index === 0, reachable: true, last_seen_at: 1, apply_lag_entries: 0, maintenance: false,
+  }));
+  const cluster = { local_node_id: "node-1", availability: "high_availability", nodes };
+  const ops = { observed_at_unix_ms: 1, nodes: [], verdict: { safe_to_restart_one: true, blockers: [], warnings: [] } };
+  const reads = [];
+  const clock = { now: 1_000_000 };
+  const tick = new Function(
+    "api", "PlurxClusterPanel", "clock", "SETTINGS_DATA",
+    `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,TRAKT=null,
+       CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=clock.now;
+     const SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const SERVER={cluster_enabled:true};
+     const Date={now:()=>clock.now};
+     const performance={now:()=>clock.now};
+     const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+     const document={visibilityState:"visible",getElementById:()=>null,querySelectorAll:()=>[],querySelector:()=>null};
+     const location={hash:"#/settings/cluster"};
+     const settingsTab=()=>"cluster",settingsCurrent=()=>true,refreshLogs=async()=>{},refreshClusterLogs=async()=>{};
+     const renderSettings=()=>{},cacheTrakt=(value)=>value,paintTrakt=()=>{};
+     ${shippedSource("settingsClusterEnabled")}
+     ${shippedSource("isSettingsRoute")}
+     ${shippedSource("clusterOpsReceived")}
+     ${shippedSource("clusterOpsInterval")}
+     ${shippedSource("clusterOpsStamp")}
+     ${shippedSource("clusterOpsDue")}
+     ${shippedSource("clusterRepaintDeferred")}
+     ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
+     ${shippedSource("patchClusterReadingAge")}
+     ${shippedSource("esc")}
+     ${shippedSource("fmtAgo")}
+     ${shippedSource("fmtBytes")}
+     ${shippedSource("clenv")}
+     ${shippedSource("settingsTick")}
+     return settingsTick;`,
+  )(
+    (url) => {
+      reads.push(url);
+      return Promise.resolve(JSON.parse(JSON.stringify(url === "/cluster/nodes" ? cluster : ops)));
+    },
+    PANEL,
+    clock,
+    { cluster, clusterOps: ops },
+  );
+  // Sixty-four seconds of two-second ticks after the page loaded: at a 2 s
+  // tick the 15 s gate falls due at 16, 32, 48 and 64.
+  for (let second = 2; second <= 64; second += 2) {
+    clock.now = 1_000_000 + second * 1000;
+    await tick(1, "cluster");
+  }
+  const count = (url) => reads.filter((read) => read === url).length;
+  assert.equal(count("/cluster/status"), 4, "one fan-out per fifteen seconds");
+  assert.equal(count("/cluster/nodes"), 4, "one roster read per gate on a healthy cluster, none between");
+  assert.equal(reads.length, 8, `no other read: ${reads.join(", ")}`);
 });
 
 main().catch((error) => {

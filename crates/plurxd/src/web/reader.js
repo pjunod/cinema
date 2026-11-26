@@ -205,7 +205,16 @@
     const theme = THEMES[prefs.theme];
     const family = FONTS[prefs.font];
     const margin = prefs.margin;
-    const common = `
+    // Important rules in the first cascade layer override publisher stylesheets.
+    // Inherit through nested text so styled link labels keep the link color.
+    const darkColors = prefs.theme === "dark" ? `
+      @layer cinema-reader-dark {
+        html, body { background:${theme.background} !important; color:${theme.foreground} !important; }
+        body :not(svg, svg *, math, math *) { background-color:transparent !important; color:inherit !important; }
+        body a:any-link { color:${theme.link} !important; }
+      }
+    ` : "";
+    const common = darkColors + `
       :root { color-scheme: ${prefs.theme === "dark" ? "dark" : "light"}; background:${theme.background}; color:${theme.foreground}; }
       html, body { box-sizing:border-box; background:${theme.background} !important; color:${theme.foreground} !important; }
       body { font-family:${family} !important; font-size:${prefs.fontSize}% !important; line-height:${prefs.lineHeight} !important; }
@@ -361,11 +370,13 @@
       const doc = this.document();
       let style = doc.getElementById("cinema-reader-style");
       if (!style) {
-        style = doc.createElement("style");
+        style = doc.createElementNS("http://www.w3.org/1999/xhtml", "style");
         style.id = "cinema-reader-style";
-        (doc.head || doc.documentElement).appendChild(style);
       }
       style.textContent = readerCss(this.prefs);
+      const head = doc.head || doc.documentElement;
+      if (this.prefs.theme === "dark") head.prepend(style);
+      else head.appendChild(style);
     }
 
     currentLocator() {

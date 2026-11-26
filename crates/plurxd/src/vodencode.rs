@@ -189,7 +189,9 @@ pub(crate) fn try_admit_frozen_bundle(
 /// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
 #[derive(Default)]
 pub(crate) struct ProcessedTrialAdmission {
-    claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
+    // Written only by `with_claim` and read only by `claim`; both share this gate.
+    #[cfg(any(target_os = "linux", test))]
+    _claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
     needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
 }
 
@@ -198,9 +200,10 @@ tokio::task_local! {
 }
 
 impl ProcessedTrialAdmission {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn with_claim(claim: Arc<crate::vodserve::TrialClaim>) -> Self {
         Self {
-            claim: std::sync::Mutex::new(Some(claim)),
+            _claim: std::sync::Mutex::new(Some(claim)),
             needed: std::sync::Mutex::new(None),
         }
     }
@@ -210,12 +213,14 @@ impl ProcessedTrialAdmission {
         *self.needed.lock().expect("trial admission")
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn record_needed(&self, resources: TranscodeResourceEstimate) {
         *self.needed.lock().expect("trial admission") = Some(resources);
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn claim(&self) -> Option<Arc<crate::vodserve::TrialClaim>> {
-        self.claim.lock().expect("trial admission").clone()
+        self._claim.lock().expect("trial admission").clone()
     }
 }
 
@@ -1037,7 +1042,7 @@ impl Encoding {
     }
 
     fn priority(&self) -> Priority {
-        if self.speculative.load(std::sync::atomic::Ordering::Acquire) {
+        if self.is_speculative() {
             Priority::Speculative
         } else {
             Priority::Live

@@ -71,9 +71,9 @@ class TVNavigationTestCase: XCTestCase {
         let address = app.textFields.firstMatch
         reachForSetup(address, in: app, limit: 8)
         assertFocus(address, in: app, context: "Fixture server address")
-        remote.press(.select)
         let previous = address.value as? String ?? ""
-        address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + origin)
+        remote.press(.select)
+        typeInSystemKeyboard(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + origin, in: app)
         dismissKeyboard(in: app)
         let connect = app.buttons["Connect"]
         reachForSetup(connect, in: app, limit: 8)
@@ -86,14 +86,14 @@ class TVNavigationTestCase: XCTestCase {
         let username = app.textFields["Username"]
         reachForSetup(username, in: app, limit: 4)
         assertFocus(username, in: app, context: "Username setup")
-        remote.press(.select)
         let previous = username.value as? String ?? ""
-        username.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "fixture")
+        remote.press(.select)
+        typeInSystemKeyboard(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "fixture", in: app)
         dismissKeyboard(in: app)
         reachForSetup(app.secureTextFields["Password"], in: app, limit: 4)
         assertFocus(app.secureTextFields["Password"], in: app, context: "Password setup")
         remote.press(.select)
-        app.secureTextFields["Password"].typeText("fixture")
+        typeInSystemKeyboard("fixture", in: app)
         dismissKeyboard(in: app)
         let signIn = app.buttons["Sign in"]
         reachForSetup(signIn, in: app, limit: 4)
@@ -105,7 +105,14 @@ class TVNavigationTestCase: XCTestCase {
     /// would defeat a later user choice, so setup uses the ordinary menu.
     func establishPresentation(_ presentation: String, in app: XCUIApplication) {
         let view = app.buttons["library:view"]
-        reachForSetup(view, in: app, limit: 8)
+        let focusedResult = app.scrollViews["library-results"].descendants(matching: .any)
+            .matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        if focusedResult.exists {
+            // Library Back returns from a focused result to the toolbar.
+            remote.press(.menu)
+        } else {
+            reachForSetup(view, in: app, limit: 8)
+        }
         assertFocus(view, in: app, context: "Presentation setup opener")
         remote.press(.select)
         let desired = app.buttons["choice:" + presentation]
@@ -124,13 +131,25 @@ class TVNavigationTestCase: XCTestCase {
         assertFocus(view, in: app, context: "Presentation setup restores opener")
     }
 
-    func dismissKeyboard(in app: XCUIApplication) {
+    private func waitForSystemKeyboard(in app: XCUIApplication) {
         let keyboard = app.keyboards.firstMatch
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             keyboard.exists && keyboard.hasFocus
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
-                       "System keyboard must own input before Back")
+                       "System keyboard must own input")
+    }
+
+    func typeInSystemKeyboard(_ text: String, in app: XCUIApplication) {
+        waitForSystemKeyboard(in: app)
+        // tvOS may replace the labeled setup field with an unlabeled system
+        // input when the keyboard opens. Type through the focused application.
+        app.typeText(text)
+    }
+
+    func dismissKeyboard(in app: XCUIApplication) {
+        waitForSystemKeyboard(in: app)
+        let keyboard = app.keyboards.firstMatch
         remote.press(.menu)
         let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             !keyboard.exists
@@ -149,6 +168,7 @@ class TVNavigationTestCase: XCTestCase {
         let targetIsTab = app.tabBars.buttons.matching(
             NSPredicate(format: "identifier == %@ AND label == %@", target.identifier, target.label)
         ).firstMatch.exists
+        var lastSideways: CGRect?
         for _ in 0..<limit {
             guard target.exists else { break }
             if hasNativeFocus(target, in: app) { return }
@@ -165,19 +185,30 @@ class TVNavigationTestCase: XCTestCase {
             let sourceIsRail = current.identifier.hasPrefix("viewer-tab-")
             let destination = target.frame
             let source = current.frame
-            if !targetIsRail && sourceIsRail && destination.minX >= source.maxX {
+            // Native focus scaling can overlap the rail and content frames.
+            // Their semantic roles and center order still identify the move.
+            if !targetIsRail && sourceIsRail && destination.midX > source.midX {
                 remote.press(.right); continue
             }
-            if targetIsRail && !sourceIsRail && source.minX >= destination.maxX {
+            if targetIsRail && !sourceIsRail && source.midX > destination.midX {
                 remote.press(.left); continue
             }
+            // A sideways press that left focus where it was (the end of a
+            // row under a right-aligned header) falls back to the vertical move.
+            if let stalled = lastSideways, stalled == source,
+               destination.maxY <= source.minY || destination.minY >= source.maxY {
+                lastSideways = nil
+                remote.press(destination.midY > source.midY ? .down : .up)
+                continue
+            }
+            lastSideways = nil
             if abs(destination.midX - source.midX) < min(destination.width, source.width) / 2
                 && abs(destination.midY - source.midY) > min(destination.height, source.height) / 2 {
                 remote.press(destination.midY > source.midY ? .down : .up)
             }
             else if destination.minY >= source.maxY { remote.press(.down) }
-            else if destination.maxX <= source.minX { remote.press(.left) }
-            else if destination.minX >= source.maxX { remote.press(.right) }
+            else if destination.maxX <= source.minX { lastSideways = source; remote.press(.left) }
+            else if destination.minX >= source.maxX { lastSideways = source; remote.press(.right) }
             else if destination.maxY <= source.minY { remote.press(.up) }
             else { remote.press(destination.midX > source.midX ? .right : .left) }
         }

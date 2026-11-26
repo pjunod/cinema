@@ -11,6 +11,35 @@ use plurx_core::testfixtures;
 
 use crate::fragindex::IndexOutcome;
 
+#[tokio::test]
+async fn fitted_status_uses_only_the_attached_digest_and_does_not_change_rendition_key() {
+    let base = crate::test_tempdir().expect("refit status fixture");
+    let rendition = synthetic_rendition(base.path()).await;
+    let mut recipe = rendition.recipe.clone();
+    let identity = crate::fragindex::identity_for(&recipe.file, recipe.video);
+    let key = rendition_key(&recipe, &identity);
+    let digest = [0x31; 32];
+    recipe.dv_refit_gain = Some(crate::dv_refit_serving::PinnedRefitGain {
+        digest,
+        gain: Some(0.37),
+    });
+    assert_eq!(rendition_key(&recipe, &identity), key);
+    assert!(recipe.fitted_refit_report().is_none());
+
+    recipe.video = recipe.video.with_dolby_vision_conversion(true);
+    let identity_report = recipe.refit_report().expect("actual To81 identity copy");
+    assert_eq!(identity_report.state, "identity");
+    assert!(identity_report.reason.is_some());
+    recipe.video = recipe.video.with_dolby_vision_refit(Some(digest));
+    let report = recipe.fitted_refit_report().expect("matching attached table");
+    assert_eq!(report.state, "fitted");
+    assert_eq!(report.gain, Some(0.37));
+    assert_eq!(report.reason, None);
+
+    recipe.dv_refit_gain.as_mut().expect("fact").digest = [0x32; 32];
+    assert!(recipe.fitted_refit_report().is_none());
+}
+
 struct CleanupObservingCommitter {
     rendition: Arc<Rendition>,
     session_id: String,
@@ -363,9 +392,10 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         "node-a".to_owned(),
         cache.path().to_path_buf(),
         None,
+        None,
     );
     let (hydrated, hydrated_version, hydrated_key) = serve
-        .try_cluster_fragment_index(&file, video, None)
+        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::SelectedDetail)
         .await
         .expect("selected converting artifact hydrates")
         .expect("source is already attested");
@@ -379,8 +409,19 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
     assert_eq!(hydrated.rows, index.rows);
 
     crate::fragment_index_cluster::remove_local_blob(cache.path(), &cache_key).await;
+    let selected = serve
+        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::SelectedDetail)
+        .await
+        .expect_err("speculation never rehydrates or repairs a missing blob");
+    assert!(selected.contains("requires foreground hydration"));
+    let unrepaired = sqlite
+        .cluster_fragment_index_job(&cache_key, "node-a")
+        .await
+        .expect("read original job")
+        .expect("published job");
+    assert_eq!(unrepaired.state, "ready");
     let unavailable = serve
-        .try_cluster_fragment_index(&file, video, None)
+        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::Playback)
         .await
         .expect_err("a catalogue row without any verified holder is not playable");
     assert!(
@@ -447,12 +488,15 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -489,12 +533,12 @@ fn settings() -> VodSettings {
         block_budget: Duration::from_secs(30),
         materialize_budget: Duration::from_secs(30),
         blocked_get_cap: DEFAULT_GLOBAL_WAIT_CAP,
-        sdr_master_codecs: false,
         index_cluster_cache: false,
         hevc_unverified_copy: false,
         live_recovery: true,
         output_preparation: crate::vodserve::OutputPreparation::Off,
         output_budget_bytes: 50 << 30,
+        source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
     }
 }
 
@@ -565,7 +609,7 @@ async fn store_with_index(file: &MediaFile) -> (Arc<dyn Store>, FragmentIndex) {
 
 fn local_serve(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
     let cache = base.join("cluster-index");
-    VodServe::new_cluster(base, store, "test-local".into(), cache, None)
+    VodServe::new_cluster(base, store, "test-local".into(), cache, None, None)
 }
 
 #[tokio::test]
@@ -753,6 +797,7 @@ async fn insert_control_session(
     serve.shared.sessions.lock().await.insert(
         session_id.to_owned(),
         Session {
+            requested_audio_index: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -771,7 +816,6 @@ async fn insert_control_session(
             kind: request("vod-control", 0.0).kind,
             supersession_user: "[\"user_id\",1]".into(),
             block_budget: Duration::from_secs(8),
-            sdr_master_codecs: false,
             lifecycle: serve.shared.session_lifecycle(session_id),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(touched),
@@ -887,6 +931,7 @@ async fn insert_terminal_session(
     serve.shared.sessions.lock().await.insert(
         session_id.to_owned(),
         Session {
+            requested_audio_index: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -905,7 +950,6 @@ async fn insert_terminal_session(
             kind: request("vod-terminal", 0.0).kind,
             supersession_user: "[\"user_id\",1]".into(),
             block_budget: Duration::from_secs(8),
-            sdr_master_codecs: false,
             lifecycle: serve.shared.session_lifecycle(session_id),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
@@ -933,6 +977,7 @@ fn synthetic_index(fragments: usize) -> FragmentIndex {
         let duration = if i % 2 == 0 { 28_016 } else { 28_032 };
         rows.push(IndexRow {
             dts,
+            first_cto: None,
             duration,
             bytes: 100_000,
             video_bytes: 99_400,
@@ -972,6 +1017,8 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            audio_excluded: false,
+            dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
@@ -996,10 +1043,12 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         working_set_budget: 8 << 30,
         completed_cache_budget: 50 << 30,
         materialize_budget: Duration::from_secs(30),
+        source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         manifest: Mutex::new(Manifest::new(plan.clone())),
         output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
         private_storage: None,
             copy_preparation: StdMutex::new(None),
+            resume_preparation: StdMutex::new(None),
         preparation_epoch: AtomicU64::new(0),
         retained_offer: StdMutex::new(None),
         cancelled_preparation_epoch: AtomicU64::new(0),

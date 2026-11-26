@@ -1,4 +1,6 @@
+use super::shared::AttachmentPurpose;
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 /// One request's resolved native recipe, before any rendition is attached.
 struct PreparedVodRecipe {
@@ -168,11 +170,11 @@ impl VodServe {
             .ok_or(PreparationError::Yield("lease_lost"))?;
         let readers = rendition.readers.lock().await;
         let manifest = rendition.manifest.lock().await;
-        if !rendition
-            .source
-            .as_ref()
-            .is_some_and(|source| source.unchanged() && source.object_version() == source_version)
-        {
+        // The readers and manifest locks are held here: check in place, so they are
+        // never held while queued for a media slot.
+        if !rendition.source.as_ref().is_some_and(|source| {
+            source.object_version() == source_version && source.unchanged_in_place()
+        }) {
             return Err(PreparationError::Stop("source_changed"));
         }
         if rendition.recipe.retained_logical.as_ref() != Some(&logical) {
@@ -441,6 +443,32 @@ impl VodServe {
         ),
         String,
     > {
+        self.resolve_rendition_for_purpose(
+            prepared,
+            file,
+            settings,
+            viewer,
+            private_preparation,
+            AttachmentPurpose::Playback,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_rendition_for_purpose(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+        private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        purpose: AttachmentPurpose,
+    ) -> Result<
+        (
+            RenditionAttachment,
+            Option<retained_manifest::LogicalOutput>,
+        ),
+        String,
+    > {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let PreparedVodRecipe {
             identity,
@@ -449,7 +477,7 @@ impl VodServe {
             duration_ms,
             incoming_logical,
         } = self
-            .prepare_recipe(prepared, file, settings, viewer)
+            .prepare_recipe(prepared, file, settings, viewer, purpose)
             .await?;
         let canonical_key = rendition_key(&recipe, &identity);
         if let Some(reuse) = prepared
@@ -531,6 +559,7 @@ impl VodServe {
                             .and_then(|admission| admission.instance_allowance.clone()),
                     )
                 }),
+                purpose,
             )
             .await?
             .ok_or_else(|| {
@@ -612,9 +641,15 @@ impl VodServe {
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_recipe(&mut prepared, file, settings, viewer)
-            .await
-            .map(|prepared| prepared.recipe.encoding)
+        self.prepare_recipe(
+            &mut prepared,
+            file,
+            settings,
+            viewer,
+            AttachmentPurpose::Playback,
+        )
+        .await
+        .map(|prepared| prepared.recipe.encoding)
     }
 
     async fn prepare_recipe(
@@ -623,6 +658,7 @@ impl VodServe {
         file: &MediaFile,
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
     ) -> Result<PreparedVodRecipe, String> {
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
@@ -669,7 +705,18 @@ impl VodServe {
             "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
-        let probe_json = if prepared.encoding.is_none() {
+        let probe_json = if purpose == AttachmentPurpose::SelectedDetail {
+            let probe = self
+                .shared
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading the file probe: {error}"))?;
+            if plurx_core::transcode::hevc_census::needs_census(file, probe.as_deref()) {
+                return Err("selected copy needs an HEVC census".into());
+            }
+            Ok(probe)
+        } else if prepared.encoding.is_none() {
             crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
         } else {
             self.shared.store.get_file_probe_json(file.id).await
@@ -682,6 +729,18 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                req.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted copy rendition: {error}"))?
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -690,7 +749,7 @@ impl VodServe {
         // A published v3 copy index is preferred over the v2 cluster artifact
         // and the node-local index; without one the order below is unchanged.
         let (copy_index, own_source) = match prepared.encoding {
-            None => match self.try_copy_index_v3(file, video).await {
+            None => match self.try_copy_index_v3(file, video, purpose).await? {
                 Some(found) => (found.index, Some(found.own)),
                 None => (None, None),
             },
@@ -722,7 +781,8 @@ impl VodServe {
         } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, viewer).await
+            self.try_cluster_fragment_index(file, video, viewer, purpose)
+                .await
         } else {
             Ok(None)
         };
@@ -749,6 +809,7 @@ impl VodServe {
                 None,
                 None,
             ),
+            Err(reason) if purpose == AttachmentPurpose::SelectedDetail => return Err(reason),
             Err(reason) => {
                 // The first rollout phase is write/shadow plus prefer-v2.
                 // Per-key fallback preserves an already healthy v1 title
@@ -765,6 +826,9 @@ impl VodServe {
                 )
             }
         };
+        if purpose == AttachmentPurpose::SelectedDetail && index.is_none() {
+            return Err("selected copy needs an existing fragment index".into());
+        }
         // HEVC safety is established on original headers, before filters can
         // hide updates. Bind the proof to this node's current source object;
         // a peer's filesystem identity is not a local attestation.
@@ -801,7 +865,10 @@ impl VodServe {
                 } else {
                     "HEVC copy needs preparation; shared preparation is disabled".to_owned()
                 };
-                if reason.is_none() && cluster_cache_enabled {
+                if reason.is_none()
+                    && cluster_cache_enabled
+                    && purpose == AttachmentPurpose::Playback
+                {
                     if let Some(node) = self.shared.cluster_node_id.as_deref() {
                         preparation =
                             match crate::state::enqueue_copy_preparation_for_object_with_viewer(
@@ -925,6 +992,18 @@ impl VodServe {
             file,
             video,
         ));
+        // A split copy binds its shared video to the exact source revision its
+        // soundtracks are prepared from, so the family can prove one source.
+        let source_object_version = match source_object_version {
+            None if prepared.encoding.is_none() && !prepared.split_soundtracks.is_empty() => Some(
+                crate::fragment_index_cluster::inspect_source(file)
+                    .await
+                    .map_err(|reason| {
+                        crate::transcode::vod_refusal_error("vod_source_rescan_required", reason)
+                    })?,
+            ),
+            current => current,
+        };
         let recipe = Recipe {
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
@@ -933,12 +1012,14 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
+            audio_excluded: !prepared.split_soundtracks.is_empty() && prepared.encoding.is_none(),
             audio_delivery: prepared
                 .encoding
                 .as_ref()
                 .and_then(|encoding| encoding.options.audio.clone())
                 .or_else(|| req.audio_delivery.clone()),
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
             copy_index_init_contract,
@@ -955,7 +1036,7 @@ impl VodServe {
 
     pub(super) async fn reserve_media_group(
         media: &[Arc<Rendition>],
-        priority: Option<crate::admission::Priority>,
+        priority: crate::admission::Priority,
     ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
         let refuse = || {
             crate::transcode::vod_refusal_error(
@@ -1004,16 +1085,6 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
-        let priority = priority.unwrap_or_else(|| {
-            if encodings
-                .iter()
-                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-            {
-                crate::admission::Priority::Speculative
-            } else {
-                crate::admission::Priority::Live
-            }
-        });
         // Foreground family starts participate in the same preemption protocol
         // as ordinary encoders. Keep the waiter alive across every attempt so
         // background indexing yields and cannot reclaim its released budget.
@@ -1131,15 +1202,7 @@ impl VodServe {
             .encoding
             .as_ref()
             .is_some_and(|encoding| encoding.nonpreemptive_trial);
-        let admission_priority = if prepared
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-        {
-            crate::admission::Priority::Speculative
-        } else {
-            crate::admission::Priority::Live
-        };
+        let admission_priority = prepared.admission_priority;
         let passive_grant = if req.passive_vod {
             if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
                 return Err(crate::transcode::vod_refusal_error(
@@ -1267,6 +1330,8 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            split_soundtracks: Vec::new(),
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -1304,6 +1369,8 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            split_soundtracks: Vec::new(),
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -1325,15 +1392,55 @@ impl VodServe {
             }
             None => None,
         };
+        // A split copy attaches every soundtrack beside its one shared video.
+        let mut split_renditions = Vec::with_capacity(prepared.split_soundtracks.len());
+        for (request, soundtrack) in &prepared.split_soundtracks {
+            let attachment = self
+                .resolve_rendition(
+                    &mut VodRecipeRequest {
+                        admission_priority,
+                        root_admission: None,
+                        measured_candidate: None,
+                        retained_capture: RetainedOutputCapture::New,
+                        companion: None,
+                        request,
+                        encoding: Some(Arc::clone(soundtrack)),
+                        soundtrack: None,
+                        split_soundtracks: Vec::new(),
+                    },
+                    file,
+                    settings,
+                    fences.viewer.as_ref(),
+                    None,
+                )
+                .await?
+                .0;
+            split_renditions.push(Arc::clone(&attachment.rendition));
+            drop(attachment);
+        }
+        let split = !split_renditions.is_empty();
+        if split && (continuous || prepared.encoding.is_some()) {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "split soundtracks require an indexed copy video",
+            ));
+        }
         let (attachment, incoming_logical) = self
             .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
         drop(attachment);
+        if split && !rendition.recipe.audio_excluded {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "split soundtracks require the video-only copy",
+            ));
+        }
         let mut media = vec![Arc::clone(&rendition)];
         if let Some(audio) = audio_rendition.as_ref() {
             media.push(Arc::clone(audio));
         }
+        media.extend(split_renditions.iter().cloned());
         if let Some(companion) = companion_rendition.as_ref() {
             media.push(Arc::clone(companion));
         }
@@ -1363,7 +1470,7 @@ impl VodServe {
                     || child
                         .source
                         .as_ref()
-                        .is_some_and(|source| !source.unchanged())
+                        .is_some_and(|source| !source.unchanged_in_place())
             }) {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_source_rescan_required",
@@ -1371,7 +1478,7 @@ impl VodServe {
                 ));
             }
         }
-        let mut private_media = if continuous {
+        let mut private_media = if continuous || split {
             let deferred = |child: &Arc<Rendition>| {
                 req.continuous_media
                     .as_ref()
@@ -1380,19 +1487,24 @@ impl VodServe {
                         .as_ref()
                         .is_some_and(|companion| Arc::ptr_eq(companion, child))
             };
+            // Encoded roles reserve their credit atomically. A split copy's
+            // shared video is a copy and holds no encode credit.
+            let unreserved = |child: &Arc<Rendition>| {
+                deferred(child) || split && child.recipe.encoding.is_none()
+            };
             let admitted = media
                 .iter()
-                .filter(|child| !deferred(child))
+                .filter(|child| !unreserved(child))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut permits = Self::reserve_media_group(&admitted, Some(admission_priority))
+            let mut permits = Self::reserve_media_group(&admitted, admission_priority)
                 .await?
                 .into_iter();
             media
                 .into_iter()
                 .map(|child| {
                     let companion_bootstrap = deferred(&child);
-                    let permit = if companion_bootstrap {
+                    let permit = if unreserved(&child) {
                         None
                     } else {
                         permits.next()
@@ -1488,7 +1600,8 @@ impl VodServe {
                 &incoming_logical,
                 req,
                 file,
-                continuous,
+                // Neither family serves one complete muxed output.
+                continuous || split,
             )
             .await?
         };
@@ -1544,6 +1657,7 @@ impl VodServe {
         }
         let mut replacement = Session {
             children: Vec::new(),
+            requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: processed_reuse_scope
@@ -1580,7 +1694,6 @@ impl VodServe {
                 }),
             supersession_user: attribution.supersession_user.to_owned(),
             block_budget: settings.block_budget,
-            sdr_master_codecs: settings.sdr_master_codecs,
             lifecycle: Arc::clone(&lifecycle),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
@@ -1657,6 +1770,18 @@ impl VodServe {
             }
             _ => None,
         };
+        // Every split soundtrack's readers, in key order like the build gates.
+        let mut split_order = split_renditions.iter().collect::<Vec<_>>();
+        split_order.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        let mut split_readers = Vec::with_capacity(split_order.len());
+        for audio in split_order {
+            if !previous_rendition
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, audio))
+            {
+                split_readers.push((Arc::clone(audio), audio.readers.lock().await));
+            }
+        }
         let mut replacement_readers = rendition.readers.lock().await;
         let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
@@ -1741,13 +1866,24 @@ impl VodServe {
                     reader
                 });
             } else {
-                let readers = if companion_rendition
+                let split = split_readers
+                    .iter_mut()
+                    .find(|(audio, _)| Arc::ptr_eq(audio, &child.rendition))
+                    .map(|(_, readers)| readers);
+                let readers = if let Some(readers) = split {
+                    Some(readers)
+                } else if companion_rendition
                     .as_ref()
                     .is_some_and(|companion| Arc::ptr_eq(companion, &child.rendition))
                 {
                     companion_readers.as_mut().or(previous_readers.as_mut())
-                } else {
+                } else if audio_rendition
+                    .as_ref()
+                    .is_some_and(|audio| Arc::ptr_eq(audio, &child.rendition))
+                {
                     audio_readers.as_mut().or(previous_readers.as_mut())
+                } else {
+                    previous_readers.as_mut()
                 }
                 .expect("private media reader guard");
                 readers.insert(child.reader_id.clone(), {
@@ -1806,6 +1942,7 @@ impl VodServe {
         // would let one viewer's recipe change stall every other reader of the
         // rendition they left or the one they joined.
         drop(replacement_readers);
+        drop(split_readers);
         drop(audio_readers);
         drop(companion_readers);
         drop(previous_readers);
@@ -1824,6 +1961,9 @@ impl VodServe {
         }
         if let Some(companion) = companion_rendition.as_ref() {
             companion.kick();
+        }
+        for audio in &split_renditions {
+            audio.kick();
         }
         if outgoing_children.is_empty() && obsolete_window_flight.is_none() {
             self.emit_lifecycle(
@@ -1891,6 +2031,8 @@ pub(super) struct PreparedVodRendition {
 #[allow(dead_code)] // The owned Source actor is the only planned consumer.
 pub(crate) struct PreparedSourceVodRendition {
     prepared: PreparedVodRendition,
+    root_admission: Option<crate::vodencode::EncodePermit>,
+    processed_reuse_scope: Option<[u8; 32]>,
     request: SessionRequest,
     file: MediaFile,
     settings: VodSettings,
@@ -1938,7 +2080,7 @@ impl SourceCopyReadiness {
         &self,
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
     ) -> bool {
-        self.assignment.same_identity(assignment) && self._source.unchanged()
+        self.assignment.same_identity(assignment) && self._source.unchanged_in_place()
     }
 }
 
@@ -1970,9 +2112,14 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
-                processing_note: None,
                 session_id: session_id.into(),
-                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                // A split copy's entry point is its family master: the
+                // video-only index alone would play without any soundtrack.
+                playlist_url: if self.rendition.recipe.audio_excluded {
+                    format!("/api/v1/hls/{session_id}/master.m3u8")
+                } else {
+                    format!("/api/v1/hls/{session_id}/index.m3u8")
+                },
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -2040,12 +2187,7 @@ impl ReservedSourceVodRendition {
             if let Some(cause) = self.rendition.failure_cause() {
                 return Err(cause);
             }
-            if self
-                .rendition
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
-            {
+            if self.rendition.source.as_ref().missing_or_changed().await {
                 return Err("Source physical identity changed before readiness".into());
             }
             if let Some(verdict) = demand.expired_verdict().await {
@@ -2213,7 +2355,9 @@ impl VodServe {
             .take()
             .ok_or_else(|| "Source attachment has already committed".to_owned())?;
         reserved.session_id = Some(session_id.into());
-        let owner_key = pending.assignment.binding().principal().owner_key();
+        let principal_scope = crate::transcode::principal_supersession_scope(
+            pending.assignment.binding().principal(),
+        );
         Box::pin(self.commit_source_rendition(
             &pending.request,
             &pending.file,
@@ -2221,7 +2365,7 @@ impl VodServe {
             VodAttribution {
                 user_name: "Shared viewer",
                 item_title: "Shared playback",
-                supersession_user: &owner_key,
+                supersession_user: &principal_scope,
             },
             session_id.into(),
             VodCreateFences {
@@ -2233,6 +2377,8 @@ impl VodServe {
                 }),
             },
             pending.prepared,
+            pending.root_admission,
+            pending.processed_reuse_scope,
         ))
         .await
     }
@@ -2240,6 +2386,7 @@ impl VodServe {
     /// No codec/FFprobe/burn work is hidden in this copy-only preparation.
     /// The real reservation is held before first durable blocked activation.
     #[allow(dead_code)] // Source actor integration is deliberately incremental.
+    #[allow(clippy::too_many_arguments)] // same admitted Source inputs as the VOD preparation API
     pub(crate) async fn prepare_admitted_source_copy(
         &self,
         source: &crate::http::hls::PreparedSourcePlayback,
@@ -2248,9 +2395,10 @@ impl VodServe {
         admissions: &crate::admission::Admissions,
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
+        have_dovi: bool,
     ) -> Result<AdmittedSourceVodRendition, String> {
         Box::pin(self.prepare_admitted_source_vod(
-            source, assignment, settings, admissions, store, deadline, None,
+            source, assignment, settings, admissions, store, deadline, None, have_dovi,
         ))
         .await
     }
@@ -2265,6 +2413,28 @@ impl VodServe {
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
         encoding: Option<Arc<crate::vodencode::Encoding>>,
+        have_dovi: bool,
+    ) -> Result<AdmittedSourceVodRendition, String> {
+        self.prepare_admitted_source_vod_with_processed_root(
+            source, assignment, settings, admissions, store, deadline, encoding, have_dovi, None,
+        )
+        .await
+    }
+
+    /// A processed trial already owns physical capacity. Its exact reservation
+    /// is transferred to this Source rendition without queueing for a second.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_admitted_source_vod_with_processed_root(
+        &self,
+        source: &crate::http::hls::PreparedSourcePlayback,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+        settings: &VodSettings,
+        admissions: &crate::admission::Admissions,
+        store: &dyn plurx_core::store::Store,
+        deadline: Instant,
+        encoding: Option<Arc<crate::vodencode::Encoding>>,
+        have_dovi: bool,
+        processed_root: Option<PreparedRootAdmission>,
     ) -> Result<AdmittedSourceVodRendition, String> {
         // A burn is always encoded; its sidecar is owned by the encoding the
         // Source preparation built, never looked up here.
@@ -2277,12 +2447,26 @@ impl VodServe {
         {
             return Err("Source VOD preparation requires its exact recipe assignment".into());
         }
+        if processed_root.as_ref().is_some_and(|root| {
+            !encoding
+                .as_ref()
+                .is_some_and(|encoding| Arc::ptr_eq(encoding, &root.encoding))
+                || root.reuse_scope.is_none()
+                || (root.reused_parent.is_some() == root.instance_nonce.is_some())
+                || (root.reused_parent.is_none() && root.instance_allowance.is_none())
+        }) {
+            return Err("Source processed root differs from its admitted recipe".into());
+        }
         // One live wait, bounded by the start deadline and the foreground
         // queue wait together. Either way the waiter stays registered across
         // attempts: the copy wait holds its own guard, and an encoding keeps
         // the waiter `try_permit` registered until it is granted.
         let admission_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
-        let admission =
+        let admission = if let Some(root) = processed_root.as_ref() {
+            Ok(crate::vodencode::SourceCopyPermitRead::Admitted(
+                root.permit.clone(),
+            ))
+        } else {
             tokio::time::timeout_at(tokio::time::Instant::from_std(admission_deadline), async {
                 let Some(encoding) = &encoding else {
                     return crate::vodencode::EncodePermit::admit_source_copy(
@@ -2306,7 +2490,8 @@ impl VodServe {
                     .await;
                 }
             })
-            .await;
+            .await
+        };
         let permit = match admission {
             Ok(crate::vodencode::SourceCopyPermitRead::Admitted(permit)) => permit,
             Ok(crate::vodencode::SourceCopyPermitRead::Unavailable) => {
@@ -2319,7 +2504,14 @@ impl VodServe {
         };
         let pending = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
-            Box::pin(self.prepare_source_vod_rendition(source, assignment, settings, encoding)),
+            Box::pin(self.prepare_source_vod_rendition_with_processed_root(
+                source,
+                assignment,
+                settings,
+                encoding,
+                have_dovi,
+                processed_root,
+            )),
         )
         .await
         .map_err(|_| "Source VOD preparation timed out".to_owned())??;
@@ -2335,6 +2527,22 @@ impl VodServe {
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
         settings: &VodSettings,
         encoding: Option<Arc<crate::vodencode::Encoding>>,
+        have_dovi: bool,
+    ) -> Result<PreparedSourceVodRendition, String> {
+        self.prepare_source_vod_rendition_with_processed_root(
+            source, assignment, settings, encoding, have_dovi, None,
+        )
+        .await
+    }
+
+    async fn prepare_source_vod_rendition_with_processed_root(
+        &self,
+        source: &crate::http::hls::PreparedSourcePlayback,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+        settings: &VodSettings,
+        encoding: Option<Arc<crate::vodencode::Encoding>>,
+        have_dovi: bool,
+        root_admission: Option<PreparedRootAdmission>,
     ) -> Result<PreparedSourceVodRendition, String> {
         if !source.matches_assignment(assignment) {
             return Err("Source prepared request differs from its immutable assignment".to_owned());
@@ -2350,9 +2558,11 @@ impl VodServe {
             serving_admission: None,
             viewer: None,
         };
+        let processed_reuse_scope = root_admission.as_ref().and_then(|root| root.reuse_scope);
+        let root_permit = root_admission.as_ref().map(|root| root.permit.clone());
         let prepared = Box::pin(self.prepare_source_rendition(
             VodRecipeRequest {
-                root_admission: None,
+                root_admission,
                 request: source.request(),
                 encoding,
                 ..source.request().into()
@@ -2361,10 +2571,13 @@ impl VodServe {
             settings,
             &fences,
             Some(assignment.binding()),
+            have_dovi,
         ))
         .await?;
         Ok(PreparedSourceVodRendition {
             prepared,
+            root_admission: root_permit,
+            processed_reuse_scope,
             request: source.request().clone(),
             file,
             settings: settings.clone(),
@@ -2382,6 +2595,8 @@ impl VodServe {
         session_id: String,
         fences: VodCreateFences<'_>,
         prepared: PreparedVodRendition,
+        prepared_root_admission: Option<crate::vodencode::EncodePermit>,
+        processed_reuse_scope: Option<[u8; 32]>,
     ) -> Result<VodStart, String> {
         let PreparedVodRendition {
             attachment,
@@ -2404,10 +2619,28 @@ impl VodServe {
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
+        let root_admission = prepared_root_admission
+            .map(|permit| {
+                if !rendition.ephemeral_processing
+                    || rendition.recipe.encoding.is_none()
+                    || rendition
+                        .retained_admission
+                        .current()
+                        .is_some_and(|current| !current.same_reservation(&permit))
+                {
+                    return Err(crate::transcode::vod_refusal_error(
+                        "vod_preparation_changed",
+                        "the admitted Source processing graph changed before attachment",
+                    ));
+                }
+                Ok(rendition.retained_admission.bind(permit))
+            })
+            .transpose()?;
         let replacement = Session {
             children: Vec::new(),
-            root_admission: None,
-            processed_reuse_scope: None,
+            requested_audio_index: req.audio_index,
+            root_admission,
+            processed_reuse_scope,
             processed_reuse_seed: None,
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
@@ -2415,7 +2648,6 @@ impl VodServe {
             ),
             passive_grant: None,
             retained_output: None,
-            sdr_master_codecs: false,
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
             file: Arc::new(rendition.recipe.file.clone()),
@@ -2605,6 +2837,9 @@ impl VodServe {
         settings: &VodSettings,
         fences: &VodCreateFences<'_>,
         source_binding: Option<&plurx_core::sharing_source_sessions::SourceBindingHandle>,
+        // The node's boot-measured `dovi_rpu` (`TranscodeManager::dv_strippable`),
+        // the same value local index analysis builds its identity from.
+        have_dovi: bool,
     ) -> Result<PreparedVodRendition, String> {
         // The one funnel every create passes through: the plain entry point,
         // the cluster one that every shipped caller actually uses, and the
@@ -2614,9 +2849,9 @@ impl VodServe {
         // would be frozen at whatever the node booted with — and applying it
         // at `try_create` alone reached no production path at all.
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
-        let source_binding = source_binding
+        let binding = source_binding
             .ok_or_else(|| "Source rendition requires exact typed binding".to_owned())?;
-        let source_binding = Some(source_binding);
+        let source_binding = Some(binding);
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
             SessionKind::Copy {
@@ -2655,13 +2890,6 @@ impl VodServe {
                 "the file has no probed duration, so no immutable plan can be built",
             ));
         };
-        // Source SDR preparation already owns its actual engine capture. A
-        // generic capability probe here would create an unowned child.
-        let have_dovi = if source_binding.is_some() {
-            false
-        } else {
-            crate::ffmpeg::has_dovi_rpu().await
-        };
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
         let probe_json = if prepared.encoding.is_some() && source_binding.is_some() {
@@ -2681,6 +2909,18 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                prepared.request.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted source copy rendition: {error}"))?
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -2701,8 +2941,8 @@ impl VodServe {
         // The origin's published v3 copy index serves a Source rendition too:
         // reading it queues nothing and joins no local viewer interest.
         let copy_index = if prepared.encoding.is_none() {
-            self.try_copy_index_v3(file, video)
-                .await
+            self.try_copy_index_v3(file, video, AttachmentPurpose::Playback)
+                .await?
                 .and_then(|found| found.index)
         } else {
             None
@@ -2719,8 +2959,13 @@ impl VodServe {
         } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
-                .await
+            self.try_cluster_fragment_index(
+                file,
+                video,
+                fences.viewer.as_ref(),
+                AttachmentPurpose::Playback,
+            )
+            .await
         } else {
             Ok(None)
         };
@@ -2915,6 +3160,18 @@ impl VodServe {
                 "its parameter sets vary mid-film (the §2 ruling)",
             ));
         }
+        // A split copy binds its shared video to the exact source revision its
+        // soundtracks are prepared from, so the family can prove one source.
+        let source_object_version = match source_object_version {
+            None if prepared.encoding.is_none() && !prepared.split_soundtracks.is_empty() => Some(
+                crate::fragment_index_cluster::inspect_source(file)
+                    .await
+                    .map_err(|reason| {
+                        crate::transcode::vod_refusal_error("vod_source_rescan_required", reason)
+                    })?,
+            ),
+            current => current,
+        };
         let recipe = Recipe {
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
@@ -2928,16 +3185,93 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
+            // A Source rendition serves a remote receiver's muxed copy; it
+            // attaches no split soundtracks, so it never excludes audio.
+            audio_excluded: false,
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
             copy_index_init_contract,
             encoding: prepared.encoding,
         };
-        let key = source_binding.map_or_else(
+        let canonical_key = source_binding.map_or_else(
             || rendition_key(&recipe, &identity),
             |binding| source_rendition_key(binding, &recipe, &identity),
         );
+        if let Some(root) = prepared
+            .root_admission
+            .as_ref()
+            .filter(|root| root.reused_parent.is_some())
+        {
+            let reuse = root.reused_parent.as_ref().expect("captured root");
+            let rendition = Arc::clone(&reuse.rendition);
+            let gate = self
+                .shared
+                .rendition_build_gate(&rendition.key)
+                .lock_owned()
+                .await;
+            let cached = self.shared.renditions.lock().await;
+            if source_binding.is_none_or(|binding| {
+                canonical_key != source_rendition_key(binding, &rendition.recipe, &identity)
+            }) || !cached
+                .get(&rendition.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                || rendition.closed.load(Acquire)
+                || !rendition.ephemeral_processing
+                || !rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| Arc::ptr_eq(encoding, &root.encoding))
+                || !rendition
+                    .retained_admission
+                    .current()
+                    .is_some_and(|current| current.same_reservation(&root.permit))
+            {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_preparation_changed",
+                    "the captured Source processing graph changed",
+                ));
+            }
+            drop(cached);
+            if !root
+                .encoding
+                .engine
+                .is_current_with_executable(&root.encoding.executable)
+                .await
+            {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_preparation_changed",
+                    "the captured Source processing executable changed",
+                ));
+            }
+            let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+            let marker_destinations = stored_marker_destinations(
+                self.shared.store.as_ref(),
+                file,
+                &rendition.plan,
+                rendition.seconds_per_segment,
+            )
+            .await;
+            return Ok(PreparedVodRendition {
+                attachment: RenditionAttachment {
+                    rendition,
+                    _build_guard: gate,
+                },
+                start_entry,
+                marker_destinations,
+            });
+        }
+        let processing_instance = prepared
+            .root_admission
+            .as_ref()
+            .and_then(|root| root.instance_nonce);
+        let key = if let Some(nonce) = processing_instance {
+            processed_instance_key(&canonical_key, &binding.incarnation_id().to_string(), nonce)
+        } else {
+            canonical_key.clone()
+        };
         let attachment = self
             .shared
             .attach_rendition_with_storage(
@@ -2948,7 +3282,16 @@ impl VodServe {
                 duration_ms,
                 settings,
                 None,
-                None,
+                processing_instance.map(|_| {
+                    (
+                        canonical_key.as_str(),
+                        prepared
+                            .root_admission
+                            .as_ref()
+                            .and_then(|root| root.instance_allowance.clone()),
+                    )
+                }),
+                AttachmentPurpose::Playback,
             )
             .await?
             .ok_or_else(|| {
@@ -2989,7 +3332,7 @@ impl VodServe {
             let session = sessions.get(session_id).expect("actual Source viewer");
             assert_eq!(
                 session.supersession_user,
-                assignment.binding().principal().owner_key()
+                crate::transcode::principal_supersession_scope(assignment.binding().principal())
             );
             assert!(session
                 .live_rendition()
@@ -3083,11 +3426,14 @@ mod principal_demand_tests {
             "node-a".to_owned(),
             root.path().join("index"),
             None,
+            None,
         );
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             control_sequence: None,
             file_id,
             playback_id: "shared-demand".to_owned(),
@@ -3116,7 +3462,8 @@ mod principal_demand_tests {
             audio_claim: None,
             audio_delivery: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
+            dv_refit_digest: None,
         };
         let initial_cap = serve.shared.pool.global_cap();
         let settings = VodSettings {
@@ -3125,12 +3472,12 @@ mod principal_demand_tests {
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: initial_cap + 7,
-            sdr_master_codecs: false,
             index_cluster_cache: false,
             hevc_unverified_copy: false,
             live_recovery: true,
             output_preparation: OutputPreparation::Off,
             output_budget_bytes: 50 << 30,
+            source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
         };
         let viewer = crate::state::PlaybackViewerDemand {
             principal: PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64))
@@ -3157,7 +3504,12 @@ mod principal_demand_tests {
             "sharing playback demand requires typed source authority"
         );
         let index_refusal = serve
-            .try_cluster_fragment_index(&file, CopyVideoOptions::new(true, false), Some(&viewer))
+            .try_cluster_fragment_index(
+                &file,
+                CopyVideoOptions::new(true, false),
+                Some(&viewer),
+                AttachmentPurpose::Playback,
+            )
             .await
             .expect_err("Shared index needs source admission");
         assert_eq!(index_refusal, refusal);

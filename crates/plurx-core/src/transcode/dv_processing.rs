@@ -13,9 +13,9 @@ use crate::domain::DolbyVisionFacts;
 
 mod display_target;
 pub use display_target::{
-    display_target_max_cll, DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice,
-    DvDisplayTargetDecline, DvMasterMetadata, DvSourceMastering, DISPLAY_TARGET_BUCKETS,
-    DISPLAY_TARGET_METHOD,
+    display_target_max_cll, title_fits_display, title_peak_nits, DvDisplayManagement,
+    DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline, DvMasterMetadata,
+    DvSourceMastering, DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
 };
 
 fn encoder_token(encoder: Encoder) -> &'static str {
@@ -85,7 +85,7 @@ pub fn dv_playback_generation_digest(generation: &str) -> Result<DvDigest, DvCon
 /// Optional presentation evidence, never a request or a route admission token.
 /// Only a production-qualified receipt can construct it. Durable responses must
 /// reacquire current authority rather than deserialize this sidecar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DvEffectiveProcessingReport {
     generation: String,
     hdr10_enhanced: bool,
@@ -105,8 +105,52 @@ pub struct DvEffectiveProcessingReport {
     /// they were decoded in software.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     gpu_decoded: bool,
+    /// Public projection only: the Playback info rows that describe this
+    /// report, attached by the node answering the client. Never part of the
+    /// owner wire ([`Self::owner_wire_json`]), which older ingress nodes parse
+    /// with `deny_unknown_fields`.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    rows: Option<crate::playback::dv_provenance::DvProcessingRows>,
 }
 impl DvEffectiveProcessingReport {
+    /// The bounded owner-to-ingress relay: the report without public rows.
+    pub fn owner_wire_json(&self) -> String {
+        let mut wire = self.clone();
+        wire.rows = None;
+        serde_json::to_string(&wire).expect("bounded processing report")
+    }
+    /// Attach the rows for the client response.
+    pub fn with_rows(
+        mut self,
+        rows: Option<crate::playback::dv_provenance::DvProcessingRows>,
+    ) -> Self {
+        self.rows = rows;
+        self
+    }
+    pub fn rows(&self) -> Option<&crate::playback::dv_provenance::DvProcessingRows> {
+        self.rows.as_ref()
+    }
+    /// The delivery route these facts describe, for the rows.
+    pub fn enhancement_route(&self) -> crate::playback::enhancement::EnhancementRoute {
+        use crate::playback::enhancement::EnhancementRoute;
+        if self.sdr_processed {
+            EnhancementRoute::ProcessedSdr {
+                fel_contributed: self.fel_contributed,
+                display_target: self.display_target_nits(),
+                creative_trims: self.creative_trims(),
+            }
+        } else if self.profile81_reconstructed {
+            EnhancementRoute::ReconstructedProfile81 {
+                fel_contributed: self.fel_contributed,
+            }
+        } else {
+            EnhancementRoute::ProcessedHdr10 {
+                fel_contributed: self.fel_contributed,
+                display_target: self.display_target_nits(),
+                creative_trims: self.creative_trims(),
+            }
+        }
+    }
     /// Whether the full enhancement layer's residual is in the served picture.
     pub fn sdr_processed(&self) -> bool {
         self.sdr_processed
@@ -209,6 +253,7 @@ impl DvEffectiveProcessingReport {
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
+            rows: None,
         })
     }
 }
@@ -464,6 +509,51 @@ pub struct DvFrameGridMapping {
     pub source: DvFrameKey,
     pub output_pts: DvTimestamp,
     pub output_duration: DvDuration,
+}
+
+/// Resolve the absolute renderer frame of an already verified, display-ordered
+/// source picture window. The first source PTS proposes the ordinal and every
+/// picture must reproduce the same consecutive grid within one source tick.
+/// A caller still needs to bind the window to its actual emitted copy samples.
+pub fn dv_observed_source_grid_start(
+    source: &[DvFrameKey],
+    source_tick: (u32, u32),
+    source_origin: DvSourceOrigin,
+    grid: super::VodFrameGrid,
+) -> Result<u64, DvContractError> {
+    let first = source
+        .first()
+        .ok_or(DvContractError::Invalid("empty source picture window"))?;
+    if super::VodFrameGrid::new(grid.numerator, grid.denominator) != Some(grid) {
+        return Err(DvContractError::Invalid("source/output clock mapping"));
+    }
+    let elapsed = timestamp_difference(first.pts, source_origin.timestamp())?;
+    if elapsed.numerator < 0 {
+        return Err(DvContractError::Invalid(
+            "source picture precedes title origin",
+        ));
+    }
+    let frames = u128::from(elapsed.numerator.unsigned_abs()) * u128::from(grid.numerator);
+    let scale = u128::from(elapsed.denominator) * u128::from(grid.denominator);
+    let first_frame =
+        u64::try_from((frames + scale / 2) / scale).map_err(|_| DvContractError::Capacity)?;
+    let binding = (first.absolute_video_index, first.continuity_epoch);
+    if source
+        .iter()
+        .any(|key| (key.absolute_video_index, key.continuity_epoch) != binding)
+        || source.windows(2).any(|pair| pair[0].pts >= pair[1].pts)
+    {
+        return Err(DvContractError::DuplicateFrame);
+    }
+
+    let mut frame = first_frame;
+    for chunk in source.chunks(DV_MAX_CONTROL_FRAMES) {
+        dv_map_source_to_output_grid(chunk, source_tick, source_origin, grid, frame, chunk.len())?;
+        frame = frame
+            .checked_add(chunk.len() as u64)
+            .ok_or(DvContractError::Capacity)?;
+    }
+    Ok(first_frame)
 }
 
 /// Bind a complete coded-source trace to consecutive output frames. Container
@@ -1011,6 +1101,10 @@ pub struct DvProcessingPlan {
     display_target: Option<DvDisplayTarget>,
 }
 impl DvProcessingPlan {
+    pub fn absolute_source_video_index(&self) -> u32 {
+        self.source.absolute_video_index
+    }
+
     pub fn destination(&self) -> DvDestination {
         self.destination
     }
@@ -2858,6 +2952,7 @@ impl DvProcessingReceipt {
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
+            rows: None,
         }))
     }
 

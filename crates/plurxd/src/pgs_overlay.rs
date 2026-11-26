@@ -649,7 +649,7 @@ async fn stored_track_into_stage(
     sup: &Path,
 ) -> bool {
     let hydrate = async {
-        if !stored.cluster_enabled().await {
+        if !stored.cluster_sources_enabled().await {
             return false;
         }
         crate::subtitle_source::hydrate_from_peers(

@@ -382,7 +382,7 @@ async fn catalog_node() -> (crate::state::AppState, i64) {
         Default::default(),
         Arc::new(crate::logbuf::LogBuffer::new(64)),
     );
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     (state, file)
 }
 
@@ -416,6 +416,7 @@ fn soon() -> tokio::time::Instant {
 /// at the plan's binding (what it did before D3d) is refuted as stale.
 #[tokio::test]
 async fn the_create_catalog_answers_from_the_create_plan_and_reads_nothing() {
+    crate::http::hls::tests::prepare_catalog_test_encoder().await;
     let (state, file) = catalog_node().await;
     let plan = ingress_plan(&state.applied, file)
         .await

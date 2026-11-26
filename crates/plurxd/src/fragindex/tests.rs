@@ -2,6 +2,313 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+/// lab5, 2026-11-25: a host OOM killed file 206's metadata probe and the
+/// kill was recorded as a terminal refusal of that delivery route. A probe
+/// killed from outside is transient, as the index pipe already was; a probe
+/// that refuses the source is not.
+#[test]
+fn an_externally_killed_probe_is_a_transient_failure() {
+    use crate::ffmpeg::{HeldPacketProbeError, HeldProbeError};
+
+    let killed = metadata_probe_failure(HeldProbeError::Interrupted(
+        "index metadata probe exited signal: 9 (SIGKILL)".into(),
+    ));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "index metadata probe exited signal: 9 (SIGKILL)"
+    );
+    let refused = metadata_probe_failure(HeldProbeError::Failed(
+        "index metadata probe exited exit status: 1".into(),
+    ));
+    assert_eq!(refused.code, IndexFailureCode::IndexProcessFailed);
+    assert!(!refused.transient_allowlisted);
+    let timeout = metadata_probe_failure(HeldProbeError::Timeout(
+        "index metadata probe timed out after 30 seconds".into(),
+    ));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+
+    let packet = packet_probe_failure(HeldPacketProbeError::Interrupted("killed".into()), 0, 0);
+    assert_eq!(packet.code, IndexFailureCode::IndexProcessFailed);
+    assert!(packet.transient_allowlisted);
+    let packet = packet_probe_failure(HeldPacketProbeError::Process("refused".into()), 0, 0);
+    assert!(!packet.transient_allowlisted);
+}
+
+/// The F+ first-packet identity recorded every failure, its own deadline and
+/// an outside kill included, as a terminal `index_completion_unverified`.
+/// Only the media's answer is terminal now.
+#[test]
+fn an_interrupted_packet_identity_is_a_transient_failure() {
+    use crate::ffmpeg::HeldProbeError;
+
+    let killed = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Interrupted(
+        "F+ first packet identity exited signal: 9 (SIGKILL)".into(),
+    )));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)"
+    );
+    let timeout = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Timeout(
+        "F+ first packet identity timed out after 30 seconds".into(),
+    )));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+    let source = packet_identity_failure(PacketIdentityError::Source("Input/output error".into()));
+    assert_eq!(source.code, IndexFailureCode::IndexSourceIo);
+    assert!(source.transient_allowlisted);
+
+    let refused = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Failed(
+        "F+ first packet identity exited exit status: 1".into(),
+    )));
+    assert_eq!(refused.code, IndexFailureCode::IndexCompletionUnverified);
+    assert!(!refused.transient_allowlisted);
+    let unverified = packet_identity_failure(PacketIdentityError::from(
+        filtered_packet_hash(b"", 0, (1, 1000)).expect_err("no hash"),
+    ));
+    assert_eq!(unverified.code, IndexFailureCode::IndexCompletionUnverified);
+    assert!(!unverified.transient_allowlisted);
+    assert_eq!(
+        unverified.reason,
+        "F+ source packet identity: F+ packet hash has no time base"
+    );
+
+    // After a failed bridge read, the child's refusal is the read's failure.
+    for error in [
+        PacketIdentityError::Probe(HeldProbeError::Failed("exited exit status: 1".into())),
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+    ] {
+        let failure = packet_identity_failure(read_failure_is_the_source(error, true));
+        assert_eq!(failure.code, IndexFailureCode::IndexSourceIo);
+        assert!(failure.transient_allowlisted);
+    }
+    let clean = read_failure_is_the_source(
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+        false,
+    );
+    assert!(matches!(clean, PacketIdentityError::Unverified(_)));
+    let timeout = read_failure_is_the_source(
+        PacketIdentityError::Probe(HeldProbeError::Timeout("timed out".into())),
+        true,
+    );
+    assert!(matches!(
+        timeout,
+        PacketIdentityError::Probe(HeldProbeError::Timeout(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_external_index_process_kill_is_a_bounded_transient_failure() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    let killed = index_process_exit_failure(ExitStatus::from_raw(libc::SIGKILL), 1089);
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert!(!index_process_exit_failure(ExitStatus::from_raw(256), 0).transient_allowlisted);
+    assert!(
+        !index_process_exit_failure(ExitStatus::from_raw(libc::SIGSEGV), 0).transient_allowlisted
+    );
+}
+
+/// A source with a nonzero start and reordered pictures exercises both parts
+/// of the fitted clock: the source DTS origin removed by the copy muxer and
+/// each sample's signed composition offset. This compares the real ffprobe
+/// packet census with the real ffmpeg index pipe, not a synthetic timeline.
+#[cfg(unix)]
+#[tokio::test]
+async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
+    use plurx_core::segplan::ranges::{normalize_to_index_ticks, SourceTimestamp};
+    use plurx_core::transcode::dv_refit_serve::SourceClock;
+    use std::process::Command;
+
+    testfixtures::require_ffmpeg();
+    let temp = crate::test_tempdir().expect("clock fixture directory");
+    let source = temp.path().join("nonzero-bframes.mkv");
+    let mut encode = Command::new(testfixtures::ffmpeg());
+    encode.args(["-y", "-v", "error", "-f", "lavfi", "-i",
+        "testsrc2=size=160x96:rate=24:duration=3", "-vf", "setpts=PTS+7/TB",
+        "-c:v", "libx265", "-preset", "ultrafast", "-x265-params",
+        "keyint=24:min-keyint=24:open-gop=0:bframes=3:repeat-headers=1:scenecut=0:log-level=none:pools=1",
+        "-an"])
+        .arg(&source);
+    testfixtures::run(&mut encode);
+    let probe = Command::new(testfixtures::ffprobe())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_packets",
+            "-show_streams",
+            "-show_entries",
+            "packet=dts,pts:stream=time_base",
+            "-of",
+            "json",
+        ])
+        .arg(&source)
+        .output()
+        .expect("ffprobe packet census");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("ffprobe JSON");
+    let packets = document["packets"].as_array().expect("video packets");
+    let (num, den) = parse_time_base(
+        document["streams"][0]["time_base"]
+            .as_str()
+            .expect("source time base"),
+    )
+    .expect("rational time base");
+    let (num, den) = (
+        u32::try_from(num).expect("num"),
+        u32::try_from(den).expect("den"),
+    );
+    let packet_time = |packet: &serde_json::Value, key: &str| -> i64 {
+        packet[key].as_i64().expect("integer packet timestamp")
+    };
+    let first_pts = packet_time(&packets[0], "pts");
+    assert!(first_pts > 0, "fixture must retain its nonzero start");
+    assert!(
+        packets.iter().any(|packet| packet["dts"]
+            .as_i64()
+            .is_some_and(|dts| packet_time(packet, "pts") != dts)),
+        "fixture must contain reordered B frames"
+    );
+
+    // Matroska may omit the reordered head's DTS. Bind the measured first
+    // PTS to the exact same independently hashed packet before resolving it
+    // from the muxer's signed composition offset, as the production pass does.
+    let mut identity_probe = Command::new(testfixtures::ffmpeg());
+    identity_probe.args(filtered_packet_hash_args(
+        source.to_str().expect("fixture path"),
+        0,
+        false,
+    ));
+    let identity = testfixtures::run(&mut identity_probe);
+    let origin_probe = RefitPacketOrigin {
+        first_dts: packets[0]["dts"].as_i64(),
+        first_pts,
+        time_base_num: num,
+        time_base_den: den,
+        first_sample_sha256: Some(
+            filtered_packet_hash(&identity, first_pts, (num, den))
+                .expect("independent first packet"),
+        ),
+    };
+
+    let mut command = Command::new(testfixtures::ffmpeg());
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&source)
+        .args([
+            "-map_chapters",
+            "-1",
+            "-map",
+            "0:v:0?",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-bsf:v",
+            "filter_units=remove_types=32-34",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+    let output = testfixtures::run(&mut command);
+    let mut reader = FragmentReader::new();
+    reader.push(&output);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("index init") else {
+        panic!("index init missing");
+    };
+    let video = init.video().expect("video track");
+    let mut observed = Vec::new();
+    let mut first_fragment = None;
+    while let Some(unit) = reader.next_unit().expect("index fragment") {
+        if let Unit::Fragment(fragment) = unit {
+            first_fragment.get_or_insert_with(|| fragment.clone());
+            let track = fragment.track(video.id).expect("video fragment");
+            let mut dts = track.base_decode_time;
+            for sample in track.samples() {
+                observed.push((dts, sample.cto));
+                dts += u64::from(sample.duration);
+            }
+        }
+    }
+    assert_eq!(
+        observed.len(),
+        packets.len(),
+        "copy must preserve every video packet"
+    );
+    let output_origin = observed[0].0;
+    let resolved = origin_probe
+        .resolve(&init, &first_fragment.expect("first copy fragment"))
+        .expect("exact matched packet clock");
+    let first_dts = resolved.first_dts;
+    assert!(
+        first_dts > 0,
+        "the derived decode origin must retain the nonzero start"
+    );
+    let origin = SourceTimestamp {
+        dts: first_dts,
+        time_base_num: num,
+        time_base_den: den,
+    };
+    let clock = SourceClock {
+        track_timescale: video.timescale,
+        track_ticks: i128::from(output_origin),
+        source_pts: first_dts,
+        source_time_base: (num, den),
+    };
+    let mut known_decode_times = 0;
+    for ((dts, cto), packet) in observed.iter().zip(packets) {
+        let source_pts = packet_time(packet, "pts");
+        if let Some(source_dts) = packet["dts"].as_i64() {
+            let indexed_dts = normalize_to_index_ticks(
+                SourceTimestamp {
+                    dts: source_dts,
+                    time_base_num: num,
+                    time_base_den: den,
+                },
+                origin,
+                output_origin,
+                video.timescale,
+            )
+            .expect("exact source DTS normalization");
+            assert_eq!(
+                *dts, indexed_dts,
+                "known source DTS and copy fragment diverged"
+            );
+            known_decode_times += 1;
+        }
+        assert_eq!(
+            clock.source_pts(i128::from(*dts) + i128::from(*cto)),
+            Ok(source_pts),
+            "source packet PTS and copy composition offset diverged"
+        );
+    }
+    assert!(
+        known_decode_times > 0,
+        "later known DTS values independently check the resolved head"
+    );
+}
+
 #[tokio::test]
 async fn changing_content_light_keeps_indexed_copy_and_scans_nonkey_samples() {
     let input = index_pipe_bytes("closed-gop");
@@ -149,6 +456,14 @@ fn dvh1_completeness_revision_retries_only_affected_copy_indexes() {
         let video =
             transcode::CopyVideoOptions::new(true, preserve).with_parameter_set_retention(retain);
         let mut old_recipe = transcode::copy_video_args(&file, video);
+        // Every ordinary copy identity carries its landing-clock revision;
+        // only the dvh1 completeness component may differ here.
+        if video.dolby_vision_refit().is_none() {
+            old_recipe.push(format!(
+                "--plurx-copy-landing-clock={}",
+                plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+            ));
+        }
         old_recipe.push(format!(
             "--plurx-hdr10-index={}",
             fmp4::HDR10_INDEX_METADATA_REVISION
@@ -1047,7 +1362,7 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     }
 }
 
-fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
+pub(super) fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
     MediaFile {
         downloaded_subtitles: Vec::new(),
         id: 77,
@@ -2052,8 +2367,8 @@ mod dv_title_companion {
             "argv carries no scan"
         );
         let spawn = source
-            .find("Some(ride) => ride.spawn(source, budget)")
-            .expect("spawn");
+            .find(".spawn(source, runtime_cache, budget)")
+            .expect("spawn with the runtime cache");
         let finish = source
             .find("let pending = ride.finish(file.id, task, lead_built, wait).await;")
             .expect("finish");
@@ -2104,7 +2419,7 @@ exec /bin/sleep 60
         let source = std::fs::File::open(source_path).expect("source descriptor");
         let (_store, _job, active) = crate::background_jobs::tests::active().await;
         let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
-            ride.spawn(&source, Duration::from_secs(60))
+            ride.spawn(&source, directory.path(), Duration::from_secs(60))
                 .expect("owned companion")
         })
         .await;
@@ -2244,4 +2559,61 @@ exec /bin/sleep 60
             pending.stats.decoded_frames
         );
     }
+}
+
+#[test]
+fn source_index_accepts_a_dolby_vision_converting_pass() {
+    let mut profile7 = hevc_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+    );
+    profile7.dolby_vision.profile = Some(7);
+    profile7.dolby_vision.level = Some(6);
+    profile7.dolby_vision.bl_compat_id = Some(6);
+    profile7.dolby_vision.el_present = Some(true);
+    profile7.dolby_vision.rpu_present = Some(true);
+    let mut profile8 = hevc_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+    );
+    profile8.dolby_vision.profile = Some(8);
+    profile8.dolby_vision.bl_compat_id = Some(1);
+    for file in [&profile7, &profile8] {
+        assert!(
+            source_index_admits(file),
+            "a Source may index a Dolby Vision copy: {:?}",
+            file.hdr_format
+        );
+    }
+    // The Source's own pass over its held descriptor: the converting
+    // identity indexes the rewritten bytes and declares the 8.1 record.
+    let converting =
+        transcode::CopyVideoOptions::new(true, true).with_dolby_vision_conversion(true);
+    let pass = index_pass(
+        &profile7,
+        converting,
+        Some("/dev/fd/3"),
+        VideoCompletionExpectation {
+            stream_index: 0,
+            duration_num: 60,
+            duration_den: 1,
+            provenance: CompletionProvenance::StreamSeconds,
+            source_object_version: "test".to_owned(),
+        },
+        None,
+    )
+    .expect("a converting Source pass");
+    assert!(pass.args.iter().any(|arg| arg == "/dev/fd/3"));
+    let [output] = pass.outputs.as_slice() else {
+        panic!("one converting output");
+    };
+    let DolbyVisionPass::Rewrite(record) = &output.dolby_vision else {
+        panic!("a converting pass rewrites the record");
+    };
+    assert_eq!(record.profile, 8);
+    assert_eq!(
+        identity_for(&profile7, converting),
+        identity_for(&profile7, output.video),
+        "the Source pass indexes the identity its copy is cut with"
+    );
 }

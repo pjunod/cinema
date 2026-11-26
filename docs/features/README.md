@@ -7,12 +7,15 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [JOB-SERVICE.md](JOB-SERVICE.md) | How playback dependencies and library jobs share a durable scheduler in standalone and Raft deployments. | open |
 | [CURATOR-LOGIN-STATUS.md](CURATOR-LOGIN-STATUS.md) | Optional explicit household login into independent Curator accounts; authority, setup, migration, review and qualification. | open |
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
 | [PIPELINE-CONTRACT.md](PIPELINE-CONTRACT.md) | What plurx promises Curator at the scan seam, and what it gets back. | built |
 | [PIPELINE-CONTRACT-REMOVED-PATHS.md](PIPELINE-CONTRACT-REMOVED-PATHS.md) | The scan request's removed-paths and probe-only detail: states, retained codes, retry rules, unreadable roots, mixed clusters. | built |
 | [PIPELINE-CONTRACT-OFFLOAD.md](PIPELINE-CONTRACT-OFFLOAD.md) | Offload and Get it back: `offloaded_paths`, kept titles, placement by ids, the reacquire webhook and its states. | built |
 | [PIPELINE-CONTRACT-RUNNER-CURATOR.md](PIPELINE-CONTRACT-RUNNER-CURATOR.md) | Pipeline contract v2 §2–§3, verbatim: Runner's terminal fact and Curator's reducer, which plurx does not implement. | open |
+| [CUSTOM-TAGS-PLAN.md](CUSTOM-TAGS-PLAN.md) | Custom household/private tags on titles, tag filter and search, suggestions review queue, grantable `manage_tags`, and configurable tag-driven Home rows; data model, API, permissions and build order. | open |
+| [CUSTOM-TAGS-CLIENTS.md](CUSTOM-TAGS-CLIENTS.md) | What the Apple and Android clients draw for custom tags: Home order and custom rows from `/home/rows`, and the detail-screen Tags checklist. | open |
 | [SUBTITLE-COMPLETION-STATUS.md](SUBTITLE-COMPLETION-STATUS.md) | Live ownership, implementation and acceptance ledger for completing progressive generation, translation, native delivery and existing-file translation. | built |
 | [DESKTOP-TRAY-IMPLEMENTATION.md](DESKTOP-TRAY-IMPLEMENTATION.md) | macOS/Linux desktop server controls, separate startup policies, signed GitHub release upgrades, task ownership and native/package acceptance. | open |
 | [DESKTOP-TRAY-QUALIFICATION.md](DESKTOP-TRAY-QUALIFICATION.md) | Complete tray cohort, retained focused evidence, native qualification, review and promotion gaps. | open |

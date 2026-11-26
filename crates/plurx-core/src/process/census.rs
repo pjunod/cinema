@@ -566,6 +566,20 @@ fn every_production_spawn_goes_through_the_launcher() {
     );
 }
 
+/// Admit only the reviewed file-size resource hook, never an entire policy
+/// module's future hooks. Matching the complete hook keeps added syscalls,
+/// different resources and extra hooks subject to the ordinary census.
+fn is_audited_file_size_hook(compact: &str) -> bool {
+    const HOOK: &str = concat!(
+        "command.pre_exec(move||{",
+        "letbounds=libc::rlimit{rlim_cur:limit,rlim_max:limit,};",
+        "iflibc::setrlimit(libc::RLIMIT_FSIZE,&bounds)==0{Ok(())}",
+        "else{Err(io::Error::last_os_error())}",
+        "});",
+    );
+    compact.matches(".pre_exec(").count() == 1 && compact.matches(HOOK).count() == 1
+}
+
 /// Descriptor manifests are meaningful only while the audited builder owns
 /// every installation and file-stdio boundary. The remaining custom hooks
 /// alter process policy, or run the decoder's prepared plan before custom exec.
@@ -577,6 +591,7 @@ fn every_production_descriptor_install_uses_the_single_builder() {
     let builder = crates.join("plurxd/src/producer_spawn.rs");
     let installer = crates.join("plurx-core/src/process/source_lifetime/descriptors.rs");
     let empty_stdio = crates.join("plurx-core/src/process/source_lifetime.rs");
+    let file_size_policy = crates.join("plurx-core/src/process/child_limits.rs");
     let policy_hooks = [
         crates.join("plurx-core/src/process/priority.rs"),
         crates.join("plurxd/src/decode_facts.rs"),
@@ -587,6 +602,7 @@ fn every_production_descriptor_install_uses_the_single_builder() {
     let mut violations = Vec::new();
     let mut builder_seen = false;
     let mut installer_seen = false;
+    let mut file_size_policy_seen = false;
     for (file, production) in daemon_production_sources() {
         builder_seen |= file == builder;
         installer_seen |= file == installer;
@@ -618,7 +634,14 @@ fn every_production_descriptor_install_uses_the_single_builder() {
                 ));
             }
         }
-        if compact.contains(".pre_exec(") && file != builder && !policy_hooks.contains(&file) {
+        let audited_file_size_hook =
+            file == file_size_policy && is_audited_file_size_hook(&compact);
+        file_size_policy_seen |= audited_file_size_hook;
+        if compact.contains(".pre_exec(")
+            && file != builder
+            && !policy_hooks.contains(&file)
+            && !audited_file_size_hook
+        {
             violations.push(format!("{}: unaudited pre_exec hook", file.display()));
         }
         // A policy/security hook can close or mark extra descriptors CLOEXEC;
@@ -631,14 +654,30 @@ fn every_production_descriptor_install_uses_the_single_builder() {
         }
     }
     assert!(
-        builder_seen && installer_seen,
-        "descriptor census missed its construction or installation boundary"
+        builder_seen && installer_seen && file_size_policy_seen,
+        "descriptor census missed its construction, installation or audited file-size policy boundary"
     );
     assert!(
         violations.is_empty(),
         "all descriptor and file stdio installations must use producer_spawn::Descriptors:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn file_size_policy_hook_rejects_extra_hooks_and_other_resources() {
+    let source = blank_non_code(include_str!("child_limits.rs"));
+    let compact: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(is_audited_file_size_hook(&compact));
+    assert!(!is_audited_file_size_hook(&format!(
+        "{compact}command.pre_exec(||Ok(()));"
+    )));
+    assert!(!is_audited_file_size_hook(
+        &compact.replace("libc::RLIMIT_FSIZE", "libc::RLIMIT_NOFILE")
+    ));
+    assert!(!is_audited_file_size_hook(
+        &compact.replace("letbounds=", "libc::dup2(1,2);letbounds=")
+    ));
 }
 
 #[test]

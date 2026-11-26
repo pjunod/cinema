@@ -350,7 +350,7 @@ async function libraryView(o){
   if(LIB_LOAD!==gen||location.hash!==route||!document.getElementById("libbody"))return;
   // Keep controls outside layout-owned grid wrappers: catalog puts #libbody
   // beside the A–Z rail, so inserting before it would steal a poster column.
-  document.querySelector("#main .libbar").insertAdjacentHTML("afterend",libraryBrowseTools(viewLibs)+`<nav id="library-group-index" aria-label="Jump to group" hidden></nav><div id="library-group-detail"></div><div id="library-load-error" role="status"></div>`);
+  document.querySelector("#main .libbar").insertAdjacentHTML("afterend",libraryBrowseTools(viewLibs)+curationLibraryTools()+`<nav id="library-group-index" aria-label="Jump to group" hidden></nav><div id="library-group-detail"></div><div id="library-load-error" role="status"></div>`);
 
   let all=[], total=0,failed=false;
   // How many cards the grid in #libbody currently holds, and 0 whenever what is
@@ -370,6 +370,7 @@ async function libraryView(o){
     if(LIB_FILTER!=="all") items=items.filter(it=>matchWatch(it,LIB_FILTER));
     if(LIB_SCOPE)items=items.filter(it=>String(it.library_id)===LIB_SCOPE);
     if(LIB_FIND.trim())items=items.filter(it=>(it.title||"").toLocaleLowerCase().includes(LIB_FIND.trim().toLocaleLowerCase()));
+    items=libraryTagFilter(items);
     const groups=libraryGroups(items,sort,now);
     const rows=LIB_PRESENTATION==="rows"&&!LIB_GROUP;
     if(LIB_GROUP)items=groups.find(g=>g.key===LIB_GROUP)?.items||[];
@@ -400,7 +401,7 @@ async function libraryView(o){
     // only the cards are spared. Keeping the existing nodes is the point: an
     // innerHTML rebuild drops the reader's focus and every decoded poster.
     const extendable=!rows&&!LIB_GROUP&&!o.resort && sort!=="resolution" && LIB_FILTER==="all"
-      && !LIB_SCOPE && !LIB_FIND.trim() && LIB_PER==="all";
+      && !LIB_SCOPE && !LIB_FIND.trim() && !libraryTagFilterActive() && LIB_PER==="all";
     const grown=extendable && painted>0 && page.length>=painted
       ? body.querySelector(".grid") : null;
     if(rows){
@@ -423,6 +424,7 @@ async function libraryView(o){
     if(count) count.innerHTML=failed?`Incomplete results · ${all.length} items loaded`:layoutRegion("library","count",m);
     if(!rows)tagAlpha(page, sort);
     else libraryUpdateIndex();
+    curationRepaintPicks();
     const error=document.getElementById("library-load-error");
     if(error)error.innerHTML=failed?`<p>Some items could not be loaded. The groups and counts are incomplete. <button class="ghost sm" onclick="${o.reload}">Retry</button></p>`:"";
   };

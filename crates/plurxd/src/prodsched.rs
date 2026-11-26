@@ -566,6 +566,7 @@ mod tests {
             let duration = if i % 2 == 0 { 28_016 } else { 28_032 };
             rows.push(IndexRow {
                 dts,
+                first_cto: None,
                 duration,
                 bytes: 100_000,
                 video_bytes: 99_400,

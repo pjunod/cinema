@@ -27,14 +27,18 @@ pub(crate) mod subtitle_fixture;
 pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use metrics::claim_skipped;
 use metrics::Event;
-pub(crate) use metrics::{accepted_claims, claim_skipped, prometheus};
+pub(crate) use metrics::{accepted_claims, prometheus};
 
 #[path = "background_jobs/analysis_reconcile.rs"]
 pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
-pub(crate) use source::{budgeted, source_budget, SourcePacingClock, SourceReadBudget};
+pub(crate) use source::{
+    budgeted, settle_read_lease, source_budget, SourcePacingClock, SourceReadBudget,
+};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
@@ -269,6 +273,21 @@ struct Inner {
     source_custody:
         Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
     source_budget: Arc<SourceReadBudget>,
+}
+
+/// What a fenced F+ publication did.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RefitPublication {
+    /// The table is the file's current one and the job succeeded.
+    Published,
+    /// The attempt no longer owns the title (cancelled, superseded, lease
+    /// lost): nothing was written and nothing is left to settle.
+    Fenced,
+    /// The rows fail their own check (a non-finite number, a table over the
+    /// one-write bound, rows that disagree with their digest): the same rows
+    /// fail again, so the attempt fails.
+    Invalid(String),
 }
 
 #[derive(Clone)]
@@ -728,7 +747,8 @@ impl JobFence {
         let Some(token) = self.source_token() else {
             return Ok(false);
         };
-        self.0
+        let permitted = self
+            .0
             .store
             .background_source_may_continue(
                 plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
@@ -736,7 +756,12 @@ impl JobFence {
                 },
                 unix_ms()?,
             )
-            .await
+            .await;
+        #[cfg(test)]
+        if matches!(&permitted, Ok(false)) {
+            faults::worker::at(faults::worker::Point::SourcePermissionDenied).await;
+        }
+        permitted
     }
 
     /// Caller must hold a verified whole-group stop acknowledgement.
@@ -1590,7 +1615,7 @@ impl JobFence {
         Ok(published)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn publish_dv_title(
         &self,
         output: plurx_core::store::dv_title_jobs::TitleOutput,
@@ -1633,6 +1658,62 @@ impl JobFence {
             state.token = None;
         }
         Ok(published)
+    }
+
+    /// Publish the title's whole curve table under the attempt's
+    /// then-current token, in one replicated write (decision A). A store
+    /// error is retried with backoff while the lease still holds (decision
+    /// I); rows that fail their own check are deterministic and are not
+    /// sent. The claim lock is released between tries so the heartbeat can
+    /// renew the lease.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn publish_dv_refit(
+        &self,
+        title: plurx_core::store::dv_refit_jobs::RefitTitle,
+        scenes: Vec<plurx_core::store::dv_refit_jobs::RefitSceneRow>,
+    ) -> Result<RefitPublication, StoreError> {
+        use plurx_core::store::dv_refit_jobs::PublishRefitJob;
+        let mut delay = std::time::Duration::from_millis(500);
+        loop {
+            let mut state = self.0.state.lock().await;
+            if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(RefitPublication::Fenced);
+            }
+            let Some(token) = state.token.clone() else {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(RefitPublication::Fenced);
+            };
+            let request = PublishRefitJob {
+                token,
+                title: title.clone(),
+                scenes: scenes.clone(),
+                now_ms: unix_ms()?,
+            };
+            if let Err(reason) = request.check() {
+                return Ok(RefitPublication::Invalid(reason));
+            }
+            match self.0.store.publish_dv_refit_job(request).await {
+                Ok(
+                    JobPublishOutcome::Published { .. }
+                    | JobPublishOutcome::AlreadyPublished { .. },
+                ) => {
+                    metrics::event(self.0.kind, Event::Published);
+                    state.token = None;
+                    return Ok(RefitPublication::Published);
+                }
+                Ok(_) => {
+                    metrics::event(self.0.kind, Event::FencedPublication);
+                    return Ok(RefitPublication::Fenced);
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "F+ publication retried while the claim holds");
+                }
+            }
+            drop(state);
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_secs(8));
+        }
     }
 
     pub(crate) async fn publish_probe(
@@ -3619,11 +3700,14 @@ pub(crate) mod tests {
             )
             .await
             .expect("stale fence"));
+        // `settle` samples its own request time after this fixture builds the
+        // yield. Keep the due time safely after that second wall-clock read.
         assert!(fence
             .settle(JobSettlement::Yield {
                 error_code: Some("foreground_preempted".into()),
                 checkpoint: Some(serde_json::json!({"staging_node_id":"node-a"})),
-                not_before_ms: unix_ms().expect("clock")
+                // Settlement samples its own clock after taking the fence lock.
+                not_before_ms: token.lease_expires_ms,
             })
             .await
             .expect("yield"));

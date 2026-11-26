@@ -25,8 +25,8 @@ fn redemption(token: &crate::cluster::membership::IssuedJoinToken) -> RedeemJoin
         raft_id: token.raft_id,
         node_id: uuid::Uuid::new_v4().to_string(),
         hostname: "prospective-peer".into(),
-        raft_address: format!("127.0.0.1:{}", free_test_port()),
-        api_address: format!("127.0.0.1:{}", free_test_port()),
+        raft_address: unserved_test_address().to_string(),
+        api_address: unserved_test_address().to_string(),
         http_base: String::new(),
         schema_version: AUTH_SCHEMA_VERSION,
         protocol_version: AUTH_PROTOCOL_MIN,
@@ -642,7 +642,7 @@ fn snapshots_directory(root: &std::path::Path) -> std::path::PathBuf {
 async fn dead_raft_core() {
     // An ordinary stop is the core stopping because we stopped it.
     let (_ordinary_directory, ordinary) = singleton().await;
-    let ordinary_failure = ordinary.replication_monitor().raft_core_failure();
+    let ordinary_failure = ordinary.membership_manager().raft_core_failure();
     ordinary
         .shutdown()
         .await
@@ -658,8 +658,8 @@ async fn dead_raft_core() {
     // replaced by a file, which no permission (root included) lets a build
     // write under, and OpenRaft 0.9 turns the failed build into a fatal quit.
     let (directory, selected) = singleton().await;
-    let failure = selected.replication_monitor().raft_core_failure();
-    let second = selected.replication_monitor().raft_core_failure();
+    let failure = selected.membership_manager().raft_core_failure();
+    let second = selected.membership_manager().raft_core_failure();
     let snapshots = snapshots_directory(directory.path());
     let parked = snapshots.with_file_name("snapshots.parked");
     std::fs::rename(&snapshots, &parked).expect("park the snapshots directory");

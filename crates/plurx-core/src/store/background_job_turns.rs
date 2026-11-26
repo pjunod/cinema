@@ -4,6 +4,41 @@ use super::background_jobs::{encode, identifier, LibraryTurnCapacity, QueueSql};
 use crate::error::StoreError;
 
 pub(super) const SCHEMA: &str = include_str!("background_job_turns.sql");
+pub(super) const LIVE_TITLE_MIGRATION: &str = include_str!("background_job_turns_v2.sql");
+pub(super) const CATALOG: &str =
+    "SELECT name, sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
+
+pub(super) fn catalog(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError> {
+    let mut statement = conn.prepare(CATALOG)?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(super) fn expected_catalog(live_titles: bool) -> Result<Vec<(String, String)>, StoreError> {
+    let conn = rusqlite::Connection::open_in_memory()?;
+    conn.execute_batch(
+        "CREATE TABLE background_jobs(id TEXT);
+        CREATE TABLE analysis_requests(request_id TEXT);
+        CREATE TABLE background_source_custody(custody_id TEXT);",
+    )?;
+    conn.execute_batch(SCHEMA)?;
+    if live_titles {
+        conn.execute_batch(LIVE_TITLE_MIGRATION)?;
+    }
+    catalog(&conn)
+}
+
+pub(super) fn verify_catalog(
+    conn: &rusqlite::Connection,
+    live_titles: bool,
+) -> Result<(), StoreError> {
+    if catalog(conn)? != expected_catalog(live_titles)? {
+        return Err(StoreError::Migration(
+            "incompatible dispatch turn schema".into(),
+        ));
+    }
+    Ok(())
+}
 
 pub(super) async fn advertise<T: QueueSql>(
     store: &T,
@@ -47,6 +82,7 @@ pub(super) async fn advertise<T: QueueSql>(
                   AND NOT EXISTS(SELECT 1 FROM background_job_waiters v WHERE v.job_id=owner.id
                     AND v.state IN ('pending','awaiting_hydration') AND (v.deadline_ms IS NULL OR v.deadline_ms>json_extract($1,'$.now'))
                     AND (v.consumer_kind IN ('playback_fragment','background_delivery','subtitle_translation','subtitle_translation_range')
+                      OR (owner.kind='dv_title_scan' AND v.consumer_kind='playback_qualification' AND v.deadline_ms IS NOT NULL)
                       OR (v.consumer_kind='subtitle_source' AND EXISTS(SELECT 1 FROM analysis_requests sub
                         WHERE sub.request_id=v.consumer_ref AND sub.trigger='playback'))))
                 UNION ALL
@@ -72,4 +108,70 @@ pub(super) async fn advertise<T: QueueSql>(
         ON CONFLICT(job_id,node_id) DO UPDATE SET revision=excluded.revision,expires_at_ms=excluded.expires_at_ms,roots=excluded.roots
         RETURNING 'true' AS result_json"#.into(), encode(&serde_json::json!({"id":job_id,"revision":revision,"node":node,"now":now_ms,"roots":roots,"capacity":capacity}))?, true, true).await?;
     Ok(!rows.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::SqliteStore;
+
+    #[test]
+    fn finite_playback_qualification_precedes_an_admissible_library_turn() {
+        let db = rusqlite::Connection::open_in_memory().expect("fixture");
+        SqliteStore::apply_migrations_for_test(&db, 135).expect("deployed schema");
+        db.execute_batch(r#"
+            INSERT INTO libraries(id,name,kind,paths) VALUES(1,'Movies','movies','["/media"]');
+            INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie');
+            INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/media/movie',10,20);
+            INSERT INTO dv_title_jobs_demand(revision,file_id,scanner_digest) VALUES(1,1,'scanner');
+            INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms)
+            VALUES('title','dv_title_scan',1,'{"kind":"dv_title_scan","file_id":1,"source_size":10,"source_mtime":20,"probe_revision":1,"scanner_digest":"scanner"}','title',0,'queued',0,0,0),
+                  ('manual','library_scan',1,'{"kind":"library_scan","library_id":1}','manual',0,'queued',0,0,0);
+            INSERT INTO background_job_waiters(request_scope,request_id,request_digest,job_id,consumer_kind,consumer_ref,priority,state,receipt_expires_ms,created_at_ms,updated_at_ms,deadline_ms)
+            VALUES('library','scan','digest','manual','library_work','1',0,'pending',9999,0,0,NULL),
+                  ('playback-qualification','viewer','digest','title','playback_qualification','recipe',3,'pending',9999,0,0,2000),
+                  ('title-maintenance','keep','digest','title','dv_title_scan','1',0,'pending',9999,0,0,NULL);
+            INSERT INTO background_library_requests(request_id,library_id,job_id,input_json) VALUES('scan',1,'manual','{"kind":"full","trigger":"manual"}');
+            INSERT INTO dispatch_turn_ready VALUES('manual','node',0,2000,'["/media"]');
+        "#).expect("competing title and manual request");
+        let claim = || {
+            db.execute(crate::store::background_jobs::CLAIM_SQL, [
+            r#"{"job_id":"title","expected_revision":0,"node_id":"node","boot_id":"boot","claim_id":"claim","kind":"dv_title_scan","payload_version":1,"now_ms":1000,"dispatched_at_ms":1000}"#,
+        ]).expect("claim title")
+        };
+        assert_eq!(claim(), 0, "deployed trigger refuses live title");
+        let winner: String = db
+            .query_row("SELECT winner FROM dispatch_turn_attempt", [], |r| r.get(0))
+            .expect("contended turn");
+        assert_eq!(winner, "manual");
+        SqliteStore::apply_next_migration_for_test(&db).expect("upgrade with pending work");
+        verify_catalog(&db, true).expect("exact upgraded catalog");
+        db.execute(
+            "UPDATE background_job_waiters SET deadline_ms=1000 WHERE request_id='viewer'",
+            [],
+        )
+        .expect("expire interest");
+        assert_eq!(claim(), 0, "maintenance still waits after viewer expiry");
+        db.execute(
+            "INSERT INTO background_job_waiters(request_scope,request_id,request_digest,job_id,consumer_kind,consumer_ref,target_node_id,priority,state,receipt_expires_ms,created_at_ms,updated_at_ms,deadline_ms)
+             VALUES('dv-native-fel-head','native-head','native-digest','title','native_fel_head','recipe','node',0,'pending',9999,0,0,2000)",
+            [],
+        )
+        .expect("add live targeted native head rebuild");
+        assert_eq!(claim(), 0, "targeted head rebuild remains ordinary work");
+        db.execute(
+            "UPDATE background_job_waiters SET deadline_ms=2000 WHERE request_id='viewer'",
+            [],
+        )
+        .expect("renew interest");
+        assert_eq!(claim(), 1, "live title gets the protected turn");
+        let held: i64 = db
+            .query_row(
+                "SELECT count(*) FROM dispatch_turn_protected_jobs WHERE job_id='title'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("held classification");
+        assert_eq!(held, 1);
+    }
 }

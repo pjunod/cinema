@@ -118,7 +118,7 @@ private fun RemoteCompanion(remote: RemoteClientModel) {
         if (selected == null) {
             Text(remote.status)
             remote.devices.forEach { device -> Button(enabled = device.available, onClick = { remote.select(device) }) { Text(device.name + if (!device.available) " · Offline" else if (device.busy) " · In use" else "") } }
-            if (remote.devices.isEmpty()) Text("Enable Cinema remotes in Developer settings on both devices and on the server.")
+            if (remote.devices.isEmpty()) Text("Enable Cinema remotes in Remotes & devices settings on both devices and on the server.")
             if (remote.unavailableNodes.isNotEmpty()) Text("Some server nodes are unavailable.")
         } else {
             Text(selected.name, style = MaterialTheme.typography.titleLarge)
@@ -196,23 +196,16 @@ private fun RemoteDirection(remote: RemoteClientModel, direction: String, label:
     }
 }
 @Composable
-internal fun RemoteDeveloperCard() {
-    val remote = LocalRemoteClient.current ?: return
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Cinema remotes", style = MaterialTheme.typography.titleLarge)
-        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(remote.enabled, onCheckedChange = remote::saveEnabled); Text("Enable foreground receiver and companion") }
-        Text("Waiting on real TV/phone focus, menus, lazy scrolling, mixed physical input and cross-platform HTTP acceptance. Per-screen background invitation choices are below; provider delivery and resident Wi-Fi/background execution still need physical qualification. This switch always saves; readiness stays advisory.")
-        Text("Graduates to Remotes & devices after acceptance.")
-        tv.plurx.app.invitations.InvitationSettings(remote)
-    }
-}
-@Composable
 internal fun RemoteDeviceSettings(remote: RemoteClientModel, onBack: () -> Unit) {
     RemoteRestricted()
     var revision by remember { mutableIntStateOf(0) }
     LaunchedEffect(remote, revision) { remote.refreshGrants() }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(onClick = onBack) { Text("Back") }; Text("Remotes & devices", style = MaterialTheme.typography.headlineMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(remote.enabled, onCheckedChange = remote::saveEnabled); Text("Enable foreground receiver and companion") }
+        tv.plurx.app.ui.components.Disclosure("Details") {
+            Text("This switch always saves; readiness stays advisory. Per-screen background invitation choices are below.")
+        }
         TextButton(onClick = { remote.closeController(); remote.remotePresented = true }) { Text("Open Cinema remote") }
         remote.localGrants.forEach { grant ->
             Text(remote.devices.firstOrNull { it.id == grant.receiverId }?.name ?: "Paired screen")
@@ -223,6 +216,8 @@ internal fun RemoteDeviceSettings(remote: RemoteClientModel, onBack: () -> Unit)
         TextButton(onClick = remote::refreshGrants) { Text("Refresh pairings") }
         if (remote.localReceiverId != null) { Text("Reset revokes this TV installation and all paired phones."); TextButton(onClick = { remote.resetReceiver(); revision++ }) { Text("Reset TV remote registration") } }
         Text(remote.managementStatus)
-        tv.plurx.app.invitations.InvitationSettings(remote, showChoices = false)
+        tv.plurx.app.ui.components.Disclosure("Background screen invitations") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { tv.plurx.app.invitations.InvitationSettings(remote) }
+        }
     }
 }

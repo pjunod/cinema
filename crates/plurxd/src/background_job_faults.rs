@@ -71,6 +71,7 @@ pub(crate) mod worker {
         BeforeCompletion,
         CompletionCommitted,
         SourcePermissionCheck,
+        SourcePermissionDenied,
         CompletionReconciled,
         ReleaseStarted,
         ReleaseFinished,

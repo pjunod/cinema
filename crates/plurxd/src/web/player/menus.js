@@ -66,7 +66,25 @@ function settingsMenuHtml(){
   return `<div class="amsec">Playback settings</div>
     <button id="pmenu-autoskip" role="menuitemcheckbox" aria-checked="${autoskipOn()}" class="${autoskipOn()?'sel':''}" onclick="togglePlayerAutoskip(); refreshPlayerSettingsMenu('pmenu-autoskip')">Auto-skip intro and credits</button>
     <button id="pmenu-autoplay" role="menuitemcheckbox" aria-checked="${autoNextOn()}" class="${autoNextOn()?'sel':''}" onclick="togglePlayerAutonext(); refreshPlayerSettingsMenu('pmenu-autoplay')">Autoplay next episode</button>
+    <button id="pmenu-retain" role="menuitemcheckbox" aria-checked="${retainOutputOn()}" class="${retainOutputOn()?'sel':''}" onclick="togglePlayerRetainOutput(); refreshPlayerSettingsMenu('pmenu-retain')">Keep a reusable copy of this playback</button>
     ${syncMenuHtml()}`;
+}
+// Per-playback output choice (Paul, 2026-11-18). Off means this playback
+// queues no complete-output preparation and keeps no rolling output; it lasts
+// for this PLAYER only, so the next title follows the server setting again.
+function retainOutputOn(){return !(PLAYER&&PLAYER.retainOutputOff);}
+function togglePlayerRetainOutput(){
+  if(!PLAYER) return;
+  PLAYER.retainOutputOff=!PLAYER.retainOutputOff;
+  if(PLAYER.retainOutputOff&&typeof stopSessionOutputRetention==="function") stopSessionOutputRetention(PLAYER);
+}
+// Turning it off mid-playback also tells the running session's owner to
+// drop its rolling retention and cancel the preparation it queued. Off only:
+// turning it back on applies to the next create of this playback.
+async function stopSessionOutputRetention(p){
+  const id=p&&p.sessionId; if(!id) return;
+  try{ await api(`/hls/${encodeURIComponent(id)}/retain-output`,{method:"POST",body:{retain_output:false}}); }
+  catch(error){ if(typeof toast==="function") toast("This playback's copy could not be stopped: "+(error.message||error)); }
 }
 function refreshPlayerSettingsMenu(focusId){
   const m=document.getElementById("pmenu");

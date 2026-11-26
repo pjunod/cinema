@@ -68,9 +68,8 @@ function hevcTiersSync(can, mse){
   });
 }
 
-// HLS/fMP4 is authorized by the selected hls.js MediaSource path, not a
-// progressive file decoder. Native HLS has no codec-specific API here and
-// therefore remains unclaimed until an actual playlist probe is available.
+// HLS/fMP4 claims follow the selected transport. The qualified Safari
+// split package uses a single in-band HEVC sample entry and separate AAC.
 async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
   const probe=injected||{};
   let video=probe.videoElement, mc=probe.mediaCapabilities, mse=probe.mediaSource;
@@ -78,9 +77,20 @@ async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
   if(mc===undefined){ try{ mc=navigator.mediaCapabilities; }catch(e){ mc=null; } }
   if(mse===undefined){ try{ mse=window.MediaSource||window.ManagedMediaSource; }catch(e){ mse=null; } }
   const native=probe.nativeHls===undefined?(!video||useNativeHls(video)):probe.nativeHls;
-  const hls=probe.hlsJsSupported===undefined?hlsJsSupported():probe.hlsJsSupported;
-  if(native||!hls||!mc||typeof mc.decodingInfo!=="function"||!mse||typeof mse.isTypeSupported!=="function") return [];
   const summary=hevcTierSummary(claimedTiers,claimedPqTiers);
+  if(native){
+    try{
+      const ua=probe.userAgent===undefined?navigator.userAgent:probe.userAgent;
+      const touchPoints=probe.maxTouchPoints===undefined?navigator.maxTouchPoints:probe.maxTouchPoints;
+      const qualified=/Macintosh/.test(ua)&&!(touchPoints>1)&&/Version\/27\.2(?:[. ]|$)/.test(ua)&&/Safari\//.test(ua);
+      // The qualified Safari build played the actual in-band HEVC HLS splice
+      // while reporting no support for standalone hev1 MP4.
+      const playable=video&&video.canPlayType("application/vnd.apple.mpegurl");
+      return qualified&&summary.pq10&&playable?["hvc1","hev1"]:[];
+    }catch(e){ return []; }
+  }
+  const hls=probe.hlsJsSupported===undefined?hlsJsSupported():probe.hlsJsSupported;
+  if(!hls||!mc||typeof mc.decodingInfo!=="function"||!mse||typeof mse.isTypeSupported!=="function") return [];
   if(!summary.maxheight) return [];
   const required=HEVC_TIERS.filter(t=>t.height<=summary.maxheight&&(t.depth===8?summary.depth8:summary.depth10));
   // Include the lowest Main10 rung even when the shared ceiling is below it.
@@ -1229,19 +1239,14 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
     &&preBurn==null&&decision.method==='direct_play'&&initialRoute==='direct'&&(decision.audio?.length||0)<=1){
     initialRoute='shared_direct';
   }else if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
-    // A burn always encodes (the Source owns its sidecar and fonts), and an
-    // HDR10/HLG grade is the Source's own answer to this browser's caps.
-    // Dolby Vision is not built for shared playback: not preserved, not
-    // converted, and a Dolby Vision source is never re-encoded or burned.
+    // A burn always encodes (the Source owns its sidecar and fonts), and the
+    // grade -- HDR10, HLG or Dolby Vision, preserved or converted -- is the
+    // Source's own answer to this browser's caps, planned as Local plans it.
     const grade=decision.delivered_dynamic_range;
     const encoded=decision.method==='transcode'||preBurn!=null;
     const supported=encoded
       ?!noSegments()&&(nativeHls||!!(window.Hls&&Hls.isSupported())):hlsAvailable;
-    if(grade==='dolby_vision'||decision.preserve_dolby_vision===true||decision.convert_dolby_vision===true
-      ||decision.source?.hdr==='dolby_vision'&&encoded){
-      failPreparation(Object.assign(new Error("Dolby Vision is not available for shared playback yet."),{code:"sharing_start_dolby_vision_unsupported"}),attempt);return null;
-    }
-    if(!supported||grade&&!['sdr','hdr10','hlg'].includes(grade)){
+    if(!supported||grade&&!['sdr','hdr10','hlg','dolby_vision'].includes(grade)){
       failPreparation(Object.assign(new Error("This shared delivery is not available yet."),{code:"sharing_start_unsupported"}),attempt);return null;
     }
     // A copy decision with a burn becomes a transcode just below, exactly as
@@ -1428,18 +1433,19 @@ function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffse
 // Commands arriving while a full open is awaiting a decision/session replace
 // that open with one snapshot of the newest destination and track choices.
 // Otherwise its late response would overwrite in-place mutations of PLAYER.
-function restartPendingPlaybackOpen(p,reason){
+function restartPendingPlaybackOpen(p,reason,reopenPositionSec=null){
   // Controls still describe the outgoing title until the new decision builds
   // its player. They must not reopen that title over the newer destination.
   if(p&&p.retiringOpenAttempt&&p.retiringOpenAttempt!==p.pendingOpenAttempt
      &&PLAY_OPEN_GATE.current(p.retiringOpenAttempt)) return true;
   if(p&&PLAYER===p&&p.pendingMediaChange){
+    if(reopenPositionSec!=null) p.pendingMediaChange={...p.pendingMediaChange,reopenPositionSec};
     executePlaybackMediaChange(p,p.pendingMediaChange);
     return true;
   }
   if(!p||PLAYER!==p||!p.pendingOpenAttempt||!PLAY_OPEN_GATE.current(p.pendingOpenAttempt)) return false;
   PENDING_ATTEMPT_REASON=reason;
-  const position=positionForPlaybackIntent(document.getElementById("video"),p);
+  const position=reopenPositionSec??positionForPlaybackIntent(document.getElementById("video"),p);
   play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
   return true;
 }
@@ -1608,7 +1614,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
   try{
     const fileId=PLAYER.fileId, options={copy:true,aac,
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
-      audio_offset_ms:PLAYER.aoffset||0};
+      audio_offset_ms:PLAYER.aoffset||0,
+      // hls.js can select soundtracks itself; native HLS keeps the muxed copy.
+      ...(!native&&!hevcCopy&&!PLAYER.preserveDolbyVision&&(PLAYER.audio||[]).length>1?{split_audio:true}:{})};
     // `vod_index_pending` has a better answer than waiting on this path — the
     // progressive remux below — so it is answered locally instead of retried.
     const retry={context:playbackCreateRetryContext(),preparation,
@@ -1625,7 +1633,14 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       new Error("A copy-HLS open needs a preparation owner to bound and cancel it."),
       {name:"TypeError"});
     info=await preparation.run(
-      signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),options,signal,retry),
+      signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),options,signal,retry)
+        .catch(error=>{
+          // Soundtrack alternates need encoder capacity a plain copy does not;
+          // when the encoders are busy, keep the copy without alternates.
+          if(!options.split_audio||!error||error.code!=="vod_family_capacity") throw error;
+          const {split_audio,...muxed}=options;
+          return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);
+        }),
       late=>releaseSession(late&&late.session_id));
   }catch(error){
     if(live && !live()) return false;

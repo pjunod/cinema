@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttachmentPurpose {
+    Playback,
+    SelectedDetail,
+}
+
 /// How many refused titles the local index pass is asked to put first.
 /// More than one pass's worth on purpose, and small, because a viewer whose
 /// start was refused asks again on the next start.
@@ -433,6 +439,7 @@ impl Shared {
             settings,
             None,
             None,
+            AttachmentPurpose::Playback,
         )
         .await
     }
@@ -448,11 +455,18 @@ impl Shared {
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(&str, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
+        purpose: AttachmentPurpose,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
         }
-        let build_guard = self.rendition_build_gate(key).lock_owned().await;
+        let gate = self.rendition_build_gate(key);
+        let build_guard = match purpose {
+            AttachmentPurpose::Playback => gate.lock_owned().await,
+            AttachmentPurpose::SelectedDetail => gate
+                .try_lock_owned()
+                .map_err(|_| "selected copy rendition already has a build owner".to_owned())?,
+        };
         // Once exact-key admission succeeds, transfer the entire slow
         // Store/filesystem/head/build transaction to a detached owner before
         // the caller reaches another cancellation point. The successful
@@ -477,6 +491,7 @@ impl Shared {
                     build_guard,
                     private_storage,
                     canonical_processing_key,
+                    purpose,
                 )
                 .await
         });
@@ -497,6 +512,7 @@ impl Shared {
         build_guard: tokio::sync::OwnedMutexGuard<()>,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
+        purpose: AttachmentPurpose,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         let source_telemetry = recipe.source_telemetry;
@@ -538,6 +554,9 @@ impl Shared {
                     if let Some(storage) = existing.private_storage.as_ref() {
                         storage.release();
                         return Err("private incarnation requires storage cleanup".into());
+                    }
+                    if purpose == AttachmentPurpose::SelectedDetail {
+                        return Err("selected copy rendition requires foreground recovery".into());
                     }
                     // A failed (or closed) handle cannot answer new readers.
                     // Publish closed first, but leave the exact handle in the
@@ -616,6 +635,7 @@ impl Shared {
                 canonical_processing_key
                     .as_ref()
                     .and_then(|(_, allowance)| allowance.clone()),
+                purpose,
             )
             .await?;
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
@@ -742,8 +762,18 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        self.build_rendition_with_storage(key, index, recipe, plan, settings, None, false, None)
-            .await
+        self.build_rendition_with_storage(
+            key,
+            index,
+            recipe,
+            plan,
+            settings,
+            None,
+            false,
+            None,
+            AttachmentPurpose::Playback,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -757,6 +787,7 @@ impl Shared {
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         ephemeral_processing: bool,
         processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+        purpose: AttachmentPurpose,
     ) -> Result<Arc<Rendition>, String> {
         let source = if key.starts_with("source-") {
             crate::fragment_index_cluster::open_source_playback_fence(
@@ -870,6 +901,9 @@ impl Shared {
             match load_identity(&dir.path().join(IDENTITY_NAME)).await {
                 Some(identity) => {
                     if !report.init_present && manifest.materialized_count() > 0 {
+                        if purpose == AttachmentPurpose::SelectedDetail {
+                            return Err("cached init requires foreground head recovery".into());
+                        }
                         if key.starts_with("source-") {
                             return Err(crate::transcode::vod_refusal_error(
                                 "vod_source_head_pending",
@@ -1014,10 +1048,12 @@ impl Shared {
                 settings.completed_cache_bytes
             },
             materialize_budget: settings.materialize_budget,
+            source_burst_secs: settings.source_burst_secs,
             manifest: Mutex::new(manifest),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage,
             copy_preparation: StdMutex::new(None),
+            resume_preparation: StdMutex::new(None),
             preparation_epoch: AtomicU64::new(0),
             retained_offer: StdMutex::new(None),
             cancelled_preparation_epoch: AtomicU64::new(0),

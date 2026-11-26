@@ -367,6 +367,12 @@ def historical_command(workflow, kind):
     return retention_enabled_rust_executor(workflow, kind, steps)
 
 
+# The pinned Linux CI image also sets the scope's run shell to Bash. Bind
+# the entire reviewed header so a different shell or working directory
+# cannot change how the historical promotion inputs were authenticated.
+PINNED_IMAGE_SCOPE_HEADER = '166d47a63bfaf0286c0d7b0375b65efba360e8a457bda07fcef9f0161a7ca6a2'
+
+
 def authenticate_scope(api, run_id, run, workflow, document, prior, repository):
     """A supplied input alone does not prove that manual binding executed."""
     event = receipts.bounded_json(run['event_payload'].encode())
@@ -387,7 +393,8 @@ def authenticate_scope(api, run_id, run, workflow, document, prior, repository):
                      'Historical workflow changes the default command executor')
     scope_header = re.search(r'(?ms)^  scope:\n(.*?)(?=^    steps:)', workflow)
     receipts.require(scope_header is not None
-                     and not re.search(r'(?m)^    (?:continue-on-error|defaults|env):', scope_header[1]),
+                     and (retention.digest(scope_header[1].encode()) == PINNED_IMAGE_SCOPE_HEADER
+                          or not re.search(r'(?m)^    (?:continue-on-error|defaults|env):', scope_header[1])),
                      'Historical binding scope masks errors or overrides its context')
     bind = [step for step in steps if re.search(r'(?m)^        id: promotion$', step)]
     receipts.require(len(bind) == 1, 'Historical promotion binding step unavailable')
@@ -1848,7 +1855,7 @@ def authenticate(api, proof, document, repository, live_logs=None):
             receipts.require(retention.digest(raw) == record['log']['sha256_ref']
                              and command_log(proof, record).encode() == raw, 'Authenticated command log mismatch')
 
-def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen_python_ids):
+def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen_python_ids, *, selected_pr=False):
     """Only a complete source-applicable union authorizes command adoption."""
     receipts.require(set(proof) == {'version', 'source_commit', 'commands', 'logs'} and proof['version'] in {1, 2}
                      and proof['source_commit'] == candidate, 'Unknown or stale command proof')
@@ -1871,7 +1878,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                              'Unknown or repeated non-Rust source-cohort command')
             seen.add(name)
             source_cohorts[name] = cohort.validate(item, proof, candidate, discovery,
-                                                  changed_inputs, clean_log, source_archive_digest)
+                                                  changed_inputs, clean_log, source_archive_digest, selected_pr=selected_pr)
             continue
         receipts.require(set(item) in ({'name', 'invocation', 'environment', 'inventory', 'records', 'obligations'}, {'name', 'invocation', 'environment', 'inventory', 'records', 'obligations','references'}),
                          'Unknown command unit fields')

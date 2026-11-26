@@ -53,7 +53,12 @@ candidate without an ordinary fallback can be refused instead of downgraded.
 
 Optional processed enhancement is prepared after the ordinary session's first
 frame and staged as a verified successor, so measurement or rendering does
-not hold first playback. Unsupported, pending or refused processing retains
+not hold first playback. That upgrade is the only processed path for an
+ordinary start: no ordinary Start renders a processed window of its own. An
+Auto start describes its upgrade with its selected candidate. An Original or
+rung start has no candidate, so it carries the ask it was accepted with (its
+capabilities, the rendition it runs and its catalog query), which is how a
+shared Source's copy is described too. Unsupported, pending or refused processing retains
 the ordinary stream. Playback Info reports the current generation's deferred
 reason; see the [GPU qualification repair](DV-GPU-QUALIFICATION-AND-PLAYBACK-INFO.md)
 for vendor-bound Intel/AMD VA-API and NVIDIA NVENC measurement and evidence.

@@ -30,6 +30,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/parseutils.h>
+#include <libavutil/sha.h>
 #include <libdovi/rpu_parser.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -45,6 +46,8 @@
 
 static struct budget_io title_io = {.fd = -1, .upstream = -1};
 static AVIOContext *title_avio;
+// Optional disk-conversion sidecar: decode-order RPU hash and exact source PTS.
+static FILE *rpu_timeline;
 static void close_title_io(void) {
   if (title_avio) {
     av_freep(&title_avio->buffer);
@@ -68,6 +71,7 @@ struct title_stats {
   uint64_t frames, valid, missing, invalid;
   unsigned max_pq;
   struct dv_title_constants mastering;
+  bool saw_fel, saw_mel, unknown_el;
 };
 struct picture_time {
   int64_t pts, duration;
@@ -105,6 +109,7 @@ static void open_title_io(AVFormatContext *input, const char *source) {
 }
 static void unknown_constants(void) {
   dv_title_constants_unknown(&stats.mastering);
+  stats.unknown_el = true;
 }
 static int nal_type(const struct nal *nal) { return (nal->data[0] >> 1) & 0x3f; }
 static int nal_layer(const struct nal *nal) {
@@ -214,7 +219,7 @@ static void hold_rpu(const struct nal *nal) {
 }
 
 // One picture's metadata: the RPU the decoder attaches to it, if any.
-static void observe_rpu(void) {
+static void observe_rpu(int64_t pts) {
   if (!rpu.held) {
     stats.missing++;
     unknown_constants();
@@ -242,6 +247,23 @@ static void observe_rpu(void) {
     unknown_constants();
     goto done;
   }
+  if (rpu_timeline) {
+    struct AVSHA *sha = av_sha_alloc();
+    uint8_t hash[32];
+    need(sha != NULL && av_sha_init(sha, 256) == 0, "timeline SHA256");
+    av_sha_update(sha, nal, size + 2);
+    av_sha_final(sha, hash);
+    av_free(sha);
+    need(fprintf(rpu_timeline, "%"PRId64" ", pts) > 0, "timeline write");
+    for (unsigned i = 0; i < 32; i++)
+      need(fprintf(rpu_timeline, "%02x", hash[i]) == 2, "timeline hash");
+    need(fputc('\n', rpu_timeline) != EOF, "timeline newline");
+  }
+  if (header->guessed_profile == 7 && header->el_type &&
+      strcmp(header->el_type, "FEL") == 0) stats.saw_fel = true;
+  else if (header->guessed_profile == 7 && header->el_type &&
+           strcmp(header->el_type, "MEL") == 0) stats.saw_mel = true;
+  else stats.unknown_el = true;
   if (!dm->dm_data.level1) {
     stats.missing++;
   } else if (dm->dm_data.level1->max_pq > 4095 ||
@@ -360,7 +382,7 @@ static void observe_unit(const AVPacket *packet, int length_size) {
   times[stats.frames].pts = packet->pts;
   times[stats.frames].duration = packet->duration;
   stats.frames++;
-  observe_rpu();
+  observe_rpu(packet->pts);
 }
 
 static int by_pts(const void *a, const void *b) {
@@ -393,7 +415,8 @@ static int configuration(const AVCodecParameters *par) {
 }
 
 int main(int argc, char **argv) {
-  need(argc == 3, "usage: scan_title HELD_SOURCE VIDEO_INDEX");
+  need(argc == 3 || (argc == 5 && strcmp(argv[3], "--rpu-timeline") == 0),
+       "usage: scan_title HELD_SOURCE VIDEO_INDEX [--rpu-timeline OUTPUT]");
   char *end;
   errno = 0;
   long index = strtol(argv[2], &end, 10);
@@ -421,6 +444,12 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < input->nb_streams; i++)
     if (i != (unsigned long)index) input->streams[i]->discard = AVDISCARD_ALL;
   int length_size = configuration(stream->codecpar);
+  if (argc == 5) {
+    rpu_timeline = fopen(argv[4], "wx");
+    need(rpu_timeline != NULL, "exclusive RPU timeline sidecar");
+    need(fprintf(rpu_timeline, "# %d/%d\n", stream->time_base.num,
+                 stream->time_base.den) > 0, "timeline time base");
+  }
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "bounded demux buffer");
   int ret;
@@ -495,8 +524,17 @@ int main(int argc, char **argv) {
     } else printf("null");
     printf("}");
   } else printf("\"state\":\"%s\"", stats.mastering.l9_state == 3 ? "inconsistent" : "unknown");
+  printf("},\"el_kind\":{\"state\":\"%s\"",
+         stats.saw_fel && stats.saw_mel ? "inconsistent" :
+         stats.unknown_el || !(stats.saw_fel || stats.saw_mel) ? "unknown" : "consistent");
+  if (!(stats.saw_fel && stats.saw_mel) && !stats.unknown_el &&
+      (stats.saw_fel || stats.saw_mel))
+    printf(",\"value\":\"%s\"", stats.saw_fel ? "fel" : "mel");
   printf("}}\n");
   need(!ferror(stdout) && fflush(stdout) == 0, "aggregate output");
+  if (rpu_timeline)
+    need(fflush(rpu_timeline) == 0 && fclose(rpu_timeline) == 0,
+         "complete RPU timeline sidecar");
   free(times);
   av_packet_free(&packet);
   avformat_close_input(&input);

@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-i" ]; then
+        media=$2
+        break
+    fi
+    shift
+done
+printf 'partial'
+printf '%s\n' "$$" > "${media%/*}/encoder.pid"
+exec sleep 30

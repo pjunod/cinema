@@ -8,8 +8,237 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
-### Removed
+<!-- Do not edit this section. Each pull request's entries live in its description's
+`Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
+from the landing commits into the dated section below. -->
 
+## [0.9.2] — 2026-11-26
+<!-- changelog-through: 6410a406eb4237e0f13181a6c9be54bbf3bd1664 -->
+
+### Added
+- each version's Dolby Vision details and how it plays on every device the account uses, in the item detail view
+- `GET /api/v1/playback/devices` (scope `playback:read`) lists the playback capabilities each signed-in device reported
+- each version's Dolby Vision details and how it plays on every device in the iOS, tvOS and Android version pickers and version details
+- Playback info on web, Apple, Android and the Linux player shows which Dolby Vision metadata levels a title carries, which Cinema applied and which are left for the display, and the display peak a processed stream was mapped for; the server records each title's levels once in a background pass
+
+### Changed
+- the Linux player's Playback info list is grouped under Input, Processing and Output
+
+### Fixed
+- plurx Player (Linux): the EL pill now follows whether mpv's native Dolby renderer actually composed the enhancement layer, so it turns off when the layer is lost even if mapping continues (needs mpv +rogdv5.7; older builds keep the previous behaviour).
+- CI runners no longer fill up with leftovers from jobs that die early: the runner janitors now reclaim the Docker workspace volumes and Apple simulators that a job which dies before its last step leaves behind.
+- Android read a version's Dolby Vision profile only from the format text, never from the server's profile field
+- An index probe killed by a host out-of-memory event no longer marks a title's delivery route as permanently unindexable; such records are retried once.
+- Linux player: Cinema's playback controls hide again during Dolby Vision playback instead of staying on screen.
+- Resuming a Dolby Vision title partway through can now use the faster in-place enhancement switch when the file carries its HDR10 metadata inside the video stream.
+- Linux player: Cinema's playback controls keep auto-hiding even if drawing them becomes slow, instead of staying on screen.
+- Dolby Vision Profile 7 FEL titles played at Original quality, or at a chosen resolution, now get the same FEL/RPU processed upgrade as Auto. Previously they stayed on the converted Profile 8.1 copy with DYN only, which is what Android clients showed.
+- A server whose network media storage stops answering keeps serving everything else instead of freezing until the storage returns.
+- A Dolby Vision F+ index whose first-packet check timed out or was killed by the host is retried instead of being refused until the file changes.
+- A one-server cluster no longer briefly reports replication as behind while it applies its own writes, so a native desktop stop or restart no longer refuses intermittently with "recovery, activation or stale topology prevents safe local shutdown".
+- The Linux packages and the Windows server download build and publish again.
+
+## [0.9.1] — 2026-11-25
+<!-- changelog-through: c19e68681671c5ced73a9881c30714c06cc0373d -->
+
+### Changed
+- Reopening a playback at a new position costs one replicated write and one claim read fewer.
+
+### Fixed
+- Resuming a Dolby Vision FEL title whose file embeds cover art no longer loses the native enhancement splice.
+- Dolby Vision Profile 7 FEL titles whose luma reshaping curve has more than two pivots are no longer refused by the F+ curve fit.
+- A Dolby Vision title the scanner refuses on its content (for example an untagged Matroska track) now fails once instead of being read in full five times.
+- A Dolby Vision FEL session whose native enhancement splice could not be used now still reaches FEL through the prepared switch instead of staying on the plain conversion.
+- A cluster voter that stalls (for example while its media storage is unreachable) no longer forces a healthy leader to step down when it resumes; voters now pre-vote before starting an election.
+- plurx Player on Linux starts when TMPDIR is a deep directory and XDG_RUNTIME_DIR is unset, instead of failing because mpv's control socket path was too long.
+
+## [0.9.0] — 2026-11-24
+<!-- changelog-through: 681167543c42d197ff732d1dc0a79c544e61c672 -->
+
+### Added
+- Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
+- A shared title's Source copy now says where its time goes. Each published
+  segment logs one `Source copy segment published` line (incarnation, range,
+  segment, media start and end, bytes, wall time, media-per-wall-second rate,
+  and the split between waiting on FFmpeg's output, plurx's conversion and the
+  segment commit). A wait past one advertised target duration logs one
+  warning naming what it waited on, and production logs how far it got
+  when it ends. Each
+  refused Source start response names the check that refused it. The
+  receiving server logs every HLS resource it relays (status, bytes against
+  the declared length, duration, `Range`, whether it completed): at debug
+  normally, at info when it fell short or took longer than a target duration.
+  Web player beacons now carry the playhead and buffered ranges.
+- **Language changes keep the picture playing on copied titles.** A copy-VOD title with two or three soundtracks now plays in the web player as one shared video with each language as an alternate audio track, so choosing another language switches in place on the same player and session instead of reopening the stream. The video is packaged and stored once for every language and viewer. Other clients, native HLS and titles with more soundtracks keep the existing combined stream.
+
+- A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
+  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
+  conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
+  `_android`, `_linux`, default off; web and Apple Settings). It runs the
+  Dolby Vision helper's `--refit-stats` mode over the whole title beside
+  playback on a 3-thread reservation, shows as "Dolby Vision F+ curve fit" in
+  Activity, resumes from a node-local spool after a preemption, and can be
+  cancelled and retried from the background-jobs page; a failed or cancelled
+  title is not fitted again until its source changes or it is retried. Each
+  title's curve table (scene spans, the quantised served coefficients, held-out
+  errors, verdict and curve digest) is published in one replicated write
+  (SQLite v134; a shape-verified hiqlite extension; carried by the SQLite to
+  cluster import), and a superseded table stays addressable by digest for
+  seven days. The Developer card lists and deletes the spool. Indexed copy
+  serving can use fitted curves when its platform switch is on and a typed
+  client platform was accepted at a session boundary.
+- The Dolby Vision helper's `--refit-stats` mode takes `--threads N` and
+  `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
+  for a refusal of the title's content (1 for any other failure), and logs
+  nothing from libav.
+- The Profile 7 → 8.1 indexed copy converter writes pinned F+ curves into
+  each RPU by exact presentation time. Fitted indexes and cache identities
+  include the curve digest; disabled platforms, unfitted titles and live
+  copy keep v1 identity bytes. An initial session without accepted typed
+  client control remains on v1 until the next session boundary.
+
+- Permanent FEL disk conversion waits for a current fit, identity verdict or
+  recorded content refusal before dropping the enhancement layer. Complete
+  title scans record FEL/MEL classification; fitted RPUs are authored by exact
+  source PTS, injected, and read back frame by frame before publication.
+  Waiting conversions explain their queue state in file details.
+- Web and Apple playback information reports the attached conversion's F+
+  mapping and held-out gain, or its identity reason. This metadata comes from
+  the pinned rendition and adds no curve-store read to status polls.
+- plurx Player (Linux) draws the web player's quality pills beside the
+  title: resolution, dynamic range (source → what mpv renders, e.g.
+  "DV P7 → DV P8", "DV P7 → HDR10-E"), the active Dolby Vision enhancements
+  (FEL / EL / RPU / DYN) and the audio format. RPU and DYN light when mpv
+  renders Dolby Vision itself (no RPU claim on a Profile 7 → 8.1 delivery); EL
+  lights when the private build receives the dual-layer Profile 7 stream; FEL
+  is only ever the server's claim. A carried route's server pills hold only
+  while mpv renders Dolby Vision; a processed route's hold while its current
+  report does. Playback info adds the source grade, the Dolby Vision mapper
+  and one line per enhancement saying why it is or is not active. The
+  launcher now ignores VO warnings (an unmapped screenshot) and non-VO text
+  when reading the mapper line, and a failed control exchange keeps the
+  current processing report instead of clearing it.
+
+
+- **Custom tags and tag-driven Home rows.** Put your own household or private tags on movies and shows, filter and select by them in any library, search with `tag:name`, review suggested matches from TMDB keywords, and build Home rows from tags. Every Home row (Watchlist and Favorites included) can be reordered or hidden with Customize Home; admins can set a household default and grant tag management to other users. Tags never leave the server through Jellyfin, Plex or shared libraries.
+
+- Optional, explicit Curator household login connections with independent local
+  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
+  household-only grants on standalone and replicated storage. Cinema credentials,
+  administrator permissions and watch history stay in Cinema.
+
+- `/metrics` attributes the daemon's steady-state replicated reads and writes
+  by the method that issued them.
+  `plurx_background_store_operations_by_method_total{class,method}` counts
+  those made outside an HTTP request (background loops, timers, workers),
+  which before were in `plurx_store_operations_total` with no method; a
+  request's split now joins its route group when the request and every task
+  it spawned in its scope have finished, so a dropped request is no longer
+  lost. The cluster membership manager's quorum reads, local reads, writes
+  and watermarks, and the 2 Hz quorum watermark sampler, which reached no
+  metric at all, now go through a counted client: they are in
+  `plurx_store_operations_total` and the request or background split, and the
+  manager's by issuing function in
+  `plurx_cluster_membership_operations_by_method_total{class,method}`.
+  Start-up schema installation, the start-up catch-up watermark and Hiqlite's
+  own Raft traffic stay uncounted. Per-route numbers such as
+  `plurx_http_store_reads_total` now include the membership reads a request
+  makes (peer authorization, `media_peers`, `activity_peers`).
+
+- Each cluster node keeps a lock-free account of what its own replica has
+  applied, and Settings → Developer shows an advisory Applied view card with
+  the node's replica proof, image state and view reads. `/metrics` adds the
+  route-read baseline by site, applied-view reads and reloads, table changes
+  and read-pool wait (playback-start E1a).
+- Settings that only choose how to serve or present a request are read from
+  the node's own replica when it can prove that replica current, instead of
+  a quorum read per request: the playback request path and the polled
+  Settings, System, Features and Developer pages. A node that saves a
+  setting reads it back from quorum until its replica has applied the save;
+  other nodes see it within about a second. Planning, encoder admission,
+  background workers, the save response, fences, auth, membership, ownership
+  and pre-mutation reads stay quorum reads (playback-start E1b).
+- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
+  files left a folder (a Re-match). Such a request probes exactly its expected
+  and removed paths, walks nothing else and never becomes a full scan; each
+  removed path is reported `gone` (its file record removed, and the item too
+  when that was its last file), `unknown`, `present` or `retained`. A missing
+  removed path is not `path_unreadable`; an unreadable chain or an empty mount
+  point is, and removes nothing. The connection test advertises
+  `"features": ["removed_paths"]`.
+- Offload: when Curator deletes a title's files to free disk, plurx keeps the
+  item, its metadata and its watch history, greyed out with an Offloaded badge.
+  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
+  connection test lists `offload`), an item is flagged `offloaded` only when no
+  file is left, and no prune ever deletes one. Library lists take
+  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
+  in the web, Apple and Android clients); search always includes them, flagged.
+  An administrator's **Get it back** asks Curator for the title again
+  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
+  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
+  kept item by the request's ids and clear the flag. Deploy every cinema node
+  before Curator sends offload. [Contract](docs/INTEGRATION.md).
+- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
+  say which media files left a folder (a Re-match). Such a request probes
+  exactly its expected and removed paths, walks nothing else, never becomes a
+  full scan and is a job of its own that no walking request joins. Each removed
+  path is reported `gone` (file records removed, `item_ids` listed, the items
+  too when that left them empty), `unknown`, `present` (with a `reason`:
+  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
+  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
+  removed while an expected file is not placed. A missing removed path is not
+  `path_unreadable`; an unreadable chain, an empty mount point or a nested
+  mount on another filesystem is, and removes nothing. The connection test
+  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
+  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
+
+- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
+  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
+  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
+  the result), `expected_files` (probed whatever the size+mtime cache says, and
+  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
+  `missing`), and `probe_paths` (a connection test answering which library
+  roots plurx can see, without scanning).
+- The key that created a scan request may read it with `scan:trigger` alone;
+  the record carries `waiting_on` and the per-file `files`, and reports
+  `running` while a worker holds it.
+- Targeted scan requests run as their own job, claimed ahead of a pending full
+  scan with a probe admission (no heavy-lane permit) and never concurrently
+  with a running one; Activity shows what a waiting one is waiting on.
+- Activity labels a targeted library job "targeted scan" rather than "library
+  scan".
+- New libraries scan every six hours by default. Existing libraries keep their
+  schedule; a library at Never shows what that costs and offers a one-click
+  "Enable 6-hourly reconcile".
+- Shared-library stream monitors and serving-read admission share one
+  advisory member-floor answer instead of each proving quorum: a ready answer
+  serves for up to five seconds, a not-ready one only the callers already
+  waiting on it, and a read survives the caller that gave up on it.
+- Shared-library monitors look again only when a table their authority rests
+  on changes on this replica, when the serving fence moves, or (receiver)
+  when the lease or the original login lapses, at most once a second, instead
+  of every second; an idle shared stream costs no authority reads. Stores
+  without an applied mark keep the one-second look.
+
+### Changed
+- Settings → Cluster is one page without folds or tabs: a six-cell status strip
+  (state, leader, nodes reachable, replication, build, rolling restart), alerts
+  only when something needs action, a nodes table whose rows open a drawer with
+  that node's detail and actions, one Cluster settings list with a single Save
+  and advisory readiness chips, the replicated database ledger, Maintenance,
+  Backup and the log. Blocked actions keep their server-supplied reason beside
+  the button, refused operations stay until dismissed, and nothing is remembered
+  in the browser any more. The roster is re-read with the direct status every
+  fifteen seconds, so a voter that stops answering shows without a Refresh, and
+  the page is not "Healthy" while the direct status shows an unobserved voter, a
+  blocked restart verdict or degraded replication. Refresh repaints in place and
+  keeps the join-token form, the log controls and unsaved settings. The nodes
+  table reflows into labelled cards whenever its card is too narrow for it.
+  Settings, endpoints and permissions are unchanged.
+- **Pull requests no longer conflict on shared bookkeeping files.** A changelog entry lives in the pull request description as `Changelog:` lines and `scripts/release-cut` writes `CHANGELOG.md` from the merge commits; `STATUS.md` and new client-fix rows come from per-PR files folded after merge; the census counts per file.
+- **Apple and Android build numbers are derived at build time** by `scripts/build-number` (the first-parent commit count of main), so client pull requests no longer raise a build counter. Build numbers jump from 310/210 to about 1955 and keep rising with every merge.
+
+### Removed
 - The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,
   its repository skill, AGENTS.md section, fast-lane lint and docs) is retired.
   In the 224 merges after it landed, 17 touched its seven covered files and only
@@ -17,11 +246,200 @@ bump may break compatibility and a **patch** bump never does.
   and its evaluation never ran (the study PR #1262 is closed unmerged).
 
 ### Fixed
+- Apple TV settings keep each setting name visible beside its selected value,
+  including Playback, Appearance and Live TV choices.
+
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
+
+- Repeated quality discovery reuses complete peer catalogue descriptions for
+  the same source, client request, endpoint and fresh peer advertisement.
+  Refusals and partial answers remain uncached; selected-owner recipe and
+  admission checks still run before execution.
+- A Dolby Vision FEL upgrade staged for a session that the viewer then closed no longer keeps
+  rendering for nobody until its deadline. Releasing the session retires its staged successor,
+  which frees the worker's reconstruction slot for the viewer's next session. An upgrade that
+  finds the slot busy now waits for the next rendering exchange instead of being declined for
+  good. Copy sessions now log why a native split layout was declined or never reserved.
+- A shared title no longer ends because its Source briefly could not answer.
+  When a healthy Source copy could not answer one Status or resource request
+  (a slow store renewal, a lost renewal race, its open-body limit, a segment
+  not yet produced), it answered the receiver as if the session had ended,
+  and the receiver retired it: playback froze once the buffer ran out (M6
+  file 6751 froze at 39 s). Each refusal now states, where its check lives,
+  whether it passes: one that does is answered with a retry the receiver
+  already keeps a session through, and one that does not (the copy died, the
+  session was retired, its route, authority or source changed) retires the
+  Source session and is answered in the same terminal shape as before.
+  Receivers since 825074e9d keep the session through the retry and rejoin a
+  Start answered with it; older receivers read it as a refusal, exactly as
+  they read the old answer, so nothing regresses for them. The Store now says
+  why a Source route could not be read (refused, a stale membership guard, a
+  lost lease race, not yet published), and only a refusal ends the session;
+  an owner's renewal tick also ends it only then. A Store or cluster
+  membership that cannot answer, and a source file that could not be read
+  just now, pass only until the session lease the Store last renewed for the
+  owner runs out, even while the Store cannot say so: no tick renews the
+  lease for a file it could not re-prove. A full set of open bodies passes
+  until a transfer ends, and a segment wait is bounded as below. A source
+  file that is missing, replaced or no longer matches its scan ends the
+  session, and a direct-play session that cannot continue is retired as a
+  copy is. Waits for segments of a finished (VOD) copy end the request as
+  before.
+- **A shared copy whose producer is stuck now ends instead of hanging.** A
+  segment request that waited its whole window (25 s) passes only if the
+  copy committed a segment meanwhile, or was holding ahead of its viewer by
+  design. A viewer waiting at the head of a held copy re-anchors it, so a
+  hold left over from a stale playback position does not excuse it twice. If
+  it committed nothing, the producer is stuck: the Source retires the session
+  and the receiver ends it, rather than retrying it forever while its player
+  polls.
+- **Shared Matroska titles start from the beginning and restart mid-title.** A shared copy of a Matroska title with reordered frames (B-frames) was refused with `copy_clock_unknown` on its first fragment: from the start for titles like *Countdown*, and on every restart after a seek for titles like *Avatar*. Matroska stores no decode times, so FFmpeg makes them up after every start and rounds each into its own output's time base. A 1/1000 packet clock never matched the 1/16000 MP4 to the tick, and a decode time FFmpeg repeated was kept by the clock but raised by one tick in the MP4. The packet clock is now written in the MP4 track's own timescale. Each sample is checked against the decode time the MP4 muxer actually writes, still exactly.
+- **Shared watch progress is saved and acknowledged.** Every progress beat (and every explicit watched toggle) for a shared title was written on the receiver and then answered `503`, because the receiver's catalogue-body guard refused a success that carried no Source content. The player kept resending the first beat, so only the first position of each session was ever recorded. These answers now carry the receiver's own history, marked as such for the guard.
+- **Shared playback-control refusals name their step.** The receiver logs which step refused a shared control exchange (attachment, peer, transport failure or the Source's own refusal code), and the Source logs why its growing copy refused one, instead of both collapsing into an unlogged `control_unavailable`.
+
+- 4K Dolby Vision titles played as HDR10-E or with display mapping keep up
+  with playback instead of stalling every few seconds. Each 2-second window
+  used to start its own renderer, which re-read and re-decoded the source
+  back to the previous keyframe and restarted the GPU. One renderer now
+  produces up to eight consecutive windows, each still verified and
+  published on its own. That is about 30% less work per window and about
+  60% fewer source reads, with byte-identical output.
+- Shared Dolby Vision Profile 7 titles start again when converted to Profile
+  8.1 for a client that enumerates Dolby Vision. The Source checked the copy's
+  first fragment against the rung its plan resolved instead of the source's own
+  size, and a 4K title, which Auto plans under the node's Dolby Vision encode
+  ceiling, was refused at `growing.copy_head_caps` with
+  `source_rescan_required` although the copy matched the scan. The check
+  compares the copy with the scanned source only. The same fix starts every
+  other shared copy whose planned rung differs from the source: 4K SDR or HDR10
+  copies from a Source whose encode ceiling is below 2160, sources taller than
+  2160 or shorter than 144 lines, and a copy started with a lower rung named,
+  which now gets the full-resolution copy over sharing as it already did
+  locally, instead of a 409.
+- Shared titles that Safari plays through its native HLS player (Dolby
+  Vision, HDR and HEVC copies, including SDR HEVC) play again. That player
+  carries the viewer's sign-in as a `token` in each playlist URL, and the
+  receiver refused every such URL, `master.m3u8` or `index.m3u8`, as an
+  unknown resource with a bare 422 ("HLS readiness returned HTTP 422") after
+  the Source had already started. The receiver now drops that one token,
+  which authorizes nothing on a shared session, and never passes it to the
+  Source. A resource it still will not relay answers a typed
+  `sharing_resource_unsupported` and logs one line naming the step. H.264
+  played through hls.js was unaffected, because hls.js signs in with a header.
+- Shared titles play again in the web player. Every web shared Start runs
+  the Source's growing copy, which answered with a 60-second control lease that
+  the receiver refused, so the viewer saw "The sharing host could not confirm
+  playback preparation" and the copy expired a minute later without serving a
+  byte. The growing copy now keeps the 300-second lease every shared client is
+  promised, on its Start, its control replies and its own retirement, and
+  counts any resource fetch or authenticated control exchange the receiver
+  relays as viewer activity (the receiver's own status checks are not). The
+  web player also accepts the bounded view such a Start returns, as the Apple
+  and Android players already did. The Source and the receiver both need this
+  release: a receiver still refuses the 60-second lease an older Source sends.
+- A shared Start whose claim the Source refuses (sharing unavailable, at
+  capacity, or in conflict) no longer leaves a cleanup that can never finish.
+  The refusal wrote nothing for that Start, so the receiver's End now settles at once instead
+  of answering 503 on every retry, and the refused Start no longer holds one of
+  the Source's eight start slots until the node restarts. A Dolby Vision title
+  started through a Source node that forwards to another is no longer noted as
+  "receiver does not relay Dolby Vision" when the receiver said it does. Every
+  refusal on the Source's forwarding paths, a growing copy that fails to start,
+  a refused claim, and a receiver about to tell its viewer only "could not
+  confirm playback preparation" now log one line naming the step that refused.
+- A shared title's Start, and every other membership-guarded Source write, no
+  longer refuses as "sharing unavailable" when a member's routine heartbeat
+  commits while the write is in flight. The write's guard counted that
+  heartbeat as a future-dated clock because it was stamped after the write
+  sampled its own clock. A heartbeat is now accepted up to the five seconds a
+  write may use its membership observation. A clock further ahead is still
+  refused. A heartbeat still goes stale 120 seconds after the time it carries,
+  so a member whose clock runs up to five seconds ahead stays fresh for up to
+  125 seconds. A viewer saw "The sharing host could not confirm playback
+  preparation".
+- 4K Dolby Vision titles played as HDR10-E or with display mapping no
+  longer stall in the browser on Intel nodes. The node's Main10 GPU decode
+  probe copied its test picture to system memory, which crashed the shipped
+  FFmpeg in about one run in nine; each crash sent every Dolby Vision
+  window to software decode, which needs 2-3 s for each 2 s window. The probe
+  now keeps the picture on the GPU, as the renderer does.
+- A shared-library Source no longer refuses its catalogue, current-scope and
+  content reads with `sharing_member_floor_unavailable` when a registered
+  learner is offline. Serving reads require fresh heartbeats from the
+  committed voters and the serving member only. Capability proofs, the
+  committed roster, joins and removals in flight, and quorum remain required.
+  Every replicated write and transition still requires every member to be
+  fresh. Before this, a receiver showed `sharing source unavailable` under
+  Assign viewers and `sharing body authority unavailable` under Shared
+  Libraries, even though Check connection passed.
+- Source playback Start observes membership at its claim boundary after pure
+  preparation. Slow filesystem or planning work no longer consumes the
+  five-second authority proof before it is used; claim expiry, file and grant
+  checks, and overlapping playback ownership are preserved.
+- Keep the accepted copy recipe bound when a Dolby Vision FEL measurement completes
+  during playback. Give the most recent native FEL title's existing background job
+  priority to prepare its exact qualified startup segments before the complete-title scan.
+
+- Keep native HLS eligible for a Dolby Vision FEL splice on Start over and
+  Resume. Resume binds the renderer to the actual source pictures observed by
+  the rolling copy, and the original AAC rendition continues across the switch.
+- Android prepared F+ copy handoffs retain source-bound frame timing in a
+  single-variant playlist. The fitted index measures a conservative sample
+  interval instead of supplying average probe FPS; the existing decoded-frame
+  alignment check and deadline remain unchanged.
+
+- Safari 27.2 on macOS can select the verified native Dolby Vision HLS splice
+  when the browser supports native HLS and PQ Main10 playback.
+
+- Native HLS can start with a verified cached FEL prefix from the existing title job even when ordinary VOD is available, with continuous original audio and ordinary startup when the prefix cannot be used. Rebuilding a missing prefix reuses the current scan and quality verdict.
+
+- Background Dolby Vision FEL measurement can qualify the current renderer
+  while requests for an older renderer remain pending.
+
+- Revisit older Dolby Vision title scans after a busy source becomes available,
+  while continuing to discover work on other sources.
+- Recover expired Dolby Vision title attempts after physical source custody clears.
+  Activity distinguishes expired leases from live owners. Analysis requests report
+  the admission failure, and reconciliation preserves copy coordinator requests.
+
+- F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
+  qualifies their actual stored precision. The new fitting method reuses
+  existing statistics; new sessions wait for its replacement table while
+  existing digest pins retain their original coefficients.
+- Safari prepared upgrades that have buffered the current picture but still
+  play behind it now seek to a buffered forward rendezvous and hold there.
+  Seek latency no longer leaves both exact-current attempts behind the moving
+  incumbent; the same decoded-frame guard still decides whether to expose.
+
+- Linux Player live starts and out-of-range seeks identify MPV as their consumer,
+  so their startup window covers MPV’s producer/reload behavior instead of
+  inheriting Safari’s 48-second presentation window. Unknown producer capacity
+  retains conservative admission, and early publication cannot bypass the
+  initial capacity assessment. Native Safari admission and steady reserve
+  retain their existing contracts.
 
 - Web prepared upgrades keep predecessor control observations on their own
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;
   retries and close preserve that exact settlement before changing reporters.
+- Guarded runner VM starts pin instance UUID/generation under the target-host
+  admission lock, retain pause and restart-budget checks, and cannot become
+  an in-service daemon repair when the VM is already running.
+
+- Auto playback keeps foreground admission through VOD creation, so a cold
+  start can ask background work to yield; prepared successors retain their
+  separate speculative purpose even when they share a cached rendition.
+- Reattaching to a cached VOD rendition no longer sends source telemetry to
+  its retired input owner. The next live input receives pending telemetry.
+- Preserve measured CM29 dark-chroma mapping for qualified P3 display targets with black from zero through 0.005 nits, while retaining each target's tone curve.
+- Clocked Source copies and Analysis gap fills preserve the first video
+  sample's duration when AAC begins earlier. The MP4 muxer previously
+  stretched only the AV companion's first sample, so strict comparison with
+  the video-only observation refused the generation as `copy_sync_unverified`.
+  The clocked mux policy now preserves both sample timing and the A/V start
+  offset without edit lists; companion and seek verification remain strict.
 
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7
@@ -352,106 +770,36 @@ bump may break compatibility and a **patch** bump never does.
 - Android direct Dolby Vision playback lists preserved dynamic metadata, and
   native DYN indicators wait for a selected Dolby Vision decoder instead of
   claiming enhancement during HDR/SDR decoder fallback.
-
-### Added
-
-- Optional, explicit Curator household login connections with independent local
-  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
-  household-only grants on standalone and replicated storage. Cinema credentials,
-  administrator permissions and watch history stay in Cinema.
-
-- `/metrics` attributes the daemon's steady-state replicated reads and writes
-  by the method that issued them.
-  `plurx_background_store_operations_by_method_total{class,method}` counts
-  those made outside an HTTP request (background loops, timers, workers),
-  which before were in `plurx_store_operations_total` with no method; a
-  request's split now joins its route group when the request and every task
-  it spawned in its scope have finished, so a dropped request is no longer
-  lost. The cluster membership manager's quorum reads, local reads, writes
-  and watermarks, and the 2 Hz quorum watermark sampler, which reached no
-  metric at all, now go through a counted client: they are in
-  `plurx_store_operations_total` and the request or background split, and the
-  manager's by issuing function in
-  `plurx_cluster_membership_operations_by_method_total{class,method}`.
-  Start-up schema installation, the start-up catch-up watermark and Hiqlite's
-  own Raft traffic stay uncounted. Per-route numbers such as
-  `plurx_http_store_reads_total` now include the membership reads a request
-  makes (peer authorization, `media_peers`, `activity_peers`).
-
-- Each cluster node keeps a lock-free account of what its own replica has
-  applied, and Settings → Developer shows an advisory Applied view card with
-  the node's replica proof, image state and view reads. `/metrics` adds the
-  route-read baseline by site, applied-view reads and reloads, table changes
-  and read-pool wait (playback-start E1a).
-- Settings that only choose how to serve or present a request are read from
-  the node's own replica when it can prove that replica current, instead of
-  a quorum read per request: the playback request path and the polled
-  Settings, System, Features and Developer pages. A node that saves a
-  setting reads it back from quorum until its replica has applied the save;
-  other nodes see it within about a second. Planning, encoder admission,
-  background workers, the save response, fences, auth, membership, ownership
-  and pre-mutation reads stay quorum reads (playback-start E1b).
-- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
-  files left a folder (a Re-match). Such a request probes exactly its expected
-  and removed paths, walks nothing else and never becomes a full scan; each
-  removed path is reported `gone` (its file record removed, and the item too
-  when that was its last file), `unknown`, `present` or `retained`. A missing
-  removed path is not `path_unreadable`; an unreadable chain or an empty mount
-  point is, and removes nothing. The connection test advertises
-  `"features": ["removed_paths"]`.
-- Offload: when Curator deletes a title's files to free disk, plurx keeps the
-  item, its metadata and its watch history, greyed out with an Offloaded badge.
-  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
-  connection test lists `offload`), an item is flagged `offloaded` only when no
-  file is left, and no prune ever deletes one. Library lists take
-  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
-  in the web, Apple and Android clients); search always includes them, flagged.
-  An administrator's **Get it back** asks Curator for the title again
-  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
-  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
-  kept item by the request's ids and clear the flag. Deploy every cinema node
-  before Curator sends offload. [Contract](docs/INTEGRATION.md).
-- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
-  say which media files left a folder (a Re-match). Such a request probes
-  exactly its expected and removed paths, walks nothing else, never becomes a
-  full scan and is a job of its own that no walking request joins. Each removed
-  path is reported `gone` (file records removed, `item_ids` listed, the items
-  too when that left them empty), `unknown`, `present` (with a `reason`:
-  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
-  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
-  removed while an expected file is not placed. A missing removed path is not
-  `path_unreadable`; an unreadable chain, an empty mount point or a nested
-  mount on another filesystem is, and removes nothing. The connection test
-  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
-  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
-
-- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
-  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
-  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
-  the result), `expected_files` (probed whatever the size+mtime cache says, and
-  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
-  `missing`), and `probe_paths` (a connection test answering which library
-  roots plurx can see, without scanning).
-- The key that created a scan request may read it with `scan:trigger` alone;
-  the record carries `waiting_on` and the per-file `files`, and reports
-  `running` while a worker holds it.
-- Targeted scan requests run as their own job, claimed ahead of a pending full
-  scan with a probe admission (no heavy-lane permit) and never concurrently
-  with a running one; Activity shows what a waiting one is waiting on.
-- Activity labels a targeted library job "targeted scan" rather than "library
-  scan".
-- New libraries scan every six hours by default. Existing libraries keep their
-  schedule; a library at Never shows what that costs and offers a one-click
-  "Enable 6-hourly reconcile".
-- Shared-library stream monitors and serving-read admission share one
-  advisory member-floor answer instead of each proving quorum: a ready answer
-  serves for up to five seconds, a not-ready one only the callers already
-  waiting on it, and a read survives the caller that gave up on it.
-- Shared-library monitors look again only when a table their authority rests
-  on changes on this replica, when the serving fence moves, or (receiver)
-  when the lease or the original login lapses, at most once a second, instead
-  of every second; an idle shared stream costs no authority reads. Stores
-  without an applied mark keep the one-second look.
+- A complete-title Dolby Vision scan whose source read was withdrawn by the
+  source service (an exhausted pause, or a revoked or unavailable read
+  budget) no longer counts against the title's five attempts. It yields as
+  `title_source_interrupted` and retries after the usual backoff, the way a
+  preempted scan does. Before, such interruptions were charged as
+  `title_scan_failed`, and readable titles failed permanently after five.
+  A storage read failure (an I/O error or a short read) is still charged,
+  now as `title_source_read_failed`, so a bad sector stays bounded by the
+  attempt limit. An aggregate built from interrupted input is never
+  published. A scanner failure on readable input stays `title_scan_failed`
+  and now records the exit status and the end of the scanner's stderr,
+  redacted, instead of a bare "scan failed".
+- **A shared copy refused for its size now says so.** A high-bitrate source
+  whose keyframe spans outgrow the copy's in-memory pairing hold (4K
+  Dolby Vision remuxes with 70 MB fragments) was refused with
+  `copy_sync_unverified` when it restarted mid-title, as if its seek landing
+  had failed. It now answers `copy_range_input_limit` (422), in the log and to
+  the client. Serving such sources is a separate change.
+- **A busy sharing host is waited for, not reported as a failure.** When the Source or its relay answered a shared decision with "busy, retry in N seconds", the receiver treated it as final, and the viewer saw "the sharing host could not determine how to play this file". The receiver now waits out the Source's interval and asks again, up to three times with growing waits and jitter, within the decision's existing 15 s budget. If the host is still busy after that, the viewer is told so and offered Try again. Catalogue, library and asset reads still answer immediately, but a busy host now reaches the viewer as their typed "busy" answer, not as "unavailable". The Source's own decision and body capacity limits now say how long to wait.
+- Reanalyze on an item no longer answers 500 when the cluster's
+  probe repair cannot run there. Another node holding the probe-repair lease is a
+  typed 503 `probe_repair_busy` naming that node, with `Retry-After: 30`. Losing
+  the lease mid-pass is `probe_repair_interrupted`, with `Retry-After: 5`. A node
+  that cannot take cluster-wide leases at that moment (entering maintenance, or
+  unable to read committed membership) is `probe_repair_not_eligible`, with
+  `Retry-After: 5`. That case used to claim the pass was running on another node
+  even when nothing was running anywhere.
+- A shared title no longer fails to start with "shared start is unavailable" when the Source server is busy preparing its first segment.
+- A Dolby Vision FEL playback in Profile 8.1 keeps its FEL, RPU and DYN badges once the server's processing report arrives, and no longer shows a false "Tone mapping" badge.
+- A resumed native Dolby Vision copy that abandons its split layout now logs why: a missing or late source picture clock, a clock that does not match, or a non-full enhancement layer.
 
 ## [0.8.0] — 2026-10-29
 
@@ -575,13 +923,6 @@ bump may break compatibility and a **patch** bump never does.
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
-
-- Apple TV settings keep each setting name visible beside its selected value,
-  including Playback, Appearance and Live TV choices.
-
-- Playback cache admission reconciles concurrent cancelled writes instead of
-  failing a video producer as disk-full while capacity remains, preventing
-  repeated Apple TV buffering and stream retries.
 
 - **HTTP app addresses forward to HTTPS while it is active.** Temporary,
   non-cached redirects preserve the requested path, query, method and body,
@@ -4195,8 +4536,11 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.8.0
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/pjunod/plurx/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.1
+[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...e3eec613f9de4b2f1a9c705ce058bc14d55a16fc
+[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...000300ccfcd98b7b3a2221d7031420cd99748bfd
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8

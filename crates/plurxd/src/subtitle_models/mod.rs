@@ -359,8 +359,8 @@ async fn model_operation(
         .find(|model| model.id == id)
         .ok_or(ApiError::NotFound("subtitle model"))?;
     let mut members = state
-        .membership
-        .activity_peers()
+        .cluster
+        .voter_targets()
         .await
         .map_err(|_| ApiError::ServiceUnavailable("Worker membership unavailable".into()))?
         .into_iter()
@@ -796,7 +796,7 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
     let observation = WorkerObservation {
         node_id: state.node_id.clone(),
         label: state.server_name.chars().take(64).collect(),
-        eligible: state.serving.is_ready() && !state.membership.local_maintenance_active(),
+        eligible: state.cluster.ready() && !state.cluster.maintenance_active(),
         observed_at_ms: now,
         expires_at_ms: now.saturating_add(60_000),
         engine: Some(
@@ -1517,7 +1517,7 @@ pub(crate) async fn worker_pass(
                 if current.size != *source_size || current.mtime != *source_mtime {
                     return Err(StoreError::Task("source_changed".into()));
                 }
-                if !source.held.unchanged()
+                if !source.held.unchanged().await
                     || crate::fragment_index_cluster::open_source_playback_fence(
                         &source.file,
                         Some(source.held.object_version()),
@@ -2526,7 +2526,7 @@ mod tests {
         else {
             panic!("accessible source");
         };
-        assert!(prepared.held.unchanged());
+        assert!(prepared.held.unchanged().await);
         let result = state
             .store
             .claim_artifact_job(ClaimJob {

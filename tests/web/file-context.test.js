@@ -73,6 +73,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
   const functions=[
     ["detail/preplay-selection.js",["prePlaySelection","playbackSelection","setPrePlay","prePlaySelectionQuery","decisionUrl","askDecision"]],
     ["player/directed-change.js",["openSession"]],
+    ["player/menus.js",["retainOutputOn","togglePlayerRetainOutput"]],
     ["player/measurements.js",["beginPlaybackPreparation","preparationRemainingMs"]],
     ["player/session.js",["newStreamId","remuxUrl"]],
     ["player/audio-sync.js",["subUrl"]],
@@ -101,6 +102,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     playContext:playbackFileContextForPlay,
     select:setPrePlay,selection:prePlaySelection,carry:playbackSelection,
     decision:askDecision,legacyDecision:decisionUrl,start:openSession,
+    toggleRetain(){togglePlayerRetainOutput();},retainOn:()=>retainOutputOn(),
     attach(c){PLAYER={fileId:"7",fileContext:c,meta:{fileContext:c},aoffset:0};},
     subtitle:subUrl,thumb:watchChapterThumbUrl,remux:remuxUrl,
     progress(){return reportProgress("7");},next:playNextEpisode,bookNext:playNextAudiobookPart,
@@ -125,6 +127,28 @@ test("a local session create sends the preparation's remaining start time",async
   assert.deepEqual(sent,[15500,11000]);
   await h.start(local,{start:0},null);
   assert.equal(h.requests.at(-1).options.startupRemainingMs,null,"no preparation, no claimed allowance");
+});
+// 2026-11-18: "Keep a reusable copy of this playback" is a per-playback player
+// menu choice. Off means every create of this playback carries
+// overrides.retain_output=false; on (the default) puts nothing on the wire.
+test("a create carries overrides.retain_output=false only after the player menu turns the copy off",async()=>{
+  const h=callerHarness(),local=h.local("7");
+  h.attach(local);
+  const sent=async()=>{await h.start(local,{start:0},null);return h.requests.at(-1).options.body;};
+  assert.equal(h.retainOn(),true,"a fresh playback keeps a reusable copy");
+  let body=await sent();
+  assert.ok(!body.overrides||!Object.hasOwn(body.overrides,"retain_output"),"default create omits retain_output");
+  h.toggleRetain();
+  assert.equal(h.retainOn(),false);
+  body=await sent();
+  assert.equal(body.overrides.retain_output,false,"the create body carries the opt-out");
+  body=await sent();
+  assert.equal(body.overrides.retain_output,false,"a restart, seek or audio switch carries it too");
+  h.toggleRetain();
+  body=await sent();
+  assert.ok(!body.overrides||!Object.hasOwn(body.overrides,"retain_output"),"turning it back on omits it again");
+  const menu=fs.readFileSync(path.join(WEB,"player/menus.js"),"utf8");
+  assert.match(menu,/id="pmenu-retain"[\s\S]*Keep a reusable copy of this playback/);
 });
 test("shipped preplay choices and every file resource caller retain A/B collision context",async()=>{
   const h=callerHarness(),shared=h.shared(reference,detail()),local=h.local("7");
@@ -260,7 +284,7 @@ test("shipped remux and session-start callers preserve legitimate full engine ca
   assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
 });
 
-test("Shared initial route is direct only for an actual direct decision, else session-first HLS with burn and HDR10, refusing Dolby Vision or absent capability",()=>{
+test("Shared initial route is direct only for an actual direct decision, else session-first HLS with burn, HDR10 and Dolby Vision, refusing absent capability",()=>{
  const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{subs:[]},failed:[],ROUTE:"direct",subLabelFor:(_,i)=>"track "+i});
  vm.runInContext(source+`
  const Hls=window.Hls;
@@ -287,13 +311,13 @@ test("Shared initial route is direct only for an actual direct decision, else se
  assert.equal(ctx.run(c,"remux","hdr10",null),"copy_hls");
  assert.equal(ctx.run(c,"remux","hlg",null),"copy_hls");
  assert.equal(ctx.failed.length,0);
- // Dolby Vision is refused with its own typed reason before any Start:
- // preserved, converted, or a Dolby Vision source re-encoded or burned.
- assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true}),null);
- assert.equal(ctx.run(c,"remux","dolby_vision",null,{convert_dolby_vision:true}),null);
- assert.equal(ctx.run(c,"transcode","sdr",null,{source:{hdr:"dolby_vision"}}),null);
- assert.equal(ctx.run(c,"remux","hdr10",1,{source:{hdr:"dolby_vision"}}),null);
- assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_dolby_vision_unsupported"));
+ // Dolby Vision is the Source's own plan for these caps, as it is Local's:
+ // preserved or converted it is Copy HLS; re-encoded or burned it encodes.
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true}),"copy_hls");
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true,convert_dolby_vision:true}),"copy_hls");
+ assert.equal(ctx.run(c,"transcode","sdr",null,{source:{hdr:"dolby_vision"}}),"transcode_hls");
+ assert.equal(ctx.run(c,"remux","hdr10",1,{source:{hdr:"dolby_vision"}}),"transcode_hls");
+ assert.equal(ctx.failed.length,0);
  // A Dolby Vision source copied as its HDR10 base needs nothing the Source lacks.
  assert.equal(ctx.run(c,"remux","hdr10",null,{source:{hdr:"dolby_vision"}}),"copy_hls");
  ctx.failed.length=0;

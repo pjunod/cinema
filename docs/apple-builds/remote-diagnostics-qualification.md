@@ -2,7 +2,6 @@
 
 **Status:** built — TV ZIP download, phone export and recovery have software qualification.
 
-Build: 238
 Issue: #1081
 
 Registers the diagnostics reporting UI regression in the iOS test target.

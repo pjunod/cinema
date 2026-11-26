@@ -242,8 +242,8 @@ fn hls_segment_delivery_stays_bounded_under_slow_and_failed_writer() {
                 Ok(events.len() as u64)
             })
         }
-        fn setting_pair(&self) -> BoxFuture<'_, Result<SettingPair, StoreError>> {
-            Box::pin(async { Ok((Some("30".into()), Some("0".into()))) })
+        fn retain_days(&self) -> BoxFuture<'_, Result<Option<String>, StoreError>> {
+            Box::pin(async { Ok(Some("30".into())) })
         }
     }
 
@@ -558,16 +558,11 @@ async fn settings_seed_precedes_the_first_event_and_local_changes_invalidate() {
         .put_setting(keys::TELEMETRY_RETAIN_DAYS, "0")
         .await
         .expect("disable retention");
-    store
-        .put_setting(keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
 
     initialize(Arc::clone(&store)).await.expect("seed settings");
     let sink = sink_for(Arc::clone(&store));
     let seeded = *sink.settings.read().expect("settings");
     assert!(!seeded.retain);
-    assert!(seeded.priors);
     assert!(seeded.read_at.is_some());
 
     store
@@ -1232,16 +1227,14 @@ struct WriterCalls {
 /// panic on the first of them.
 struct ScriptedWriterStore {
     calls: Arc<Mutex<WriterCalls>>,
-    priors_enabled: bool,
     sleep: Option<Duration>,
     panic_first: AtomicBool,
 }
 
 impl ScriptedWriterStore {
-    fn new(priors_enabled: bool) -> Self {
+    fn new() -> Self {
         Self {
             calls: Arc::new(Mutex::new(WriterCalls::default())),
-            priors_enabled,
             sleep: None,
             panic_first: AtomicBool::new(false),
         }
@@ -1250,12 +1243,12 @@ impl ScriptedWriterStore {
     fn sleeping(duration: Duration) -> Self {
         Self {
             sleep: Some(duration),
-            ..Self::new(false)
+            ..Self::new()
         }
     }
 
     fn panicking_once() -> Self {
-        let store = Self::new(false);
+        let store = Self::new();
         store.panic_first.store(true, Ordering::Release);
         store
     }
@@ -1291,14 +1284,8 @@ impl WriterStore for ScriptedWriterStore {
         })
     }
 
-    fn setting_pair(&self) -> BoxFuture<'_, Result<SettingPair, StoreError>> {
-        let priors = self.priors_enabled;
-        Box::pin(async move {
-            Ok((
-                Some("30".to_owned()),
-                Some(if priors { "1" } else { "0" }.to_owned()),
-            ))
-        })
+    fn retain_days(&self) -> BoxFuture<'_, Result<Option<String>, StoreError>> {
+        Box::pin(async { Ok(Some("30".to_owned())) })
     }
 }
 
@@ -1344,7 +1331,7 @@ async fn wait_for(mut done: impl FnMut() -> bool) -> bool {
 /// make this 65 calls, and on the hiqlite sidecar 65 acquisitions of the
 /// one mutex that telemetry shares with fragment-index work.
 #[tokio::test]
-async fn a_batch_with_priors_on_is_one_store_call_not_one_per_event() {
+async fn a_batch_is_one_store_call_not_one_per_event() {
     let metrics = isolated_metrics();
     let sink = new_sink(metrics);
     for index in 0..BATCH {
@@ -1353,7 +1340,7 @@ async fn a_batch_with_priors_on_is_one_store_call_not_one_per_event() {
             Admission::Queued
         );
     }
-    let store = Arc::new(ScriptedWriterStore::new(true));
+    let store = Arc::new(ScriptedWriterStore::new());
     let observer = Arc::clone(&store);
     tokio::spawn(supervise_writer(store, Arc::clone(&sink)));
 
@@ -1370,10 +1357,10 @@ async fn a_batch_with_priors_on_is_one_store_call_not_one_per_event() {
     );
 }
 
-/// Retention off and priors on stays one call carrying only the priors:
-/// the switches are independent, the lease is shared.
+/// Retention off stays one call carrying only the priors, which are always
+/// on: the lease is shared.
 #[tokio::test]
-async fn the_two_opt_ins_stay_independent_inside_the_shared_batch() {
+async fn retention_off_still_folds_priors_inside_the_shared_batch() {
     let metrics = isolated_metrics();
     let sink = new_sink(metrics);
     sink.settings
@@ -1381,15 +1368,14 @@ async fn the_two_opt_ins_stay_independent_inside_the_shared_batch() {
         .expect("settings")
         .clone_from(&EffectiveSettings {
             retain: false,
-            priors: true,
             read_at: Some(Instant::now()),
         });
     for index in 0..8 {
         sink.queue.push(measured_job(&format!("session-{index}")));
     }
     // A cached read this fresh is never refreshed, so the sink keeps the
-    // retention-off, priors-on pair the operator set.
-    let store = Arc::new(ScriptedWriterStore::new(true));
+    // retention-off value the operator set.
+    let store = Arc::new(ScriptedWriterStore::new());
     let observer = Arc::clone(&store);
     tokio::spawn(supervise_writer(store, Arc::clone(&sink)));
 

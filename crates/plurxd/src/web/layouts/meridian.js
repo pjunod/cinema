@@ -27,7 +27,7 @@ function meridianDestinations(){
   }
   entries.push({id:"activity",label:"Activity",icon:"act",href:"#/activity"});
   if(ME&&ME.is_admin)entries.push({id:"settings",label:"Settings",icon:"gear",href:"#/settings"});
-  entries.push({id:"device",label:"Device preferences",icon:"gear",href:"#/settings/developer"},{id:"remote",label:"Phone remote",icon:"tv",href:"#/remote"});
+  entries.push({id:"device",label:"Device preferences",icon:"gear",href:"#/settings/remotes"},{id:"remote",label:"Phone remote",icon:"tv",href:"#/remote"});
   return entries;
 }
 function meridianLink(entry){

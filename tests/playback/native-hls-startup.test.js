@@ -323,6 +323,142 @@ test('native master and child authentication refusals keep the shipped Sign in s
  }
 });
 
+function installNativeDiagnosis(h){
+ const {ctx,player}=h;
+ Object.assign(ctx,{TOKEN:null,play:()=>{},retainedQualityChange:()=>null,
+  finishStallRecovery:()=>{}});
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../../crates/plurxd/src/web/player/surface.js'),'utf8'),ctx);
+ vm.runInContext('renderPlaybackSurface=()=>{};recordPlaybackSurfaceLog=()=>{};',ctx);
+ installPermissionOwner(h);
+ vm.runInContext('async '+shippedFunction('stall-diagnosis.js','stallDiagnose'),ctx);
+ vm.runInContext(shippedFunction('stall-diagnosis.js','retryPlayback'),ctx);
+ player.attemptId='native-start';player.stallFrom=0;
+ ctx.playbackSurfaceStep({attach:player.attemptId});
+ ctx.raisePlaybackSurface('client_preparing',{title:'Preparing native playback'});
+ return ()=>vm.runInContext('PLAYBACK_SURFACE.surface',ctx);
+}
+function inactiveSession(h){
+ return h.response(JSON.stringify({code:'media_session_ended',
+  message:'this media session is no longer active'}),410,'application/json');
+}
+async function failNativeStartupWithGone(h,stage){
+ h.answers.push(inactiveSession(h));
+ if(stage==='classification'){
+  h.video.error={code:4};
+  await h.listeners.get('error')();
+ }else h.advance(1000);
+ await flush();
+}
+
+test('terminal native startup 410 shows a working Try again before metadata',async()=>{
+ for(const stage of ['readiness','classification']){
+  const h=stage==='classification'?await readyNativeHarness():harness();
+  await flush();
+  const surface=installNativeDiagnosis(h);
+  const episode=h.player.hlsStartup,attachment=h.player.mediaAttachment;
+  assert.equal(h.video.readyState,0);
+  await failNativeStartupWithGone(h,stage);
+  assert.equal(episode.state,'exhausted',stage);
+  assert.equal(episode.latestFailure.code,'media_session_ended',stage);
+  assert.equal(attachment.nativePositionPending,true,stage);
+  assert.equal(h.player.terminalStop,undefined,stage);
+  h.advance(0);await flush();
+  assert.equal(surface().kind,'blocking',stage);
+  assert.equal(surface().fault.source,'startup_exhausted',stage);
+  assert.deepEqual(Array.from(surface().actions),['close','retry'],stage);
+  assert.match(surface().detail,/this media session is no longer active/);
+  assert.equal(h.player.terminalStop.attachment,attachment);
+  assert.equal(episode.state,'cancelled');
+  assert.equal(episode.native.metadataListener,null);
+  assert.equal(episode.loaders.size,0);
+  assert.equal(h.ctx.playbackOwnsAttachedMedia(h.player),false);
+  assert.equal(h.player.wantsPlayback,true);
+  await h.ctx.stallDiagnose();h.advance(50000);await flush();
+  assert.equal(h.stops.length,1,'only the terminal source owner stops the player');
+  assert.equal(h.logs.filter(row=>row.event==='stall').length,1);
+  assert.equal(h.reopens.length,0,'a 410 does not silently reload the retired source');
+  h.ctx.playbackSurfaceAction('retry');
+  assert.equal(h.reopens.length,1,'the shipped Try again action reaches the reopen path');
+  assert.equal(h.reopens[0][0],0,'Try again targets the requested opening');
+  assert.equal(h.reopens[0][1],true);
+  assert.equal(h.rescues.length,0);
+ }
+});
+
+test('native pre-metadata diagnosis fences queued failures from the superseded source',async()=>{
+ for(const change of ['element','attachment','execution','source','new_seek','pending_successor']){
+  const h=await readyNativeHarness(),surface=installNativeDiagnosis(h);
+  await failNativeStartupWithGone(h,'classification');
+  assert.equal(h.player.hlsStartup.state,'exhausted');
+  if(change==='element') h.ctx.document.getElementById=()=>({});
+  if(change==='attachment')h.player.mediaAttachment={nativePositionPending:true};
+  if(change==='execution')h.player.hlsStartup.native.execution++;
+  if(change==='source')h.video.currentSrc='http://fixture.invalid/old/master.m3u8';
+  if(change==='new_seek')h.player.controlSeekSequence=1;
+  if(change==='pending_successor')h.player.pendingMediaChange={};
+  h.advance(0);await flush();
+  assert.equal(surface().fault.source,'client_preparing',change);
+  assert.equal(h.stops.length,0,change);
+  assert.equal(h.logs.filter(row=>row.event==='stall').length,0,change);
+  h.stop();
+ }
+});
+
+test('native readiness without metadata diagnoses only a spent startup budget',async()=>{
+ const h=harness(),surface=installNativeDiagnosis(h);await flush();
+ h.answers.push(h.response(JSON.stringify({code:'response_publication_timeout',
+  message:'not yet'}),503,'application/json'));
+ h.advance(1000);await flush();
+ h.video.error={code:4};
+ await h.ctx.stallDiagnose();
+ assert.equal(h.player.hlsStartup.state,'active');
+ assert.equal(surface().fault.source,'client_preparing','transient refusal and stale element error do not own diagnosis');
+ assert.equal(h.stops.length,0);
+ h.advance(h.player.hlsStartup.deadlineMs-h.ctx.performance.now());await flush();
+ h.advance(0);await flush();
+ assert.equal(surface().fault.source,'startup_exhausted');
+ assert.ok(surface().actions.includes('retry'));
+ assert.equal(h.stops.length,1);
+ assert.equal(h.player.mediaAttachment.nativePositionPending,true);
+});
+
+test('pause after native exhaustion defers the owned retry surface until Play',async()=>{
+ const h=await readyNativeHarness(),surface=installNativeDiagnosis(h);
+ await failNativeStartupWithGone(h,'classification');
+ assert.equal(h.player.hlsStartup.state,'exhausted');
+ h.player.wantsPlayback=false;h.player.controlIntentGeneration++;
+ h.ctx.pauseHlsStartup(h.player);
+ h.advance(0);await flush();
+ assert.equal(surface().fault.source,'client_preparing');
+ assert.equal(h.stops.length,0);
+ h.player.wantsPlayback=true;h.player.controlIntentGeneration++;
+ h.ctx.resumeHlsStartup(h.video,h.player);
+ h.advance(0);await flush();
+ assert.equal(surface().fault.source,'startup_exhausted');
+ assert.ok(surface().actions.includes('retry'));
+ assert.equal(h.stops.length,1);
+ h.stop();
+});
+
+test('pausing before a native readiness failure prevents the cancelled response from diagnosing',async()=>{
+ const h=harness(),surface=installNativeDiagnosis(h);await flush();
+ let reply;
+ h.answers.push(()=>new Promise(resolve=>reply=resolve));
+ h.advance(1000);await flush();
+ h.player.wantsPlayback=false;h.player.controlIntentGeneration++;
+ h.ctx.pauseHlsStartup(h.player);
+ reply(inactiveSession(h));await flush();h.advance(0);await flush();
+ assert.equal(h.player.hlsStartup.state,'paused');
+ assert.equal(surface().fault.source,'client_preparing');
+ assert.equal(h.stops.length,0);
+ h.player.wantsPlayback=true;h.player.controlIntentGeneration++;
+ h.answers.push(inactiveSession(h));
+ h.ctx.resumeHlsStartup(h.video,h.player);
+ h.advance(4000);await flush();h.advance(0);await flush();
+ assert.equal(surface().fault.source,'startup_exhausted');
+ assert.equal(h.stops.length,1);
+});
+
 test('late native authority or auth refusal cannot act on a superseded attachment',async()=>{
  for(const status of [401,503]){
   const h=await readyNativeHarness();let release;

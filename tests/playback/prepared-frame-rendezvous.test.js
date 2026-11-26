@@ -109,7 +109,7 @@ test("prepared successor callback rechecks viewer intent before exposing an alig
 // Installed SDR trial: both clocks advance steadily, but the 83ms gap is
 // inside the old 250ms coarse window and outside one 24fps decoded frame.
 test("prepared SDR clock alignment seeks a two-frame gap before exposure",async()=>{
-  const h=harness({origin:0});
+  const h=harness({origin:0});h.state.hls={}; // Installed MSE transport.
   h.player.hitches={fps:24000/1001};
   h.incumbent.currentTime=9.968;
   h.target.currentTime=9.884875;
@@ -130,7 +130,7 @@ test("prepared SDR clock alignment seeks a two-frame gap before exposure",async(
 });
 
 test("prepared SDR clock alignment retries when the first seek still trails by more than a frame",async()=>{
-  const h=harness({origin:0});h.player.hitches={fps:24};
+  const h=harness({origin:0});h.state.hls={};h.player.hitches={fps:24};
   h.incumbent.currentTime=9.968;h.target.currentTime=9.884875;
   const seeks=[],proof=[];
   h.ctx.detachPreparedOverlapListeners=()=>{};

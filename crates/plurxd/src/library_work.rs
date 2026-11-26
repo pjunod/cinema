@@ -1603,38 +1603,53 @@ mod tests {
             0,
         );
         next_worker_event(&mut events, "library", WorkerPoint::BeforeCompletion).await;
-        // The Store can finish the write while its reply is still pending.
-        // A source check can therefore see the settled waiter and move the
-        // controller into JoinWork before the producer observes the commit.
-        // JoinWork polls the same producer but never starts a second check.
+        // A permission query can start before completion commits and return
+        // its denial afterward. Observe the actual Store result, not when a
+        // query began or whether the worker starts another pressure check.
+        // The completion acknowledgement remains held throughout this check.
         let mut observed = Vec::new();
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let point = events.recv().await.expect("library worker event").point;
+                assert!(
+                    !matches!(
+                        point,
+                        WorkerPoint::WorkJoined
+                            | WorkerPoint::ReleaseStarted
+                            | WorkerPoint::ReleaseFinished
+                            | WorkerPoint::AdmissionDropped
+                    ),
+                    "work cannot join or release before its completion acknowledgement: {point:?}"
+                );
                 observed.push(point);
                 let committed = observed.contains(&WorkerPoint::CompletionCommitted);
-                let checked = observed.contains(&WorkerPoint::SourcePermissionCheck);
-                if committed
-                    && checked
-                    && (point == WorkerPoint::SourcePermissionCheck
-                        || observed.contains(&WorkerPoint::Pressure))
-                {
+                let denied = observed.contains(&WorkerPoint::SourcePermissionDenied);
+                if committed && denied {
                     break;
                 }
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("completion and source check did not converge: {observed:?}"));
+        .unwrap_or_else(|_| panic!("completion and source denial did not converge: {observed:?}"));
         let first = request_record(store.as_ref(), "first-scan").await;
         assert_eq!(first.state, "succeeded");
         resume
             .expect("completion barrier")
             .send(())
             .expect("deliver completion reply");
-        tokio::time::timeout(Duration::from_secs(3), worker)
-            .await
-            .expect("a completed scan must release its source custody")
-            .expect("library worker joins");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            for point in [
+                WorkerPoint::WorkJoined,
+                WorkerPoint::ReleaseStarted,
+                WorkerPoint::ReleaseFinished,
+                WorkerPoint::AdmissionDropped,
+            ] {
+                next_worker_event(&mut events, "library", point).await;
+            }
+            worker.await.expect("library worker joins");
+        })
+        .await
+        .expect("a completed scan must release its source custody");
         enqueue_full(store.as_ref(), first.library_id, "next-scan", false).await;
         assert!(jobs.work_library_queue(&transcode, None).await);
         assert_eq!(

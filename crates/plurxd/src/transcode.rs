@@ -617,6 +617,92 @@ pub(crate) struct LiveReconstructionFacts {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
 
+/// Descriptive inputs to the one processed-upgrade planner. An Auto start
+/// takes them from its candidate context. A start without one (a shared
+/// Source's copy, or a viewer who chose Original or a manual rung) derives
+/// them from its accepted capabilities, the rendition it runs and its
+/// selection catalog query: [`ProcessedUpgradeAsk::accepted`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessedUpgradeAsk {
+    pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
+    pub(crate) target_height: u32,
+    pub(crate) grade: plurx_core::transcode::OutputGrade,
+    pub(crate) names_processed: bool,
+    pub(crate) route: plurx_core::playback::candidate::CandidateRoute,
+    pub(crate) average_bps: Option<u64>,
+    pub(crate) peak_bps: Option<u64>,
+    pub(crate) recipe_digest: [u8; 32],
+    pub(crate) required_fel_qualification: Option<PendingFelQualification>,
+    pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
+}
+impl ProcessedUpgradeAsk {
+    /// The ask of a start that has no Auto candidate. Nothing here is a
+    /// measurement: the rate fields stay empty and the recipe digest zero,
+    /// so the processed envelope is sized from the rendition's own rung and
+    /// the held source rate, exactly as for a shared Source's copy.
+    pub(crate) fn accepted(
+        caps: plurx_core::playback::DeviceCaps,
+        target_height: u32,
+        grade: plurx_core::transcode::OutputGrade,
+        copy: bool,
+        catalog_query: crate::media_pool::QualityCatalogRequest,
+    ) -> Self {
+        use plurx_core::playback::candidate::CandidateRoute;
+        Self {
+            canonical_caps: Some(caps),
+            target_height,
+            grade,
+            names_processed: false,
+            route: if copy {
+                CandidateRoute::Remux
+            } else {
+                CandidateRoute::Encode
+            },
+            average_bps: None,
+            peak_bps: None,
+            recipe_digest: [0; 32],
+            required_fel_qualification: None,
+            catalog_query: Some(catalog_query),
+            display_target: None,
+            display_target_note: None,
+            dv_row_facts: None,
+        }
+    }
+
+    pub(crate) fn from_candidate(context: &CandidateExecutionContext) -> Self {
+        Self {
+            canonical_caps: context.canonical_caps.clone(),
+            target_height: context.selected_candidate.target_height,
+            grade: context.selected_candidate.grade,
+            names_processed: context.selected_candidate.processed_dv,
+            route: context.selected_candidate.route,
+            average_bps: context.selected_candidate.average_bps,
+            peak_bps: context.selected_candidate.peak_bps,
+            recipe_digest: context.recipe_digest,
+            required_fel_qualification: context.required_fel_qualification.clone(),
+            catalog_query: context.catalog_query.clone(),
+            display_target: context.display_target,
+            display_target_note: context.display_target_note.clone(),
+            dv_row_facts: context.dv_row_facts.clone(),
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct SourceProcessedWork {
+    pub(crate) ask: ProcessedUpgradeAsk,
+    pub(crate) authority: Arc<source_actor::SourceProducerAuthority>,
+    pub(crate) assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    pub(crate) producer: Arc<crate::prodrun::ProducerSlot>,
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+}
+
 /// One verified processed upgrade: the successor request (its incarnation
 /// already the staged successor's), the candidate it plays, and the exact
 /// prepared root its first window was produced on.
@@ -669,6 +755,12 @@ pub struct TranscodeManager {
     pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
+    #[cfg(target_os = "linux")]
+    native_fel_head: Mutex<Option<Arc<manager_native_fel::NativeFelHead>>>,
+    #[cfg(target_os = "linux")]
+    native_fel_target: std::sync::Mutex<Option<manager_native_fel::FelHeadTarget>>,
+    #[cfg(target_os = "linux")]
+    native_fel_backend: std::sync::Mutex<Option<String>>,
     /// The VOD presentation's serving runtime (plan §2). Sessions created
     /// under `presentation:"vod"` live here rather than in `sessions`; every
     /// serving entry point dispatches to it first and falls through when the
@@ -678,7 +770,8 @@ pub struct TranscodeManager {
     runtime_cache: PathBuf,
     /// Extracted text subtitles shared with the WebVTT endpoint.
     subtitle_cache: PathBuf,
-    subtitle_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    subtitle_calls: Option<crate::cluster::calls::PeerTransport>,
+    subtitle_directory: Option<crate::cluster::Directory>,
     subtitle_jobs: Option<Arc<crate::state::JobManager>>,
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
@@ -907,6 +1000,10 @@ pub struct TranscodeManager {
     /// Whether boot proved the exact software/tonemapx/software renderer used
     /// for non-backward-compatible Dolby Vision.
     dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape with
+    /// ([`crate::ffmpeg::measure_dovi_reshape_hardware`]). A session reads
+    /// this record; it never probes a pairing itself.
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this daemon's ffmpeg proved the HDR10 passthrough renderer at
     /// boot ([`crate::ffmpeg::has_dovi_passthrough`]). Its own field, and its
     /// own probe: the SDR reshape graph proves nothing about a PQ output.
@@ -937,6 +1034,167 @@ pub struct TranscodeManager {
     /// never waits on the catalog rebuild, source fences or replicated
     /// enqueue; [`TranscodeManager::output_enqueue_loop`] owns them.
     output_enqueue: OutputEnqueueQueue,
+    /// The viewer's mid-playback "stop retaining output" choices and the
+    /// complete-output rows each session's own start created, so turning it
+    /// off can cancel exactly that session's work. Process-local, like the
+    /// sessions it describes.
+    retain_output: std::sync::Mutex<RetainOutputLedger>,
+}
+
+/// How long a mid-playback retention choice or a queued-row record is kept.
+/// Longer than any one playback; bounded so the ledger cannot grow forever.
+const RETAIN_OUTPUT_LEDGER_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Hard bound on each ledger map, whatever the TTL leaves.
+const RETAIN_OUTPUT_LEDGER_MAX: usize = 4096;
+
+/// See [`TranscodeManager::stop_output_retention`].
+#[derive(Default)]
+pub(crate) struct RetainOutputLedger {
+    /// Sessions whose viewer turned output retention off.
+    refused: HashMap<String, Instant>,
+    /// The complete-output job each session's start reached, whether it
+    /// created the row or dedup-joined one, and when.
+    queued: HashMap<String, QueuedOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueuedOutput {
+    job_id: String,
+    /// This session's enqueue created the row (not a dedup join).
+    created: bool,
+    at: Instant,
+}
+
+/// Drop the oldest entries of `map` until at most `max` remain.
+fn evict_oldest<V>(map: &mut HashMap<String, V>, max: usize, at: impl Fn(&V) -> Instant) {
+    if map.len() <= max {
+        return;
+    }
+    let mut ages = map
+        .iter()
+        .map(|(key, value)| (at(value), key.clone()))
+        .collect::<Vec<_>>();
+    ages.sort_unstable();
+    for (_, key) in ages.into_iter().take(map.len() - max) {
+        map.remove(&key);
+    }
+}
+
+impl RetainOutputLedger {
+    fn prune(&mut self, now: Instant) {
+        self.refused
+            .retain(|_, at| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
+        self.queued
+            .retain(|_, row| now.duration_since(row.at) < RETAIN_OUTPUT_LEDGER_TTL);
+    }
+
+    /// The job `session_id` may cancel: one its own start created, that no
+    /// other session on this node has joined. A row someone else shares is
+    /// theirs too and stays.
+    fn cancellable(&self, session_id: &str, row: &QueuedOutput) -> Option<String> {
+        let shared = self
+            .queued
+            .iter()
+            .any(|(other, joined)| other != session_id && joined.job_id == row.job_id);
+        (row.created && !shared).then(|| row.job_id.clone())
+    }
+
+    /// Record the refusal; returns the job this session may cancel, if any.
+    fn refuse(&mut self, session_id: &str) -> Option<String> {
+        let now = Instant::now();
+        self.prune(now);
+        self.refused.insert(session_id.to_owned(), now);
+        evict_oldest(&mut self.refused, RETAIN_OUTPUT_LEDGER_MAX, |at| *at);
+        let row = self.queued.remove(session_id)?;
+        self.cancellable(session_id, &row)
+    }
+
+    fn refused(&self, session_id: &str) -> bool {
+        self.refused.contains_key(session_id)
+    }
+
+    /// Record the row this session's start reached. Returns the job to
+    /// cancel at once when the session already refused retention.
+    fn record_queued(&mut self, session_id: &str, job_id: String, created: bool) -> Option<String> {
+        let now = Instant::now();
+        self.prune(now);
+        let row = QueuedOutput {
+            job_id,
+            created,
+            at: now,
+        };
+        if self.refused.contains_key(session_id) {
+            return self.cancellable(session_id, &row);
+        }
+        self.queued.insert(session_id.to_owned(), row);
+        evict_oldest(&mut self.queued, RETAIN_OUTPUT_LEDGER_MAX, |row| row.at);
+        None
+    }
+
+    /// A session that ended has nothing left to opt out of.
+    fn forget(&mut self, session_id: &str) {
+        self.refused.remove(session_id);
+        self.queued.remove(session_id);
+    }
+}
+
+#[cfg(test)]
+mod retain_output_ledger_tests {
+    use super::*;
+
+    #[test]
+    fn refusing_hands_back_only_an_unshared_row_this_session_created() {
+        let mut ledger = RetainOutputLedger::default();
+        assert_eq!(ledger.record_queued("a", "job-a".into(), true), None);
+        assert_eq!(ledger.record_queued("b", "job-b".into(), true), None);
+        assert!(!ledger.refused("a"));
+        assert_eq!(ledger.refuse("a").as_deref(), Some("job-a"));
+        assert!(ledger.refused("a"));
+        assert!(!ledger.refused("b"), "another session is untouched");
+        assert_eq!(
+            ledger.refuse("a"),
+            None,
+            "idempotent: the row was handed back once"
+        );
+        assert_eq!(
+            ledger
+                .record_queued("a", "job-late".into(), true)
+                .as_deref(),
+            Some("job-late"),
+            "a row created after the refusal is cancelled at once"
+        );
+        // A dedup join is never the joiner's to cancel, and a row another
+        // session joined is no longer its creator's alone.
+        assert_eq!(ledger.record_queued("c", "job-b".into(), false), None);
+        assert_eq!(ledger.refuse("b"), None, "c shares job-b");
+        assert_eq!(ledger.refuse("c"), None, "c only joined job-b");
+    }
+
+    #[test]
+    fn the_ledger_evicts_its_oldest_entries_and_forgets_ended_sessions() {
+        let mut ledger = RetainOutputLedger::default();
+        for index in 0..=RETAIN_OUTPUT_LEDGER_MAX {
+            ledger.refuse(&format!("s{index}"));
+        }
+        assert_eq!(ledger.refused.len(), RETAIN_OUTPUT_LEDGER_MAX);
+        assert!(!ledger.refused("s0"), "the oldest goes first");
+        assert!(ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
+        ledger.forget(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}"));
+        assert!(!ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
+
+        for index in 0..=RETAIN_OUTPUT_LEDGER_MAX {
+            ledger.record_queued(&format!("q{index}"), format!("job-{index}"), true);
+        }
+        assert_eq!(ledger.queued.len(), RETAIN_OUTPUT_LEDGER_MAX);
+        assert!(
+            !ledger.queued.contains_key("q0"),
+            "the oldest row goes first"
+        );
+        let newest = format!("q{RETAIN_OUTPUT_LEDGER_MAX}");
+        assert!(ledger.queued.contains_key(&newest));
+        ledger.forget(&newest);
+        assert!(!ledger.queued.contains_key(&newest));
+    }
 }
 
 /// Starts that may hand off before the owned worker drains. Beyond this a
@@ -1016,15 +1274,6 @@ mod terminal_admission;
 use terminal_admission::*;
 // split: end terminal-admission
 
-/// Rolling retention as this node sees it, for the Developer card.
-pub(crate) struct RollingRetentionFacts {
-    pub(crate) same_filesystem: Option<bool>,
-    pub(crate) slack: Option<i64>,
-    pub(crate) admits: Result<(), &'static str>,
-    pub(crate) rows: Vec<crate::vodserve::retained::RetainedOutputRow>,
-    pub(crate) cleanup_pending: usize,
-}
-
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]
 mod manager_cache;
@@ -1045,6 +1294,9 @@ mod manager_create;
 mod manager_describe;
 #[path = "transcode/manager/maintenance.rs"]
 mod manager_maintenance;
+#[cfg(target_os = "linux")]
+#[path = "transcode/manager/native_fel.rs"]
+mod manager_native_fel;
 #[path = "transcode/manager/plan.rs"]
 mod manager_plan;
 #[path = "transcode/manager/produce.rs"]

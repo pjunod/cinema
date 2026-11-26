@@ -19,6 +19,7 @@ WHERE old.request_id = json_extract((SELECT original FROM input), '$.request_id'
   AND old.fence = json_extract((SELECT original FROM input), '$.fence')
   AND old.updated_at_ms = json_extract((SELECT original FROM input), '$.updated_at_ms')
   AND old.state = 'queued' AND old.component = 'fragment_index'
+  AND old.pipeline_version NOT GLOB 'coordination-contract:*'
   AND COALESCE(old.result_cache_key, '') = '' AND old.cancel_requested = 0
   AND NOT EXISTS (SELECT 1 FROM settings
     WHERE key = 'internal.cluster_job_owner_removed.' || old.target_node_id)
@@ -49,6 +50,7 @@ WHERE old.request_id = json_extract((SELECT original FROM input), '$.request_id'
   AND old.fence = json_extract((SELECT original FROM input), '$.fence')
   AND old.updated_at_ms = json_extract((SELECT original FROM input), '$.updated_at_ms')
   AND old.state = 'queued' AND old.component = 'fragment_index'
+  AND old.pipeline_version NOT GLOB 'coordination-contract:*'
   AND COALESCE(old.result_cache_key, '') = '' AND old.cancel_requested = 0
   AND NOT EXISTS (SELECT 1 FROM settings
     WHERE key = 'internal.cluster_job_owner_removed.' || old.target_node_id)

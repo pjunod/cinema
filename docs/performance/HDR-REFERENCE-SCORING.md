@@ -1,6 +1,9 @@
 # HDR reference scoring — compare grades, not labels
 
-**Status:** open — offline M1 scoring path; corpus and physical acceptance owed.
+**Status:** open — offline M1 code-domain scorer plus optional pinned CPU
+ColorVideoVDP adapter. Source review and bounded component qualification pass;
+one-host perceptual CLI, corpus and physical acceptance remain open
+(2026-11-20).
 
 Companion to [codec qualification](../streaming/CODEC-AND-GPU-QUALIFICATION.md)
 §3.6 and [benchmarking](../BENCHMARKING.md). This describes the independent
@@ -52,6 +55,178 @@ absent, not invented metadata preservation. A DOVI configuration record or
 decoded RPU/metadata refuses the pair: a genuine Profile 5 input first needs
 an independently proved reshape and output-grade contract. HLG, SDR and
 eight-bit inputs refuse this PQ path. There is no automatic transfer relabel.
+
+## Optional ColorVideoVDP — explicit display prediction, separate admission
+
+The `score-perceptual` command adds a display-dependent JOD report to the
+incumbent PSNR/SSIM/census result. Ordinary scoring above still returns
+`hdr_perceptual_model: null`, loads no model, and keeps its existing contract.
+The adapter is [`codec-hdr-cvvdp`](../../scripts/codec-hdr-cvvdp); it reuses
+the original scorer rather than duplicating its grade/metadata checks.
+
+**Runtime pin:** use an already installed local CPU-capable
+[ColorVideoVDP](https://github.com/gfxdisp/ColorVideoVDP) environment. The tool
+never installs packages or fetches models. The qualified model/API and temporal
+buffer formula below are for ordinary ColorVideoVDP 0.5.7. Deliberate future
+runtime pins require independent source/API/resource qualification. Capture
+the existing environment's file identities once:
+
+```bash
+python3 scripts/codec-hdr-score pin-cvvdp-runtime \
+  --python /owned/cvvdp/venv/bin/python3 \
+  --output /owned/new-runtime-pin
+```
+
+The result names `runtime.json` and its SHA256. Retain that SHA256 separately
+from the manifest. It binds the interpreter, selected standard-library files,
+installed distribution payloads (including native package libraries, model
+parameters and calibration assets), versions and virtual-environment config.
+A venv's Python symlink is permitted: both its invocation and resolved target
+are pinned. Installed bytecode is bypassed using a fresh private empty Python
+cache prefix and `-B` for both pin capture and prediction. Actual imported model/torch/numpy
+source files and every resolved model calibration asset must belong to the pin.
+Standard-library GUI/tests and transitive OS/framework libraries are outside
+this file closure. A pin records reviewed local bytes;
+it is neither a signature nor proof that those bytes were originally trusted.
+Changes require a deliberately captured new pin, not automatic acceptance.
+
+**Display:** write an explicit JSON file and retain its SHA256 separately.
+For example, this declares a modeled 30-inch 1280 × 720 PQ display for a
+short 24000/1001-fps source of that exact raster. It fits the buffer preflight
+below; it does not claim that a connected panel has these properties:
+
+```json
+{
+  "schema": 1,
+  "colorspace": "BT.2020-PQ",
+  "resolution": [1280, 720],
+  "diagonal_size_inches": 30,
+  "viewing_distance_meters": 0.7472,
+  "peak_luminance_cd_m2": 1500,
+  "contrast": 1000000,
+  "ambient_lux": 10,
+  "reflectivity": 0.005,
+  "exposure": 1
+}
+```
+
+Every field is required; source dimensions must equal the declared display
+resolution. No resize, crop, inherited display defaults or SDR interpretation
+is inferred. Geometry and viewing conditions affect this model's prediction.
+
+```bash
+python3 scripts/codec-hdr-score score-perceptual \
+  --reference /owned/reference.mp4 --reference-sha256 REF_SHA256 \
+  --distorted /owned/output.mp4 --distorted-sha256 OUTPUT_SHA256 \
+  --ffmpeg /absolute/regular/ffmpeg --ffprobe /absolute/regular/ffprobe \
+  --duration 0.5 \
+  --cvvdp-runtime /owned/new-runtime-pin/runtime.json \
+  --cvvdp-runtime-sha256 RUNTIME_SHA256 \
+  --cvvdp-display /owned/pq-display.json \
+  --cvvdp-display-sha256 DISPLAY_SHA256 \
+  --output /owned/new-perceptual-report
+```
+
+**Additional admission:** two to 600 frames, decoded left-sited chroma,
+explicit 1:1 sample aspect ratio, no nonidentity display matrix/rotation, and
+strictly regular integer-PTS/time-base grids at 1..120 frames/s. Equivalent
+rational time bases are accepted; 24000/1001, 30000/1001 and 60000/1001 remain
+fractional rates. VFR and irregular mux-quantized clocks are explicitly refused,
+even when both files share them. There is no average-fps substitution. The
+existing duration bound of 30 seconds and PQ-only grade/metadata admission
+remain in force; HLG, residual Dolby metadata and an SDR regrade are outside
+this command.
+
+**Existing FFmpeg:** use an already supported Jellyfin FFmpeg release and
+matching FFprobe; the bounded component check below used Jellyfin 8.1.3. This
+adapter adds no maintained FFmpeg build, installer or alternate production
+engine. A minimal FFmpeg lacking the shared inverse's `zscale` filter refuses
+execution; it never triggers a new build or silently substitutes `scale`.
+
+**Execution:** the incumbent scorer runs before model prediction. Export
+reuses the exact repository-owned
+[`bt2020_pq_rgb48.filter`](../../tools/dv_quality/bt2020_pq_rgb48.filter),
+also consumed by the production FEL qualifier. Its bytes and SHA256 are
+recorded and rechecked after prediction; callers cannot supply another graph.
+The existing inverse converts limited-range, left-sited BT.2020 NCL/PQ to
+packed R,G,B unsigned 16-bit little endian with bicubic chroma reconstruction,
+retaining PQ encoding without resizing, tone mapping or dither.
+
+Autorotation is disabled. Named `showinfo` stages before and after conversion
+prove every frame's rational PTS, ordinal, dimensions, square aspect and pixel
+format, preventing an equal-byte-size rotated raster from passing as the
+original geometry. Byte lengths, whole-file and per-frame hashes bind the
+RGB48 exports. The CPU worker reads packed R,G,B codes, normalizes by 65535,
+and transposes into model channels; a known-code packing/channel control must
+pass before prediction. RGB16 export has already quantized/clipped the RGB
+values. The report gives code/normalized ranges and counts at codes 0 and
+65535 **after that export**; it cannot recover original out-of-range values
+or interpret every endpoint sample as conversion clipping.
+
+The custom data source verifies every admitted reference/test ordinal was
+read. Model `N_frames`, finite features and finite JOD are required. Temporal
+resampling is disabled. CPU execution uses two intra-op threads and one
+inter-op thread, with no device fallback. Each fresh subprocess has a
+300-second wall/CPU deadline. Combined RGB48 exports are limited to 16 GiB;
+choose a shorter window when this or processing time is exceeded. A separate
+preflight caps the model's dominant test/reference temporal RGB buffers at
+512 MiB using `2 × 3 × (2 × ceil(fps/8) + 1) × width × height × 4` bytes.
+This guard currently excludes UHD at every admitted cadence, even with few
+frames. It is not a total resident-memory guarantee because feature pyramids,
+package/runtime state and other allocations remain additional. Existing code-domain
+subprocess allowances are unchanged.
+
+**How to read it:** `report.json` and stdout retain the ordinary metrics plus
+`hdr_perceptual_model`, display/runtime/worker identities, exact cadence,
+conversion commands/filter hash, raw identities, model information, RGB16
+endpoint counts and
+JOD. Identity normally scores 10; lower values predict greater difference
+under that display model. This is not a human preference result, an artistic
+grading target, physical output acceptance or an automatic encoder decision.
+Logs, request and RGB48 exports remain in the new output directory for audit;
+a failure retains its partial evidence and must not be retried into that same
+directory. Runtime/display/source/tool identities are checked again after
+prediction. The CPU worker blocks ordinary Python socket `connect` calls and
+sets offline dependency options; it provides no OS network sandbox. The
+standard model uses local pinned calibration assets and supplied decoded
+frames, without a download step.
+
+Authored regression coverage is in
+[`test_codec_hdr_cvvdp.py`](../../tests/operations/test_codec_hdr_cvvdp.py).
+**2026-11-20 component evidence:** independent source review approved the
+RGB48 adapter. All 17 authored adapter controls passed in the existing
+NumPy-capable environment without skips; all five incumbent scorer controls
+also passed. The actual runtime-pin command passed.
+
+The split component smoke used existing shipping Jellyfin FFmpeg 8.1.3 for
+three owned 128 × 72, eight-frame, 4-fps PQ controls, then the existing
+pinned ColorVideoVDP 0.5.7 CPU worker for prediction. Every RGB48 export's
+count, exact source PTS, aspect, geometry and hashes were verified. Each
+prediction consumed all eight test/reference frames with finite features and
+a passing RGB16 packing control:
+
+| Authored control | JOD |
+|---|---:|
+| Identity | 10.0 |
+| Luma perturbation | 9.856706619262695 |
+| Chroma perturbation | 0.41873836517333984 |
+
+These values establish bounded identity/sensitivity component behavior, not
+an encoder gain or content preference. The retained private receipt
+`plurx-actual-components.json` has SHA256
+`e25f1142fecd8c8b54eb20c8b8bd375140db43eda8667ed8ca19dc273372f6a0`.
+Its runtime manifest SHA256 is
+`1cd2589af094d309ebc161810b747d269ed1175c422a887ced6dcbd03e848112`.
+Incumbent actual scoring of the three pairs was checked separately with the
+existing local codec tools. No newly compiled FFmpeg was used, and no remote
+installation, file deployment or display change was made.
+
+**Still open:** the complete user-facing `score-perceptual` CLI has not been
+executed on one host with both supported FFmpeg and this model environment.
+The authored orchestration controls and split component runs do not close
+that integration boundary. Repository promotion/publication remains separate;
+no broad HDR corpus, subjective, native/display or optical acceptance follows
+from these controls. Speculative algorithms and observer material remain parked.
 
 ## The authored reference is separate from every incumbent fixture
 
@@ -441,3 +616,25 @@ decode and process startup. Candidate times stay close to baseline, but this
 campaign establishes neither general real-time delivery nor production
 resource headroom. The unchanged rate limit must not be mistaken for a
 throughput measurement.
+
+## Regression coverage from the HDR research audit
+
+The bounded score consumer already rejects a mismatched decoded grade, frame
+count/grid, mastering/light metadata, residual Dolby data and source geometry.
+The tone-map segment qualifier separately compares exact raw frame hashes and
+rational presentation timestamps through filter restarts. These contracts are
+retained; no new scorer, codec, dither or LUT policy is introduced.
+
+The authored score regressions also exercise a 61-frame 60000/1001 grid, with
+presentation ordinals 30 and 60 at 0.5005 and 1.001 seconds. A nominal 60 Hz
+substitution, a single mid-stream pairing error, same-count dropped/duplicated
+frames and invalid shared grids refuse before any metric or census invocation.
+Mid-stream/end-frame transfer, range, primaries, matrix, depth and subsampling
+changes, missing decoded interpretation and a late residual RPU also refuse.
+A correct stream and missing optional container tags remain positive controls
+when decoded frames supply the complete required interpretation.
+
+These are synthetic ffprobe payloads through the real score admission path,
+with native scoring mocked. They qualify admission regressions, not fresh
+FFmpeg decoding, optical HDR accuracy or physical Dolby Vision acceptance.
+The already-parked research algorithms and observer study remain untouched.

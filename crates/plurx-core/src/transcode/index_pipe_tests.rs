@@ -1081,9 +1081,26 @@ fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
         )
         .expect("distinct inherited outputs");
         assert_eq!(clocked.first().map(String::as_str), Some("-copyts"));
-        assert_eq!(&clocked[1..=measured.len()], measured.as_slice());
+        let input_end = measured.iter().position(|arg| arg == "-i").expect("input") + 2;
+        assert_eq!(&clocked[1..input_end + 1], &measured[..input_end]);
         assert_eq!(clocked.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
-        let clock = &clocked[measured.len() + 1..];
+        let mut start = 1;
+        for output in ["pipe:1", "pipe:4"] {
+            let end = clocked
+                .iter()
+                .position(|arg| arg == output)
+                .expect("MP4 output");
+            let block = &clocked[start..end];
+            assert!(block
+                .windows(2)
+                .any(|pair| pair == ["-avoid_negative_ts", "make_non_negative"]));
+            assert!(block.windows(2).any(|pair| pair[0] == "-movflags"
+                && pair[1].split('+').any(|flag| flag == "frag_discont")));
+            assert!(block.windows(2).any(|pair| pair == ["-use_editlist", "0"]));
+            assert!(!block.contains(&"make_zero".into()));
+            start = end + 1;
+        }
+        let clock = &clocked[start..];
         assert!(contains_run(
             clock,
             &strip_plurx_markers(&copy_video_args(&file, video))
@@ -1101,6 +1118,94 @@ fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
                 .filter(|arg| arg.as_str() == "make_zero")
                 .count(),
             2
+        );
+    }
+}
+
+/// Regression (Countdown, file 1421, restarted at 18.493 s): Matroska stores
+/// no decode times, so FFmpeg synthesizes them after every input start and
+/// rounds each into its output's own time base. The MP4 track is 1/16000;
+/// a 1/1000 clock read 16016 ms where the MP4 wrote 256259 ticks, and no
+/// sample of the first fragment could be associated (`copy_clock_unknown`).
+/// The clock output, and only it, is retimed to the MP4 track's timescale.
+#[test]
+fn the_packet_clock_is_written_in_the_mp4_tracks_own_timescale() {
+    let probe = |time_base: &str| {
+        format!(
+            r#"{{"streams":[{{"codec_type":"audio","time_base":"1/48000"}},{{"codec_type":"video","time_base":"{time_base}"}},{{"codec_type":"video","time_base":"1/90000","disposition":{{"attached_pic":1}}}}]}}"#
+        )
+    };
+    for (time_base, timescale) in [
+        ("1/1000", Some(16000)),
+        ("1/90000", Some(90000)),
+        ("1/24000", Some(24000)),
+        ("1001/24000", Some(24000)),
+        ("1/25", Some(12800)),
+        ("0/1000", None),
+        ("1/0", None),
+    ] {
+        assert_eq!(
+            copy_mp4_video_timescale(Some(&probe(time_base))),
+            timescale,
+            "{time_base}"
+        );
+    }
+    // `-map 0:v:0` takes the first video stream, a cover picture included.
+    assert_eq!(
+        copy_mp4_video_timescale(Some(
+            r#"{"streams":[{"codec_type":"video","time_base":"1/90000","disposition":{"attached_pic":1}},{"codec_type":"video","time_base":"1/1000"}]}"#
+        )),
+        Some(90000)
+    );
+    assert_eq!(copy_mp4_video_timescale(None), None);
+    assert_eq!(copy_mp4_video_timescale(Some("{}")), None);
+
+    let mut file = hevc_dv();
+    file.hdr = None;
+    file.hdr_format = None;
+    for (codec, probe) in [("hevc", probe("1/1000")), ("h264", probe("1/1000"))] {
+        file.video_codec = Some(codec.into());
+        let video = CopyVideoOptions::from_probe(&file, Some(&probe), false, false);
+        assert_eq!(video.packet_clock_timescale(), Some(16000));
+        let args = copy_pipe_args_with_index_and_packet_clock(
+            &file,
+            18.493,
+            None,
+            false,
+            Pacing::unpaced(),
+            video,
+            None,
+            "pipe:6",
+            "pipe:7",
+        )
+        .expect("clocked recipe");
+        let measurement = args
+            .iter()
+            .position(|arg| arg == "pipe:6")
+            .expect("canonical");
+        assert!(
+            !args[..measurement].iter().any(|arg| arg.contains("setts")),
+            "the served and canonical MP4 outputs keep their bytes: {args:?}"
+        );
+        let clock = &args[measurement + 1..];
+        let filters = clock
+            .iter()
+            .rposition(|arg| arg == "-bsf:v")
+            .map(|at| clock[at + 1].as_str())
+            .expect("the clock carries a filter chain");
+        assert!(
+            filters.ends_with(",setts=time_base=1/16000:pts=PTS:dts=DTS")
+                || filters == "setts=time_base=1/16000:pts=PTS:dts=DTS",
+            "{filters}"
+        );
+        assert_eq!(clock.iter().filter(|arg| *arg == "-bsf:v").count(), 1);
+        // The fragment-index identity is the video args, which do not move.
+        assert!(!copy_video_args(&file, video)
+            .iter()
+            .any(|arg| arg.contains("setts")));
+        assert_eq!(
+            copy_video_args(&file, video),
+            copy_video_args(&file, video.with_packet_clock_timescale(None))
         );
     }
 }
@@ -1289,6 +1394,52 @@ fn measured_offset_uses_resolved_audio_delivery_instead_of_legacy_encode_hint() 
         .windows(2)
         .any(|pair| pair == ["-af", "atrim=start=0.250,asetpts=PTS-STARTPTS"]));
     assert!(!encoded_args.contains(&"-bsf:a".into()));
+}
+
+#[test]
+fn picture_clock_keeps_existing_av_output_and_bounds_only_the_observation() {
+    let file = hevc_dv();
+    let video = CopyVideoOptions::from_probe(&file, None, false, false);
+    let plain = copy_pipe_args_with_audio_delivery(
+        &file,
+        592.252,
+        None,
+        true,
+        Pacing::unpaced(),
+        video,
+        None,
+    );
+    let measured = |url| {
+        copy_pipe_args_with_picture_clock(
+            &file,
+            592.252,
+            None,
+            true,
+            Pacing::unpaced(),
+            video,
+            None,
+            url,
+            std::num::NonZeroUsize::new(64).expect("bounded prefix"),
+        )
+    };
+    let args = measured("pipe:7").expect("one-input picture clock");
+    assert_eq!(args[0], "-copyts");
+    assert_eq!(&args[1..=plain.len()], &plain);
+    assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
+    assert_eq!(
+        &args[args.len() - 7..],
+        &[
+            "-f",
+            "framehash",
+            "-hash",
+            "sha256",
+            "-frames:v",
+            "64",
+            "pipe:7"
+        ]
+    );
+    assert!(measured("pipe:1").is_err());
+    assert!(measured("movie.mp4").is_err());
 }
 
 #[test]

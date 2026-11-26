@@ -199,6 +199,9 @@ async fn jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_a
     Box::pin(native_hls_copy_flow(false, true)).await;
 }
 async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
+    if encoded {
+        crate::http::hls::tests::prepare_catalog_test_encoder().await;
+    }
     let f = playback_fixture().await;
     // Production renews the native route's 12-second lease from the
     // owner loop. Without it, a flow slower than one lease (a loaded CI
@@ -638,7 +641,11 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
     // untouched, so the same play answers once authority is back. That
     // the native session itself outlives a short loss is the serving
     // fence's own property (`serving_fence_flapping_losses_share_one_grace`).
-    f.state.serving.validation_set_ready(false).await;
+    f.state
+        .cluster
+        .test_fence()
+        .validation_set_ready(false)
+        .await;
     let fenced = f
         .app
         .clone()
@@ -647,7 +654,11 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .expect("fenced child");
     assert_eq!(fenced.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(fenced.headers().contains_key("retry-after"));
-    f.state.serving.validation_set_ready(true).await;
+    f.state
+        .cluster
+        .test_fence()
+        .validation_set_ready(true)
+        .await;
     let recovered = f
         .app
         .clone()
@@ -659,6 +670,13 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         StatusCode::OK,
         "the play survives a recovered authority loss"
     );
+    let recovered_bytes = recovered
+        .into_body()
+        .collect()
+        .await
+        .expect("complete recovered fragment")
+        .to_bytes();
+    assert!(!recovered_bytes.is_empty());
     if encoded {
         let response = f
             .app

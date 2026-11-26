@@ -3,6 +3,7 @@ package tv.plurx.app.player
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -178,6 +179,24 @@ class PlaybackIntentTest {
         assertTrue(routed.isEmpty())
         assertTrue(replacement.route(intent, force = true))
         assertEquals(listOf(50_000L to quality), routed)
+    }
+
+    @Test
+    fun preparedOriginalPresentationKeepsTheNextSeekOnItsAttachedPlan() {
+        for (presented in listOf(false, true)) {
+            val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+            val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)
+            val reloads = mutableListOf<Pair<Long, PlaybackQuality>>()
+            replacement.retain { target, quality -> reloads += target to quality }
+            val requested = intent.beginQualityChange(PlaybackQuality.Original)
+            if (presented) replacement.presented(requested.quality)
+
+            val seek = intent.beginRelativeSeek(-10_000L, 76_000L, 206_864L)
+            assertEquals(!presented, replacement.route(intent))
+            assertSame(seek, intent.pendingSeek)
+            assertEquals(66_000L, seek.targetMs)
+            assertEquals(if (presented) emptyList() else listOf(66_000L to PlaybackQuality.Original), reloads)
+        }
     }
 
     @Test
@@ -631,5 +650,23 @@ class PlaybackIntentTest {
         assertTrue(intent.presentedInPlace(pending.sequence))
         assertNull(intent.pendingSeek)
         assertNull(intent.controlSequenceFloor)
+    }
+
+    @Test fun retainOutputOffRidesEveryCreateOfThisPlaybackAndOnlyThen() {
+        val wire = kotlinx.serialization.json.Json { explicitNulls = false }
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val base = CreateSessionReq(playback_id = intent.playbackId, caps = caps)
+        assertTrue(intent.retainOutput)
+        assertFalse(wire.encodeToString(intent.applyRetention(base)).contains("retain_output"))
+        assertFalse(wire.encodeToString(intent.applyRetention(base)).contains("overrides"))
+
+        intent.setRetainOutput(false)
+        assertTrue(wire.encodeToString(intent.applyRetention(base)).contains("\"overrides\":{\"retain_output\":false}"))
+        assertTrue(wire.encodeToString(intent.applyRetention(base.copy(start = 30.0))).contains("\"retain_output\":false"))
+
+        intent.setRetainOutput(true)
+        assertFalse(wire.encodeToString(intent.applyRetention(base)).contains("retain_output"))
+        // The next title gets its own intent, which starts on.
+        assertTrue(PlaybackIntent(initialQuality = PlaybackQuality.Auto).retainOutput)
     }
 }

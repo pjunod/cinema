@@ -233,6 +233,7 @@ Windows, systemd, launchd, Unraid, storage, GPU access, and ports. The
 | See the full feature set and its limits | [Features](docs/FEATURES.md) |
 | Run and troubleshoot the server | [Operations](docs/OPERATIONS.md) |
 | Find commands quickly | [Cheat sheet](docs/CHEATSHEET.md) |
+| Diagnose Linux Player live startup | [MPV startup admission](docs/streaming/MPV-LIVE-STARTUP.md) |
 | Understand playback decisions | [Playback](docs/PLAYBACK.md) |
 | Understand the architecture | [Architecture](docs/ARCHITECTURE.md) |
 | Connect an application | [API](docs/API.md) · [Integrations](docs/INTEGRATION.md) |

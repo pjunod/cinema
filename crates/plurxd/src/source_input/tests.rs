@@ -55,6 +55,14 @@ pub(super) async fn input(
     window: usize,
     read_gate: Option<Arc<ReadGate>>,
 ) -> (SourceInput, std::fs::File, Arc<UnlimitedBudget>) {
+    input_with_observer(bytes, window, read_gate, None).await
+}
+async fn input_with_observer(
+    bytes: &[u8],
+    window: usize,
+    read_gate: Option<Arc<ReadGate>>,
+    observer: Option<SourceObserver>,
+) -> (SourceInput, std::fs::File, Arc<UnlimitedBudget>) {
     use std::io::Write;
     let mut file = tempfile::tempfile().expect("source file");
     file.write_all(bytes).expect("source bytes");
@@ -65,7 +73,7 @@ pub(super) async fn input(
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
         custody: std::sync::Mutex::new(None),
-        observer: None,
+        observer,
         purpose_budget: None,
         background_budget: Some(allocator.clone()),
         pause: plurx_core::process::bounded::source_pause_controller(),
@@ -80,6 +88,7 @@ pub(super) async fn input(
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         read_failed: std::sync::atomic::AtomicBool::new(false),
+        physical_read_failed: std::sync::atomic::AtomicBool::new(false),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
         read_gate,
     });
@@ -158,6 +167,7 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         read_failed: std::sync::atomic::AtomicBool::new(false),
+        physical_read_failed: std::sync::atomic::AtomicBool::new(false),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
         read_gate: Some(Arc::clone(&gate)),
     });
@@ -300,14 +310,22 @@ async fn a_failed_served_read_is_recorded_for_the_consumer() {
     );
     file.set_len((bytes.len() + 1) as u64)
         .expect("source replacement mutation");
-    let changed = client
-        .get(input.url())
-        .header("range", format!("bytes={}-", SOURCE_HTTP_CHUNK))
-        .send()
-        .await
-        .expect("changed source range");
-    assert!(changed.bytes().await.is_err(), "the body ends in an error");
-    assert!(input.source_read_failed());
+    // Hyper may observe the failing first body chunk before it delivers the
+    // response headers. Both phases must fail the same consumer operation.
+    let changed = async {
+        let response = client
+            .get(input.url())
+            .header("range", format!("bytes={}-", SOURCE_HTTP_CHUNK))
+            .send()
+            .await?;
+        response.bytes().await
+    }
+    .await;
+    assert!(changed.is_err(), "the changed source cannot be served");
+    assert!(
+        input.source_read_failed(),
+        "the actual served read must record the source failure"
+    );
     input.close_and_wait().await.expect("close source");
 }
 
@@ -633,4 +651,142 @@ async fn broker_verification_is_revoked_on_join_cleanup_and_drop() {
         !is_registered_broker(&url),
         "Drop cannot leave a verifying bearer behind"
     );
+}
+
+#[tokio::test]
+async fn source_input_close_revokes_publication_before_joining_physical_source() {
+    let owners = crate::source_generation::SourceRenditionOwners::default();
+    let (observer, mut owner) = SourceObserver::policy_fixture();
+    let (mut input, _file, _budget) =
+        input_with_observer(b"source", SOURCE_HTTP_CHUNK, None, Some(observer)).await;
+    input
+        .publish_source_observer(&owners, 12)
+        .await
+        .expect("publish live input");
+    let state = Arc::clone(&input.state);
+    let read = Arc::clone(&state.read_slot)
+        .acquire_owned()
+        .await
+        .expect("hold physical reader");
+    let close = tokio::spawn(input.close_and_wait());
+    owner.cleanup_pending().await;
+    assert!(owners.source_observer(12).is_none());
+    assert!(state.source.lock().expect("physical source").is_some());
+    assert!(
+        !close.is_finished(),
+        "physical source still waits for reader join"
+    );
+    owners
+        .declare_source_telemetry()
+        .await
+        .expect("retired observer stays pending");
+    drop(read);
+    close
+        .await
+        .expect("close task")
+        .expect("joined source input");
+    assert!(state.source.lock().expect("physical source").is_none());
+}
+
+#[tokio::test]
+async fn source_input_drop_and_cleanup_revoke_their_publication() {
+    let owners = crate::source_generation::SourceRenditionOwners::default();
+    for cleanup in [false, true] {
+        let (observer, _owner) = SourceObserver::policy_fixture();
+        let (mut input, _file, _budget) =
+            input_with_observer(b"source", SOURCE_HTTP_CHUNK, None, Some(observer)).await;
+        input
+            .publish_source_observer(&owners, 13)
+            .await
+            .expect("publish live input");
+        assert!(owners.source_observer(13).is_some());
+        if cleanup {
+            input.cleanup_pending();
+        } else {
+            drop(input);
+        }
+        assert!(owners.source_observer(13).is_none());
+    }
+}
+
+/// A VOD start must build a buffer: a transfer input reads its startup burst
+/// in full source windows before the five-second epoch grant paces it. With
+/// a 1 KiB epoch, a paced read can issue at most 1 KiB (or the control window
+/// before its first grant), so two full 4 MiB windows prove the burst served
+/// A seek-bootstrapped Copy range start proves its landing inside a small
+/// bounded allowance. The startup burst must not spend that allowance on a
+/// full window the seek then discards; it starts once the landing is verified.
+#[tokio::test]
+async fn transfer_startup_burst_waits_for_a_verified_seek_landing() {
+    let window = SOURCE_WINDOW_MAX;
+    let bytes = (0..3 * window)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (observer, owner) = SourceObserver::transfer_fixture(2 * window as u64);
+    let (input, _file, _budget) = input_with_observer(&bytes, window, None, Some(observer)).await;
+    let bootstrap = input
+        .seal_seek_bootstrap_limit(2 * window as u64)
+        .expect("fresh primary operation");
+    let projections = owner.accept_projections();
+    read_source(&input.state, 0, bytes.len() as u64)
+        .await
+        .expect("landing read");
+    assert_eq!(
+        input.observation().source_bytes,
+        SOURCE_WINDOW_CONTROL as u64,
+        "an unverified landing reads a control window, not a burst window"
+    );
+    bootstrap.verified_landing();
+    read_source(&input.state, window as u64, (bytes.len() - window) as u64)
+        .await
+        .expect("burst read after the verified landing");
+    assert_eq!(
+        input.observation().source_bytes,
+        SOURCE_WINDOW_CONTROL as u64 + window as u64,
+        "the burst issues a full window once the landing is verified"
+    );
+    input.close_and_wait().await.expect("close source");
+    projections.abort();
+}
+
+/// them and the capped third read proves pacing resumed after it.
+#[tokio::test]
+async fn transfer_startup_burst_reads_full_windows_before_epoch_pacing() {
+    let window = SOURCE_WINDOW_MAX;
+    let bytes = (0..3 * window)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (observer, owner) = SourceObserver::transfer_fixture(2 * window as u64);
+    let (input, _file, _budget) = input_with_observer(&bytes, window, None, Some(observer)).await;
+    let projections = owner.accept_projections();
+    let first = read_source(&input.state, 0, bytes.len() as u64).await;
+    assert_eq!(
+        first.expect("first burst read"),
+        &bytes[..SOURCE_HTTP_CHUNK]
+    );
+    assert_eq!(input.observation().source_bytes, window as u64);
+    let second = read_source(&input.state, window as u64, (bytes.len() - window) as u64)
+        .await
+        .expect("second burst read");
+    assert_eq!(second, &bytes[window..window + SOURCE_HTTP_CHUNK]);
+    assert_eq!(
+        input.observation().source_bytes,
+        2 * window as u64,
+        "the burst issues a full window although the epoch grant is 1 KiB"
+    );
+    let third = read_source(
+        &input.state,
+        2 * window as u64,
+        (bytes.len() - 2 * window) as u64,
+    )
+    .await
+    .expect("paced read");
+    assert_eq!(third, &bytes[2 * window..2 * window + 1024]);
+    assert_eq!(
+        input.observation().source_bytes,
+        2 * window as u64 + 1024,
+        "after the burst the epoch grant caps the issued window"
+    );
+    input.close_and_wait().await.expect("close source");
+    projections.abort();
 }

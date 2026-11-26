@@ -25,12 +25,13 @@ test("approved pairing saves grant once and connects without acquiring control",
 test("QR canvas bounds modules and retains four module quiet zone without HTML parsing",()=>{
   const h=harness(),rectangles=[],canvas={getContext:()=>({set fillStyle(value){},fillRect:(...args)=>rectangles.push(args)})};h.context.canvas=canvas;h.context.rows=Array.from({length:21},()=>"1".repeat(21));assert.equal(h.run("cinemaRemoteQr(canvas,rows)"),true);assert.deepEqual(rectangles[1],[44,44,11,11]);h.context.rows=["<svg>"];assert.equal(h.run("cinemaRemoteQr(canvas,rows)"),false);h.context.rows=Array.from({length:178},()=>"0".repeat(178));assert.equal(h.run("cinemaRemoteQr(canvas,rows)"),false);
 });
-test("non-admin Developer renders only local cards before privileged settings or readiness reads",async()=>{
-  const calls=[],context=vm.createContext({ME:{is_admin:false},location:{hash:"#/settings/developer"},api:url=>{calls.push(url);throw new Error("privileged read");},settingsRouteTab:hash=>hash==="#/settings/developer"?"developer":null,viewLocalRemoteSettings:generation=>calls.push(["local",generation])});
-  vm.runInContext(fs.readFileSync(path.join(web,"pages/settings.js"),"utf8"),context);await vm.runInContext("viewSettings(7)",context);assert.deepEqual(calls,[["local",7]]);
-  context.location.hash="#/settings/users";await vm.runInContext("viewSettings(8)",context);assert.equal(context.location.hash,"#/");assert.deepEqual(calls,[["local",7]]);
+test("non-admin Remotes & devices (and the old Developer route) render only local cards before privileged settings or readiness reads",async()=>{
+  for(const [hash,tab] of [["#/settings/remotes","remotes"],["#/settings/developer","developer"]]){
+    const calls=[],context=vm.createContext({ME:{is_admin:false},location:{hash},api:url=>{calls.push(url);throw new Error("privileged read");},settingsRouteTab:value=>value===hash?tab:null,viewLocalRemoteSettings:generation=>calls.push(["local",generation])});
+    vm.runInContext(fs.readFileSync(path.join(web,"pages/settings.js"),"utf8"),context);await vm.runInContext("viewSettings(7)",context);assert.deepEqual(calls,[["local",7]],hash);
+    context.location.hash="#/settings/users";await vm.runInContext("viewSettings(8)",context);assert.equal(context.location.hash,"#/");assert.deepEqual(calls,[["local",7]]);
+  }
 });
-
 function phoneHarness(){
   const h=harness(),nodes=new Map(["cinema-remote-controls","cinema-phone-pair","cinema-phone-pair-status","cinema-remote-status"].map(id=>[id,{textContent:"",innerHTML:"",replaceChildren(){this.innerHTML="";},querySelectorAll(){return [];}}]));
   h.context.document.getElementById=id=>nodes.get(id)||null;h.context.document.querySelectorAll=()=>[];h.context.document.addEventListener=()=>{};h.context.window={addEventListener:()=>{}};h.context.setInterval=()=>0;h.context.location={hash:"#/remote"};h.context.CINEMA_WEB_CONTROLLER=null;h.context.CINEMA_WEB_RECEIVER=null;h.context.cinemaRemoteText=value=>String(value);h.context.esc=value=>String(value);

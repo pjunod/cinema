@@ -92,12 +92,13 @@ class OperationProgressPackageTests(unittest.TestCase):
                 "sha256": "a" * 64,
             }
             configs[name] = config
+        source = "fn reviewed() {\n    // source anchor\n}\n"
         mapping = {
             "model_file": package["model_file"], "model_sha256": "a" * 64,
             "configs": configs,
-            "source_mapping": {"status": "reviewed", "tables": [{
+            "source_mapping": {"status": "reviewed", "pin_scheme": formal.PIN_SCHEME, "tables": [{
                 "table": "reviewed source", "source": "src.rs", "anchor": "source anchor",
-                "sha256": "a" * 64,
+                **formal.item_pin("src.rs", source, "source anchor"),
             }]},
         }
 
@@ -109,7 +110,7 @@ class OperationProgressPackageTests(unittest.TestCase):
                 return self.text
 
         def fake_repo_file(relative: str, label: str) -> Source:
-            return Source("SPECIFICATION Spec\nINVARIANT Prop\n" if relative.endswith(".cfg") else "source anchor")
+            return Source("SPECIFICATION Spec\nINVARIANT Prop\n" if relative.endswith(".cfg") else source)
 
         with (
             mock.patch.object(formal, "repo_file", side_effect=fake_repo_file),

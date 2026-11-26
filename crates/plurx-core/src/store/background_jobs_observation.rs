@@ -7,6 +7,9 @@ pub struct JobCount {
     pub kind: String,
     pub state: String,
     pub count: i64,
+    /// Rows in this state whose execution lease has elapsed at observation time.
+    #[serde(default)]
+    pub expired_leases: i64,
     pub oldest_age_ms: i64,
     /// Manual library work due for dispatch for at least five minutes.
     #[serde(default)]
@@ -125,6 +128,7 @@ FROM (
 
 pub(super) const COUNTS_SQL: &str = r#"
 SELECT json_object('kind', kind, 'state', state, 'count', COUNT(*),
+    'expired_leases', COUNT(CASE WHEN state IN ('running','cancelling') AND lease_expires_ms <= json_extract($1, '$.now_ms') THEN 1 END),
     'oldest_age_ms', MAX(0, json_extract($1, '$.now_ms') - MIN(created_at_ms)),
     'overdue_manual', COUNT(CASE WHEN state = 'queued' AND kind IN ('library_scan', 'metadata_refresh')
         AND not_before_ms <= json_extract($1, '$.manual_due_before_ms')
@@ -174,7 +178,7 @@ ORDER BY job.id
 "#;
 
 /// Closed metric labels: persisted unknown kinds never become labels.
-pub const JOB_METRIC_KINDS: [&str; 22] = [
+pub const JOB_METRIC_KINDS: [&str; 23] = [
     "transcode_prepare",
     "fragment_index_build",
     "artifact_hydrate",
@@ -197,6 +201,7 @@ pub const JOB_METRIC_KINDS: [&str; 22] = [
     "subtitle_text_model_operation",
     "subtitle_text_translate_artifact",
     "fragment_index_publish",
+    "dv_refit",
 ];
 pub const JOB_METRIC_STATES: [&str; 6] = [
     "queued",

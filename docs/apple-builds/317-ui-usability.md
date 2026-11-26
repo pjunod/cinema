@@ -1,6 +1,5 @@
 # Mobile continuation and recording usability
 
-Build: 159
 Issue: #317
 
 Share series continuation with iPhone and iPad, name its episode target,

@@ -10896,14 +10896,18 @@ async fn handle_request(
         }),
         Request::ActivityPeers => Ok(Response::ActivityPeers {
             peers: membership_ref(membership)?
-                .activity_peers()
+                .cluster_access()
+                .directory(None)
+                .voter_observation()
                 .await?
                 .into_iter()
                 .map(|peer| (peer.node_id, peer.http_base, peer.reachable))
                 .collect(),
         }),
         Request::ArtworkPeerUrls => membership_ref(membership)?
-            .reachable_peer_http_urls()
+            .cluster_access()
+            .names()
+            .delivery_origins()
             .await
             .map(|urls| Response::ArtworkPeerUrls { urls })
             .or_else(|error| Ok(membership_error_response(error))),

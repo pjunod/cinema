@@ -40,7 +40,7 @@ pub(crate) fn real_receiver_fixture(
 fn real_receiver_fixture_at(
     address: IpAddr,
     mode: SourceFixtureMode,
-    advertised_http: std::net::SocketAddr,
+    advertised_http: tokio::net::TcpListener,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealReceiverFixture> + Send>> {
     Box::pin(build_receiver_fixture(
@@ -53,17 +53,22 @@ fn real_receiver_fixture_at(
 async fn build_receiver_fixture(
     address: IpAddr,
     mode: SourceFixtureMode,
-    advertised_http: Option<std::net::SocketAddr>,
+    advertised_http: Option<tokio::net::TcpListener>,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealReceiverFixture {
     let directory = crate::test_tempdir().expect("real B directory");
+    // The startup socket owner serves on the caller's bound HTTP socket, so
+    // the advertised origin is never unbound before it serves.
+    let advertised_address = advertised_http
+        .as_ref()
+        .map(|listener| listener.local_addr().expect("advertised HTTP address"));
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    if let Some(address) = advertised_http {
+    if let Some(address) = advertised_address {
         config.server.bind = address;
         config.cluster.artwork_url = format!("http://{address}");
     }
-    let cluster_address = advertised_http.map_or(
+    let cluster_address = advertised_address.map_or(
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         |http| http.ip(),
     );
@@ -71,16 +76,25 @@ async fn build_receiver_fixture(
     let api = std::net::TcpListener::bind((cluster_address, 0)).expect("B API port");
     config.cluster.raft_bind = raft.local_addr().expect("B Raft address");
     config.cluster.api_bind = api.local_addr().expect("B API address");
-    config.cluster.advertise_host = if advertised_http.is_some() {
+    config.cluster.advertise_host = if advertised_address.is_some() {
         cluster_address.to_string()
     } else {
         "localhost".to_owned()
     };
-    drop((raft, api));
-    let startup_clock =
-        advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
+    // Keep the bound sockets: the voter serves on them, so no other socket
+    // can take either port before it starts.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    let startup_clock = advertised_http.map(|listener| {
+        Arc::new(
+            crate::StartupObservationHttp::from_listener(listener).expect("advertised HTTP socket"),
+        )
+    });
     let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
+        Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&crate::cluster::StartupClockAdapter(clock.as_ref())),
+        ))
+        .await
     } else {
         crate::sharing_fixture_clock::select_applied_singleton(&config).await
     }
@@ -106,7 +120,7 @@ async fn build_receiver_fixture(
     state.node_id = selected.identity.node_id.clone();
     state.replace_membership(selected.membership_manager());
     state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        state.membership.clone(),
+        state.cluster.test_membership().clone(),
         Arc::clone(&state.store),
     );
     state.clock_observer = if let Some(clock) = &startup_clock {
@@ -115,10 +129,10 @@ async fn build_receiver_fixture(
             .await
             .expect("actual startup clock observer")
     } else {
-        crate::clock_offset::ClockObserver::new(state.membership.clone())
+        crate::clock_offset::ClockObserver::new(state.cluster.operations().clock())
     };
     state.catalogue = selected.catalogue_reader();
-    state.replication = selected.replication_monitor();
+    state.replace_replication(selected.replication_monitor());
     state.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -129,10 +143,12 @@ async fn build_receiver_fixture(
         },
     ));
     state
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
     state
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual B fixture registry boot");
@@ -590,6 +606,9 @@ async fn actual_pinned_playback(
     let observed_ends = source_ends.clone();
     let source_resource_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_resource_status = source_resource_status.clone();
+    // The resource name each relayed Source request carried.
+    let source_resources = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let observed_resources = source_resources.clone();
     let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let stalled_end_release = tokio_util::sync::CancellationToken::new();
     let observed_stall_release = stalled_end_release.clone();
@@ -608,6 +627,7 @@ async fn actual_pinned_playback(
                 let starts = observed_starts.clone();
                 let ends = observed_ends.clone();
                 let resource_status = observed_resource_status.clone();
+                let resources = observed_resources.clone();
                 let status = observed_status.clone();
                 async move {
                     if request.uri().path().ends_with("/end") {
@@ -634,6 +654,21 @@ async fn actual_pinned_playback(
                         starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     let is_resource = request.uri().path().ends_with("/resources");
+                    let request = if is_resource {
+                        let (parts, body) = request.into_parts();
+                        let bytes = axum::body::to_bytes(body, 128 * 1024)
+                            .await
+                            .expect("bounded Source resource ask");
+                        if let Some(name) = serde_json::from_slice::<Value>(&bytes)
+                            .ok()
+                            .and_then(|value| value["resource"].as_str().map(str::to_owned))
+                        {
+                            resources.lock().expect("Source resources").push(name);
+                        }
+                        Request::from_parts(parts, Body::from(bytes))
+                    } else {
+                        request
+                    };
                     let response = next.run(request).await;
                     if is_resource {
                         resource_status.store(
@@ -1093,6 +1128,46 @@ async fn actual_pinned_playback(
         .to_str()
         .expect("playlist MIME")
         .contains("mpegurl"));
+    // Safari's native HLS readiness asks for the same playlist with the
+    // viewer's login in the URL (`core/api.js` `tok`). B relays it, and the
+    // Source is asked for the playlist alone, never for the token.
+    let source_name = playlist_path
+        .strip_prefix(&prefix)
+        .expect("B session playlist")
+        .to_owned();
+    let native_path = format!(
+        "{playlist_path}{}token={}",
+        if playlist_path.contains('?') {
+            '&'
+        } else {
+            '?'
+        },
+        fixture.original_login
+    );
+    let (native_status, _, native_bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &native_path,
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        native_status,
+        StatusCode::OK,
+        "native readiness URL; H2={h2}: {}",
+        String::from_utf8_lossy(&native_bytes)
+    );
+    assert!(native_bytes.starts_with(b"#EXTM3U"));
+    {
+        let asked = source_resources.lock().expect("Source resources");
+        assert_eq!(asked.last(), Some(&source_name), "H2={h2}");
+        assert!(
+            asked.iter().all(|name| !name.contains("token")),
+            "{asked:?}"
+        );
+    }
     let mut playlist = String::from_utf8(bytes.to_vec()).expect("actual HLS UTF-8");
     assert!(playlist.starts_with("#EXTM3U"));
     if playlist.contains("#EXT-X-STREAM-INF:") {

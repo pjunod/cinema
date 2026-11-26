@@ -24,6 +24,20 @@ def bearer(request):
     return request["headers"].get("Authorization")
 
 
+class RuntimeSocket(LauncherCase):
+    def test_a_runtime_dir_too_deep_for_the_socket_is_passed_over(self):
+        deep = os.path.join(self.tmp, *(["d" * 40] * 3))
+        os.makedirs(deep, mode=0o700)
+        os.rmdir(self.runtime)
+        self.runtime = deep
+        self.close_at(12)
+        self.assertEqual(self.run_launcher(), 0, self.errors)
+        sock = next(a for a in self.mpv.argv() if a.startswith("--input-ipc-server=")).split("=", 1)[1]
+        self.assertFalse(sock.startswith(deep))
+        self.assertLessEqual(len(os.fsencode(sock)), launcher_module.SUN_PATH_MAX)
+        self.assertFalse(os.path.exists(os.path.dirname(sock)), "the private socket directory is removed")
+
+
 class CallSequence(LauncherCase):
     def test_redeem_decide_create_play_then_release_and_revoke(self):
         self.close_at(12)
@@ -46,6 +60,7 @@ class CallSequence(LauncherCase):
             self.assertEqual(bearer(r), None if capability else f"Bearer {TOKEN}", r["path"])
         create_body = s.requests[create]["body"]
         self.assertEqual(create_body["start"], 65.0)
+        self.assertEqual(create_body["transport"], "mpv")
         self.assertEqual(create_body["audio"], 1)
         self.assertTrue(create_body["quality_auto"])
         self.assertNotIn("height", create_body, "transcode Auto is the server's choice")
@@ -78,6 +93,7 @@ class CallSequence(LauncherCase):
         self.assertEqual(self.run_launcher(), 0)
         body = self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")[0]["body"]
         self.assertEqual((body["copy"], body["aac"], body["preserve_dolby_vision"]), (True, True, True))
+        self.assertEqual(body["transport"], "mpv")
         control = self.server.calls("POST", pattern=r"/control$")[0]["body"]
         self.assertEqual(control["selection"]["quality"], {"mode": "original"})
         self.assertNotIn("supported_actions", control, "passive: the server may only answer none")
@@ -176,6 +192,7 @@ class Seeking(LauncherCase):
         release_first = s.index("DELETE", rf"/hls/{first}$")
         creates = s.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")
         self.assertEqual(len(creates), 2)
+        self.assertEqual([r["body"]["transport"] for r in creates], ["mpv", "mpv"])
         self.assertLess(release_first, s.requests.index(creates[1]), "the old session goes first")
         self.assertEqual(creates[1]["body"]["start"], 560.0, "60 s origin + 500 s into the session")
         self.assertEqual(creates[1]["body"]["playback_id"], creates[0]["body"]["playback_id"])
@@ -739,6 +756,7 @@ class FilmTimeline(LauncherCase):
         self.assertEqual(self.run_launcher(), 0)
         creates = self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")
         self.assertEqual(len(creates), 2)
+        self.assertEqual([r["body"]["transport"] for r in creates], ["mpv", "mpv"])
         self.assertEqual(creates[1]["body"]["start"], 3000.5)
         self.assertEqual(self.film_settings()[-1],
                          ["set_property", "user-data/osc/film", {"origin": 3000.0, "duration": 7200.0}])

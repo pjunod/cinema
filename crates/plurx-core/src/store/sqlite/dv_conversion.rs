@@ -1768,19 +1768,26 @@ mod tests {
             // v129: the shared queue helper drops every background_* object,
             // the replaced triggers and their marker among them.
             "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
-            // v130: offload's `items.offloaded_at` and its two clearing
-            // triggers; the shared source-extension fixture rewinds them
-            // first, so both fixtures reach v129 before the tails above.
+            // v130: offload's `items.offloaded_at` and its two clearing triggers.
             "ADD COLUMN offloaded_at",
-            // v131: the shared queue helper drops every background_* object,
-            // including the pending storage-domain table, views and marker.
+            // v131: storage-domain pending tables, views and marker.
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
             // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
             // v133: the empty delegation tail is removed after the source
             // lease rewind by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
-            // v134/v135: the shared source-extension fixture drops the empty
+            // v136: the test rewind restores the exact v124 dispatch definitions.
+            "DROP TRIGGER dispatch_turn_job",
+            // v135: remove the exact empty curation extension before the F+ tail.
+            "CREATE TABLE library_curation_schema",
+            // v134: the shared title rewind removes the exact empty F+ curve extension.
+            "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
+            // v137/v138: the shared curation rewind restores the exact managed
+            // v6 view and marker and the original analysis view, first.
+            "INSERT INTO subtitle_managed_schema VALUES(1,7)",
+            "CREATE TABLE IF NOT EXISTS analysis_source_scope_schema",
+            // v139/v140: the shared source-extension fixture drops the empty
             // lease table and restores the v1 owners and replaced dependents.
             "CREATE TABLE source_leases",
             "UPDATE source_lease_schema SET version=3",

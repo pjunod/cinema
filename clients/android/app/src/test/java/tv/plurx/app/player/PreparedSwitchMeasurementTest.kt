@@ -265,4 +265,26 @@ class PreparedSwitchMeasurementTest {
         val rebind = settle.indexOf("rebindMediaSessionTransport()")
         assertTrue("rebound only after the frame", proof in 0 until rebind)
     }
+
+    @Test
+    fun preparedQualityOwnsSeeksOnlyAfterTheSuccessorsProvenFrame() {
+        val module = generateSequence(java.io.File("").absoluteFile) { it.parentFile }
+            .first { java.io.File(it, "src/main/java/tv/plurx/app/player/Controller.kt").isFile }
+        val source = java.io.File(module, "src/main/java/tv/plurx/app/player/Controller.kt").readText()
+        val presented = "planReplacement.presented(change.quality)"
+        val switch = source.substringAfter("private fun commitPreparedReplacement(")
+            .substringBefore("private fun settleCommitOnFirstFrame(")
+        val settle = source.substringAfter("private fun settleCommitOnFirstFrame(")
+            .substringBefore("private fun drainSeekDeferredBehindSwitch(")
+        val rollback = source.substringAfter("private fun rollbackSwitchedReplacement(")
+            .substringBefore("private fun releaseSuccessor(")
+        assertFalse(switch.contains(presented))
+        assertFalse(rollback.contains(presented))
+        val frame = settle.indexOf("preparedSwitch.noteFirstFrame(")
+        val owned = settle.indexOf("directedChange?.takeIf(::directedChangeOutstanding)")
+        val quality = settle.indexOf(presented)
+        val seek = settle.indexOf("drainSeekDeferredBehindSwitch()")
+        assertTrue("a proven directed presentation updates the plan before a held seek",
+            frame >= 0 && frame < owned && owned < quality && quality < seek)
+    }
 }

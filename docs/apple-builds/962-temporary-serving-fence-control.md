@@ -1,6 +1,5 @@
 # Keep playback control through a temporary serving fence
 
-Build: 220
 Issue: #962
 
 Apple's local playback control reporter now retries `503 serving_fenced`

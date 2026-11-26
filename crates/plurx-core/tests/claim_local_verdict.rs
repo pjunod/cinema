@@ -144,14 +144,14 @@ impl Pair {
 /// An embedded single voter and a SQLite store, side by side.
 async fn pair(root: &Path) -> Pair {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let listeners: Vec<_> = (0..2)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
-        .collect();
-    let addresses: Vec<_> = listeners
-        .iter()
-        .map(|listener| listener.local_addr().expect("listener address"))
-        .collect();
-    drop(listeners);
+    // The voter serves on these sockets rather than binding the ports again,
+    // so no other socket can take either port between choosing and serving it.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned port");
+    let addresses = [
+        raft.local_addr().expect("listener address"),
+        api.local_addr().expect("listener address"),
+    ];
     let raft = Box::pin(hiqlite::start_node(NodeConfig {
         node_id: 1,
         nodes: vec![Node {
@@ -161,6 +161,7 @@ async fn pair(root: &Path) -> Pair {
         }],
         listen_addr_api: Cow::Borrowed("127.0.0.1"),
         listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+        listeners: Some(hiqlite::NodeListeners { raft, api }),
         data_dir: Cow::Owned(root.join("node").to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("claim-verdict.db"),
         secret_api: "owned-claim-verdict-api".into(),
@@ -251,6 +252,17 @@ async fn scenario(root: &Path) {
     pair.raw(&format!(
         "DELETE FROM source_leases WHERE owner_kind='job' AND work_id='{}'",
         holders[1]
+    ))
+    .await;
+    pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
+        .await;
+
+    // A worker can disappear with the physical reader still charged. Its
+    // lapsed lease keeps the viewer slot reserved through the grace period.
+    pair.raw(&format!(
+        "UPDATE source_leases SET expires_at_ms={} WHERE owner_kind='job' AND work_id='{}'",
+        NOW - 1,
+        holders[0]
     ))
     .await;
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)

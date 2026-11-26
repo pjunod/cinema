@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 25] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 26] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -192,6 +192,7 @@
             "processed_upgrade_qualification.rs",
             include_str!("../processed_upgrade_qualification.rs"),
         ),
+        ("retain_output.rs", include_str!("../retain_output.rs")),
         ("fence.rs", include_str!("../fence.rs")),
         ("start_plan.rs", include_str!("../start_plan.rs")),
     ];
@@ -346,7 +347,10 @@
             .split_once("    if owner_node_id == state.node_id {")
             .expect("the activation that follows dispatch")
             .0;
-        assert!(degraded.contains("(degraded_processing, processing_note)"), "the worker result carries its degrade reason and processing note");
+        assert!(
+            degraded.contains("local_serving_generation, degraded_processing)) = started"),
+            "the worker result carries its degrade reason"
+        );
         assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
         for restored in [
             "plan_notes.push(processing_declined_note(&reason));",
@@ -365,6 +369,48 @@
             super::create::processing_declined_note("the graph expired"),
             "Dolby Vision processing declined: the graph expired"
         );
+    }
+
+    #[test]
+    fn delayed_activation_entry_consumes_the_absolute_lease_instead_of_restarting_it() {
+        let started = tokio::time::Instant::now();
+        let deadline = super::create::activation_lease_deadline_at(13_000, 1_000, started);
+        let entered = started + Duration::from_secs(11);
+        let delayed = super::create::activation_lease_deadline_at(13_000, 12_000, entered);
+        assert_eq!(deadline, started + Duration::from_secs(12));
+        assert_eq!(delayed, deadline);
+        assert_eq!(delayed - entered, Duration::from_secs(1));
+        assert_eq!(
+            super::create::activation_lease_deadline_at(13_000, 13_000, deadline),
+            deadline,
+            "an expired absolute lease yields no new owner lifetime",
+        );
+    }
+
+    #[test]
+    fn activation_reentry_cannot_extend_the_captured_owner_deadline() {
+        let started = tokio::time::Instant::now();
+        let captured = super::create::activation_lease_deadline_at(13_000, 1_000, started);
+        for elapsed in [2_u64, 7, 11] {
+            assert_eq!(
+                super::create::activation_lease_deadline_at(
+                    13_000,
+                    1_000 + elapsed as i64 * 1_000,
+                    started + Duration::from_secs(elapsed),
+                ),
+                captured,
+            );
+        }
+        let source = hls_product_source();
+        let owner = source
+            .split_once("pub(in crate::http) async fn activate_session_under_authority(")
+            .expect("activation owner")
+            .1
+            .split_once("async fn wait_for_exact_activation(")
+            .expect("activation owner end")
+            .0;
+        assert!(owner.contains("lease_deadline: tokio::time::Instant"));
+        assert!(!owner.contains("activation_lease_deadline("));
     }
 
     /// The reservation is a control-flow property of one `async fn` that needs
@@ -732,6 +778,7 @@
     /// A minimal delivered selection; only `height` matters to these tests.
     fn sample_effective_selection() -> crate::playback_control::EffectiveSelection {
         crate::playback_control::EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             height: 1080,
             quality_auto: false,
@@ -1024,12 +1071,15 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 source_telemetry: None,
                 dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -1054,6 +1104,7 @@
             },
         };
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -1070,6 +1121,7 @@
             height: 720,
             encoder: "software".to_owned(),
             vod: false,
+            startup_seek_ready_ms: None,
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
@@ -1690,6 +1742,81 @@
     }
 
     #[tokio::test]
+    async fn rolling_native_split_authorizes_both_renditions_and_holds_unpublished_video() {
+        let dir = crate::test_tempdir().expect("split session directory");
+        let session = uuid::Uuid::new_v4().to_string();
+        let feed = plurx_core::testfixtures::pipe("closed-gop");
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&feed);
+        let Some(plurx_core::fmp4::Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+            panic!("HEVC fixture has no initialization");
+        };
+        let Some(plurx_core::fmp4::Unit::Fragment(fragment)) =
+            reader.next_unit().expect("fixture fragment")
+        else {
+            panic!("HEVC fixture has no first fragment");
+        };
+        for (name, bytes) in [
+            ("init.mp4", init.bytes.as_slice()),
+            ("seg00000.m4s", fragment.bytes.as_slice()),
+            ("split-audio.mp4", b"audio init"),
+            ("split-video.mp4", b"video init"),
+            ("split-audio-seg00000.m4s", b"audio segment"),
+            ("split-video-seg00000.m4s", b"video segment"),
+            ("split-video-seg00012.m4s", b"unpublished ordinary video"),
+        ] {
+            tokio::fs::write(dir.path().join(name), bytes).await.expect("seed split object");
+        }
+        let (fixture, ids) = HlsDeliveryFixture::publish_native_split_actor_managed(dir.path(), &session).await;
+        activate_fixture_route(&fixture, &session, "split-playback").await;
+
+        let master = master_playlist_response(
+            State(fixture.state.clone()), AxPath(session.clone()),
+            Query(PlaylistQuery { native: None, acquisition_start_ms: None, subtitle: None, diagnostic: None }),
+            HeaderMap::new(),
+        ).await.expect("authenticate split master");
+        let master = axum::body::to_bytes(master.into_body(), 16_384).await.expect("split master body");
+        let master = std::str::from_utf8(&master).expect("split master UTF-8");
+        assert!(master.contains("CODECS=\"hev1."));
+
+        for (role, id, init, bytes, renewal, fetched) in [
+            ("audio", &ids.audio, &b"audio init"[..], &b"audio segment"[..], "audio-media-segment", None),
+            ("video", &ids.video, &b"video init"[..], &b"video segment"[..], "split-video-media-segment", Some(0)),
+        ] {
+            assert!(master.contains(&format!("{role}/{id}/index.m3u8")));
+            let playlist = child_playlist(
+                State(fixture.state.clone()), AxPath((session.clone(), role.into(), id.clone())),
+                HeaderMap::new(),
+            ).await.expect("authenticate split child playlist");
+            let playlist = axum::body::to_bytes(playlist.into_body(), 16_384).await.expect("split playlist body");
+            let playlist = std::str::from_utf8(&playlist).expect("child playlist UTF-8");
+            assert!(playlist.contains(&format!("init/{id}.mp4")));
+            assert!(playlist.contains("segment/0.m4s"));
+            assert!(!playlist.contains("segment/12.m4s"));
+
+            for (kind, object, expected) in [("init", format!("{id}.mp4"), init), ("segment", "0.m4s".into(), bytes)] {
+                let response = child_segment(
+                    State(fixture.state.clone()),
+                    AxPath((session.clone(), role.into(), id.clone(), kind.into(), object)),
+                    HeaderMap::new(),
+                ).await.expect("authenticate split media object");
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024).await.expect("split media body").as_ref(),
+                    expected,
+                );
+            }
+            fixture.wait_for_delivery_projection(renewal, fetched).await;
+        }
+        let future = crate::vodserve::ChildMediaRequest {
+            role: "video".into(), rendition: ids.video, kind: "segment".into(), object: "12.m4s".into(),
+        };
+        let pending = fixture.state.transcode.segment_for_publication_role_before(
+            &session, "seg00012.m4s", Some(&future), Instant::now() + Duration::from_millis(20),
+        ).await.expect("resolve unpublished split object");
+        assert!(matches!(pending, crate::transcode::SegmentPublication::Pending(_)));
+    }
+
+    #[tokio::test]
     async fn rolling_status_authz_does_not_change_vod_status_publication() {
         let dir = crate::test_tempdir().expect("VOD status directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
@@ -1915,6 +2042,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -1931,6 +2059,7 @@
             height: 720,
             encoder: "software".to_owned(),
             vod: false,
+            startup_seek_ready_ms: None,
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
@@ -2026,64 +2155,6 @@
             draining.drain_deadline_ms.is_some(),
             "the commit is what puts the predecessor into its drain",
         );
-
-        // A newer ingress may transparently forward the bounded extension to
-        // this parser-floor owner. Refuse only at this local semantic boundary,
-        // preserving the active predecessor and its sequence/admission state.
-        for decoder_loss in [false, true] {
-            let mut unsupported = drain_control_request(generation.clone(), 1);
-            unsupported.selection.quality = crate::playback_control::QualitySelection::Auto {
-                height: Some(720),
-                candidate_id: Some(plurx_core::playback::candidate::CandidateId([0x12; 16])),
-            };
-            if decoder_loss {
-                unsupported.selection.quality = crate::playback_control::QualitySelection::Original;
-                unsupported
-                    .capabilities
-                    .as_mut()
-                    .expect("fixture capabilities")
-                    .decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
-                    revision: 4,
-                    video: vec![],
-                });
-            }
-            let response = crate::http::internal_media_sessions::control_authorized(
-                fixture.state.clone(),
-                crate::playback_control::ControlRelayRequest {
-                    session_id: session_id.clone(),
-                    generation: generation.clone(),
-                    expected_owner_node_id: fixture.state.node_id.clone(),
-                    expected_owner_epoch: 1,
-                    deadline_unix_ms: unix_ms().saturating_add(4_000),
-                    control: unsupported,
-                },
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
-                .await
-                .expect("valid parser-floor test fixture");
-            let refusal: crate::playback_control::ControlErrorBody =
-                serde_json::from_slice(&bytes).expect("valid parser-floor test fixture");
-            assert_eq!(
-                refusal.invalid_field.as_deref(),
-                Some(if decoder_loss {
-                    "capabilities.decoder_caps_unsupported"
-                } else {
-                    "selection.quality.candidate_id_unsupported"
-                })
-            );
-            assert!(refusal.is_valid_for_status(400));
-            let preserved = fixture
-                .store
-                .media_session_route(&session_id)
-                .await
-                .expect("valid parser-floor test fixture")
-                .expect("valid parser-floor test fixture");
-            assert_eq!(preserved.state, "active");
-            assert_eq!(preserved.incarnation_id, draining.incarnation_id);
-            assert_eq!(preserved.drain_deadline_ms, draining.drain_deadline_ms);
-        }
 
         let switched = || crate::playback_control::ActionAcknowledgement {
             action_id: uuid::Uuid::new_v4().to_string(),
@@ -2212,12 +2283,15 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 source_telemetry: None,
                 dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2242,6 +2316,7 @@
             },
         };
         let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,
@@ -2258,6 +2333,7 @@
             height: 720,
             encoder: "software".to_owned(),
             vod: false,
+            startup_seek_ready_ms: None,
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
@@ -2494,12 +2570,15 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    split_audio: false,
                     source_telemetry: None,
                     dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
                     continuous_media: None,
                     quality_catalog: None,
                     candidate_context: None,
+                    accepted_processed_ask: None,
                     vod_only: false,
                     passive_vod: false,
                     finite_bitrate_limit_bps: None,
@@ -2524,6 +2603,7 @@
                 },
             };
             let start = StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
                 delivered_audio: None,
@@ -2540,6 +2620,7 @@
                 height: 720,
                 encoder: "software".to_owned(),
                 vod: label.starts_with("vod"),
+                startup_seek_ready_ms: None,
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
@@ -2707,6 +2788,7 @@
                     owner_epoch: 1,
                 },
                 effective_selection: crate::playback_control::EffectiveSelection {
+                    audio_alternates: false,
                     candidate_id,
                     quality_auto: true,
                     height: 720,

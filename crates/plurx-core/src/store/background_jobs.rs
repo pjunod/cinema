@@ -268,6 +268,26 @@ macro_rules! claim_foreground_window {
     };
 }
 
+/// A viewer's read-preparation lease (title detail, predicted resume,
+/// subtitle read attestation) overlapping `$key` has live authority. Analysis
+/// and jobs yield to it as they do to playback. Only live authority counts —
+/// no grace — so an unsettled or stuck preparation cannot hold them back.
+macro_rules! claim_preparation_window {
+    ($key:literal, $now:literal) => {
+        concat!(
+            "EXISTS(SELECT 1 FROM source_leases prep JOIN source_lease_effective_resources prep_key ",
+            "ON prep_key.lease_id=prep.lease_id WHERE prep.owner_kind='lease' AND prep.phase!='paused' ",
+            "AND prep.expires_at_ms>",
+            $now,
+            " AND (prep_key.resource_key=",
+            $key,
+            " OR prep_key.resource_key='source_io' OR ",
+            $key,
+            "='source_io'))"
+        )
+    };
+}
+
 /// Every slot of this root (or explicitly limited aggregate domain) is
 /// taken. A generic legacy key uses the bounded node-local fallback.
 macro_rules! claim_source_holders {
@@ -400,8 +420,24 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind')='dv_title_scan' AND NOT EXISTS(
       SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
       WHERE d.revision=json_extract(body,'$.payload.probe_revision') AND d.file_id=json_extract(body,'$.payload.file_id')
-      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest') AND d.terminal=0
-      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')) THEN 'no_demand'
+      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest')
+      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')
+      AND CASE
+        WHEN json_type(body,'$.native_fel_head_reopen') IS NULL THEN d.terminal=0
+        ELSE json_extract(body,'$.native_fel_head_reopen')=1 AND d.terminal=1 AND prior_job IS NULL
+          AND json_extract(body,'$.request.scope')='dv-native-fel-head'
+          AND json_extract(body,'$.request.consumer_kind')='native_fel_head'
+          AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+          AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
+          AND (
+            (json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.request.identity')=json_extract(body,'$.request.request_digest')
+             AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.verdict.admitted')=1)
+            OR (json_extract(body,'$.native_fel_head_measure_missing')=1
+             AND json_type(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')) IS NULL)
+          )
+          AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
+            AND j.state IN ('queued','running','cancelling') AND json_extract(j.payload_json,'$.file_id')=d.file_id)
+      END) THEN 'no_demand'
     WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')
         AND state = 'awaiting_import'
@@ -574,11 +610,11 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_type(body, '$.retry_of') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.retry_of')
         AND original.state IN ('failed','cancelled') AND original.payload_version = 1
-        AND original.kind IN ('transcode_prepare','artifact_hydrate')
+        AND original.kind IN ('transcode_prepare','artifact_hydrate','dv_refit')
         AND original.dedupe_key = json_extract(body, '$.dedupe_key')
     ) THEN 'conflict'
     WHEN json_type(body, '$.retry_of') IS NOT NULL
-      AND json_extract(body, '$.payload.kind') = 'transcode_prepare' AND NOT EXISTS (
+      AND json_extract(body, '$.payload.kind') IN ('transcode_prepare','dv_refit') AND NOT EXISTS (
         SELECT 1 FROM files WHERE id = json_extract(body, '$.payload.file_id')
           AND size = json_extract(body, '$.payload.source_size')
           AND mtime = json_extract(body, '$.payload.source_mtime')
@@ -724,6 +760,16 @@ macro_rules! claim_kind_demand {
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
     AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
+  AND (kind!='dv_title_scan' OR NOT EXISTS (
+      SELECT 1 FROM background_job_waiters w
+      WHERE w.job_id=background_jobs.id AND w.consumer_kind='native_fel_head'
+    ) OR EXISTS (
+      SELECT 1 FROM background_job_waiters w WHERE w.job_id=background_jobs.id
+        AND w.state IN ('pending','awaiting_hydration')
+        AND (w.deadline_ms IS NULL OR w.deadline_ms>json_extract($1,'$.now_ms'))
+        AND (w.consumer_kind IN ('playback_qualification','dv_title_scan')
+          OR (w.consumer_kind='native_fel_head' AND w.target_node_id=json_extract($1,'$.node_id')))
+    ))
   AND (kind NOT IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') OR ("#,
     text_admission!("payload_json", "json_extract($1,'$.now_ms')"),
     r#"))
@@ -807,9 +853,23 @@ macro_rules! claim_foreground_admission {
         claim_foreground_window!("required.resource_key", "json_extract($1,'$.now_ms')"), ")") };
 }
 
-/// Per-node and per-domain holder caps, plus the unchanged provider slots.
-/// A claimant excludes only its own job's prior fences; other jobs still
-/// count those leases through expiry plus grace.
+/// The job's previous physical reader may still be charged: a lease of an
+/// earlier fence that is not paused and has not passed its expiry plus
+/// grace. A takeover waits for it to settle or lapse, so one job never has
+/// two source readers at once.
+macro_rules! claim_previous_reader {
+    ($job:literal) => {
+        concat!(
+            "NOT EXISTS (SELECT 1 FROM source_leases previous WHERE previous.owner_kind='job' AND previous.work_id=",
+            $job,
+            " AND previous.phase!='paused' AND previous.expires_at_ms>json_extract($1,'$.now_ms')-60000)"
+        )
+    };
+}
+/// Per-root and explicit-domain holder caps, the unchanged provider slots,
+/// and the job's own previous reader. A claimant's prior fences are left out
+/// of the counts (other jobs still charge them through expiry plus grace)
+/// because `claim_previous_reader` already waits for them.
 macro_rules! claim_holder_admission {
     ($job:literal) => { concat!(
         "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
@@ -817,7 +877,8 @@ macro_rules! claim_holder_admission {
         claim_source_holders!("required.resource_key", "json_extract($1,'$.node_id')", "json_extract($1,'$.now_ms')",
             concat!(" AND NOT (held.owner_kind='job' AND held.work_id=", $job, ")")),
         ") AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
-        " AND required.resource_key NOT LIKE 'source_io%' AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key=required.resource_key AND held.expires_at_ms>json_extract($1,'$.now_ms') AND held.job_id!=background_jobs.id)>=2)") };
+        " AND required.resource_key NOT LIKE 'source_io%' AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key=required.resource_key AND held.expires_at_ms>json_extract($1,'$.now_ms') AND held.job_id!=background_jobs.id)>=2) AND ",
+        claim_previous_reader!($job)) };
 }
 
 /// Reserve the last node/domain reader for live demand, on every claim path.
@@ -879,7 +940,8 @@ pub enum ClaimBlock {
     KindDemand,
     /// Playback does not permit background reads, including its expiry grace.
     ForegroundWindow,
-    /// The node/domain holder cap or provider slots are full.
+    /// A previous reader of this job remains charged, or the root/domain holder
+    /// cap or provider slots are full.
     SourceHolders,
     /// The last node/domain reader is reserved for live demand.
     MaintenanceReader,
@@ -1326,6 +1388,8 @@ pub enum JobKind {
     SemanticEmbedding,
     MediaProbe,
     DvTitleScan,
+    /// F+ curve fit of a Profile 7 FEL title: decodes the whole title on the CPU.
+    DvRefit,
 }
 
 impl JobKind {
@@ -1352,7 +1416,8 @@ impl JobKind {
             | Self::ArtworkDerivative
             | Self::SemanticEmbedding
             | Self::MediaProbe
-            | Self::DvTitleScan => true,
+            | Self::DvTitleScan
+            | Self::DvRefit => true,
             Self::LibraryScan | Self::MetadataRefresh => false,
         }
     }
@@ -1690,6 +1755,19 @@ pub enum JobPayload {
         probe_revision: i64,
         scanner_digest: String,
     },
+    /// One title's fit. Its identity (and dedupe key) is the source, the
+    /// selected video stream, the helper's refit identity (refit mode and
+    /// decoder ABI) and the fit method; `probe_revision` records the
+    /// title-scan generation it read and is not part of the identity.
+    DvRefit {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        video_index: i64,
+        probe_revision: i64,
+        helper_identity: String,
+        fit_version: String,
+    },
 }
 
 impl JobPayload {
@@ -1754,6 +1832,7 @@ impl JobPayload {
             Self::SemanticEmbedding { .. } => JobKind::SemanticEmbedding,
             Self::MediaProbe { .. } => JobKind::MediaProbe,
             Self::DvTitleScan { .. } => JobKind::DvTitleScan,
+            Self::DvRefit { .. } => JobKind::DvRefit,
         }
     }
 
@@ -2110,6 +2189,23 @@ impl JobPayload {
                     && *source_mtime >= 0
                     && *probe_revision > 0
                     && digest(scanner_digest)
+            }
+            Self::DvRefit {
+                file_id,
+                source_size,
+                source_mtime,
+                video_index,
+                probe_revision,
+                helper_identity,
+                fit_version,
+            } => {
+                *file_id > 0
+                    && *source_size >= 0
+                    && *source_mtime >= 0
+                    && (0..=255).contains(video_index)
+                    && *probe_revision > 0
+                    && digest(helper_identity)
+                    && super::dv_refit_jobs::valid_fit_version(fit_version)
             }
             Self::MediaProbe {
                 file_id,
@@ -3036,6 +3132,10 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         binding: &str,
     ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_head(
+        &self,
+        request: super::dv_title_jobs::FelHeadRequest,
+    ) -> Result<bool, StoreError>;
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
     /// Settled FEL titles whose verdict another FEL identity measured.
     async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
@@ -3045,7 +3145,25 @@ pub trait BackgroundJobStore: Send + Sync {
         scanner: &str,
         after: i64,
         now_ms: i64,
+    ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
+        self.dv_title_demands_through(scanner, after, i64::MAX, now_ms)
+            .await
+    }
+    /// Page the current maintenance demands in a fixed (after, through] revision range.
+    async fn dv_title_demands_through(
+        &self,
+        scanner: &str,
+        after: i64,
+        through: i64,
+        now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
+    /// Read a recent native FEL target independently of the maintenance cursor.
+    async fn dv_title_demand_for_file(
+        &self,
+        scanner: &str,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<super::dv_title_jobs::TitleDemand>, StoreError>;
     async fn bind_dv_title_demand(
         &self,
         revision: i64,
@@ -3061,6 +3179,45 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         output: super::dv_title_jobs::AnalysisTitleOutput,
     ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
+    /// Profile 7 FEL titles whose F+ fit is missing or stale for `helper`
+    /// and `fit_version`, after `after_file_id`.
+    async fn dv_refit_demands(
+        &self,
+        helper: &str,
+        fit_version: &str,
+        include_all: bool,
+        after_file_id: i64,
+        limit: u32,
+    ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError>;
+    /// Publish a running F+ attempt's whole curve table in one replicated
+    /// write, supersede the file's previous table and settle the job.
+    async fn publish_dv_refit_job(
+        &self,
+        request: super::dv_refit_jobs::PublishRefitJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    /// The file's current F+ curve table, for the source its row describes.
+    async fn dv_refit_curves(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
+    /// One of the file's F+ curve tables by digest: the current one, or one
+    /// superseded within the last seven days.
+    async fn dv_refit_curves_by_digest(
+        &self,
+        file_id: i64,
+        curve_digest: &str,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
+    /// Move a stored F+ table's and outcome's title-scan generation forward
+    /// when the newer generation selects the same stream of the same source.
+    async fn rebind_dv_refit(
+        &self,
+        request: super::dv_refit_jobs::RebindRefit,
+    ) -> Result<(), StoreError>;
+    /// Drop F+ tables superseded more than seven days before `now_ms`, and
+    /// outcomes of sources the catalogue no longer has.
+    async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError>;
+    /// Profile 7 FEL titles and their current F+ tables, by verdict.
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -3285,6 +3442,11 @@ pub trait BackgroundJobStore: Send + Sync {
         node_id: &str,
         now_ms: i64,
     ) -> Result<Option<ClaimVerdict>, StoreError>;
+    /// Read the durable claim predicates for one operator-requested job and node.
+    async fn explain_job_claim(
+        &self,
+        request: ClaimJob,
+    ) -> Result<Option<ClaimVerdict>, StoreError>;
     /// Narrow entry point shared by voter and learner artifact workers.
     async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
@@ -3431,6 +3593,9 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn settle_job(&self, request: SettleJob) -> Result<bool, StoreError>;
     async fn fail_fragment_job(&self, request: FragmentJobFailure) -> Result<bool, StoreError>;
     async fn cancel_job(&self, request: CancelJob) -> Result<Option<BackgroundJob>, StoreError>;
+    /// Cancel a viewer's complete-output preparation only while queued and
+    /// with only its original waiter, in the same transaction as the update.
+    async fn cancel_unshared_output_job(&self, request: CancelJob) -> Result<bool, StoreError>;
     async fn cancel_waiter(
         &self,
         request: CancelWaiter,
@@ -4109,6 +4274,12 @@ LIMIT 1
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::request_requalification(self, file_id, binding).await
     }
+    async fn request_dv_fel_head(
+        &self,
+        request: super::dv_title_jobs::FelHeadRequest,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_fel_head(self, request).await
+    }
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
         super::dv_title_jobs::fel_verdict_counts(self, identity).await
     }
@@ -4119,13 +4290,26 @@ LIMIT 1
     ) -> Result<Vec<i64>, StoreError> {
         super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
     }
-    async fn dv_title_demands(
+    async fn dv_title_demands_through(
         &self,
         scanner: &str,
         after: i64,
+        through: i64,
         now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        super::dv_title_jobs::demands(self, scanner, after, now_ms).await
+        super::dv_title_jobs::demands(self, scanner, after, through, now_ms, None).await
+    }
+    async fn dv_title_demand_for_file(
+        &self,
+        scanner: &str,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<super::dv_title_jobs::TitleDemand>, StoreError> {
+        Ok(
+            super::dv_title_jobs::demands(self, scanner, 0, i64::MAX, now_ms, Some(file_id))
+                .await?
+                .pop(),
+        )
     }
     async fn bind_dv_title_demand(
         &self,
@@ -4145,6 +4329,48 @@ LIMIT 1
         output: super::dv_title_jobs::AnalysisTitleOutput,
     ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
         super::dv_title_jobs::publish_from_analysis(self, output).await
+    }
+    async fn dv_refit_demands(
+        &self,
+        helper: &str,
+        fit_version: &str,
+        include_all: bool,
+        after_file_id: i64,
+        limit: u32,
+    ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError> {
+        super::dv_refit_jobs::demands(self, helper, fit_version, include_all, after_file_id, limit)
+            .await
+    }
+    async fn publish_dv_refit_job(
+        &self,
+        request: super::dv_refit_jobs::PublishRefitJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::dv_refit_jobs::publish(self, request).await
+    }
+    async fn dv_refit_curves(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
+        super::dv_refit_jobs::curves(self, file_id).await
+    }
+    async fn dv_refit_curves_by_digest(
+        &self,
+        file_id: i64,
+        curve_digest: &str,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
+        super::dv_refit_jobs::curves_by_digest(self, file_id, curve_digest).await
+    }
+    async fn rebind_dv_refit(
+        &self,
+        request: super::dv_refit_jobs::RebindRefit,
+    ) -> Result<(), StoreError> {
+        super::dv_refit_jobs::rebind(self, request).await
+    }
+    async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError> {
+        super::dv_refit_jobs::prune(self, now_ms).await
+    }
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
+        super::dv_refit_jobs::progress(self).await
     }
     async fn probe_can_preempt_title(
         &self,
@@ -5141,6 +5367,29 @@ LIMIT 1
         rows.first().map(|row| decode(row)).transpose()
     }
 
+    async fn cancel_unshared_output_job(&self, request: CancelJob) -> Result<bool, StoreError> {
+        if uuid::Uuid::parse_str(&request.job_id).is_err() || request.now_ms < 0 {
+            return Err(invalid("invalid background cancellation"));
+        }
+        let rows = self
+            .queue_sql(
+                "UPDATE background_jobs SET state = 'cancelled', revision = revision + 1,
+                    updated_at_ms = json_extract($1, '$.now_ms')
+                 WHERE id = json_extract($1, '$.job_id') AND state = 'queued'
+                   AND kind IN ('copy_output_prepare','encoded_output_prepare')
+                   AND revision < 9223372036854775807
+                   AND (SELECT COUNT(*) FROM background_job_waiters
+                        WHERE job_id = background_jobs.id) = 1
+                 RETURNING 'true' AS result_json"
+                    .to_owned(),
+                encode(&request)?,
+                true,
+                true,
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
     async fn enqueue_job(&self, request: EnqueueJob) -> Result<EnqueueOutcome, StoreError> {
         request.validate()?;
         let rows = self
@@ -5180,7 +5429,9 @@ LIMIT 1
         let payload = original.supported_payload()?;
         if !matches!(
             payload,
-            JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+            JobPayload::TranscodePrepare { .. }
+                | JobPayload::ArtifactHydrate { .. }
+                | JobPayload::DvRefit { .. }
         ) {
             return Err(invalid("retry requires a domain generation adapter"));
         }
@@ -5349,6 +5600,17 @@ LIMIT 1
         };
         request.validate()?;
         Ok(local_claim_verdict(self, &encode(&request)?).await)
+    }
+
+    async fn explain_job_claim(
+        &self,
+        request: ClaimJob,
+    ) -> Result<Option<ClaimVerdict>, StoreError> {
+        request.validate()?;
+        let rows = self
+            .queue_sql(CLAIM_VERDICT_SQL.into(), encode(&request)?, false, false)
+            .await?;
+        rows.first().map(|row| decode(row)).transpose()
     }
 
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {

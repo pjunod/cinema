@@ -122,18 +122,7 @@ pub(crate) struct ProcessingSkip {
 
 impl ProcessingSkip {
     pub(crate) fn owner_header(&self) -> Option<String> {
-        let json = serde_json::to_string(self).ok()?;
-        let mut ascii = String::new();
-        for ch in json.chars() {
-            if ch.is_ascii() {
-                ascii.push(ch);
-            } else {
-                for unit in ch.encode_utf16(&mut [0; 2]) {
-                    ascii.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-        (ascii.len() <= 4096).then_some(ascii)
+        ascii_header_json(self)
     }
 
     pub(crate) fn from_owner_wire(bytes: &[u8], generation: &str) -> Option<Self> {
@@ -180,8 +169,14 @@ pub(in crate::http) fn register(intent: UpgradeIntent) {
         Entry::Running { .. } => true,
     });
     if entries.len() >= MAX_INTENTS {
+        tracing::warn!(target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(&intent.session_id),
+            "processed upgrade not registered: the intent registry is full");
         return;
     }
+    tracing::info!(target: "plurxd::http::hls",
+        session = %crate::transcode::session_log_id(&intent.session_id),
+        "processed upgrade registered; it waits for the session's first frame");
     entries.insert(
         intent.session_id.clone(),
         Entry::Waiting {
@@ -457,11 +452,39 @@ pub(in crate::http) fn note_rendering(state: &AppState, route: &MediaSessionRout
     let Some(user_id) = route.principal.local_user_id() else {
         return;
     };
+    #[cfg(target_os = "linux")]
+    if state.transcode.reconstruction_slot_held_by_play()
+        && hold_while_reconstruction_busy(user_id, &route.session_id, &route.incarnation_id)
+    {
+        return;
+    }
     let Some((intent, run)) = take_on_rendering(user_id, &route.session_id, &route.incarnation_id)
     else {
         return;
     };
     start_upgrade(state, intent, run);
+}
+
+/// Another playback's reconstruction holds this worker's one slot. A waiting
+/// Profile 8.1 upgrade for a session that is still presenting stays waiting:
+/// the exchange proves the viewer is here, so its first-frame window restarts,
+/// and no trial, planning or preparation slot is spent until the slot frees.
+/// Returns whether the upgrade was held.
+#[cfg(target_os = "linux")]
+pub(in crate::http) fn hold_while_reconstruction_busy(
+    user_id: i64,
+    session_id: &str,
+    incarnation_id: &str,
+) -> bool {
+    let mut entries = lock();
+    let Some(Entry::Waiting { intent, registered }) = entries.get_mut(session_id) else {
+        return false;
+    };
+    if intent.user_id != user_id || intent.incarnation_id != incarnation_id || intent.hdr10_intent {
+        return false;
+    }
+    *registered = std::time::Instant::now();
+    true
 }
 
 /// A prepared successor this node owns was committed for `user_id`: the
@@ -829,6 +852,10 @@ where
             }
         }
     }
+    let native_split = state
+        .transcode
+        .native_split_owns_fel(&intent.session_id)
+        .await;
     let ids = super::preparation::StagedSuccessorIds::mint();
     let recovery = crate::transcode::SessionRecoveryIdentity {
         principal: route.principal.clone(),
@@ -865,7 +892,7 @@ where
     // today's decline.
     let mut incumbent_claim = None;
     let trial = match (trial, admission.needed()) {
-        (Err(reason), Some(needed)) => {
+        (Err(reason), Some(needed)) if !native_split => {
             match claim_incumbent(ids.incarnation_id.clone(), needed).await {
                 None => Err(reason),
                 Some(claim) => {
@@ -885,10 +912,14 @@ where
                         );
                         let mut retry = intent.request.clone();
                         retry.start_seconds = verified_ms as f64 / 1_000.0;
-                        let scoped =
+                        let trial = run_trial(retry, recovery.clone());
+                        #[cfg(any(target_os = "linux", test))]
+                        let trial = crate::vodencode::PROCESSED_TRIAL_ADMISSION.scope(
                             Arc::new(crate::vodencode::ProcessedTrialAdmission::with_claim(
                                 Arc::clone(claim.claim()),
-                            ));
+                            )),
+                            trial,
+                        );
                         // A claim closed mid-trial (a seek past the runway)
                         // means the incumbent must produce now: the trial is
                         // dropped at once rather than holding its capacity
@@ -899,8 +930,7 @@ where
                                 run.skipped(INCUMBENT_RUNWAY_SPENT);
                                 return "declined";
                             }
-                            trial = crate::vodencode::PROCESSED_TRIAL_ADMISSION
-                                .scope(scoped, run_trial(retry, recovery.clone())) => trial,
+                            trial = trial => trial,
                         };
                         incumbent_claim = Some(claim);
                         trial
@@ -929,6 +959,15 @@ where
                 run.skipped("the current reconstruction recipe no longer matches its completed qualification");
                 return "declined";
             }
+            #[cfg(target_os = "linux")]
+            if crate::transcode::TranscodeManager::is_reconstruction_slot_busy(&reason) {
+                // Another playback took this worker's reconstruction slot
+                // after the rendering check. That is capacity, not a verdict
+                // on this session: wait for a later rendering exchange.
+                tracing::info!(target: "plurxd::http::hls", session = %session,
+                    "processed upgrade waits: this worker's reconstruction slot is busy");
+                return SLOT_HELD;
+            }
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade declined; the ordinary session keeps playing");
             run.skipped(&reason);
@@ -954,6 +993,42 @@ where
         root,
         prepared_window,
     } = trial;
+    #[cfg(target_os = "linux")]
+    if native_split {
+        if post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
+            if let Err(reason) = admit_processed_candidate(
+                state,
+                intent,
+                &source,
+                &route,
+                &candidate,
+                AdmissionStage::AfterTrial,
+            )
+            .await
+            {
+                run.skipped(&reason);
+                return "admission_refused";
+            }
+        }
+        return match state
+            .transcode
+            .run_native_fel_splice(
+                &intent.session_id,
+                &intent.incarnation_id,
+                &source,
+                &root,
+                pending.cancellation_token(),
+            )
+            .await
+        {
+            Ok(true) => "native_splice_staged",
+            Ok(false) => "declined",
+            Err(reason) => {
+                run.skipped(&reason);
+                "declined"
+            }
+        };
+    }
     // A parked incumbent keeps only its published runway. When that no
     // longer covers a failed hand-back (or the viewer seeks past it), the
     // claim closes and this upgrade gives back what it took, now.
@@ -1080,6 +1155,7 @@ where
         super::preparation::PreparationPurpose::SelectionChange,
         super::preparation::AcceptedAsk {
             prepared_proof: None,
+            platform: None,
             film_time_ms,
             desired_digest: None,
             planning_cancellation: Some(pending.cancellation_token()),
@@ -1277,3 +1353,21 @@ fn trial_proved_production(
 #[cfg(test)]
 #[path = "processed_upgrade_tests.rs"]
 pub(in crate::http) mod tests;
+
+/// JSON for a bounded private owner header: header values are visible ASCII,
+/// so every other character travels as a JSON `\u` escape, which the
+/// receiving `serde_json` parse restores. `None` past 4096 bytes.
+pub(crate) fn ascii_header_json(value: &impl serde::Serialize) -> Option<String> {
+    let json = serde_json::to_string(value).ok()?;
+    let mut ascii = String::with_capacity(json.len());
+    for ch in json.chars() {
+        if ch.is_ascii() {
+            ascii.push(ch);
+        } else {
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                ascii.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    (ascii.len() <= 4096).then_some(ascii)
+}

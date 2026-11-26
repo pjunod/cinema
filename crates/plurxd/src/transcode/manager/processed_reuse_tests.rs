@@ -774,6 +774,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -803,6 +804,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
             file_id,
             range,
             profile,
+            None,
         )
         .await
         .expect("fresh enhancement from the actual primed owner");
@@ -826,6 +828,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                     wrong_file,
                     wrong_range,
                     wrong_profile,
+                    None,
                 )
                 .await
                 .is_none(),
@@ -848,6 +851,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -874,6 +878,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -959,6 +964,159 @@ async fn fixture_with_audio(
     audio: Option<(Option<i64>, i64)>,
 ) -> Fixture {
     fixture_with_encoder(destination, audio, Encoder::Software, None).await
+}
+
+#[tokio::test]
+async fn native_fel_window_requires_reaped_success_and_keeps_verified_evidence() {
+    use crate::vodencode::dv_runtime::{ObservedPicture, ObservedWindow, VerifiedWindow};
+
+    let f = fixture(DvDestination::Profile81).await;
+    let witness = DvDigest::new("a".repeat(64)).expect("source picture digest");
+    let make_window = |registration, has_receipt: bool, has_witness: bool| VerifiedWindow {
+        bytes: b"verified encoded control".to_vec(),
+        observed: ObservedWindow {
+            pictures: (0..3)
+                .map(|ordinal| ObservedPicture {
+                    key: DvFrameKey {
+                        absolute_video_index: 0,
+                        continuity_epoch: 0,
+                        pts: DvTimestamp::new(i64::try_from(ordinal).expect("ordinal"), 24)
+                            .expect("timestamp"),
+                        display_ordinal: ordinal,
+                    },
+                    base_vcl_sha256: has_witness.then(|| witness.clone()),
+                    duration: DvDuration::new(1, 24, DvDurationProvenance::CodedPacketObserved)
+                        .expect("duration"),
+                    rpu: Vec::new(),
+                    bl_shape: (64, 64),
+                    el_shape: (64, 64),
+                    profile: 7,
+                    source_el_kind: DvElKind::Fel,
+                })
+                .collect(),
+            display_target_rows: Vec::new(),
+            source_trace: witness.clone(),
+            source_tick: (1, 24),
+            runtime_device: witness.clone(),
+            decoder: plurx_core::transcode::DecodeBackend::Software,
+            software_frame_workers: true,
+        },
+        encoded_payloads: Vec::new(),
+        registration,
+        receipt: has_receipt.then(|| f.receipt.clone()),
+    };
+    for (program, succeeds) in [("/bin/true", true), ("/bin/false", false)] {
+        let slot = crate::prodrun::ProducerSlot::new();
+        let child = tokio::process::Command::new(program)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("test encoder process");
+        let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        slot.request_registered_completion(&registration)
+            .await
+            .expect("natural completion");
+        assert_eq!(registration.wait_child_exit().await.success(), succeeds);
+        assert_eq!(
+            make_window(registration.clone(), true, true)
+                .into_native_fel_window()
+                .err()
+                .as_deref(),
+            Some("FEL splice renderer has not completed"),
+        );
+        writers.settled();
+        registration.wait_confirmed_reap().await;
+        if succeeds {
+            let window = make_window(registration.clone(), true, true)
+                .into_native_fel_window()
+                .expect("confirmed completed FEL window");
+            assert_eq!(
+                window.receipt.counts().el_accepted,
+                f.receipt.counts().emitted
+            );
+            assert_eq!(
+                make_window(registration.clone(), false, true)
+                    .into_native_fel_window()
+                    .err()
+                    .as_deref(),
+                Some("FEL splice has no processing receipt"),
+            );
+            assert_eq!(
+                make_window(registration, true, false)
+                    .into_native_fel_window()
+                    .err()
+                    .as_deref(),
+                Some("FEL source witness unavailable"),
+            );
+        } else {
+            assert_eq!(
+                make_window(registration, true, true)
+                    .into_native_fel_window()
+                    .err()
+                    .as_deref(),
+                Some("FEL splice renderer has not completed"),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn prepared_fel_batch_is_bound_to_first_snapshot_and_attempt() {
+    use crate::copyseg::{NativeSplitInventory, PreparedNativeFelObject};
+
+    let f = fixture(DvDestination::Profile81).await;
+    let DvSelection::Selected(plan) = &f.encoding.dv_processing else {
+        panic!("fixture did not qualify reconstructed FEL");
+    };
+    let incarnation = uuid::Uuid::new_v4().to_string();
+    let shape = DvDigest::new("b".repeat(64)).expect("packaged video hash");
+    let mut receipt = f.receipt.clone();
+    receipt
+        .bind_publication(&incarnation, shape.clone())
+        .expect("bind fixture");
+    let report = receipt
+        .effective_report(&DvProductionRegistry, plan, &incarnation, &shape)
+        .expect("fixture receipt validation")
+        .expect("processed report");
+    assert!(report.profile81_reconstructed());
+    assert!(report.fel_contributed());
+
+    let objects = || {
+        (0..2)
+            .map(|index| PreparedNativeFelObject {
+                object: format!("prepared-{index}.m4s"),
+                bytes: 100,
+                report: report.clone(),
+            })
+            .collect()
+    };
+    for (staged_attempt, served_last) in [(2, 1), (1, 2)] {
+        let split = NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        assert!(split.stage_prepared_head(staged_attempt, objects()).is_ok());
+        assert!(!split.defer_first_snapshot_for_prepared_head(std::time::Instant::now()));
+        assert_eq!(
+            split
+                .publish_prepared_head(1, 0, served_last, Some(&incarnation))
+                .len(),
+            2
+        );
+        assert!(split.fel_object(0, 1).is_none());
+    }
+
+    let split = NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+    assert!(split.stage_prepared_head(1, objects()).is_ok());
+    assert!(split.fel_object(0, 1).is_none(), "staged bytes are private");
+    assert!(split
+        .publish_prepared_head(1, 0, 1, Some(&incarnation))
+        .is_empty());
+    assert!(split.stage_prepared_head(1, objects()).is_err());
+    assert_eq!(split.prepared_head_frontier(1), Some(1));
+    assert!(split.fel_object(0, 1).is_some());
+    assert!(split.fel_object(1, 1).is_some());
+    assert!(split.fel_object(1, 2).is_none());
+    assert!(split.fel_at(0, 1, &incarnation).is_none());
+    split.mark_fel_delivered(0, 1);
+    assert_eq!(split.fel_at(0, 1, &incarnation), Some(report));
 }
 
 #[tokio::test]
@@ -1339,6 +1497,7 @@ async fn fixture_with_encoder(
                     }
                     _ => TitleConstant::Unknown,
                 },
+                el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
             }
         };
         let raw_rpus = vec![
@@ -1726,6 +1885,7 @@ printf '%s\n' '{}'
         display_target,
         display: caps.display.clone(),
         display_target_note: display_target_note.clone(),
+        dv_row_facts: None,
         source_tick,
         source_origin,
         native_bl: (64, 64),
@@ -1744,6 +1904,7 @@ printf '%s\n' '{}'
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
+        window_run: Default::default(),
         failure_episode: digest(b"lifecycle failure"),
         preparation_budget: Duration::from_secs(5),
         report_revision: AtomicU64::new(0),
@@ -1831,11 +1992,14 @@ printf '%s\n' '{}'
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
-        sdr_master_codecs: None,
+        retain_output: None,
+        dv_refit_digest: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,

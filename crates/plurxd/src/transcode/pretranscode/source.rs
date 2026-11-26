@@ -285,8 +285,7 @@ impl LocalSourceSnapshot {
 
     #[cfg(unix)]
     pub(super) fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
-        file.metadata()
-            .map(|metadata| Self::from_metadata(&metadata))
+        plurx_core::media_io::fstat(file).map(|metadata| Self::from_metadata(&metadata))
     }
 
     #[cfg(windows)]
@@ -560,13 +559,13 @@ pub async fn pretranscode_source_snapshot(
         }
         let path = path?;
         let open_path = path.clone();
-        let handle = tokio::task::spawn_blocking(move || {
+        let handle = plurx_core::media_io::blocking(move || {
             plurx_core::fs_secure::open_read_nofollow_blocking(&open_path)
         })
         .await
         .ok()?
         .ok()?;
-        let metadata = handle.metadata().ok()?;
+        let metadata = plurx_core::media_io::fstat(&handle).ok()?;
         let snapshot = LocalSourceSnapshot::from_file(&handle).ok()?;
         (metadata.is_file()
             && snapshot.bytes == file.size.max(0) as u64
@@ -648,6 +647,10 @@ pub(crate) struct FragmentAdmission {
     /// this maintenance-only signal.
     pub(super) maintenance: bool,
     pub(super) threads: usize,
+    /// Runs beside live sessions instead of only on an idle node (the F+
+    /// fit): it yields when a viewer waits for capacity, not whenever one
+    /// holds some ([`super::TranscodeManager::fragment_worker_idle`]).
+    pub(super) coexist: bool,
     /// A second bundle the same background job admitted for a heavier step
     /// (the FEL qualification's GPU graph inside a title scan). It is the
     /// job's own capacity, so the idle check counts it as the job's.
@@ -661,7 +664,7 @@ pub(crate) struct FragmentAdmission {
 pub(crate) struct FragmentExtension {
     pub(super) hardware: usize,
     pub(super) threads: usize,
-    pub(super) _permit: crate::admission::TranscodePermit,
+    pub(super) _permit: crate::vodencode::EncodePermit,
 }
 
 impl FragmentAdmission {
@@ -674,12 +677,18 @@ impl FragmentAdmission {
     pub(crate) fn probe_only() -> Self {
         Self {
             threads: 1,
+            coexist: false,
             playback_qualification: false,
             maintenance: false,
             extension: std::sync::Mutex::new(None),
             _permit: None,
             _heavy: None,
         }
+    }
+
+    /// Whether this admission coexists with live sessions (see `coexist`).
+    pub(crate) fn coexists(&self) -> bool {
+        self.coexist
     }
 
     pub(crate) fn is_probe_only(&self) -> bool {
@@ -712,24 +721,30 @@ impl FragmentAdmission {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn install_extension(&self, permit: crate::admission::TranscodePermit) -> bool {
+    pub(super) fn install_extension(
+        &self,
+        permit: crate::admission::TranscodePermit,
+    ) -> Option<crate::vodencode::EncodePermit> {
         let resources = permit.retained_resources();
+        let hardware = usize::from(resources.hardware.is_some());
+        let threads = resources
+            .software
+            .map_or(0, crate::admission::SwPermit::threads);
+        let permit_handle = crate::vodencode::EncodePermit::from(permit);
         let extension = FragmentExtension {
-            hardware: usize::from(resources.hardware.is_some()),
-            threads: resources
-                .software
-                .map_or(0, crate::admission::SwPermit::threads),
-            _permit: permit,
+            hardware,
+            threads,
+            _permit: permit_handle.clone(),
         };
         let mut slot = self
             .extension
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.is_some() {
-            return false;
+            return None;
         }
         *slot = Some(extension);
-        true
+        Some(permit_handle)
     }
 
     /// Release the extension's capacity (the job's heavier step is over).

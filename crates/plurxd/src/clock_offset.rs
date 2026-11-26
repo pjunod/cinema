@@ -1,11 +1,11 @@
 //! One serialized full-roster clock observation owner per daemon.
+use crate::cluster::ClockOperations;
 use crate::settings_changes::{Proved, SettingsChangeSource};
 use crate::state::AppState;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::clock::{ClockDecisionTicket, PeerClockOffset, CLOCK_OBSERVATION_MAX_AGE};
 use plurx_core::cluster::membership::{
     normalize_internal_http_base, ClockLeadershipIdentity, ClockPeerRoster, MembershipError,
-    MembershipManager,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Semaphore};
 
 const CLOCK_FILTER_DEPTH: usize = 8;
-const CLOCK_PROBE_MAX_RTT_MS: i64 = 2_000;
-const CLOCK_RTT_QUANTIZATION_FLOOR_US: i64 = 1_000;
-const CLOCK_PROBE_INTERVAL: Duration = Duration::from_secs(10);
-const CLOCK_ROSTER_BUDGET: Duration = Duration::from_secs(2);
+const CLOCK_PROBE_MAX_RTT_MS: i64 = plurx_core::cluster::timing::clock::CLOCK_PROBE_MAX_RTT_MS;
+const CLOCK_RTT_QUANTIZATION_FLOOR_US: i64 =
+    plurx_core::cluster::timing::clock::CLOCK_RTT_QUANTIZATION_FLOOR_US;
+const CLOCK_PROBE_INTERVAL: Duration = plurx_core::cluster::timing::clock::CLOCK_PROBE_INTERVAL;
+const CLOCK_ROSTER_BUDGET: Duration = plurx_core::cluster::timing::clock::CLOCK_ROSTER_BUDGET;
 const CLOCK_WAITER_LIMIT: usize = 64;
 
 type PeerDirectory = BTreeMap<String, (u64, String)>;
@@ -48,13 +49,13 @@ pub(crate) trait ClockRosterSource: Send + Sync {
 }
 
 #[plurx_core::cluster::coordination::cluster_job_async_trait]
-impl ClockRosterSource for MembershipManager {
+impl ClockRosterSource for ClockOperations {
     async fn clock_roster(&self) -> Result<ClockPeerRoster, MembershipError> {
-        self.clock_peers().await
+        self.roster().await
     }
 
     async fn clock_roster_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
-        self.clock_peers_hint().await
+        self.roster_hint().await
     }
 }
 
@@ -112,13 +113,8 @@ impl RosterProof {
         }
     }
 
-    fn for_membership(membership: &MembershipManager) -> Self {
-        Self::new(match membership.local_db_raft_metrics() {
-            Some(applied) => SettingsChangeSource::Applied(applied),
-            // Without a replicated store the roster is empty and read from
-            // nothing; no other process can change it.
-            None => SettingsChangeSource::LocalOnly,
-        })
+    fn for_clock(clock: &ClockOperations) -> Self {
+        Self::new(clock.change_source())
     }
 
     /// The held roster while it stands, otherwise one consistent read, held
@@ -168,7 +164,7 @@ struct OwnerControl {
 }
 
 struct ObserverInner {
-    membership: MembershipManager,
+    clock: ClockOperations,
     roster: RosterProof,
     transport: crate::http::peer_transport::PeerTransport,
     requests: mpsc::Sender<()>,
@@ -257,13 +253,14 @@ pub(crate) struct LearnerClockBarrier {
 }
 
 impl ClockObserver {
-    pub(crate) fn new(membership: MembershipManager) -> Self {
+    pub(crate) fn new(clock: crate::cluster::ClockOperations) -> Self {
         let (requests, receiver) = mpsc::channel(1);
         let (completion, _) = watch::channel(Completion::default());
+        let transport = clock.calls();
         Self(Arc::new(ObserverInner {
-            transport: crate::http::peer_transport::PeerTransport::new(membership.clone()),
-            roster: RosterProof::for_membership(&membership),
-            membership,
+            transport,
+            roster: RosterProof::for_clock(&clock),
+            clock,
             requests,
             completion,
             control: Mutex::new(OwnerControl {
@@ -358,8 +355,8 @@ impl ClockObserver {
         interval.tick().await;
     }
 
-    pub(crate) fn belongs_to(&self, membership: &MembershipManager) -> bool {
-        Arc::ptr_eq(&self.0.membership.clock_guard(), &membership.clock_guard())
+    pub(crate) fn belongs_to(&self, clock: &ClockOperations) -> bool {
+        self.0.clock.same_source(clock)
     }
 
     fn claim_receiver(&self) -> Option<mpsc::Receiver<()>> {
@@ -416,8 +413,8 @@ impl ClockObserver {
         &self,
         learner_id: &str,
     ) -> Result<Option<LearnerClockBarrier>, ()> {
-        let Some(leadership) = self.0.membership.clock_leadership_identity() else {
-            return if self.0.membership.is_replicated() {
+        let Some(leadership) = self.0.clock.leadership() else {
+            return if self.0.clock.clustered() {
                 Err(())
             } else {
                 Ok(None)
@@ -426,16 +423,11 @@ impl ClockObserver {
         if leadership.current_leader != Some(leadership.membership.local_node) {
             return Ok(None);
         }
-        let guard = self.0.membership.clock_guard();
+        let guard = self.0.clock.guard();
         let clock_generation = guard.ticket().clock_generation;
-        let roster = self
-            .0
-            .roster
-            .roster(&self.0.membership)
-            .await
-            .map_err(|_| ())?;
+        let roster = self.0.roster.roster(&self.0.clock).await.map_err(|_| ())?;
         if roster.membership.as_ref() != Some(&leadership.membership)
-            || self.0.membership.clock_leadership_identity().as_ref() != Some(&leadership)
+            || self.0.clock.leadership().as_ref() != Some(&leadership)
             || guard.ticket().clock_generation != clock_generation
         {
             return Err(());
@@ -458,7 +450,7 @@ impl ClockObserver {
 
     fn current_completion(&self, barrier: &LearnerClockBarrier) -> Option<CompletedRound> {
         let round = self.0.completion.borrow().round.clone()?;
-        let guard = self.0.membership.clock_guard();
+        let guard = self.0.clock.guard();
         let current = guard.ticket();
         if round.leadership.as_ref() != Some(&barrier.leadership)
             || round.directory != barrier.directory
@@ -466,7 +458,7 @@ impl ClockObserver {
             || round.ticket.clock_generation != barrier.clock_generation
             || current.clock_generation != round.ticket.clock_generation
             || current.state_generation != round.ticket.state_generation
-            || self.0.membership.clock_leadership_identity().as_ref() != Some(&barrier.leadership)
+            || self.0.clock.leadership().as_ref() != Some(&barrier.leadership)
         {
             return None;
         }
@@ -526,11 +518,7 @@ impl ClockObserver {
                 gate.hold().await;
             }
         }
-        let roster = self
-            .0
-            .membership
-            .clock_peers_after_authenticated_request(auth)
-            .await;
+        let roster = self.0.clock.roster_after_auth(auth).await;
         #[cfg(all(test, feature = "cluster-integration-tests"))]
         self.0
             .test
@@ -541,7 +529,7 @@ impl ClockObserver {
         let roster = roster.map_err(|_| ())?;
         if roster.membership.as_ref() != Some(&barrier.leadership.membership)
             || peer_directory(&roster).as_ref() != Some(&barrier.directory)
-            || self.0.membership.clock_leadership_identity().as_ref() != Some(&barrier.leadership)
+            || self.0.clock.leadership().as_ref() != Some(&barrier.leadership)
         {
             return Err(());
         }
@@ -561,7 +549,7 @@ impl ClockObserver {
         };
         let mut filters = BTreeMap::<String, Filter>::new();
         let mut previous_directory = PeerDirectory::new();
-        let mut generation = self.0.membership.clock_guard().ticket().clock_generation;
+        let mut generation = self.0.clock.guard().ticket().clock_generation;
         let mut membership = None;
         let mut interval = tokio::time::interval(CLOCK_PROBE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -591,7 +579,7 @@ impl ClockObserver {
             let round = tokio::select! {
                 () = shutdown.cancelled() => break,
                 round = observation_round(
-                    &self.0.membership,
+                    &self.0.clock,
                     &self.0.roster,
                     &self.0.transport,
                     &mut filters,
@@ -719,7 +707,8 @@ impl Filter {
 
 /// How often a node looks at the replicated enforcement switch, so a change
 /// saved on another node reaches this node's guard without a restart.
-const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
+const CLOCK_ENFORCEMENT_REFRESH: Duration =
+    plurx_core::cluster::timing::clock::CLOCK_ENFORCEMENT_REFRESH;
 
 /// How long an advisory answer (enforcement off) is held before a consistent
 /// read proves it again, change signal or not. A held answer otherwise lasts
@@ -729,7 +718,8 @@ const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
 /// This caps that at two minutes and one look after the save commits, for
 /// 720 consistent reads a day while enforcement is off and none while it is
 /// on. A held "on" needs no cap: holding it past a disable only refuses more.
-const CLOCK_ADVISORY_MAX_HOLD: Duration = Duration::from_secs(120);
+const CLOCK_ADVISORY_MAX_HOLD: Duration =
+    plurx_core::cluster::timing::clock::CLOCK_ADVISORY_MAX_HOLD;
 
 /// The Store reads that follow the enforcement switch, parsed by the same
 /// `stored_switch` as the settings page (missing is off): an authority read
@@ -814,7 +804,7 @@ async fn follow_stored_enforcement<S, F>(
 pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
     // The store is readable here (startup stays advisory because it is not):
     // apply the stored switch immediately, then keep following it.
-    let guard = state.membership.clock_guard();
+    let guard = state.cluster.operations().clock().guard();
     let enforcement = follow_stored_enforcement(
         state.store.as_ref(),
         state.settings_changes.clone(),
@@ -825,7 +815,7 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
 }
 
 async fn observation_round(
-    membership_manager: &MembershipManager,
+    clock: &ClockOperations,
     roster: &RosterProof,
     transport: &crate::http::peer_transport::PeerTransport,
     filters: &mut BTreeMap<String, Filter>,
@@ -833,23 +823,22 @@ async fn observation_round(
     generation: &mut u64,
     membership: &mut Option<plurx_core::cluster::clock::ClockMembershipIdentity>,
 ) -> Option<CompletedRound> {
-    let guard = membership_manager.clock_guard();
-    let leadership = membership_manager.clock_leadership_identity();
-    let peer_roster =
-        match tokio::time::timeout(CLOCK_ROSTER_BUDGET, roster.roster(membership_manager)).await {
-            Ok(Ok(peers)) => peers,
-            _ => {
-                guard.roster_failed();
-                filters.clear();
-                return None;
-            }
-        };
+    let guard = clock.guard();
+    let leadership = clock.leadership();
+    let peer_roster = match tokio::time::timeout(CLOCK_ROSTER_BUDGET, roster.roster(clock)).await {
+        Ok(Ok(peers)) => peers,
+        _ => {
+            guard.roster_failed();
+            filters.clear();
+            return None;
+        }
+    };
     let Some(directory) = peer_directory(&peer_roster) else {
         guard.roster_failed();
         filters.clear();
         return None;
     };
-    let roster_ticket = if membership_manager.is_replicated() {
+    let roster_ticket = if clock.clustered() {
         guard.roster_for_peer_directory(&peer_roster)
     } else {
         guard.roster_for_membership(&[], None)
@@ -915,13 +904,12 @@ async fn observation_round(
     // Bind all UUID/Raft/origin facts, not merely an unchanged UUID set. A
     // proof still standing costs no read; a roster changed during the fan-out
     // is proved again and fails the round.
-    let final_peers =
-        tokio::time::timeout(CLOCK_ROSTER_BUDGET, roster.roster(membership_manager)).await;
+    let final_peers = tokio::time::timeout(CLOCK_ROSTER_BUDGET, roster.roster(clock)).await;
     let same_roster = match final_peers {
         Ok(Ok(final_roster)) => {
             peer_directory(&final_roster).as_ref() == Some(&directory)
                 && final_roster.membership == peer_roster.membership
-                && membership_manager.clock_leadership_identity() == leadership
+                && clock.leadership() == leadership
         }
         _ => false,
     };
@@ -1343,7 +1331,9 @@ mod tests {
 
     #[test]
     fn k06_clock_observer_single_owner_and_bounded_coalescing() {
-        let observer = ClockObserver::new(MembershipManager::unavailable());
+        let observer = ClockObserver::new(crate::cluster::startup_clock(
+            plurx_core::cluster::membership::MembershipManager::unavailable(),
+        ));
         let mut receiver = observer.claim_receiver().expect("one owner");
         assert!(observer.clone().claim_receiver().is_none());
         for _ in 0..128 {

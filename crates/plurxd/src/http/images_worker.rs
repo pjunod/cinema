@@ -246,8 +246,8 @@ async fn copy_from_peer(
     let _bytes = state.artwork_fetch.local_permit(MAX_ARTWORK_BYTES).await?;
     let client = state.artwork_fetch.client()?;
     let name = format!("variant-{}", location.artifact_key);
-    let auth = state.membership.artwork_peer_auth(&name).ok()?;
-    let peers = state.membership.reachable_peer_http_urls().await.ok()?;
+    let auth = state.cluster.artwork().sign(&name).ok()?;
+    let peers = state.cluster.artwork().targets().await.ok()?;
     let bytes = tokio::select! {
         () = cancel.cancelled() => return None,
         bytes = fetch_peer_artwork_checked(&client, &peers, &name, &auth, Some((&location.blob_sha256, location.bytes))) => bytes?,

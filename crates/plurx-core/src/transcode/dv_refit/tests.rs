@@ -391,6 +391,7 @@ fn add_builds_the_same_normal_equations_as_a_direct_sum() {
 #[test]
 fn squared_error_from_statistics_equals_the_direct_sum() {
     let curves = stats(&fixture("michael5400")).solve().expect("fit");
+    let published = servable(&curves).expect("served fit").curves().clone();
     let mut s = RefitStats::new();
     let mut direct_luma = 0.0;
     let mut direct_chroma = 0.0;
@@ -406,17 +407,18 @@ fn squared_error_from_statistics_equals_the_direct_sum() {
             (4 * u32::from(b[2])) as u16,
         ];
         s.add(b, c);
-        direct_luma += (f64::from(c[0]) - curves.luma_at(usize::from(b[0]))).powi(2);
-        let x = mmr_basis(
-            f64::from(b[0]) / 1023.0,
-            f64::from(b[1]) / 1023.0,
-            f64::from(b[2]) / 1023.0,
-        );
+        // Direct evaluation of the actual published coefficients, before
+        // output clipping/rounding, as the sufficient-statistics model scores.
+        let y = f64::from(b[0]) / 1024.0;
+        let p = published.luma[usize::from(b[0]) / 128];
+        let fy = (p[0] + p[1] * y + p[2] * y * y) * 4096.0;
+        direct_luma += (f64::from(c[0]) - fy).powi(2);
+        let x = mmr_basis(y, f64::from(b[1]) / 1024.0, f64::from(b[2]) / 1024.0);
         for ch in 0..2 {
             let fit: f64 = (0..MMR_TERMS)
-                .map(|k| x[k] * curves.mmr[k][ch])
+                .map(|k| x[k] * published.chroma[ch][k])
                 .sum::<f64>()
-                * 4095.0;
+                * 4096.0;
             direct_chroma += (f64::from(c[ch + 1]) - fit).powi(2);
         }
     }
@@ -801,4 +803,80 @@ fn the_helper_adds_the_residual_to_a_nonidentity_mapping() {
         }
     }
     assert!(residuals > samples.len());
+}
+
+fn native_grid_fixture() -> (QuantisedCurves, QuantisedCurves, Value) {
+    let data: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/dv-refit/published-mmr-q12.json"
+    ))
+    .expect("native coefficient fixture");
+    let original = serde_json::from_value(data["original"].clone()).expect("original Q23 curves");
+    let expected = serde_json::from_value(data["expected"].clone()).expect("qualified Q12 curves");
+    (original, expected, data["point06"].clone())
+}
+
+fn optimizer_from_stored(q: &QuantisedCurves) -> RefitCurves {
+    let mut fit = RefitCurves::identity();
+    let k = OUT_SCALE / 4096.0;
+    let rs = 1024.0 / IN_SCALE;
+    for (piece, original) in fit.luma.iter_mut().zip(q.luma) {
+        for (degree, (value, n)) in piece.iter_mut().zip(original).enumerate() {
+            *value = n as f64 / FIT_QUANT / (k * rs.powi(degree as i32));
+        }
+    }
+    for (i, row) in fit.mmr.iter_mut().enumerate() {
+        for (ch, value) in row.iter_mut().enumerate() {
+            *value = q.chroma[ch][i] as f64 / FIT_QUANT / (k * rs.powi(MMR_DEGREE[i]));
+        }
+    }
+    fit
+}
+
+#[test]
+fn published_mmr_uses_the_native_qualified_coefficient_grid() {
+    let (original, expected, _) = native_grid_fixture();
+    let published = servable(&optimizer_from_stored(&original))
+        .expect("publishable")
+        .quantised();
+    assert_eq!(
+        published, expected,
+        "the qualified native program, including signed rounding"
+    );
+    assert_eq!(
+        published.luma, original.luma,
+        "luma retains its Q23 precision"
+    );
+    assert_ne!(
+        published.chroma, original.chroma,
+        "low MMR bits must not escape into publication"
+    );
+    assert!(published.chroma.iter().flatten().all(|n| n % 2048 == 0));
+}
+
+#[test]
+fn held_out_error_uses_the_published_mmr_grid() {
+    let (original, _, point) = native_grid_fixture();
+    let curves = optimizer_from_stored(&original);
+    let mut held = RefitStats::new();
+    held.add([371, 521, 544], [1468, 2084, 2176]);
+    let scored = held.squared_error(&curves).expect("second moments");
+    let output = floats(&point["published_unrounded_codes12"]);
+    let expected = (output[1] - 2084.0).powi(2) + (output[2] - 2176.0).powi(2);
+    assert!(
+        (scored.chroma - expected).abs() < 1e-6,
+        "held-out scoring must evaluate the published program: {} vs {expected}",
+        scored.chroma
+    );
+}
+
+#[test]
+fn retained_q23_curves_keep_their_original_coefficients() {
+    let (original, _, _) = native_grid_fixture();
+    assert!(original.chroma.iter().flatten().any(|n| n % 2048 != 0));
+    let retained = ServableCurves::from_quantised(&original).expect("retained legacy fit");
+    assert_eq!(
+        retained.quantised(),
+        original,
+        "a pinned digest must never be regridded"
+    );
 }
