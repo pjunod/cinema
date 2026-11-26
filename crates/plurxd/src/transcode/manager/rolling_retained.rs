@@ -123,6 +123,7 @@ impl TranscodeManager {
             core_copy_quota: std::sync::Mutex::new(None),
             #[cfg(target_os = "linux")]
             core_copy_refresh_gate: Mutex::new(()),
+            selected_core_copy: false,
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
             actor_prepublication_producer: Arc::new(AtomicBool::new(false)),

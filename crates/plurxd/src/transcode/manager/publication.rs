@@ -364,7 +364,7 @@ impl TranscodeManager {
                 return Err(MediaResponsePublicationRejection::OwnerGone);
             }
             #[cfg(target_os = "linux")]
-            let core_copy_playlist = session.scratch.is_none() && !session.cached;
+            let core_copy_playlist = session.selected_core_copy;
             #[cfg(not(target_os = "linux"))]
             let core_copy_playlist = false;
             if object == crate::playback_control::RollingResponseObject::VideoMediaPlaylist
@@ -1355,7 +1355,7 @@ impl TranscodeManager {
                         let _ = core_copy_output;
                         None
                     }
-                } else if session.scratch.is_none() && !session.cached {
+                } else if session.selected_core_copy {
                     // The selected copy owner may have moved into its compact
                     // close ticket. Its pathname is never a legacy fallback.
                     None
@@ -2328,7 +2328,7 @@ impl TranscodeManager {
         #[cfg(not(target_os = "linux"))]
         let core_copy_output: Option<()> = None;
         #[cfg(target_os = "linux")]
-        if session.scratch.is_none() && !session.cached && core_copy_output.is_none() {
+        if session.selected_core_copy && core_copy_output.is_none() {
             return Ok(SegmentPublication::Missing(Some(current_owner())));
         }
         #[cfg(target_os = "linux")]

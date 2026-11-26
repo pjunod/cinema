@@ -375,7 +375,28 @@
         control: crate::playback_control::RollingControlHandle,
         producer_attempt: u64,
     ) -> Arc<Session> {
-        Arc::new(Session {
+        Arc::new(watchdog_raw_session(
+            dir,
+            child,
+            cached,
+            actor_managed_prepublication,
+            control,
+            producer_attempt,
+        ))
+    }
+
+    /// An ordinary rolling Session (or, with `cached`, a cached presentation).
+    /// The selected core copy role is a start decision, so only a test that
+    /// names that role sets `selected_core_copy`.
+    fn watchdog_raw_session(
+        dir: &std::path::Path,
+        child: Option<Child>,
+        cached: bool,
+        actor_managed_prepublication: bool,
+        control: crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+    ) -> Session {
+        Session {
             #[cfg(target_os = "linux")]
             playback_lane: std::sync::Mutex::new(None),
             audio_delivery: None,
@@ -398,6 +419,7 @@
         core_copy_quota: std::sync::Mutex::new(None),
         #[cfg(target_os = "linux")]
         core_copy_refresh_gate: Mutex::new(()),
+            selected_core_copy: false,
             actor_managed_response_publication: actor_managed_prepublication,
             actor_managed_prepublication_process: actor_managed_prepublication,
             actor_prepublication_producer: Arc::new(AtomicBool::new(actor_managed_prepublication)),
@@ -480,7 +502,7 @@
             suspend_count: AtomicU64::new(0),
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
-        })
+        }
     }
 
     fn watchdog_session_with_publication(
@@ -559,7 +581,17 @@
         let dir = crate::test_tempdir().expect("selected copy negative boundary");
         let path = dir.path().join("seg00000.m4s");
         std::fs::write(&path, b"held").expect("unowned path sentinel");
-        let session = watchdog_session(dir.path(), None, false);
+        // A selected copy whose original owner is absent.
+        let mut raw = watchdog_raw_session(
+            dir.path(),
+            None,
+            false,
+            false,
+            crate::playback_control::RollingControlHandle::spawn_for_test("test-start"),
+            0,
+        );
+        raw.selected_core_copy = true;
+        let session = Arc::new(raw);
         let expired = Instant::now() - Duration::from_secs(1);
         *session.segments.lock().await = SegmentIndex {
             segs: vec![SegmentMeta {

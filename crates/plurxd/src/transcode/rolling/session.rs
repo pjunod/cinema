@@ -50,6 +50,12 @@ pub(super) struct Session {
     /// one original session operation at a time, including publication.
     #[cfg(target_os = "linux")]
     pub(super) core_copy_refresh_gate: Mutex<()>,
+    /// The start chose the selected core copy role for this Session: its
+    /// original output owner is `core_copy` and it holds no rolling scratch.
+    /// Fixed at construction from the start's own decision. It is never
+    /// inferred from an absent scratch permit, which a cached presentation
+    /// also has.
+    pub(super) selected_core_copy: bool,
     /// True for every rolling generation whose response publication is
     /// admitted by the actor. Producer recovery may still remain compatibility
     /// owned; response ownership does not imply prepublication retry policy.
@@ -837,7 +843,7 @@ impl Session {
     /// `Complete` inventory.
     pub(super) async fn measure_scratch_bytes(&self) -> ScratchMeasurement {
         #[cfg(target_os = "linux")]
-        if self.scratch.is_none() && !self.cached {
+        if self.selected_core_copy {
             // The core copy role journals its scratch inventory and charge.
             // A second, path-based daemon scan would neither own those files
             // nor be allowed to collapse the reservation on a missing path.
@@ -991,7 +997,7 @@ impl Session {
             .as_ref()
             .map(|owner| owner.output());
         #[cfg(target_os = "linux")]
-        if self.scratch.is_none() && !self.cached && copy_output.is_none() {
+        if self.selected_core_copy && copy_output.is_none() {
             return Err("selected copy output is closing".to_owned());
         }
         #[cfg(target_os = "linux")]
@@ -2771,7 +2777,7 @@ impl Session {
             .as_ref()
             .map(|owner| owner.output());
         #[cfg(target_os = "linux")]
-        if self.scratch.is_none() && !self.cached && copy_output.is_none() {
+        if self.selected_core_copy && copy_output.is_none() {
             return;
         }
         #[cfg(target_os = "linux")]

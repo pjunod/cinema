@@ -427,7 +427,7 @@ pub(super) async fn reconcile_expired_selected_copy_presentation(
         entries
             .iter()
             .find(|(_, retired)| {
-                retired.session.scratch.is_none()
+                retired.session.selected_core_copy
                     && Instant::now()
                         >= retired
                             .session
@@ -597,7 +597,7 @@ async fn run_retired_presentation_cleanup_owner(
         }
     }
     #[cfg(target_os = "linux")]
-    if retired.session.scratch.is_none() {
+    if retired.session.selected_core_copy {
         loop {
             match close_expired_selected_presentation(&retired_presentations, &session_id, &retired)
                 .await
@@ -936,7 +936,7 @@ async fn park_selected_copy_ticket(session: &Session) -> Result<(), String> {
 async fn finish_prepublication_cleanup_after_reap(session: &Arc<Session>) -> Result<(), String> {
     finish_rolling_retirement_after_reap(session).await;
     #[cfg(target_os = "linux")]
-    if session.scratch.is_none() {
+    if session.selected_core_copy {
         // A full compact book is an uncertain handoff, not completed cleanup.
         // The original prepublication owner keeps this same Session and ticket
         // alive, then retries on its existing cadence.
@@ -971,7 +971,7 @@ async fn own_prepublication_cleanup(
         let cleanup = {
             let _transition = session.child_transition.lock().await;
             #[cfg(target_os = "linux")]
-            if session.scratch.is_none() {
+            if session.selected_core_copy {
                 prepare_selected_copy_close(&session).await
             } else {
                 terminate_current_prepublication_child(&session).await
@@ -1175,7 +1175,7 @@ async fn own_rolling_retirement(
         let cleanup = {
             let _transition = session.child_transition.lock().await;
             #[cfg(target_os = "linux")]
-            if session.scratch.is_none() {
+            if session.selected_core_copy {
                 if session.core_copy_close.lock().await.is_some() {
                     // A prior uncertain compact-book handoff already closed
                     // the original graph. Retry that same ticket below.
@@ -1225,7 +1225,7 @@ async fn own_rolling_retirement(
                 // carrying a charge it no longer needs.
                 settle_rolling_scratch_charge(&session_id, &session).await;
                 #[cfg(target_os = "linux")]
-                if session.scratch.is_none() && registered_key.is_none() {
+                if session.selected_core_copy && registered_key.is_none() {
                     // A cancelled start never published a serving Session, so
                     // it has no grace promise that could drive later close.
                     // Keep this original detached retirement owner until the
@@ -1246,7 +1246,7 @@ async fn own_rolling_retirement(
                 // and admission release are both facts. Adoption may rename it
                 // during actor settlement, so remove by pointer at the end.
                 let retired_promise =
-                    if session.cached || (session.scratch.is_none() && registered_key.is_none()) {
+                    if session.cached || (session.selected_core_copy && registered_key.is_none()) {
                         None
                     } else {
                         Some(RetiredPresentation {

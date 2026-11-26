@@ -339,7 +339,7 @@ pub(super) async fn gc_expired_segments(session: &Session) {
         return;
     }
     #[cfg(target_os = "linux")]
-    if session.scratch.is_none() {
+    if session.selected_core_copy {
         // The selected owner can move into its close ticket between the
         // first guard and this read. That transition never grants the legacy
         // pathname sweeper authority over its charged output.

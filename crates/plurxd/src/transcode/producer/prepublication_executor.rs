@@ -148,7 +148,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
                 .map_err(|error| format!("resetting held retry input: {error}"))?;
         }
         retire_upload_lane(&session).await;
-        if session.scratch.is_none() {
+        if session.selected_core_copy {
             return Err("selected copy predecessor needs its original typed close".into());
         }
         clear_session_dir(&session.dir)
@@ -377,7 +377,7 @@ async fn execute_prepublication_copy_retry(
                 .map_err(|error| format!("resetting held copy fallback input: {error}"))?;
         }
         retire_upload_lane(&session).await;
-        if session.scratch.is_none() {
+        if session.selected_core_copy {
             return Err("selected copy predecessor needs its original typed close".into());
         }
         clear_session_dir(&session.dir)
@@ -1198,7 +1198,7 @@ async fn run_prepublication_producer_executor(
                         let cleanup = async {
                             terminate_exact_prepublication_child(&session, *failed_attempt).await?;
                             retire_upload_lane(&session).await;
-                            if session.scratch.is_none() {
+                            if session.selected_core_copy {
                                 return Err(
                                     "selected copy predecessor needs its original typed close"
                                         .into(),
