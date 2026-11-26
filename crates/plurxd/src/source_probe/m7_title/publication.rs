@@ -343,11 +343,15 @@ impl FittedPublication {
         ))
         .await
         .map_err(|e| e.to_string())?;
-        if !output.status.success()
-            || context.cancel.is_cancelled()
-            || !executable.is_current().await
-        {
-            return Err("M7 fitted copy pipe failed or was cancelled".into());
+        if context.cancel.is_cancelled() {
+            return Err("M7 fitted copy pipe was cancelled".into());
+        }
+        if !executable.is_current().await {
+            return Err("M7 fitted copy FFmpeg identity changed".into());
+        }
+        if !output.status.success() {
+            tracing::debug!(argv = ?command.as_std().get_args().collect::<Vec<_>>(), "M7 fitted copy failed");
+            return Err(copy_failure(output.status, &output.stderr));
         }
         let mut source = tokio::fs::File::open(&pipe)
             .await
@@ -663,6 +667,32 @@ fn parse_digest(text: &str) -> Result<[u8; 32], String> {
     Ok(digest)
 }
 
+/// Longest FFmpeg diagnosis carried into the title job's error.
+const MAX_COPY_FAILURE_BYTES: usize = 512;
+
+/// A failed fitted copy names how FFmpeg ended and its last few diagnostic
+/// lines. FFmpeg states the cause near the end of stderr; without it every
+/// failure reads the same and each retry rescans the whole title blind.
+fn copy_failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
+    let mut message = format!("M7 fitted copy pipe failed ({status})");
+    if !tail.is_empty() {
+        let mut start = tail.len().saturating_sub(MAX_COPY_FAILURE_BYTES);
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        message.push_str(": ");
+        message.push_str(&tail[start..]);
+    }
+    message
+}
+
 /// The fitted copy's FFmpeg runs in its own daemon-owned scratch directory,
 /// like every other declared M7 and F+ child. Without one it inherits the
 /// daemon's working directory, which the source-access verifier refuses
@@ -694,6 +724,28 @@ mod tests {
         fmp4::{Run, Sample, Track, TrackFragment, TrackKind, VideoCodec},
         transcode::Rational,
     };
+
+    /// Eclipse's fitted copy failed in half a second with nothing recorded
+    /// but "failed or was cancelled".
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_fitted_copy_names_ffmpegs_last_diagnosis() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let failure = copy_failure(
+            status,
+            b"banner\n[in] opened\n\n[mp4] Could not find tag\nConversion failed!\n",
+        );
+        assert!(failure.contains("exit status: 1"), "{failure}");
+        assert!(
+            failure.ends_with(": [in] opened | [mp4] Could not find tag | Conversion failed!"),
+            "{failure}"
+        );
+        assert!(!copy_failure(status, b"").contains("): "));
+        let long = copy_failure(status, "é".repeat(2 * MAX_COPY_FAILURE_BYTES).as_bytes());
+        assert!(long.len() <= 64 + MAX_COPY_FAILURE_BYTES, "{}", long.len());
+        assert!(long.ends_with('é'));
+    }
 
     /// Eclipse's first fitted materialization panicked the M7 task with
     /// `cwd_outside_daemon_roots`, leaving its title job running forever.
