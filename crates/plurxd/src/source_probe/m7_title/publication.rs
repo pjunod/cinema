@@ -32,8 +32,21 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, sync::Mutex};
 
-const MAX_PIPE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_INIT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Bytes one fitted copy may read from its held source, and separately write
+/// to its producer file. A fitted window from film zero reaches minutes into
+/// a UHD title, gigabytes of source, so no fixed size can bound it. A stream
+/// copy reads its source at most once; Matroska seeking also re-reads its
+/// small SeekHead and Cues elements. A picture-only MP4 copy writes a subset
+/// of what it read plus a few bytes of `trun` per picture. Twice the source
+/// length is therefore a bound only a looping producer reaches.
+fn fitted_copy_byte_ceiling(source_len: u64) -> Result<u64, String> {
+    source_len
+        .checked_mul(2)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| "M7 fitted copy has no source byte ceiling".to_owned())
+}
 
 pub(super) struct FittedPublication {
     index: FragmentIndex,
@@ -259,7 +272,10 @@ impl FittedPublication {
         retain: u32,
         last: u32,
     ) -> Result<PublishedRange, String> {
-        input.seal_read_ceiling(MAX_PIPE_BYTES as u64)?;
+        let ceiling = fitted_copy_byte_ceiling(input.source_len())?;
+        input.seal_read_ceiling(ceiling)?;
+        let output_ceiling =
+            usize::try_from(ceiling).map_err(|_| "M7 fitted copy ceiling exceeds memory")?;
         let mut file = context.file.clone();
         file.path = input.url().into();
         let entry = self
@@ -318,7 +334,7 @@ impl FittedPublication {
             &mut command,
             super::super::FEL_WINDOW_STAGE_DEADLINE,
             4096,
-            MAX_PIPE_BYTES,
+            output_ceiling,
             ChildWork::background("M7 fitted VOD materialization"),
             &[],
             stdout,
@@ -335,6 +351,14 @@ impl FittedPublication {
         if !output.status.success() {
             tracing::debug!(argv = ?command.as_std().get_args().collect::<Vec<_>>(), "M7 fitted copy failed");
             return Err(copy_failure(output.status, &output.stderr));
+        }
+        // FFmpeg ends a stream copy whose input stops early with exit 0 and a
+        // truncated final fragment. Report the read, not that fragment's proof.
+        if input.source_read_failed() {
+            return Err(format!(
+                "M7 fitted copy's held source read failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
         let mut source = tokio::fs::File::open(&pipe)
             .await
@@ -676,18 +700,16 @@ fn copy_failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
     message
 }
 
-/// The fitted copy's FFmpeg runs in its own daemon-owned scratch directory,
-/// like every other declared M7 and F+ child. Without one it inherits the
-/// daemon's working directory, which the source-access verifier refuses
-/// (`cwd_outside_daemon_roots`), and debug builds panic on that refusal.
 /// Where a bounded fitted copy may stop. The run ends when the sink refuses
 /// entry `last + 1`, which the segmenter emits only once the first fragment
 /// of entry `last + 2` is pushed, and every pushed fitted fragment must first
 /// match its canonical proof. FFmpeg's final fragment under `-t` is cut short
-/// and its last duration is guessed at EOF, so it can never match: the copy
-/// covers all of entry `last + 2` plus a fragment margin, keeping that cut
-/// fragment after the run has ended. Without entry `last + 2` the copy runs
-/// to the title's end, whose final fragment the index measured the same way.
+/// and its last duration is guessed at EOF, so it can never match. Ending at
+/// `end(last)` plus the policy's maximum segment length lands inside that
+/// closing fragment whenever entry `last + 1` is a maximum-length segment, so
+/// the copy covers all of entry `last + 2` plus that margin. Without entry
+/// `last + 2` the copy runs to the title's end, whose final fragment the index
+/// measured the same way.
 fn bounded_copy_end_ticks(plan: &SegmentPlan, last: u32, margin_ticks: u64) -> Option<u64> {
     let closing = plan.entry(last.checked_add(2)?)?;
     Some(
@@ -714,6 +736,10 @@ fn fitted_copy_args(
     )
 }
 
+/// The fitted copy's FFmpeg runs in its own daemon-owned scratch directory,
+/// like every other declared M7 and F+ child. Without one it inherits the
+/// daemon's working directory, which the source-access verifier refuses
+/// (`cwd_outside_daemon_roots`), and debug builds panic on that refusal.
 fn materialization_command<I, S>(
     program: &Path,
     args: I,
@@ -764,9 +790,19 @@ mod tests {
         assert!(long.ends_with('é'));
     }
 
-    /// Eclipse's bounded copy ended inside the fragment that closes entry
-    /// `last + 1`; FFmpeg cut that fragment short, so its proof failed and
-    /// the window never completed.
+    #[test]
+    fn a_fitted_copy_may_read_and_write_its_whole_source() {
+        // Eclipse's fitted window from film zero needs about 2 GB of a 83 GB
+        // source; the former fixed 512 MiB ceiling ended it after 53 fragments.
+        let eclipse = 83_773_946_095_u64;
+        assert_eq!(fitted_copy_byte_ceiling(eclipse), Ok(2 * eclipse));
+        assert!(fitted_copy_byte_ceiling(eclipse).expect("ceiling") > 2_000_000_000);
+        assert!(fitted_copy_byte_ceiling(0).is_err());
+        assert!(fitted_copy_byte_ceiling(u64::MAX).is_err());
+    }
+
+    /// A copy cut inside the fragment that closes entry `last + 1` leaves
+    /// that fragment short, so its proof fails and the window never completes.
     #[test]
     fn a_bounded_fitted_copy_ends_past_the_fragment_that_closes_its_window() {
         use plurx_core::segplan::{PlanCut, PlanEntry, PlanEntryKind};
