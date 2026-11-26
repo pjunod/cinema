@@ -430,7 +430,7 @@ async fn spawn_generation_with_input(
                     drop(custody);
                 });
             }
-            if !runtime.source.unchanged() || !runtime.tools.is_current().await {
+            if !runtime.source.unchanged().await || !runtime.tools.is_current().await {
                 Err("DV source/backend changed before prepared publication".into())
             } else {
                 Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
@@ -613,7 +613,7 @@ async fn spawn_generation_with_input(
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged_in_place())
                 && manifest
                     .state(at)
                     .is_some_and(|state| state.is_materialized() && state.bytes() > 0)

@@ -170,12 +170,11 @@ impl VodServe {
             .ok_or(PreparationError::Yield("lease_lost"))?;
         let readers = rendition.readers.lock().await;
         let manifest = rendition.manifest.lock().await;
-        if !rendition
-            .source
-            .as_ref()
-            .held_unchanged_as(source_version)
-            .await
-        {
+        // The readers and manifest locks are held here: check in place, so they are
+        // never held while queued for a media slot.
+        if !rendition.source.as_ref().is_some_and(|source| {
+            source.object_version() == source_version && source.unchanged_in_place()
+        }) {
             return Err(PreparationError::Stop("source_changed"));
         }
         if rendition.recipe.retained_logical.as_ref() != Some(&logical) {

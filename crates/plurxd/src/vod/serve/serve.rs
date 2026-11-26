@@ -381,10 +381,7 @@ impl VodServe {
             let (rendition, _, _) = publication.result.ok()?;
             if rendition.closed.load(Relaxed)
                 || rendition.failure().is_some()
-                || rendition
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                || rendition.source.as_ref().missing_or_changed().await
             {
                 return None;
             }

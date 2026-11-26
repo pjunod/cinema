@@ -755,7 +755,9 @@ impl SourceInput {
         // mount is hung. Wait for it off the scheduler, like the fstat after.
         plurx_core::media_io::in_place(|| {
             let state = self.state.source.lock().expect("source input fence");
-            let source = state.as_ref().filter(|source| source.unchanged())?;
+            let source = state
+                .as_ref()
+                .filter(|source| source.unchanged_in_place())?;
             Some(source.object_version().to_owned())
         })
     }

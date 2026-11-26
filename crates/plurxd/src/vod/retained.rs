@@ -2,7 +2,6 @@
 //! A recipe directory is mutable; an issued artifact is never that directory.
 use super::output_measurement::CompleteOutputObservation;
 use super::*;
-use crate::fragment_index_cluster::HeldSource as _;
 
 const MAX_ARTIFACTS: usize = 64;
 const RETAINED_GC_BATCH: usize = 32;
@@ -1439,11 +1438,12 @@ impl RetainedArtifactRegistry {
             || artifact.logical.is_none()
             || artifact.logical != *incoming_logical
             || artifact.observation.preimage.playlist.as_slice() != rendition.playlist.as_slice()
-            || !rendition
-                .source
-                .as_ref()
-                .held_unchanged_as(&artifact.source_version)
-                .await
+            // The collector and validation locks are held here: check in
+            // place, so they are never held while queued for a media slot.
+            || !rendition.source.as_ref().is_some_and(|source| {
+                source.object_version() == artifact.source_version
+                    && source.unchanged_in_place()
+            })
         {
             return None;
         }
@@ -1473,11 +1473,12 @@ impl RetainedArtifactRegistry {
         )
         .await;
         if !matches!(validated, Ok(Ok(Ok(()))))
-            || !rendition
-                .source
-                .as_ref()
-                .held_unchanged_as(&artifact.source_version)
-                .await
+            // The collector and validation locks are held here: check in
+            // place, so they are never held while queued for a media slot.
+            || !rendition.source.as_ref().is_some_and(|source| {
+                source.object_version() == artifact.source_version
+                    && source.unchanged_in_place()
+            })
         {
             return None;
         }

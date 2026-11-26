@@ -3123,7 +3123,7 @@ impl TranscodeManager {
             {
                 return Err("the processed executable changed during qualification".into());
             }
-            if !runtime.source.unchanged() {
+            if !runtime.source.unchanged().await {
                 return Err("the source changed during processed qualification".into());
             }
             let facts = Self::quality_facts_from_snapshot(&planning)
@@ -5061,11 +5061,14 @@ impl TranscodeManager {
             ));
         }
         #[cfg(target_os = "linux")]
-        if prepared
-            .encoding
-            .dv_runtime
-            .as_ref()
-            .is_none_or(|runtime| !runtime.source.unchanged())
+        if crate::fragment_index_cluster::HeldSource::missing_or_changed(
+            prepared
+                .encoding
+                .dv_runtime
+                .as_ref()
+                .map(|runtime| &*runtime.source),
+        )
+        .await
         {
             return Err(vod_refusal_error(
                 "candidate_recipe_changed",

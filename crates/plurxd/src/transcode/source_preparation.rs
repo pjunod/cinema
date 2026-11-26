@@ -1043,6 +1043,9 @@ async fn run_authorized_child(
         || authority.is_cancelled()
         || !source.unchanged().await
         || !current.unchanged().await
+        // Again after the awaited fence checks, which can wait for a slot.
+        || cancel.is_cancelled()
+        || authority.is_cancelled()
     {
         return Err("Source probe cancelled or file changed before spawn".into());
     }
@@ -1075,6 +1078,9 @@ async fn run_authorized_child(
         || authority.is_cancelled()
         || !source.unchanged().await
         || !current.unchanged().await
+        // Again after the awaited fence checks, which can wait for a slot.
+        || cancel.is_cancelled()
+        || authority.is_cancelled()
     {
         return Err("Source probe expired at spawn".into());
     }

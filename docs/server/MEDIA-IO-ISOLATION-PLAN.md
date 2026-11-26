@@ -92,13 +92,30 @@ blocking pool, never a worker) and adds a bound for media storage.
   a duplicated descriptor through `blocking` (`dup` stays in the local kernel
   and never reaches the server). The `HeldSource` helpers cover the
   `Option<&SourceFence>` call shapes (`held_unchanged`, `missing_or_changed`,
-  `held_and_changed`, `held_unchanged_as`, `held_drift`). 93 call sites
-  await the bounded check. The 35 that remain use `unchanged_in_place()` /
-  `drift_in_place()`, which take the `in_place` path above. They are
-  synchronous decision code, `filter`/`is_some_and` closures over
-  lock-guarded state, or code already on the blocking pool under a media
-  slot. Making the check `async` by default made the compiler list every
-  caller, and each in-place site is a sync context it confirmed.
+  `held_and_changed`, `held_unchanged_as`, `held_drift`). The slot is taken
+  before the `dup`, so a queued check holds no extra descriptor. Making the
+  check `async` by default made the compiler list every caller, on macOS and
+  under the Linux-only `cfg` gates alike. Callers that cannot await use
+  `unchanged_in_place()` / `drift_in_place()`, which take the `in_place` path
+  above: synchronous decision code, `filter`/`is_some_and` closures, and code
+  already on the blocking pool under a media slot. So do the checks made
+  while a lock is held (the `VodServe` preparation readers and manifest
+  locks, the retained collector and validation locks, the manifest lock in
+  generation start, the publication clock). A lock must never be held while
+  its holder queues for a media slot.
+- **Cheap state is re-read after an awaited check that guards a destructive
+  step.** The check can wait for a slot, so a lease or cancellation read
+  before it may be stale by the time it returns. The DV disk publication
+  re-reads its lease, and the source-probe spawn re-reads its cancellation
+  and authority.
+- **The bound is node-wide, not per mount.** While one mount is hung and
+  holds all 64 slots, an awaited check of a source on a healthy mount or
+  local disk queues behind it. That is the trade-off of one global bound. It
+  keeps the blocking pool (local `tokio::fs`, the store) and the async
+  workers serving, which matter more than a fence check on another mount.
+  The fleet's media sits on one NFS server. A per-device budget, keyed by the
+  `st_dev` already in each object version, is the follow-up if that changes
+  (ask A-45050A2C).
 - **`media_io::slot()`** is for code already on the blocking pool, such as
   the source reader. It takes the same permit around the media calls only.
   The reader revalidates its grant (store and Raft work) before it takes the

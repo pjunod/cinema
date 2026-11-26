@@ -264,10 +264,12 @@ impl SourceFence {
     ///
     /// That `fstat` revalidates against the media server on NFS, so it runs
     /// on the bounded media pool (`media_io::blocking`): a hung mount parks
-    /// one of its 64 threads and only this caller waits. The descriptor is
-    /// duplicated for the call (`dup` is local to the kernel and never
-    /// reaches the server) so the fence itself stays with the caller.
+    /// one of its 64 threads and only this caller waits. Once the slot is
+    /// held, the descriptor is duplicated for the call (`dup` is local to the
+    /// kernel and never reaches the server) so the fence itself stays with
+    /// the caller, and a queued check holds no extra descriptor.
     pub(crate) async fn drift(&self) -> Option<String> {
+        let slot = plurx_core::media_io::slot().await;
         let handle = match self.handle.try_clone() {
             Ok(handle) => handle,
             Err(error) => {
@@ -276,7 +278,8 @@ impl SourceFence {
                 ));
             }
         };
-        let current = plurx_core::media_io::blocking(move || current_object_version(&handle))
+        let current = slot
+            .run(move || current_object_version(&handle))
             .await
             .unwrap_or_else(|error| Err(format!("the source check did not run: {error}")));
         self.compare(current)
@@ -352,7 +355,7 @@ impl HeldSource for Option<&SourceFence> {
 
     async fn held_unchanged_as(self, version: &str) -> bool {
         match self {
-            Some(source) => source.unchanged().await && source.object_version() == version,
+            Some(source) => source.object_version() == version && source.unchanged().await,
             None => false,
         }
     }
@@ -1951,6 +1954,10 @@ mod tests {
             async move { fence.unchanged().await }
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            plurx_core::media_io::observation().1 >= 1,
+            "the awaited check never reached the media semaphore"
+        );
         assert!(
             !awaited.is_finished(),
             "the awaited check ran without a media slot"
