@@ -380,7 +380,7 @@ Usage:
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
                              [--preparation-measurement] [--frame-diagnostics] [--d3-acquisition]
-                             [--fixtures DIR] [--server PATH]
+                             [--server-metrics] [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
                              [--headed] [--keep-runtime]
@@ -4379,13 +4379,17 @@ function parseServerMetrics(text, families = SERVER_METRIC_FAMILIES) {
   return series;
 }
 
+// A counter that went backwards means the server restarted during the case;
+// the delta is then not a measurement of the case and says so.
 function serverMetricDelta(before, after) {
   const delta = {};
+  let reset = false;
   for (const [key, value] of after) {
     const moved = value - (before.get(key) || 0);
+    if (moved < 0) reset = true;
     if (moved !== 0) delta[key] = Math.round(moved * 1e6) / 1e6;
   }
-  return delta;
+  return reset ? { ...delta, reset: true } : delta;
 }
 
 async function readServerMetrics(server) {

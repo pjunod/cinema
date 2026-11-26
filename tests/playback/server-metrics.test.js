@@ -28,6 +28,11 @@ test("server metric deltas keep only the baseline families that moved", () => {
   });
 });
 
+test("a counter that goes backwards marks the delta as a server reset", () => {
+  const delta = serverMetricDelta(parseServerMetrics(after), parseServerMetrics(before));
+  assert.equal(delta.reset, true);
+});
+
 test("server metric parsing ignores comments, other families and malformed lines", () => {
   const series = parseServerMetrics("# HELP a\nplurx_hls_requests_total{a=\"b\"} nope\nplurx_other 3\n");
   assert.equal(series.size, 0);

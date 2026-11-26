@@ -129,7 +129,15 @@ split video key.
 
 The labels come from the matched route template, plus path values the routes
 accept from a fixed vocabulary, so no session, rendition or object name can
-become a label (`P/http/hls_request_metrics.rs`).
+become a label (`P/http/hls_request_metrics.rs`). Only GETs are counted.
+
+Two caveats:
+- For a relayed session, the HLS series are counted on the edge node and the
+  segment answers on the owner. A cluster reading must sum both nodes; a
+  single-node lab reading sees both.
+- A `stored` answer is counted when the bytes are opened. In the rare case
+  that delivery then refuses them (a cached child over its delivery budget),
+  it is still counted. This overstates reuse by those refusals only.
 
 **Existing series used with them.**
 - `plurx_create_seconds` and `plurx_start_outcomes_total`: startup.
