@@ -132,7 +132,15 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/system.rs",
         "get_settings",
     ),
-    // With `SettingsDtoSource::Authority` (pinned below).
+    // With `SettingsDtoSource::Authority` (pinned below). The capacity form
+    // (cb7bc7588) is its own transaction boundary and answers the same way:
+    // the response is the post-commit Authority snapshot, never the view.
+    (
+        "http/system.rs",
+        "settings_dto",
+        "http/system.rs",
+        "update_resource_capacity",
+    ),
     (
         "http/system.rs",
         "settings_dto",
@@ -465,7 +473,39 @@ pub(super) fn mask(src: &str) -> String {
     String::from_utf8(out).expect("masking keeps ASCII and whole characters")
 }
 
-/// A masked source with every `#[cfg(test)]` item blanked.
+/// The next test-only attribute at or after `from`: `#[cfg(test)]`, or a
+/// `#[cfg(all(test, ...))]` conjunction, which is just as test-only. (An
+/// `any(test, ...)` can be production and is not one.) Returns where the
+/// attribute starts and where its item starts.
+fn next_test_attribute(masked: &str, from: usize) -> Option<(usize, usize)> {
+    let plain = masked[from..]
+        .find("#[cfg(test)]")
+        .map(|offset| from + offset);
+    let conjunction = masked[from..]
+        .find("#[cfg(all(test,")
+        .map(|offset| from + offset);
+    let start = match (plain, conjunction) {
+        (Some(plain), Some(conjunction)) => plain.min(conjunction),
+        (found, None) | (None, found) => found?,
+    };
+    if Some(start) == plain {
+        return Some((start, start + "#[cfg(test)]".len()));
+    }
+    // The attribute closes at the `]` that balances its opening `#[`.
+    let mut depth = 0_usize;
+    for (index, byte) in masked.bytes().enumerate().skip(start + "#[".len()) {
+        match byte {
+            b'[' => depth += 1,
+            b']' if depth == 0 => return Some((start, index + 1)),
+            b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A masked source with every test-only item blanked (see
+/// [`next_test_attribute`]).
 ///
 /// An item ends at its `;`, its braced body, or — for a struct field or a
 /// struct-literal entry — at the `,` or closing `}` that ends it; separators
@@ -474,9 +514,7 @@ pub(super) fn mask(src: &str) -> String {
 pub(super) fn production(masked: &str) -> String {
     let mut out = masked.as_bytes().to_vec();
     let mut at = 0;
-    while let Some(offset) = masked[at..].find("#[cfg(test)]") {
-        let start = at + offset;
-        let item = start + "#[cfg(test)]".len();
+    while let Some((start, item)) = next_test_attribute(masked, at) {
         let bytes = masked.as_bytes();
         let mut nesting = 0_usize;
         let mut angle = 0_usize;
@@ -809,6 +847,10 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("http/internal_media_sessions.rs", "start", "restore_candidate_context_with_deadline", "plan.as_ref()"),
     ("media_pool.rs", "live_tv_worker", "remote_placement_ready", "None"),
     ("media_sessions.rs", "attempt_takeover", "restore_candidate_context_with_deadline", "None"),
+    // A processed upgrade's adoption (0c3eecc92) revalidates the planning
+    // binding its root was prepared under; it is not a create and has no plan
+    // of its own, like `processed_planning_authority` below.
+    ("transcode/adaptive_attempts/processed.rs", "validate_adopt", "validate_candidate_planning_binding", "None"),
     ("transcode/manager/candidates.rs", "restore_candidate_context_with_deadline", "restore_catalog_context_planned", "plan"),
     ("transcode/manager/candidates.rs", "restore_catalog_context", "restore_catalog_context_planned", "None"),
     ("transcode/manager/create.rs", "create_cluster_prepared_session", "create_cluster_session_with_priority", "None"),
@@ -1185,11 +1227,23 @@ fn the_save_response_fences_and_admission_stay_quorum_reads() {
             .count(),
         1
     );
+    // The fourth (cb7bc7588) is the legacy capacity patch: a numeric
+    // transcode limit in the general form is folded against the current
+    // Authority settings before its own write.
     assert_eq!(
         update.matches("state.store.settings_snapshot()").count(),
-        3,
-        "the save handler's three pre-mutation snapshots"
+        4,
+        "the save handler's four pre-mutation snapshots"
     );
+    let capacity = body("http/system.rs", "update_resource_capacity");
+    assert_eq!(
+        capacity
+            .matches("settings_dto(&state,SettingsDtoSource::Authority)")
+            .count(),
+        1,
+        "the capacity form answers with the one Authority snapshot"
+    );
+    assert!(!capacity.contains("SettingsDtoSource::View"));
     let dto = body("http/system.rs", "settings_dto");
     assert!(dto.contains(
         "SettingsDtoSource::Authority=>Arc::new(state.store.settings_snapshot().await?)"
@@ -1231,7 +1285,9 @@ fn the_census_masks_literals_and_skips_test_items() {
                   struct S {\n    #[cfg(test)]\n    injected: Arc<Mutex<Vec<u8>>>,\n    kept: u8,\n}\n\
                   #[cfg(test)]\nfn g(a: u8, b: u8) -> Result<(), HashMap<u8, u8>> { state.applied.setting(k); }\n\
                   impl S {\n    fn e() { state.applied.setting(k); }\n}\n\
-                  fn f() { S {\n        #[cfg(test)]\n        injected: Default::default()\n    }; state.applied.setting(k); }\n";
+                  fn f() { S {\n        #[cfg(test)]\n        injected: Default::default()\n    }; state.applied.setting(k); }\n\
+                  #[cfg(all(test, target_os = \"linux\"))]\nimpl S {\n    fn h() { state.applied.setting(k); }\n}\n\
+                  #[cfg(any(test, feature = \"fixtures\"))]\nfn i() { state.applied.setting(k); }\n";
     let text = production(&mask(source));
     let reads = view_reads(&[("x.rs".to_owned(), text)]);
     let expected: BTreeMap<(String, String), usize> = [
@@ -1240,6 +1296,8 @@ fn the_census_masks_literals_and_skips_test_items() {
         // A `#[cfg(test)]` struct field or literal entry blanks only itself.
         (("x.rs".to_owned(), "e".to_owned()), 1),
         (("x.rs".to_owned(), "f".to_owned()), 1),
+        // A `cfg(all(test, ...))` item is test-only; `any(test, ...)` is not.
+        (("x.rs".to_owned(), "i".to_owned()), 1),
     ]
     .into_iter()
     .collect();
