@@ -320,9 +320,7 @@ impl FittedPublication {
         let stdout = File::create_new(&pipe).map_err(|e| e.to_string())?;
         let _pipe =
             source_lifetime::register_daemon_file(&stdout, &pipe).map_err(|e| e.to_string())?;
-        let mut command = tokio::process::Command::new(&program);
-        command.args(args);
-        crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+        let mut command = materialization_command(&program, args, dir.path(), runtime_cache);
         let descriptors = Descriptors::default()
             .prepare(
                 &mut command,
@@ -665,6 +663,26 @@ fn parse_digest(text: &str) -> Result<[u8; 32], String> {
     Ok(digest)
 }
 
+/// The fitted copy's FFmpeg runs in its own daemon-owned scratch directory,
+/// like every other declared M7 and F+ child. Without one it inherits the
+/// daemon's working directory, which the source-access verifier refuses
+/// (`cwd_outside_daemon_roots`), and debug builds panic on that refusal.
+fn materialization_command<I, S>(
+    program: &Path,
+    args: I,
+    scratch: &Path,
+    runtime_cache: &Path,
+) -> tokio::process::Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = tokio::process::Command::new(program);
+    command.current_dir(scratch).args(args);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    command
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -676,6 +694,21 @@ mod tests {
         fmp4::{Run, Sample, Track, TrackFragment, TrackKind, VideoCodec},
         transcode::Rational,
     };
+
+    /// Eclipse's first fitted materialization panicked the M7 task with
+    /// `cwd_outside_daemon_roots`, leaving its title job running forever.
+    #[test]
+    fn the_fitted_copy_runs_in_its_owned_scratch_directory() {
+        let scratch = Path::new("/owned/m7-scratch");
+        let command = materialization_command(
+            Path::new("/bundle/ffmpeg"),
+            ["-i", "in"],
+            scratch,
+            Path::new("/owned/runtime"),
+        );
+        assert_eq!(command.as_std().get_current_dir(), Some(scratch));
+        assert_eq!(command.as_std().get_args().count(), 2);
+    }
 
     #[test]
     fn copy_readback_keeps_source_packets_and_mux_decode_durations_in_their_clocks() {
