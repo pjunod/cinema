@@ -1670,6 +1670,18 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             matches!(contend, ClaimOutcome::Contended),
             "{backend}: {contend:?}"
         );
+        // The expired-lease sweep honours the same charged reader.
+        store
+            .requeue_expired_running_jobs(expiry)
+            .await
+            .expect("sweep while the reader is charged");
+        let waiting = store
+            .background_job(&old.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(waiting.state, JobState::Running, "{backend}");
+        assert_eq!(waiting.revision, old.revision, "{backend}");
         assert!(store
             .resolve_background_source_custody(custody.clone())
             .await
