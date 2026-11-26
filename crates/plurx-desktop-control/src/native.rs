@@ -176,6 +176,7 @@ fn bootstrap_package_with_origin(
             j.transition(crate::transaction::Phase::Committed)?;
             j.start_permit_expires = None;
             store.save(&j)?;
+            retire_after_commit(&installed, &store, &mut j);
             Ok(installed)
         })();
         if let Err(error) = &result {
@@ -896,6 +897,174 @@ pub fn rollback(i: &InstallationV1, store: &TransactionStore, j: &JournalV1) -> 
     }
     Ok(())
 }
+
+/// What a committed native upgrade retired from the immutable runtime store.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RetirementV1 {
+    pub versions: Vec<String>,
+    pub app_backups: Vec<String>,
+    /// Entries that could not be removed; the next committed upgrade retries.
+    pub failed: Vec<String>,
+}
+
+/// Retire superseded runtime closures once a native upgrade has committed.
+///
+/// Every promotion copies a full closure into `runtime/versions` and parks the
+/// old app as `.Plurx-retained-<transaction>`; nothing else ever removes them.
+/// Retention belongs to the transaction that made the previous closure
+/// superseded: it keeps the committed target (what `current` points at), the
+/// one recorded as `previous_current` (manual binary rollback), and any closure
+/// whose executable is still running. Failure never undoes the commit: the
+/// journal records it and the next committed upgrade retries the same rule.
+pub fn retire_after_commit(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV1) {
+    if i.method != InstallMethod::MacosNative
+        || j.operation != crate::protocol::Operation::Upgrade
+        || j.phase != crate::transaction::Phase::Committed
+    {
+        return;
+    }
+    let retired = home_for(i.owner_uid).and_then(|home| {
+        let running = crate::process::executables()?;
+        retire_superseded_at(i, store, j, &home.join("Applications"), &running)
+    });
+    let deferred = match retired {
+        Ok(r) if r.failed.is_empty() => return,
+        Ok(r) => r.failed.join("; "),
+        Err(error) => error.message,
+    };
+    j.detail = Some(format!(
+        "Update committed; superseded runtime retirement deferred: {deferred}"
+    ));
+    // The commit is already durable; a lost note only loses this detail.
+    let _ = store.save(j);
+}
+
+fn retire_superseded_at(
+    i: &InstallationV1,
+    store: &TransactionStore,
+    j: &JournalV1,
+    apps: &Path,
+    running: &[PathBuf],
+) -> Result<RetirementV1> {
+    let p: PromotionV1 = store.dir(&j.transaction_id)?.json("promotion.json")?;
+    let target = PathBuf::from("versions").join(&p.version_id);
+    if p.schema_version != 1
+        || p.transaction_id != j.transaction_id
+        || !p.pointer_promoted
+        || !relative(Path::new(&p.version_id))
+        || current_target(&i.paths.runtime)?.as_ref() != Some(&target)
+    {
+        return Err(invalid(
+            "committed promotion does not own runtime/current; nothing retired",
+        ));
+    }
+    let versions = i.paths.runtime.join("versions");
+    let mut keep = BTreeSet::from([std::ffi::OsString::from(&p.version_id)]);
+    if let Some(previous) = &p.previous_current {
+        let mut c = previous.components();
+        match (c.next(), c.next(), c.next()) {
+            (Some(Component::Normal(root)), Some(Component::Normal(name)), None)
+                if root == "versions" =>
+            {
+                keep.insert(name.to_owned());
+            }
+            _ => return Err(invalid("retained runtime escaped immutable versions root")),
+        }
+    }
+    keep.extend(running_children(&versions, running)?);
+    let mut retired = RetirementV1::default();
+    secure_fs::open_dir(&versions, i.owner_uid)?;
+    for entry in std::fs::read_dir(&versions)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if keep.contains(&name) || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        // One stuck tree must not block every later sweep: continue, report.
+        match retire_tree(&versions, &name, i.owner_uid, ".retiring-") {
+            Ok(()) => retired.versions.push(name.to_string_lossy().into_owned()),
+            Err(e) => retired
+                .failed
+                .push(format!("{}: {}", name.to_string_lossy(), e.message)),
+        }
+    }
+    // Only this transaction's backup is the app matching `previous_current`.
+    if apps.exists() {
+        let own = format!(".Plurx-retained-{}", j.transaction_id);
+        let busy = running_children(apps, running)?;
+        for entry in std::fs::read_dir(apps)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(text) = name.to_str() else { continue };
+            if text == own
+                || busy.contains(&name)
+                || ![".Plurx-retained-", ".Plurx-incoming-", APP_RETIRING]
+                    .iter()
+                    .any(|prefix| text.starts_with(prefix))
+                || !entry.file_type()?.is_dir()
+            {
+                continue;
+            }
+            match retire_tree(apps, &name, i.owner_uid, APP_RETIRING) {
+                Ok(()) => retired.app_backups.push(text.to_owned()),
+                Err(e) => retired.failed.push(format!("{text}: {}", e.message)),
+            }
+        }
+    }
+    retired.versions.sort();
+    retired.app_backups.sort();
+    Ok(retired)
+}
+
+/// Names of `parent`'s direct children that contain a running executable.
+/// Matches the directory by device and inode, not spelling, so firmlinked or
+/// differently canonicalised paths reported by the kernel still match.
+fn running_children(parent: &Path, running: &[PathBuf]) -> Result<BTreeSet<std::ffi::OsString>> {
+    let root = std::fs::metadata(parent)?;
+    let canonical = parent.canonicalize()?;
+    let mut out = BTreeSet::new();
+    for exe in running {
+        let mut child = None;
+        for ancestor in exe.ancestors().skip(1) {
+            let same = ancestor == parent
+                || ancestor == canonical
+                || std::fs::metadata(ancestor)
+                    .is_ok_and(|m| m.dev() == root.dev() && m.ino() == root.ino());
+            if same {
+                child = exe.strip_prefix(ancestor).ok().and_then(|rest| {
+                    match rest.components().next() {
+                        Some(Component::Normal(name)) => Some(name.to_owned()),
+                        _ => None,
+                    }
+                });
+                break;
+            }
+        }
+        out.extend(child);
+    }
+    Ok(out)
+}
+
+/// Rename out of the addressable namespace first so an interrupted removal can
+/// never leave a partial closure under a valid version name; a later
+/// retirement sweeps the hidden remainder because it is not in the keep set.
+const APP_RETIRING: &str = ".Plurx-retiring-";
+fn retire_tree(parent: &Path, name: &std::ffi::OsStr, uid: u32, hidden: &str) -> Result<()> {
+    secure_fs::open_dir(parent, uid)?;
+    let doomed = if name.to_string_lossy().starts_with(hidden) {
+        parent.join(name)
+    } else {
+        let doomed = parent.join(format!("{hidden}{}", uuid::Uuid::new_v4()));
+        std::fs::rename(parent.join(name), &doomed)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        doomed
+    };
+    // std's remove_dir_all never follows symlinks out of the tree.
+    std::fs::remove_dir_all(&doomed)?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 pub fn daemon_path(i: &InstallationV1) -> Result<PathBuf> {
     if i.method == InstallMethod::MacosNative {
         let target = current_target(&i.paths.runtime)?
@@ -1581,5 +1750,319 @@ mod restoration_tests {
         );
         drop(store);
         std::fs::remove_dir_all(scratch).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use crate::transaction::Phase;
+
+    struct Fixture {
+        scratch: PathBuf,
+        i: InstallationV1,
+        store: TransactionStore,
+        j: JournalV1,
+        apps: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/native-retirement-tests")
+                .join(uuid::Uuid::new_v4().to_string());
+            std::fs::create_dir_all(&scratch).expect("scratch");
+            let scratch = scratch.canonicalize().expect("absolute scratch");
+            let uid = native_uid();
+            let id = uuid::Uuid::new_v4().to_string();
+            let installation_id = uuid::Uuid::new_v4().to_string();
+            let runtime = scratch.join("runtime");
+            let i: InstallationV1 = serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "installation_id": installation_id,
+                "method": "macos-native", "owner_uid": uid, "service_uid": uid,
+                "architecture": "arm64", "desktop_installed": true,
+                "repository": REPOSITORY, "current_version": "0.9.2", "current_tag": "v0.9.2",
+                "current_commit": "a".repeat(40), "controller_protocol": 1,
+                "trust_key_ids": [], "last_transaction_id": id,
+                "paths": {"state": runtime.join("control"), "runtime": runtime,
+                    "socket": scratch.join("socket"), "config": scratch.join("config"),
+                    "data": scratch.join("data"), "log": scratch.join("log")},
+                "service": {"kind": "launchd", "name": LAUNCH_LABEL, "domain": format!("gui/{uid}")},
+                "browser_origin": "http://127.0.0.1:32400"
+            }))
+            .expect("installation fixture");
+            std::fs::create_dir_all(&i.paths.state).expect("state");
+            let store = TransactionStore::locked(&i).expect("store");
+            let j: JournalV1 = serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "transaction_id": id, "installation_id": installation_id,
+                "operation": "upgrade", "old_version": "0.9.1", "target_version": "0.9.2",
+                "phase": "committed", "initial_running": true,
+                "initial_startup": {"state": "enabled", "detail": null},
+                "policy_revision": "fixture", "config_digest": "fixture", "rollback": "manual_recovery"
+            }))
+            .expect("journal fixture");
+            store.transactions.child(&id, true).expect("transaction");
+            let apps = scratch.join("Applications");
+            std::fs::create_dir_all(&apps).expect("apps");
+            Fixture {
+                scratch,
+                i,
+                store,
+                j,
+                apps,
+            }
+        }
+        fn versions(&self) -> PathBuf {
+            self.i.paths.runtime.join("versions")
+        }
+        /// A read-only closure shaped like `copy_tree` output (0500/0400 leaves).
+        fn version(&self, name: &str) {
+            let uid = self.i.owner_uid;
+            let root = self.versions().join(name);
+            private_dir(&root.join("runtime"), uid).expect("version runtime");
+            secure_fs::open_dir(&root.join("runtime"), uid)
+                .expect("runtime")
+                .write("plurxd", b"fixture", 0o500)
+                .expect("daemon");
+            secure_fs::open_dir(&root, uid)
+                .expect("root")
+                .write("release.json", b"{}", 0o400)
+                .expect("release");
+        }
+        fn promote(&self, version_id: &str, previous: Option<&str>) {
+            let p = PromotionV1 {
+                schema_version: 1,
+                transaction_id: self.j.transaction_id.clone(),
+                version_id: version_id.into(),
+                previous_current: previous.map(|v| PathBuf::from("versions").join(v)),
+                app_backup: None,
+                app_promoted: true,
+                controls_promoted: CONTROL_BINARIES.iter().map(|n| (*n).into()).collect(),
+                pointer_promoted: true,
+            };
+            self.store
+                .dir(&self.j.transaction_id)
+                .expect("transaction")
+                .write_json("promotion.json", &p)
+                .expect("promotion");
+            pointer(
+                &self.i.paths.runtime,
+                &PathBuf::from("versions").join(version_id),
+            )
+            .expect("pointer");
+        }
+        fn retire(&self, running: &[PathBuf]) -> Result<RetirementV1> {
+            retire_superseded_at(&self.i, &self.store, &self.j, &self.apps, running)
+        }
+        fn names(dir: &Path) -> BTreeSet<String> {
+            std::fs::read_dir(dir)
+                .expect("list")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+        fn done(self) {
+            drop(self.store);
+            std::fs::remove_dir_all(self.scratch).expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn committed_upgrade_keeps_current_previous_and_running_and_retires_the_rest() {
+        let f = Fixture::new();
+        let own = &f.j.transaction_id;
+        for v in [
+            "0.8.0-a",
+            "0.9.0-b",
+            "0.9.1-prev",
+            "0.9.1-running",
+            "0.9.2-cur",
+        ] {
+            f.version(v);
+        }
+        // An interrupted earlier retirement leaves a hidden partial tree.
+        f.version(".retiring-interrupted");
+        // Non-directories and links in the store are never ours to remove.
+        let outside = f.scratch.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("keep"), b"keep").expect("outside file");
+        std::os::unix::fs::symlink(&outside, f.versions().join("link")).expect("link");
+        std::fs::write(f.versions().join("note"), b"note").expect("note");
+        f.promote("0.9.2-cur", Some("0.9.1-prev"));
+        for name in [
+            format!(".Plurx-retained-{own}"),
+            ".Plurx-retained-old-1".into(),
+            ".Plurx-retained-old-2".into(),
+            ".Plurx-incoming-crashed".into(),
+            "Plurx Server.app".into(),
+            ".Plurx-failed-inspect".into(),
+            "Other.app".into(),
+        ] {
+            private_dir(&f.apps.join(&name).join("Contents"), f.i.owner_uid).expect("app");
+        }
+        let running = [f.versions().join("0.9.1-running/runtime/plurxd")];
+
+        let retired = f.retire(&running).expect("retire");
+
+        assert_eq!(retired.versions.len(), 3, "{retired:?}");
+        assert!(retired.versions.contains(&"0.8.0-a".to_owned()));
+        assert!(retired.versions.contains(&"0.9.0-b".to_owned()));
+        assert!(retired
+            .versions
+            .contains(&".retiring-interrupted".to_owned()));
+        assert_eq!(
+            Fixture::names(&f.versions()),
+            BTreeSet::from(
+                ["0.9.1-prev", "0.9.1-running", "0.9.2-cur", "link", "note"].map(String::from)
+            )
+        );
+        assert!(outside.join("keep").exists(), "links are never followed");
+        assert_eq!(
+            current_target(&f.i.paths.runtime).expect("current"),
+            Some(PathBuf::from("versions/0.9.2-cur"))
+        );
+        assert_eq!(
+            Fixture::names(&f.apps),
+            BTreeSet::from([
+                format!(".Plurx-retained-{own}"),
+                "Plurx Server.app".into(),
+                ".Plurx-failed-inspect".into(),
+                "Other.app".into(),
+            ])
+        );
+        assert_eq!(
+            f.retire(&running).expect("idempotent"),
+            RetirementV1::default(),
+            "a second pass has nothing left to retire"
+        );
+        f.done();
+    }
+
+    #[test]
+    fn running_executable_through_another_spelling_or_in_an_app_backup_is_kept() {
+        let f = Fixture::new();
+        for v in ["0.9.0-busy", "0.9.1-idle", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", None);
+        // The kernel may name the same directory through another path (a
+        // firmlink or alias); identity is by device and inode, not spelling.
+        let alias = f.scratch.join("alias");
+        std::os::unix::fs::symlink(f.versions(), &alias).expect("alias");
+        for name in [".Plurx-retained-busy", ".Plurx-retained-idle"] {
+            private_dir(&f.apps.join(name).join("Contents/MacOS"), f.i.owner_uid).expect("app");
+        }
+        let running = [
+            alias.join("0.9.0-busy/runtime/plurxd"),
+            f.apps
+                .join(".Plurx-retained-busy/Contents/MacOS/Plurx Server"),
+        ];
+        let retired = f.retire(&running).expect("retire");
+        assert_eq!(retired.versions, vec!["0.9.1-idle".to_owned()]);
+        assert_eq!(retired.app_backups, vec![".Plurx-retained-idle".to_owned()]);
+        assert!(f.versions().join("0.9.0-busy").exists());
+        assert!(f.apps.join(".Plurx-retained-busy").exists());
+        f.done();
+    }
+
+    #[test]
+    fn one_stuck_tree_is_reported_and_does_not_block_the_rest() {
+        let f = Fixture::new();
+        for v in ["0.9.0-stuck", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", None);
+        // A read-only subdirectory makes its entries unremovable for the owner.
+        let locked = f.versions().join("0.9.0-stuck/runtime");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("lock");
+        private_dir(&f.apps.join(".Plurx-retained-old/Contents"), f.i.owner_uid).expect("app");
+        let retired = f.retire(&[]).expect("retire");
+        assert_eq!(
+            retired.app_backups,
+            vec![".Plurx-retained-old".to_owned()],
+            "the app sweep still runs after a failed version"
+        );
+        // Root ignores directory modes, so only an ordinary UID can get stuck.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(retired.failed.len(), 1, "{retired:?}");
+            assert!(retired.versions.is_empty());
+            assert!(
+                !f.versions().join("0.9.0-stuck").exists(),
+                "a partial tree is never left under a valid version name"
+            );
+            for entry in std::fs::read_dir(f.versions()).expect("list") {
+                let path = entry.expect("entry").path();
+                if path.join("runtime").exists() && path != f.versions().join("0.9.2-cur") {
+                    std::fs::set_permissions(
+                        path.join("runtime"),
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .expect("unlock");
+                }
+            }
+            let again = f.retire(&[]).expect("retry");
+            assert_eq!(
+                again.versions.len(),
+                1,
+                "the hidden remainder is swept next time"
+            );
+            assert!(again.failed.is_empty());
+        }
+        f.done();
+    }
+
+    #[test]
+    fn running_executable_through_canonical_path_is_kept() {
+        let f = Fixture::new();
+        for v in ["0.9.0-busy", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", None);
+        let canonical = f.versions().canonicalize().expect("canonical");
+        let retired = f
+            .retire(&[canonical.join("0.9.0-busy/runtime/plurxd")])
+            .expect("retire");
+        assert!(retired.versions.is_empty(), "{retired:?}");
+        assert!(f.versions().join("0.9.0-busy").exists());
+        f.done();
+    }
+
+    #[test]
+    fn retirement_refuses_when_current_is_not_the_committed_promotion() {
+        let f = Fixture::new();
+        for v in ["0.9.0-a", "0.9.1-prev", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", Some("0.9.1-prev"));
+        // Another actor moved `current` after this transaction committed.
+        pointer(&f.i.paths.runtime, Path::new("versions/0.9.0-a")).expect("moved");
+        assert!(f.retire(&[]).is_err());
+        assert_eq!(Fixture::names(&f.versions()).len(), 3, "nothing retired");
+        // A promotion that escaped the versions root is refused outright.
+        f.promote("0.9.2-cur", Some("../elsewhere"));
+        assert!(f.retire(&[]).is_err());
+        assert_eq!(Fixture::names(&f.versions()).len(), 3, "nothing retired");
+        f.done();
+    }
+
+    #[test]
+    fn only_committed_native_upgrades_retire() {
+        let mut f = Fixture::new();
+        for v in ["0.9.0-a", "0.9.2-cur"] {
+            f.version(v);
+        }
+        f.promote("0.9.2-cur", None);
+        // Non-committed phases return before touching the store, the home
+        // directory or the process table.
+        for phase in [Phase::Restoring, Phase::Installing, Phase::RecoveryRequired] {
+            f.j.phase = phase;
+            retire_after_commit(&f.i, &f.store, &mut f.j);
+            assert!(f.versions().join("0.9.0-a").exists());
+            assert_eq!(f.j.detail, None);
+        }
+        f.j.phase = Phase::Committed;
+        f.j.operation = crate::protocol::Operation::Stop;
+        retire_after_commit(&f.i, &f.store, &mut f.j);
+        assert!(f.versions().join("0.9.0-a").exists());
+        f.done();
     }
 }
