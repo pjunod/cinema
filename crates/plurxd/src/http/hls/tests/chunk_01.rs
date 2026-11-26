@@ -335,7 +335,7 @@ fn the_create_runs_no_processed_work_before_the_first_frame() {
     );
     assert!(include_str!("../processed_upgrade.rs").contains(".prepare_processed_upgrade("));
     let gates = create
-        .split_once("let processed_upgrade_applies = if pinned_owner")
+        .split_once("let processed_upgrade_applies = if ")
         .expect("the create's processed gates")
         .1
         .split_once("let advertise_control")
@@ -358,7 +358,7 @@ fn the_create_runs_no_processed_work_before_the_first_frame() {
         .1;
     assert!(
         registration
-            .split_once("Ok(Json(response))")
+            .split_once("Ok(FundedStartReply {")
             .expect("the answer")
             .0
             .contains("super::processed_upgrade::register("),
