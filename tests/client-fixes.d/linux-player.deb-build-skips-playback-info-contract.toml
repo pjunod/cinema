@@ -1,0 +1,9 @@
+# The Debian build errored on the playback-info field contract, which the
+# source package does not carry; the check now skips there by name.
+[[fixes]]
+id = "linux-player.deb-build-skips-playback-info-contract"
+commits = ["cf58e5584459465904c7453e44d80deb67e49b32"]
+source = "clients/linux-player/debian/rules"
+source_anchor = "--allow-skip test_badges.Provenance.test_labels_equal_the_contract"
+test = "clients/linux-player/tests/test_badges.py"
+test_anchor = "def test_labels_equal_the_contract"

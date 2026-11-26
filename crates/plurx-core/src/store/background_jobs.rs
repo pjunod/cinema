@@ -46,6 +46,14 @@ pub const SQLITE_INTRODUCED_SCHEMA: i64 = 71;
 
 pub const JOB_LEASE_MS: i64 = 30_000;
 pub const JOB_RENEW_INTERVAL_MS: i64 = 10_000;
+/// How long past its lease expiry a running job stays untouched by the
+/// expired-lease sweep. Each node sweeps with its own clock, so the margin
+/// absorbs clock skew between the owner and the sweeper and store latency
+/// on a renewal: six renewal intervals and twice the lease beyond the
+/// moment a healthy owner would have renewed. It equals
+/// `SOURCE_AUTHORITY_REAP_GRACE_MS`, the custody reap's grace, so a job whose
+/// lapsed custody the reap just released is swept on the same tick.
+pub const EXPIRED_LEASE_SWEEP_GRACE_MS: i64 = 60_000;
 pub const CLAIM_RESOLUTION_WINDOW_MS: i64 = 120_000;
 pub const REQUEST_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 pub const MAX_ACTIVE_JOBS: usize = 4_096;
@@ -626,14 +634,36 @@ macro_rules! claim_kind_demand {
     };
 }
 
+/// The job-level attempt budget. A running row is an expired lease here (the
+/// claim admits no other running row), and taking it over charges that
+/// attempt, so it needs room for one more. `fragment_index_build` budgets per
+/// waiter instead (see `claim_state`).
+macro_rules! claim_attempt_budget {
+    () => {
+        r#"(kind = 'fragment_index_build' OR failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < attempt_limit)"#
+    };
+}
+
+/// `attempt_errors` with the expired attempt's `lease_expired` appended,
+/// compacted to the 2048-character bound. The claim takeover and the
+/// expired-lease sweep charge the same entry from this one expression.
+macro_rules! lease_expired_attempt_errors {
+    () => {
+        r#"CASE WHEN length(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired') <= 2048 THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE 'history_compacted,' || substr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), instr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), ',') + 1) END"#
+    };
+}
+
 /// Placement, queue state, retry and attempt budget, a pending waiter, owner
 /// membership and the counters.
 macro_rules! claim_state {
     () => {
-        r#"(target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
+        concat!(
+            r#"(target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
-  AND (kind = 'fragment_index_build' OR failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < attempt_limit)
+  AND "#,
+            claim_attempt_budget!(),
+            r#"
   AND not_before_ms <= json_extract($1, '$.now_ms')
   AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
     AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms'))
@@ -644,6 +674,7 @@ macro_rules! claim_state {
         AND participation_fence = background_jobs.fence THEN 1 ELSE 0 END < attempt_limit)))
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
   AND fence < 9223372036854775807 AND revision < 9223372036854775807"#
+        )
     };
 }
 
@@ -678,9 +709,23 @@ macro_rules! claim_source_holders {
       WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.active_occupancy=1
         AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)
         AND (held.work_id!="#, $job, r#" OR held.custody_id IS NOT NULL))>=2)
-  AND NOT EXISTS (SELECT 1 FROM background_source_custody previous
-    WHERE previous.owner_kind='job' AND previous.work_id="#, $job, r#" AND previous.phase!='paused')"#
+  AND "#, claim_previous_reader!($job)
     )
+    };
+}
+
+/// The job's previous physical reader may still be charged: it holds source
+/// custody that is not paused. A takeover waits for the custody to settle or
+/// for `reap_settled_source_custody` to release it after
+/// `SOURCE_AUTHORITY_REAP_GRACE_MS`, and so does the expired-lease sweep.
+macro_rules! claim_previous_reader {
+    ($job:literal) => {
+        concat!(
+            r#"NOT EXISTS (SELECT 1 FROM background_source_custody previous
+    WHERE previous.owner_kind='job' AND previous.work_id="#,
+            $job,
+            r#" AND previous.phase!='paused')"#
+        )
     };
 }
 
@@ -774,7 +819,9 @@ pub(super) const CLAIM_SQL: &str = concat!(
 UPDATE background_jobs SET
   failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
   attempt_errors = CASE WHEN state = 'running' THEN
-    CASE WHEN length(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired') <= 2048 THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE 'history_compacted,' || substr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), instr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), ',') + 1) END ELSE attempt_errors END,
+    "#,
+    lease_expired_attempt_errors!(),
+    r#" ELSE attempt_errors END,
   state = 'running', owner_node_id = json_extract($1, '$.node_id'),
   owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
   fence = fence + 1, revision = revision + 1,
@@ -805,6 +852,120 @@ WHERE "#,
     claim_maintenance_reader!("json_extract($1, '$.job_id')"),
     "\n"
 );
+
+/// The expired-lease running jobs one sweep pass returns to the queue: every
+/// row a claim could take over except for the claimant's own admission
+/// (placement, demand, not-before, source capacity), oldest lease first.
+///
+/// - Only a lease expired at least `EXPIRED_LEASE_SWEEP_GRACE_MS` ago on the
+///   sweeper's clock (`swept_before_ms`). A claim may take over at expiry
+///   because its claimant is about to run the work; the sweep only revokes,
+///   so it must not revoke a live owner whose clock or renewal lags.
+/// - The budget is the takeover's own (`claim_attempt_budget`), per waiter
+///   for `fragment_index_build`. A row without it is the maintenance
+///   command's: `maintain_jobs` settles an expired running job with no
+///   attempt left terminally (`execution_abandoned`; the settlement trigger
+///   records that attempt as `failed`), so the sweep never races it for the
+///   same row. The waiter clause is the exact negation of that command's
+///   fragment test.
+/// - A lapsed index retry window is the maintenance command's as well.
+/// - `cancelling` is never swept: its expiry settles to `cancelled` there.
+/// - A job whose previous reader may still be charged waits, as a takeover
+///   does (`claim_previous_reader`), until its custody settles or the custody
+///   reap releases it `SOURCE_AUTHORITY_REAP_GRACE_MS` after the lease; the
+///   daemon runs that reap earlier on the same tick.
+macro_rules! expired_lease_candidates {
+    () => {
+        concat!(
+            r#"SELECT id FROM background_jobs WHERE state = 'running'
+    AND lease_expires_ms <= json_extract($1, '$.swept_before_ms')
+    AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
+    AND "#,
+            claim_attempt_budget!(),
+            r#"
+    AND (kind != 'fragment_index_build' OR EXISTS (SELECT 1 FROM background_job_waiters interest
+      WHERE interest.job_id = background_jobs.id AND interest.state = 'pending'
+        AND interest.failed_attempts + CASE WHEN interest.participation_fence = background_jobs.fence THEN 1 ELSE 0 END < interest.attempt_limit
+        AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract($1, '$.now_ms'))))
+    AND "#,
+            claim_previous_reader!("background_jobs.id"),
+            r#"
+    AND fence < 9223372036854775807 AND revision < 9223372036854775807
+    ORDER BY lease_expires_ms, id LIMIT 128"#
+        )
+    };
+}
+
+/// Whether a sweep pass has anything to write. The write rechecks every row.
+const EXPIRED_LEASE_PENDING_SQL: &str = concat!(
+    "SELECT 'true' AS result_json WHERE EXISTS (",
+    expired_lease_candidates!(),
+    ")"
+);
+
+/// The expired attempt ends `lease_expired`, exactly as the takeover's
+/// `background_job_claim_effects` ends it. This runs first in the sweep's
+/// transaction so the row's settlement trigger, which would record an
+/// ordinary `retry`, finds the attempt already finished.
+const EXPIRED_LEASE_ATTEMPTS_SQL: &str = concat!(
+    "UPDATE background_job_attempts SET finished_at_ms = json_extract($1, '$.now_ms'), outcome = 'lease_expired'\nWHERE finished_at_ms IS NULL AND job_id IN (",
+    expired_lease_candidates!(),
+    ")"
+);
+
+/// The takeover's bookkeeping without the new owner: charge the expired
+/// attempt, append `lease_expired`, bump fence and revision, and leave the row
+/// queued with no owner, claim or lease. Leaving `running` is an ordinary
+/// retry settlement to every kind trigger; for `fragment_index_build`,
+/// `background_fragment_interest_failed` charges the waiters that took part
+/// in the expired attempt, as the takeover's claim effects do. The policy is
+/// `retry` so an expiry never inherits an earlier index-retry backoff.
+const EXPIRED_LEASE_REQUEUE_SQL: &str = concat!(
+    r#"UPDATE background_jobs SET
+  failed_attempts = failed_attempts + 1,
+  attempt_errors = "#,
+    lease_expired_attempt_errors!(),
+    r#",
+  failure_policy = 'retry', last_error_code = 'lease_expired',
+  state = 'queued', owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL,
+  lease_expires_ms = NULL, fence = fence + 1, revision = revision + 1,
+  updated_at_ms = json_extract($1, '$.now_ms')
+WHERE id IN ("#,
+    expired_lease_candidates!(),
+    ")"
+);
+
+/// Returns expired-lease running jobs to the queue in bounded passes.
+async fn requeue_expired_running_jobs<T: QueueSql>(
+    store: &T,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    if now_ms < 0 {
+        return Err(invalid("invalid expired-lease sweep time"));
+    }
+    let body = encode(&serde_json::json!({
+        "now_ms": now_ms,
+        "swept_before_ms": now_ms.saturating_sub(EXPIRED_LEASE_SWEEP_GRACE_MS),
+    }))?;
+    if store
+        .queue_sql(
+            EXPIRED_LEASE_PENDING_SQL.to_owned(),
+            body.clone(),
+            false,
+            false,
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(());
+    }
+    store
+        .queue_transaction(vec![
+            (EXPIRED_LEASE_ATTEMPTS_SQL.to_owned(), body.clone()),
+            (EXPIRED_LEASE_REQUEUE_SQL.to_owned(), body),
+        ])
+        .await
+}
 
 /// Why this node's applied replica says [`CLAIM_SQL`] would refuse a claim
 /// (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md §3.2): the first predicate
@@ -3382,6 +3543,14 @@ pub trait BackgroundJobStore: Send + Sync {
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<bool, StoreError>;
     async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError>;
+    /// Return every running job whose lease expired at least
+    /// [`EXPIRED_LEASE_SWEEP_GRACE_MS`] before `now_ms` to the queue with the
+    /// claim takeover's fenced bookkeeping: one charged attempt,
+    /// `lease_expired` appended, fence and revision bumped, owner cleared and
+    /// the attempt ended `lease_expired`. A job whose previous reader still
+    /// holds custody waits for the custody reap; a job with no attempt left
+    /// is settled by [`Self::maintain_jobs`]. Idempotent and CAS-safe.
+    async fn requeue_expired_running_jobs(&self, now_ms: i64) -> Result<(), StoreError>;
     async fn settled_foreground_source_custody(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
@@ -5774,6 +5943,9 @@ LIMIT 1
     }
     async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError> {
         super::background_jobs_resources::reap_settled_source_custody(self, now_ms).await
+    }
+    async fn requeue_expired_running_jobs(&self, now_ms: i64) -> Result<(), StoreError> {
+        requeue_expired_running_jobs(self, now_ms).await
     }
     async fn settled_foreground_source_custody(
         &self,

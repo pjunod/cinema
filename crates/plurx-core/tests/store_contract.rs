@@ -890,6 +890,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "abort_foreground_source_activation",
     "mark_foreground_source_settled",
     "reap_settled_source_custody",
+    // store_contract/background_jobs.rs `expired_lease_sweep_requeues_with_takeover_bookkeeping`.
+    "requeue_expired_running_jobs",
     "settled_foreground_source_custody",
     "activate_background_source_custody",
     "abort_background_source_activation",
@@ -22033,7 +22035,12 @@ fn contract_inventory_matches_every_store_method() {
     // and covered on both backends by
     // store_contract/dv_title_probe_provenance.rs (dv_levels_*).
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 643, "review the Store method count");
+    // 643 -> 644: `BackgroundJobStore`'s `requeue_expired_running_jobs`
+    // returns expired-lease running jobs to the queue with the takeover's
+    // bookkeeping. Named in BACKGROUND_JOB_METHODS and exercised on both
+    // backends by background_jobs::expired_lease_sweep_requeues_with_takeover_bookkeeping.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 644, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -35655,6 +35662,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: other.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35674,6 +35682,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35700,6 +35709,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: Some(&only),
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35715,6 +35725,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35740,6 +35751,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &only_unwatched,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35761,6 +35773,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &first,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35782,6 +35795,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35796,6 +35810,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35972,6 +35987,80 @@ async fn curation_contract_runs_through_dyn_store() {
             before,
             "{backend}: seasons and episodes are not taggable"
         );
+
+        let home = store
+            .create_library(&NewLibrary {
+                name: "Curation Videos".into(),
+                kind: LibraryKind::Home,
+                paths: vec![PathBuf::from("/curation/videos")],
+                anime: false,
+            })
+            .await
+            .expect("video library");
+        let home_item = |kind, parent_id, title: &str| NewItem {
+            library_id: home.id,
+            kind,
+            parent_id,
+            title: title.into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        };
+        let folder = store
+            .insert_item(&home_item(ItemKind::Folder, None, "Trips"))
+            .await
+            .expect("folder");
+        let video = store
+            .insert_item(&home_item(ItemKind::Video, Some(folder), "Beach day"))
+            .await
+            .expect("nested video");
+        store
+            .set_tag_members(
+                household.id,
+                &[video],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                255,
+            )
+            .await
+            .expect("tag nested video");
+        let video_rule = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            libraries: vec![home.id],
+            ..Default::default()
+        };
+        let mut query = RuleQuery {
+            viewer: owner.id,
+            spec: &video_rule,
+            only_items: None,
+            top_level_only: false,
+            day: 0,
+            presence: plurx_core::domain::ItemPresence::OnDisk,
+        };
+        let result = store.rule_items(&query, 0, 20).await.expect("Home row");
+        assert_eq!(
+            (result.item_ids, result.total),
+            (vec![video], 1),
+            "{backend}"
+        );
+        query.top_level_only = true;
+        let result = store
+            .rule_items(&query, 0, 20)
+            .await
+            .expect("root library grid");
+        assert_eq!((result.item_ids, result.total), (vec![], 0), "{backend}");
+        store
+            .set_tag_members(
+                household.id,
+                &[],
+                &[video],
+                owner.id,
+                TagSource::Manual,
+                256,
+            )
+            .await
+            .expect("remove nested-video tag before the merge count assertions");
 
         // Ids are never reused: a stored layout or a client holding row:N or
         // tag N must not silently point at something new.
