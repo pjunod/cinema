@@ -60,6 +60,14 @@ class ServerEnhancement(unittest.TestCase):
         shown = server_enhancement(self.session(dict(report, fel_contributed=True), enhancement=enhancement))
         self.assertTrue(shown["details"][0]["text"].startswith("FEL: full enhancement layer"))
         self.assertIsNone(server_enhancement({"enhancement": dict(self.NATIVE, el_kind="xel")})["el_kind"])
+        # A prepared successor's neutral snapshot has no rows; the MEL row
+        # still comes from el_kind, never from a stale FEL sentence.
+        cleared = dict(enhancement, active=[], details=[])
+        shown = server_enhancement(self.session(report, enhancement=cleared))
+        self.assertEqual(shown["details"][0], self.MEL_ROW)
+        stale = dict(enhancement, details=[{"badge": "FEL", "active": True,
+                                            "text": "FEL: full enhancement layer reconstructed into the picture"}])
+        self.assertEqual(server_enhancement(self.session(report, enhancement=stale))["details"][0], self.MEL_ROW)
 
     def session(self, report, delivered="hdr10", **extra):
         return dict({"enhancement": dict(self.NATIVE, requires_effective_processing=True),

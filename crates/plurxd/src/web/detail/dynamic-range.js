@@ -214,18 +214,20 @@ function playerEnhancement(p){
   const target=operations.find(op=>op?.DisplayTargetMapping)?.DisplayTargetMapping.nits;
   const trims=operations.includes('CreativeTrimApplication')?"with the colourist's creative trims"
     :report.creative_trims_partial===true?"with the colourist's creative trims on some shots":"L1 only; creative trims are not applied";
-  // A minimal layer (MEL) has no detail to miss: the server's row says MEL.
-  const melRow=enhancement.el_kind==='mel'?enhancement.details.find(d=>d.badge==='FEL'):null;
+  // A minimal layer (MEL), as the server's title scan classified it, has no
+  // detail to miss; the row is built from that fact, not from the snapshot
+  // (enhancement.rs's processed-route MEL row).
+  const mel=enhancement.el_kind==='mel';
   const current=[
     report.fel_contributed
       ?{badge:'FEL',active:true,text:`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`}
-      :melRow?{...melRow,active:false}
+      :mel?{badge:'FEL',active:false,text:'MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU'}
       :{badge:'FEL',active:false,text:'FEL: no enhancement-layer detail in this window'},
     {badge:'RPU',active:rpu.length>0,text:rpu.length?`RPU: ${rpu.join(', ')} applied by the server`:'RPU: no reshaping or colour conversion applied in this window'},
     {badge:'DYN',active:!!target,text:target?`DYN: per-shot Dolby display mapping for a ${target}-nit display by the server (${trims})`
       :'DYN: no per-shot Dolby display mapping applied in this window'}
   ];
-  const details=current.filter(d=>d.badge!=='FEL'||d.active||enhancement.details.some(old=>old.badge==='FEL'))
+  const details=current.filter(d=>d.badge!=='FEL'||d.active||mel||enhancement.details.some(old=>old.badge==='FEL'))
     .concat(enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge)));
   return {...enhancement,active:current.filter(d=>d.active).map(d=>d.badge),details};
 }

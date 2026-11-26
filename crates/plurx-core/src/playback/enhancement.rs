@@ -241,6 +241,15 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
         EnhancementRoute::NativeDolbyVision => {
             if mel {
                 details.push(mel_row(" delivered for the display"));
+            } else if has_el && facts.el_kind.is_none() {
+                // Unscanned, or its RPUs disagree: the version line says
+                // "type not yet scanned", and this row does not guess FEL.
+                details.push(detail(
+                    Fel,
+                    false,
+                    "Enhancement layer: delivered for the display to decode — the title \
+                     scan has not yet said whether it is full (FEL) or minimal (MEL)",
+                ));
             } else if has_el {
                 details.push(detail(
                     Fel,
@@ -797,6 +806,10 @@ mod tests {
                     ..
                 }
             );
+            // The planner composes only a FEL (dv_processing refuses a
+            // non-FEL source for composition), so a receipt saying a full
+            // layer was composed means the scan and the processor disagree;
+            // the receipt is the measurement of this play and wins.
             if receipt_proves_fel {
                 assert!(layer.active && layer.text.starts_with("FEL:"), "{route:?}");
             } else {
@@ -826,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn fel_and_unscanned_titles_keep_their_fel_rows() {
+    fn fel_and_unscanned_titles_are_not_called_mel() {
         use crate::scan::dv_title::TitleElKind;
         for el_kind in [Some(TitleElKind::Fel), None] {
             for route in every_route() {
@@ -834,20 +847,34 @@ mod tests {
                 fel.el_kind = el_kind;
                 let shown = playback_enhancement(&fel).expect("DV source");
                 assert_eq!(shown.el_kind, el_kind);
+                let unscanned_native =
+                    el_kind.is_none() && route == EnhancementRoute::NativeDolbyVision;
+                let prefix = if unscanned_native {
+                    "Enhancement layer:"
+                } else {
+                    "FEL:"
+                };
                 assert!(shown
                     .details
                     .iter()
                     .filter(|detail| detail.badge == Fel)
-                    .all(|detail| detail.text.starts_with("FEL:")));
+                    .all(|detail| detail.text.starts_with(prefix)));
             }
-            let mut native = facts(EnhancementRoute::NativeDolbyVision);
-            native.el_kind = el_kind;
-            let shown = playback_enhancement(&native).expect("DV source");
-            assert_eq!(
-                shown.details[0].text,
-                "FEL: delivered for the display to decode"
-            );
         }
+        let mut native = facts(EnhancementRoute::NativeDolbyVision);
+        native.el_kind = Some(TitleElKind::Fel);
+        let shown = playback_enhancement(&native).expect("DV source");
+        assert_eq!(
+            shown.details[0].text,
+            "FEL: delivered for the display to decode"
+        );
+        // An unscanned title is not called FEL: the state the Gran Turismo
+        // (2023) MEL remux was in when its row read "FEL: delivered".
+        native.el_kind = None;
+        let shown = playback_enhancement(&native).expect("DV source");
+        assert!(shown.details[0]
+            .text
+            .contains("has not yet said whether it is full (FEL) or minimal (MEL)"));
         // A single-layer source names no layer kind, whatever the scan said.
         let mut p8 = facts(EnhancementRoute::NativeDolbyVision);
         p8.source_profile = Some(8);

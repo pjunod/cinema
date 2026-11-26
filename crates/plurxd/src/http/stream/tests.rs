@@ -915,6 +915,72 @@ fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
     );
 }
 
+/// The decision's enhancement reads the complete-title scan from the probe
+/// document: a Profile 7 MEL title (Gran Turismo 2023's remux) says MEL, and
+/// the same file before its scan does not claim FEL.
+#[test]
+fn direct_enhancement_names_the_scanned_layer_kind() {
+    use plurx_core::playback::enhancement::{EnhancementBadge, TitleScanFacts};
+    use plurx_core::scan::dv_title::{
+        DvTitleStats, TitleConstant, TitleElKind, PROBE_FIELD, SCHEMA,
+    };
+    let mut file = hevc_file(Some("dolby_vision"));
+    file.dolby_vision.profile = Some(7);
+    file.dolby_vision.rpu_present = Some(true);
+    file.dolby_vision.el_present = Some(true);
+    let mut decision = planned(playback::PlaybackMethod::DirectPlay);
+    decision.preserve_dolby_vision = true;
+    decision.convert_dolby_vision = false;
+    decision.delivered_dynamic_range = "dolby_vision";
+    decision.delivered_dolby_vision_profile = Some(7);
+    let (_, delivery) = delivery_plan(file.id, &decision, None, false);
+    let probe = |el_kind| {
+        serde_json::json!({ PROBE_FIELD: DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(3079),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+            el_kind,
+        }})
+        .to_string()
+    };
+    let layer_row = |document: Option<String>| {
+        let title = TitleScanFacts::from_probe(document.as_deref());
+        let enhancement = direct_enhancement(&file, &decision, &delivery, Some(&title))
+            .expect("preserved Profile 7 Dolby Vision");
+        let row = enhancement
+            .details
+            .iter()
+            .find(|detail| detail.badge == EnhancementBadge::Fel)
+            .expect("layer row")
+            .text
+            .clone();
+        (
+            row,
+            serde_json::to_value(&enhancement).expect("serialize")["el_kind"].clone(),
+        )
+    };
+    let (mel, kind) = layer_row(Some(probe(TitleConstant::Consistent(TitleElKind::Mel))));
+    assert!(mel.starts_with("MEL: minimal enhancement layer"), "{mel}");
+    assert_eq!(kind, serde_json::json!("mel"));
+    let (fel, kind) = layer_row(Some(probe(TitleConstant::Consistent(TitleElKind::Fel))));
+    assert_eq!(fel, "FEL: delivered for the display to decode");
+    assert_eq!(kind, serde_json::json!("fel"));
+    for unscanned in [None, Some(probe(TitleConstant::Unknown))] {
+        let (row, kind) = layer_row(unscanned);
+        assert!(
+            !row.starts_with("FEL:") && !row.starts_with("MEL:"),
+            "{row}"
+        );
+        assert!(kind.is_null());
+    }
+}
+
 #[test]
 fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
     use plurx_core::playback::enhancement::EnhancementBadge;

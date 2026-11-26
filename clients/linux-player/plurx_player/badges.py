@@ -33,6 +33,8 @@ ENHANCEMENTS = ("FEL", "RPU", "DYN")
 DV_METADATA_LABELS = ("In the file", "Applied by Cinema", "Left for the display")
 DISPLAY_TARGET_LABELS = ("Reported peak", "Mapped for", "Title peak")
 NATIVE_MAPPER = "shared native Dolby renderer"
+# enhancement.rs's MEL row for a processed route, which the report rebuild keeps.
+MEL_TEXT = "MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU"
 _RPU_NAMES = {"PolynomialReshape": "polynomial reshaping", "MmrReshape": "MMR reshaping",
               "RpuColorConversion": "RPU color conversion"}
 _GENERATION = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
@@ -132,13 +134,13 @@ def _processed(enhancement, report):
              else "L1 only; creative trims are not applied")
     fel = report["fel_contributed"]
     sdr = "SDR " if report.get("sdr_processed") is True else ""
-    # A minimal layer (MEL) has no detail to miss: the server's row says MEL.
-    mel_row = next((d for d in enhancement["details"] if d["badge"] == "FEL"), None) \
-        if enhancement.get("el_kind") == "mel" else None
+    # A minimal layer (MEL), as the server's title scan classified it, has no
+    # detail to miss; the row is built from that fact, not from the snapshot.
+    mel = enhancement.get("el_kind") == "mel"
     current = [
         {"badge": "FEL", "active": True, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"}
-        if fel else dict(mel_row, active=False) if mel_row
-        else {"badge": "FEL", "active": False, "text": "FEL: no enhancement-layer detail in this window"},
+        if fel else {"badge": "FEL", "active": False, "text": MEL_TEXT}
+        if mel else {"badge": "FEL", "active": False, "text": "FEL: no enhancement-layer detail in this window"},
         {"badge": "RPU", "active": bool(rpu), "text": f"RPU: {', '.join(rpu)} applied by the server"
             if rpu else "RPU: no reshaping or colour conversion applied in this window"},
         {"badge": "DYN", "active": target is not None,
@@ -146,7 +148,7 @@ def _processed(enhancement, report):
             if target is not None else "DYN: no per-shot Dolby display mapping applied in this window"},
     ]
     had_fel = any(d["badge"] == "FEL" for d in enhancement["details"])
-    details = [d for d in current if d["badge"] != "FEL" or d["active"] or had_fel]
+    details = [d for d in current if d["badge"] != "FEL" or d["active"] or had_fel or mel]
     details += [d for d in enhancement["details"] if d["badge"] not in ENHANCEMENTS]
     return {"active": [d["badge"] for d in current if d["active"]], "details": details}
 
