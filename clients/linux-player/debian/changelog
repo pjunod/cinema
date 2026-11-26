@@ -1,3 +1,17 @@
+plurx-player (0.5.6-1) stonking; urgency=medium
+
+  * Name the EL pill FEL or MEL when the server's title scan has classified
+    a Dolby Vision Profile 7 enhancement layer, as the Info panel does; an
+    unclassified layer keeps EL.
+  * Keep the server's MEL row on processed routes and name the composed
+    layer FEL or MEL in the EL detail (from #1950).
+  * Show the Dolby Vision metadata and display target rows, grouped as
+    Input, Processing and Output.
+  * Coalesce Cinema's renders so a slow one cannot starve the hide timer, and
+    flush the click binding in the pass that changes it.
+
+ -- Claude Agent <noreply@anthropic.com>  Thu, 26 Nov 2026 11:59:20 -0500
+
 plurx-player (0.5.5-1) stonking; urgency=medium
 
   * Hide Cinema's playback controls again during Dolby Vision playback: take
