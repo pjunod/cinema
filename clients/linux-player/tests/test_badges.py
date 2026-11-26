@@ -12,6 +12,8 @@ from plurx_player.playback import Playback
 
 TOKEN = "secret-token-value"
 GENERATION = "0f8fad5b-d9cb-469f-a165-70867728950e"
+# The server-side field contract; the Debian source package does not carry it.
+CONTRACT = pathlib.Path(__file__).resolve().parents[3] / "tests/playback/playback-info-fields.json"
 
 
 class SourceFacts(unittest.TestCase):
@@ -139,9 +141,9 @@ class Provenance(unittest.TestCase):
                 "control": {"generation": GENERATION}, "delivered_dynamic_range": "hdr10",
                 "effective_processing": dict(self.REPORT, **dict({"dv_metadata": self.META, "display_target": self.TARGET}, **report))}
 
+    @unittest.skipUnless(CONTRACT.exists(), "needs the plurx source tree")
     def test_labels_equal_the_contract(self):
-        root = pathlib.Path(__file__).resolve().parents[3]
-        fields = json.loads((root / "tests/playback/playback-info-fields.json").read_text())
+        fields = json.loads(CONTRACT.read_text())
         fields = fields if isinstance(fields, list) else fields["fields"]
         sub_rows = {f["id"]: f.get("sub_rows") for f in fields}
         self.assertEqual(list(badges.DV_METADATA_LABELS), sub_rows["dv_metadata"])
