@@ -164,6 +164,11 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         ("vod_continuous_audio_invalid", Refuse),
         ("vod_family_invalid", Refuse),
         ("vod_family_capacity", Refuse),
+        // A processed (FEL) preparation found no admitted worker here: the
+        // slot is held or adaptive admission refused. The processed upgrade
+        // retries it on an eligible peer; a rolling fallback would serve a
+        // different picture than the trial was asked to qualify.
+        ("processed_worker_capacity", Refuse),
         ("vod_family_catalog_missing", Refuse),
         // The selected track does not exist in the source.
         ("vod_audio_track_missing", Refuse),
