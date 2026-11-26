@@ -400,13 +400,15 @@ update('native-dovi-target-state',nil)
 -- The server's complete-title scan names the layer: a MEL title's EL pill says
 -- the composed layer is minimal and adds no picture detail, never FEL.
 local mel_row='MEL: minimal enhancement layer delivered for the display — it adds no picture detail; the Dolby grade is in the RPU'
-data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}})
-assert(has(data,'MEL') and not has(data,'EL'),'a MEL title names its EL pill MEL')
-data=pills_case(dv,native,nil,{active={'DYN'},el_kind='fel'})
-assert(has(data,'FEL') and not has(data,'EL'),'a FEL title names its EL pill FEL')
-data=pills_case(dv,native,nil,{active={'FEL','DYN'},el_kind='fel'})
-local _,fels=data:gsub('}FEL\n','');eq(fels,1)
-assert(has(pills_case(dv,native,nil,{active={'DYN'}}),'EL'),'an unclassified layer keeps EL')
+test('el_pill_names_the_scanned_layer_kind',function()
+    local data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}})
+    assert(has(data,'MEL') and not has(data,'EL'),'a MEL title names its EL pill MEL')
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='fel'})
+    assert(has(data,'FEL') and not has(data,'EL'),'a FEL title names its EL pill FEL')
+    data=pills_case(dv,native,nil,{active={'FEL','DYN'},el_kind='fel'})
+    local _,fels=data:gsub('}FEL\n','');eq(fels,1)
+    assert(has(pills_case(dv,native,nil,{active={'DYN'}}),'EL'),'an unclassified layer keeps EL')
+end)
 pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}});click(1125,681)
 for i=1,60 do if overlay.data:find('Dolby Vision mapper:',1,true) then break end; press('down') end
 -- The panel wraps long rows; read its visible text as one run.
