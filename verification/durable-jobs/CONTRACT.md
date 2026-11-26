@@ -14,6 +14,20 @@ source mapping**, not an automatic refinement proof. Item hashes in
 that set complete or that the abstractions are correct.
 
 
+## Expired-lease sweep — model and source review on 2026-11-26
+
+`requeue_expired_running_jobs` returns an expired running job to `queued`
+with the takeover's revocation and no successor (`ExpireSweep`). The claim's
+attempt budget, `lease_expired` attempt-error and previous-reader custody
+fragments are now macros shared with the sweep; `CLAIM_SQL` expands to the
+same statement text, and the trait, adapter, `claim_state`,
+`claim_source_holders` and `CLAIM_SQL` pins are refreshed with the new
+sweep and fragment rows. Model `a992eb158a07`: all 18 registered
+configurations returned their expected verdicts in one local `full` run
+(clean governed inputs at `9e25e97b9`; baseline 33,608,489 distinct states
+in 477 s, lifecycle 11,754,965 in 139 s). This is development evidence;
+CI and promotion qualification remain separate.
+
 ## HDR integration with item pins — 2026-11-18
 
 Main `1d350d82` introduces item pins and the reviewed claim/predicate
