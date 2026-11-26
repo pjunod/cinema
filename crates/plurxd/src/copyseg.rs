@@ -248,9 +248,20 @@ impl WriteGrants {
     }
 
     pub(crate) fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
-        self.ledger.authorize_write(
+        self.authorize_keeping(bytes, 0)
+    }
+
+    /// Authorize an optional write that must leave `keep` bytes of this
+    /// allocation's grant for the writer that is not optional.
+    pub(crate) fn authorize_keeping(
+        &self,
+        bytes: usize,
+        keep: u64,
+    ) -> Option<crate::scratch_ledger::ScratchWrite> {
+        self.ledger.authorize_write_keeping(
             self.key,
             i64::try_from(bytes).unwrap_or(i64::MAX),
+            i64::try_from(keep).unwrap_or(i64::MAX),
             self.configured.load(std::sync::atomic::Ordering::Relaxed),
             self.headroom,
         )
@@ -734,7 +745,7 @@ async fn native_copy_picture_clock_names_why_it_could_not_bind() {
     // The writer's decline is the layout's recorded reason, once, and it does
     // not decide the layout: the resumed split still owns its FEL processing
     // until the master chooses, so no hidden successor can start meanwhile.
-    let split = NativeSplitInventory::with_startup_budget(100).require_resume_clock();
+    let split = NativeSplitInventory::with_budget(100, u64::MAX).require_resume_clock();
     split.decline_unselected("resume_clock_records_late", "fixture-session");
     split.decline_unselected("enhancement_layer_not_full", "fixture-session");
     assert_eq!(split.decline_reason(), Some("resume_clock_records_late"));
@@ -749,7 +760,14 @@ async fn native_copy_picture_clock_names_why_it_could_not_bind() {
 
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
-    startup_budget: u64,
+    /// The ordinary copy's own startup grant. Until the ordinary copy has
+    /// landed this many bytes, an undecided split may only write with growth
+    /// that leaves the rest of it unspent.
+    ordinary_startup: u64,
+    /// The session's scratch ceiling. Both copies of the staged window must
+    /// fit under it, or the split could never be served beside the ordinary
+    /// copy it mirrors.
+    session_ceiling: u64,
     init_ids: std::sync::OnceLock<NativeSplitInitIds>,
     chosen: std::sync::OnceLock<bool>,
     /// Why the layout settled on the ordinary mux, set by the decision itself.
@@ -834,9 +852,10 @@ pub(crate) struct NativeSplitEntry {
 }
 
 impl NativeSplitInventory {
-    pub(crate) fn with_startup_budget(startup_budget: u64) -> Self {
+    pub(crate) fn with_budget(ordinary_startup: u64, session_ceiling: u64) -> Self {
         Self {
-            startup_budget,
+            ordinary_startup,
+            session_ceiling,
             ..Self::default()
         }
     }
@@ -1168,6 +1187,10 @@ struct SessionDir {
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
     split_author: Option<NativeSplitAuthor>,
     split_staged_bytes: u64,
+    /// Bytes of the ordinary copy landed so far (init, media, playlists).
+    ordinary_bytes: std::sync::atomic::AtomicU64,
+    /// A split the master declined has had its staged objects removed.
+    split_discarded: bool,
     /// The `#EXTINF`/URI pairs, without the immutable header.
     entries: String,
     /// Media written so far, summed from every published segment's real
@@ -1237,6 +1260,8 @@ impl SessionDir {
             split_inventory: None,
             split_author: None,
             split_staged_bytes: 0,
+            ordinary_bytes: std::sync::atomic::AtomicU64::new(0),
+            split_discarded: false,
             entries: String::new(),
             published_secs: 0.0,
             gate_secs,
@@ -1311,6 +1336,10 @@ impl SessionDir {
             playback_write = held_reservation;
             let digest = digest?;
             tokio::fs::rename(&tmp, self.dir.join(name)).await?;
+            if !name.starts_with("split-") && name != "index.m3u8" {
+                self.ordinary_bytes
+                    .fetch_add(landed_bytes as u64, std::sync::atomic::Ordering::Relaxed);
+            }
             Ok::<_, std::io::Error>(digest.map(|digest| crate::rolling_output::CommittedObject {
                 bytes: bytes.len() as u64,
                 digest,
@@ -1335,6 +1364,17 @@ impl SessionDir {
         written
     }
 
+    /// What the ordinary copy's startup grant still has to carry. An optional
+    /// split write must leave this much of the allocation's grant unused.
+    fn ordinary_reserve(&self) -> u64 {
+        self.split_inventory.as_ref().map_or(0, |inventory| {
+            inventory.ordinary_startup.saturating_sub(
+                self.ordinary_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
+    }
+
     /// Wait until the budget authorizes this write, the session goes away, or
     /// the bounded wait expires.
     async fn authorize_write(
@@ -1345,14 +1385,20 @@ impl SessionDir {
         let Some(grants) = self.grants.as_ref() else {
             return Ok(None);
         };
-        if let Some(authorized) = grants.authorize(bytes) {
-            return Ok(Some(authorized));
-        }
         if self.optional_write {
+            // An undecided split never waits and never spends what the
+            // ordinary copy still needs to reach its startup: it is paid for
+            // by growth on top of that remainder, or it does not write.
+            if let Some(authorized) = grants.authorize_keeping(bytes, self.ordinary_reserve()) {
+                return Ok(Some(authorized));
+            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "native FEL write has no capacity",
             ));
+        }
+        if let Some(authorized) = grants.authorize(bytes) {
+            return Ok(Some(authorized));
         }
         // Only a session that has never published can wait forever for
         // nothing, so only that one gets a deadline. Measured in polls, so
@@ -1423,15 +1469,24 @@ impl SessionDir {
                 let size = bytes.len() as u64;
                 (total.saturating_add(size), largest.max(size))
             });
+        // The ordinary copy's startup is protected at the ledger, where each
+        // optional write must leave its unspent remainder (`ordinary_reserve`).
+        // What is checked here is only whether both copies of the window can
+        // ever fit under the session's ceiling: a split staged beyond it could
+        // never be served beside the ordinary copy it mirrors. `largest` is
+        // the write in flight, charged twice until its rename settles.
+        let ordinary = self
+            .ordinary_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(inventory.ordinary_startup);
         if !active
             && self
                 .split_staged_bytes
                 .saturating_add(payload)
                 .saturating_add(largest)
-                > inventory.startup_budget
+                .saturating_add(ordinary)
+                > inventory.session_ceiling
         {
-            // Never start either member of a pair with the original copy's
-            // startup grant. A selected layout already owns a live reserve.
             let (ids, declined_here) = inventory.settle("startup_budget_exceeded");
             active = ids.is_some();
             if !active {
@@ -1441,8 +1496,9 @@ impl SessionDir {
                         staged_bytes = self.split_staged_bytes,
                         payload_bytes = payload,
                         largest_bytes = largest,
-                        startup_budget = inventory.startup_budget,
-                        "native split layout declined before selection: its startup staging exceeds the split budget"
+                        ordinary_bytes = ordinary,
+                        session_ceiling = inventory.session_ceiling,
+                        "native split layout declined before selection: both copies would exceed the session's scratch ceiling"
                     );
                 }
                 return Ok(false);
@@ -1539,6 +1595,44 @@ impl SessionDir {
         Ok(())
     }
 
+    /// Once the master has settled on the ordinary mux, nothing can ever
+    /// serve the staged split objects (`segment_publication` requires the
+    /// split's active ids), so remove them rather than leave a second copy of
+    /// the window in scratch until retention prunes each segment.
+    async fn discard_declined_split(&mut self) {
+        if self.split_discarded
+            || self
+                .split_inventory
+                .as_ref()
+                .is_none_or(|inventory| inventory.chosen.get() != Some(&false))
+        {
+            return;
+        }
+        self.split_discarded = true;
+        self.split_author = None;
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.starts_with("split-audio") || name.starts_with("split-video") {
+                if let Err(error) = tokio::fs::remove_file(entry.path()).await {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(
+                            target: "plurxd::copyseg",
+                            %error,
+                            object = name,
+                            "a declined split object remains in scratch until retention"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     async fn write_split_segment(&mut self, published: &Published) -> Result<(), PublishError> {
         let Some(author) = self.split_author.as_mut() else {
             return Ok(());
@@ -1624,6 +1718,7 @@ impl SessionDir {
             && published.reason != fmp4::CutReason::EndOfStream)
             .then_some(published.index);
         self.observe_object(&name, committed, video_index);
+        self.discard_declined_split().await;
         self.write_split_segment(published).await?;
         if self.published_secs == 0.0 {
             tracing::info!(
@@ -2476,7 +2571,7 @@ async fn blocking_reserved_write<T: Send + 'static>(
 mod tests {
     #[test]
     fn split_layout_records_why_it_settled_on_the_ordinary_mux() {
-        let uninitialized = super::NativeSplitInventory::with_startup_budget(100);
+        let uninitialized = super::NativeSplitInventory::with_budget(100, u64::MAX);
         assert!(uninitialized.decline_reason().is_none());
         assert!(uninitialized.choose(Some((0, 3))).is_none());
         assert_eq!(
@@ -2484,13 +2579,13 @@ mod tests {
             Some("split_init_unavailable")
         );
 
-        let unstaged = super::NativeSplitInventory::with_startup_budget(100);
+        let unstaged = super::NativeSplitInventory::with_budget(100, u64::MAX);
         unstaged.seed_for_http_test(2);
         // The served window runs past what the split layout has staged.
         assert!(unstaged.choose(Some((0, 3))).is_none());
         assert_eq!(unstaged.decline_reason(), Some("served_range_not_staged"));
 
-        let budget = super::NativeSplitInventory::with_startup_budget(100);
+        let budget = super::NativeSplitInventory::with_budget(100, u64::MAX);
         assert_eq!(budget.settle("startup_budget_exceeded"), (None, true));
         // The first decision is final: later callers neither change the
         // layout nor overwrite the reason.
@@ -2498,7 +2593,7 @@ mod tests {
         assert!(budget.choose(Some((0, 0))).is_none());
         assert_eq!(budget.decline_reason(), Some("startup_budget_exceeded"));
 
-        let selected = super::NativeSplitInventory::with_startup_budget(100);
+        let selected = super::NativeSplitInventory::with_budget(100, u64::MAX);
         let ids = selected.seed_for_http_test(4);
         assert_eq!(selected.choose(Some((0, 3))), Some(ids.clone()));
         assert_eq!(
@@ -2511,12 +2606,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn prepared_native_fel_leaves_the_successor_open_once_the_split_is_lost() {
-        let unprepared = super::NativeSplitInventory::with_startup_budget(100);
+        let unprepared = super::NativeSplitInventory::with_budget(100, u64::MAX);
         assert!(unprepared.choose(None).is_none());
         assert!(!unprepared.owns_fel_processing());
 
         let prepared =
-            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+            super::NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         prepared.decline_prepared_head();
         // Undecided: the splice may still be chosen, so no successor yet.
         assert!(prepared.owns_fel_processing());
@@ -2527,7 +2622,7 @@ mod tests {
 
         // A chosen split keeps ownership.
         let selected =
-            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+            super::NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         let ids = selected.seed_for_http_test(2);
         assert_eq!(selected.choose(Some((0, 1))), Some(ids));
         assert!(selected.owns_fel_processing());
@@ -2535,7 +2630,7 @@ mod tests {
         // A writer that cannot split the copy's initialization settles the
         // layout with that cause before the master asks.
         let unsplittable =
-            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+            super::NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         assert_eq!(unsplittable.settle("split_init_unsplittable"), (None, true));
         assert!(unsplittable.choose(Some((0, 1))).is_none());
         assert_eq!(
@@ -2549,10 +2644,10 @@ mod tests {
     #[test]
     fn prepared_fel_defers_first_snapshot_once_and_falls_back() {
         let now = std::time::Instant::now();
-        let ordinary = super::NativeSplitInventory::with_startup_budget(100);
+        let ordinary = super::NativeSplitInventory::with_budget(100, u64::MAX);
         assert!(!ordinary.defer_first_snapshot_for_prepared_head(now));
 
-        let warm = super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        let warm = super::NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         assert!(warm.defer_first_snapshot_for_prepared_head(now));
         assert!(warm
             .defer_first_snapshot_for_prepared_head(now + std::time::Duration::from_millis(599)));
@@ -2562,7 +2657,7 @@ mod tests {
         assert!(!warm.defer_first_snapshot_for_prepared_head(now));
         assert!(warm.prepared_head_frontier(1).is_none());
 
-        let warm = super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        let warm = super::NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         warm.decline_prepared_head();
         assert!(!warm.defer_first_snapshot_for_prepared_head(now));
     }
@@ -4344,6 +4439,156 @@ mod grant_wait_tests {
             waiting.is_err(),
             "a published session waits out a hold for as long as it lives"
         );
+    }
+}
+
+#[cfg(test)]
+mod split_reserve_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+    use std::sync::Arc;
+
+    // nynuc's 2026-11-26 Resume, scaled down 1000x: a 91 MB ordinary
+    // startup, an 18 MB first segment, then 66 MB segments at 4K rates.
+    const STARTUP: u64 = 91_218;
+    const FIRST: usize = 18_222;
+    const NEXT: usize = 66_208;
+
+    fn writer(
+        dir: PathBuf,
+        permit_bytes: i64,
+        configured: i64,
+        inventory: &Arc<NativeSplitInventory>,
+    ) -> (SessionDir, crate::scratch_ledger::ScratchPermit) {
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let permit = ledger.reserve(permit_bytes, configured).expect("admission");
+        let grants = WriteGrants::new(
+            Arc::clone(&ledger),
+            permit.key(),
+            Arc::new(AtomicI64::new(configured)),
+            0,
+        );
+        let mut session = SessionDir::new(dir, 0, 16, Some(grants));
+        session.split_inventory = Some(Arc::clone(inventory));
+        (session, permit)
+    }
+
+    /// Write one ordinary segment, then its split pair, as `write_segment`
+    /// does. Returns whether the split pair was staged.
+    async fn segment(session: &mut SessionDir, index: usize, bytes: usize) -> bool {
+        let media = vec![0u8; bytes];
+        session
+            .publish_file(&format!("seg{index:05}.m4s"), &media)
+            .await
+            .expect("the ordinary copy is never refused here");
+        let (audio, video) = media.split_at(bytes / 8);
+        session
+            .publish_split_files(&[
+                (format!("split-audio-seg{index:05}.m4s"), audio),
+                (format!("split-video-seg{index:05}.m4s"), video),
+            ])
+            .await
+            .expect("an optional split write never fails the copy")
+    }
+
+    /// The split used to be capped at one ordinary startup for as long as the
+    /// layout was undecided, while the master needs it staged for the whole
+    /// window it serves. With room in the global budget, a 4K Resume stages
+    /// every segment of that window and the master can choose the split.
+    #[tokio::test]
+    async fn an_undecided_split_stages_the_whole_served_window_when_the_budget_allows() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = Arc::new(NativeSplitInventory::with_budget(STARTUP, 2_000_000));
+        let (mut session, _permit) = writer(
+            root.path().to_path_buf(),
+            (STARTUP * 2) as i64,
+            10_000_000,
+            &inventory,
+        );
+        for index in 0..9 {
+            let bytes = if index == 0 { FIRST } else { NEXT };
+            assert!(
+                segment(&mut session, index, bytes).await,
+                "segment {index} staged its split pair"
+            );
+        }
+        assert_eq!(inventory.decline_reason(), None);
+        assert!(inventory.chosen.get().is_none(), "the master still decides");
+    }
+
+    /// When the global budget cannot grow, the split gives way: it declines
+    /// rather than spend what the ordinary copy still needs, and the ordinary
+    /// copy goes on writing within its own startup grant.
+    #[tokio::test]
+    async fn an_undecided_split_never_spends_the_ordinary_startup() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let startup = 40_000;
+        let inventory = Arc::new(NativeSplitInventory::with_budget(startup, 2_000_000));
+        let (mut session, _permit) = writer(
+            root.path().to_path_buf(),
+            startup as i64,
+            startup as i64,
+            &inventory,
+        );
+        assert!(
+            !segment(&mut session, 0, 10_000).await,
+            "no growth pays for the split"
+        );
+        assert_eq!(inventory.decline_reason(), Some("optional_write_blocked"));
+        session
+            .publish_file("seg00001.m4s", &[0u8; 10_000])
+            .await
+            .expect("the ordinary copy still has its startup");
+    }
+
+    /// Under a session ceiling below two startups, both copies of the window
+    /// must fit beneath it, which is the old bound exactly.
+    #[tokio::test]
+    async fn a_capped_session_declines_where_both_copies_exceed_its_ceiling() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (video, staged) in [(40usize, true), (60, false)] {
+            let inventory = Arc::new(NativeSplitInventory::with_budget(100, 250));
+            let (mut session, _permit) =
+                writer(root.path().to_path_buf(), 10_000, 100_000, &inventory);
+            let audio = vec![0u8; 50];
+            let video_bytes = vec![0u8; video];
+            // 50 + video staged, the larger again in flight, plus the 100-byte
+            // ordinary startup, against the 250-byte ceiling.
+            let result = session
+                .publish_split_files(&[
+                    ("split-audio-seg00000.m4s".to_owned(), audio.as_slice()),
+                    (
+                        "split-video-seg00000.m4s".to_owned(),
+                        video_bytes.as_slice(),
+                    ),
+                ])
+                .await
+                .expect("optional");
+            assert_eq!(result, staged, "video {video}");
+            if !staged {
+                assert_eq!(inventory.decline_reason(), Some("startup_budget_exceeded"));
+            }
+        }
+    }
+
+    /// A split the master declined can never be served, so its staged
+    /// objects leave scratch at once, and the ordinary copy's stay.
+    #[tokio::test]
+    async fn a_declined_split_removes_its_staged_objects() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = Arc::new(NativeSplitInventory::with_budget(STARTUP, 2_000_000));
+        let (mut session, _permit) =
+            writer(root.path().to_path_buf(), 1_000_000, 10_000_000, &inventory);
+        assert!(segment(&mut session, 0, FIRST).await);
+        assert!(
+            inventory.choose(None).is_none(),
+            "the master settles on the mux"
+        );
+        session.discard_declined_split().await;
+        assert!(root.path().join("seg00000.m4s").exists());
+        assert!(!root.path().join("split-audio-seg00000.m4s").exists());
+        assert!(!root.path().join("split-video-seg00000.m4s").exists());
+        assert!(session.split_author.is_none());
     }
 }
 

@@ -1091,7 +1091,7 @@ async fn prepared_fel_batch_is_bound_to_first_snapshot_and_attempt() {
             .collect()
     };
     for (staged_attempt, served_last) in [(2, 1), (1, 2)] {
-        let split = NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        let split = NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         assert!(split.stage_prepared_head(staged_attempt, objects()).is_ok());
         assert!(!split.defer_first_snapshot_for_prepared_head(std::time::Instant::now()));
         assert_eq!(
@@ -1103,7 +1103,7 @@ async fn prepared_fel_batch_is_bound_to_first_snapshot_and_attempt() {
         assert!(split.fel_object(0, 1).is_none());
     }
 
-    let split = NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+    let split = NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
     assert!(split.stage_prepared_head(1, objects()).is_ok());
     assert!(split.fel_object(0, 1).is_none(), "staged bytes are private");
     assert!(split

@@ -2427,8 +2427,9 @@ impl TranscodeManager {
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
             native_split: native_split.then(|| {
-                let split = crate::copyseg::NativeSplitInventory::with_startup_budget(
-                    split_startup_budget as u64,
+                let split = crate::copyseg::NativeSplitInventory::with_budget(
+                    u64::try_from(ordinary_sizing.grant_bytes(limits)).unwrap_or(0),
+                    u64::try_from(RollingScratchSizing::session_ceiling(limits)).unwrap_or(0),
                 );
                 #[cfg(target_os = "linux")]
                 let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
