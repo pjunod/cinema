@@ -14,7 +14,7 @@ the binary roll; do not start a pre-expand binary on the expanded catalog.
 M1's note that ordinary startup does not reinstall the old claim trigger is
 not evidence that the old executable accepts this catalog.
 
-Companion to [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md), which
+Companion to [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md), which
 records the physical-proof model this plan retires, and
 [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md), which owns
 the wider queue work. Read §1 for why, §2 for the rule, and §4 for the steps.
@@ -172,7 +172,7 @@ one node from serialising the cluster.
 - **#1561** (census recovery for playback owners) is on a merge train owned
   by another session. It becomes unnecessary after step 1 and is removed in
   step 2.
-- [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md) is retired to
+- [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) is retired to
   `archive/` in step 2.
 
 ## Execution log

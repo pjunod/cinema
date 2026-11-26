@@ -1,9 +1,9 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** done · retired 2026-11-15 by [SOURCE-LEASE-RELEASE-PLAN.md](../server/SOURCE-LEASE-RELEASE-PLAN.md) step 2, which deleted the witness, census and physical-stop machinery and the host helpers this ledger describes · **Updated:** 2026-11-15
+**Status:** done · retired 2026-11-15 by [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) step 2, which deleted the witness, census and physical-stop machinery and the host helpers this ledger describes · **Updated:** 2026-11-15
 
 > **Retired (2026-11-15):** source capacity is released by lease expiry
-> alone — see [SOURCE-LEASE-RELEASE-PLAN.md](../server/SOURCE-LEASE-RELEASE-PLAN.md).
+> alone — see [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md).
 > The code, scripts and binds below were removed in that plan's step 2; this
 > ledger is kept for history only. Links to removed files no longer resolve.
 

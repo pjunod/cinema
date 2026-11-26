@@ -22,7 +22,7 @@ a restart during playback settles itself through the existing v2 path: the
 kernel lock is released when the daemon dies, the kernel is the same, and
 the anchor is untouched.
 
-Companion: [source custody recovery](../archive/SOURCE-CUSTODY-RECOVERY.md) §1.1–1.3,
+Companion: [source custody recovery](SOURCE-CUSTODY-RECOVERY.md) §1.1–1.3,
 [job queue RCA](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md),
 [storage domains deferred apply](STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md).
 
@@ -481,7 +481,7 @@ AGENTS.md.
 
 ## 13. Docs touched
 
-- `docs/archive/SOURCE-CUSTODY-RECOVERY.md` §1.1 (classes, allowlist), §1.2a
+- `docs/server/SOURCE-CUSTODY-RECOVERY.md` §1.1 (classes, allowlist), §1.2a
   (declared raw and the lifetime lock), §1.3 (census as fallback).
 - `docs/OPERATIONS.md`: the Developer card and when a census is needed.
 - `docs/API.md`: `GET /api/v1/developer/source-recovery`.

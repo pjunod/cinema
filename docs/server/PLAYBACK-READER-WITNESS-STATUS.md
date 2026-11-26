@@ -31,7 +31,7 @@ through the fast lane on 2026-11-13. This does not qualify the whole project.
 3. **Namespace recovery has a narrower implemented contract.** Main's #1566
    records namespace/init evidence and recovers only through its old-init,
    new-init, different-namespace and free-anchor proof. This does not claim
-   general native recovery; [the recovery reference](../archive/SOURCE-CUSTODY-RECOVERY.md)
+   general native recovery; [the recovery reference](SOURCE-CUSTODY-RECOVERY.md)
    defines its deployment ordering assumptions.
 4. **B9 remains scoped.** Standalone SQLite lacks the authoritative witness
    backend; its existing recovery behavior is unchanged. A read-only card
