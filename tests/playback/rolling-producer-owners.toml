@@ -3305,7 +3305,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/transcode/tests/chunk_02.rs" = 14
 "crates/plurxd/src/transcode/tests/chunk_04.rs" = 6
 "crates/plurxd/src/transcode/tests/chunk_05.rs" = 15
-"crates/plurxd/src/transcode/tests/chunk_06.rs" = 26
+# a8a08ecc8: the watchdog test for a selected copy with an absent owner
+# builds its raw session itself to set selected_core_copy (+1 test handle).
+"crates/plurxd/src/transcode/tests/chunk_06.rs" = 27
 "crates/plurxd/src/transcode/tests/chunk_07.rs" = 7
 "crates/plurxd/src/transcode/tests/chunk_08.rs" = 2
 "crates/plurxd/src/transcode/tests/chunk_09.rs" = 6
