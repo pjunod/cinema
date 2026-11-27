@@ -5326,6 +5326,22 @@ async fn controlled_continuous_primary_admits_under_a_pool_the_companion_would_f
     controlled_continuous_companion_case(false).await;
 }
 
+/// The exact bytes a finite client slot reserved: the largest size its own
+/// validation accepts.
+#[cfg(target_os = "linux")]
+fn charged_slot_bytes(slot: &super::client_state::ClientSlot) -> usize {
+    let (mut low, mut high) = (0_usize, 1_usize << 34);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if slot.validate_actual(middle).is_ok() {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
+}
+
 async fn controlled_continuous_companion_case(pool_includes_companion: bool) {
     use plurx_core::playback::continuous_quality::{
         QualityAttachment, QualityOperation, QualityTransitionRequest,
@@ -5461,6 +5477,34 @@ async fn controlled_continuous_companion_case(pool_includes_companion: bool) {
         parked && !serve.shared.renditions.lock().await.contains_key(&companion_key)
     };
     assert!(companion_is_parked().await);
+    // The first finite charge of the parent's record is the real one: it
+    // covers its children and the parked intent.
+    #[cfg(target_os = "linux")]
+    let create_charge = {
+        let sessions = serve.shared.sessions.lock().await;
+        let session = &sessions[&parent];
+        let charged = charged_slot_bytes(
+            session
+                .finite_session_slot
+                .as_ref()
+                .expect("a finite parent charges its record"),
+        );
+        let parked = session
+            .parked_children
+            .iter()
+            .map(|child| child.requested_heap_bytes().expect("measurable parked child"))
+            .sum::<usize>()
+            + session.parked_children.capacity()
+                * std::mem::size_of::<super::session::ParkedMediaReader>();
+        let children = session.children.capacity()
+            * std::mem::size_of::<super::session::ParentMediaReader>();
+        assert!(session.children.capacity() > 0, "children are in the record");
+        assert!(
+            charged >= std::mem::size_of::<super::session::Session>() + children + parked,
+            "create charge {charged} covers children {children} and parked intent {parked}"
+        );
+        charged
+    };
     if !pool_includes_companion {
         assert!(serve.end(&parent, Terminal::Deleted).await);
         return;
@@ -5567,6 +5611,19 @@ async fn controlled_continuous_companion_case(pool_includes_companion: bool) {
         assert!(child.companion_bootstrap);
         assert!(child._reservation.is_some());
         assert!(!child.rendition.readers.lock().await[&child.reader_id].authority_only);
+        #[cfg(target_os = "linux")]
+        {
+            let installed = charged_slot_bytes(
+                session
+                    .finite_session_slot
+                    .as_ref()
+                    .expect("the installed record stays charged"),
+            );
+            assert!(
+                installed < create_charge,
+                "installing the companion drops its parked intent from the charge"
+            );
+        }
         Arc::clone(&child.rendition)
     };
     wait_until(

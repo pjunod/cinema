@@ -2627,11 +2627,15 @@ impl VodServe {
                 "the exact artifact changed before attachment",
             ));
         }
+        // Only the Linux finite charge below mutates the finished record.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut replacement = Session {
             adopted_reader: fences
                 .expected_attempt
                 .map(|(_, reader)| Arc::clone(reader)),
-            children: Vec::new(),
+            // In the record before it is charged, so the first finite charge
+            // covers this attachment's own children.
+            children: std::mem::take(&mut private_media),
             // Parked before the session record is charged, so its finite
             // slot covers the parked intent. It holds no reader or credit.
             parked_children: parked_companion.into_iter().collect(),
@@ -2826,8 +2830,8 @@ impl VodServe {
                 admission_priority
             }
         };
-        let mut child_readers = Vec::with_capacity(private_media.len());
-        for child in &private_media {
+        let mut child_readers = Vec::with_capacity(replacement.children.len());
+        for child in &replacement.children {
             #[cfg(target_os = "linux")]
             let finite = child.rendition.finite_client_lease.is_some();
             #[cfg(not(target_os = "linux"))]
@@ -2898,7 +2902,7 @@ impl VodServe {
             obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
         rendition.revoke_preparation();
-        for (child, prepared) in private_media.iter().zip(child_readers) {
+        for (child, prepared) in replacement.children.iter().zip(child_readers) {
             let entry = media_entry_containing_ms(
                 &child.rendition.plan,
                 (req.start_seconds.max(0.0) * 1000.0) as i64,
@@ -2958,7 +2962,6 @@ impl VodServe {
                 *child.rendition.dormant_since.lock().expect("dormant lock") = None;
             }
         }
-        replacement.children = std::mem::take(&mut private_media);
         let mut authority = prepared_authority.1;
         authority.authority_only = replacement.retained_output.is_some()
             || replacement.children.iter().any(|child| child.controlled);
