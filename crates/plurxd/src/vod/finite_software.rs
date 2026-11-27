@@ -573,6 +573,22 @@ impl FiniteSoftwareProducer {
         }
         Ok(Performed::Done)
     }
+    /// What this producer's own stage says when it is not running, for an
+    /// expired verdict. Only its own state: admitted but never started is
+    /// told apart from starting, finished, retiring and failed, and nothing
+    /// is inferred beyond the stage it recorded.
+    pub(crate) fn idle_stage(&self) -> &'static str {
+        match self.stage.load(Acquire) {
+            PREPARED => "its admitted producer had not started before the deadline",
+            PREPARING => "its admitted producer was still starting at the deadline",
+            RUNNING => "its producer is running",
+            RETIRING => "its producer is retiring",
+            RETAINED => "its producer finished without publishing it",
+            FAILED => "its producer failed",
+            _ => "its producer state is unknown",
+        }
+    }
+
     /// Executor/diagnostic belief only; settlement uses core native receipts.
     pub(crate) fn belief(&self) -> Producer {
         let produced_through = self

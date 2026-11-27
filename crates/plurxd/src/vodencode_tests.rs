@@ -5226,3 +5226,74 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
     assert!(serve.end(&parent, Terminal::Deleted).await);
 }
 
+/// A finite rendition holds its own admitted claim from its build, so a
+/// permit wait on the shared Encoding belongs to another rendition of the
+/// recipe. Its expired verdict reads only its own producer state and names
+/// what that state knows: admitted, not started before the deadline.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_expired_finite_verdict_reads_its_own_producer_not_a_sibling_permit_wait() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("finite verdict");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("one recipe exactly fills the pool");
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
+    let rendition = serve
+        .shared
+        .build_rendition(
+            "finite-verdict",
+            None,
+            Recipe {
+                audio_excluded: false,
+                source_telemetry: false,
+                retained_logical: None,
+                measured_candidate: None,
+                file,
+                audio_index: None,
+                aac: true,
+                audio_delivery: None,
+                video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
+                source_object_version: Some(encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                copy_index_init_contract: None,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            encoding.grid.plan(96_000, 0),
+            &settings(),
+        )
+        .await
+        .expect("a finite rendition admitted at build");
+    assert!(rendition.dir.is_finite());
+    // The finite claim fills the pool, so a sibling's permit request on the
+    // same recipe is refused and left waiting.
+    assert!(encoding.try_permit().await.is_none());
+    assert!(encoding.is_waiting() && encoding.last_refusal().is_some());
+    let belief = rendition.producer_belief().await;
+    assert!(matches!(belief, Producer::Absent { .. }), "{belief:?}");
+    match rendition
+        .finite_materialize_verdict_bounded(1, belief)
+        .expect("bounded verdict")
+    {
+        MaterializeVerdict::Producer(cause) => assert!(
+            cause.contains("its admitted producer had not started before the deadline"),
+            "{cause}"
+        ),
+        other => panic!("a sibling's permit wait is not this rendition's capacity: {other:?}"),
+    }
+    encoding.cancel_wait();
+    let key = rendition.key.clone();
+    drop(rendition);
+    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+    wait_until(
+        "the finite rendition returns its claim",
+        Duration::from_secs(30),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
+}
+

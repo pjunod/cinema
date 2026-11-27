@@ -2997,8 +2997,8 @@ pattern = "purge_if_dormant"
 # run 9504: a finite rendition is retired by the dormant purge, not by the legacy slot; the test retires it before checking capacity.
 "crates/plurxd/src/vod/tests/source_lifetime.rs" = 1
 # run 9504: restarts, prepared root and AAC neighbors retire their finite renditions through the dormant purge.
-# run 9504 follow-up: shared_audio's leak check retires through the dormant purge.
-"crates/plurxd/src/vodencode_tests.rs" = 4
+# run 9504 follow-up: shared_audio's leak check and the finite verdict test retire through the dormant purge.
+"crates/plurxd/src/vodencode_tests.rs" = 5
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or

@@ -407,20 +407,10 @@ impl Rendition {
             " exceeded the {:.1}s producer deadline",
             self.materialize_budget.as_secs_f64()
         );
-        let producer_present =
-            matches!(belief, Producer::Running { .. } | Producer::Stopped { .. });
-        if !producer_present {
-            if let Some(refusal) = self
-                .recipe
-                .encoding
-                .as_ref()
-                .filter(|encoding| encoding.is_waiting())
-                .and_then(|encoding| encoding.last_refusal())
-            {
-                append!(" waiting for an encoder permit; no producer ran for it ({refusal})");
-                return Ok(MaterializeVerdict::Capacity(text.0));
-            }
-        }
+        // A finite rendition holds its own admitted claim from its build and
+        // never waits on the shared Encoding's permit: a wait or refusal
+        // recorded there belongs to another rendition of the recipe. Its
+        // verdict reads only its own producer and publication state.
         let epoch = self.gen_epoch.load(Relaxed);
         let received = *self
             .fragment_received
@@ -447,7 +437,10 @@ impl Rendition {
                 );
             }
             Producer::Absent { .. } => {
-                append!(": no producer is running for it");
+                match self.dir.finite_producer() {
+                    Some(producer) => append!(": {}", producer.idle_stage()),
+                    None => append!(": no producer is running for it"),
+                }
                 return Ok(MaterializeVerdict::Producer(text.0));
             }
         }
