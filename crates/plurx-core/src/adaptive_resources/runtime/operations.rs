@@ -39,6 +39,7 @@ mod finite_settlement;
 mod finite_terminal;
 #[cfg(unix)]
 pub use finite_terminal::FiniteCloseWorkspace;
+pub use finite_terminal::{FiniteSuccessorDemand, FiniteSuccessorGrant};
 #[cfg(unix)]
 mod finite_vod;
 mod inventory;
@@ -523,6 +524,7 @@ impl NodeResourceRuntime {
             None,
             false,
             None,
+            None,
             |_| (),
         )
         .map(|(owner, ())| owner)
@@ -589,6 +591,7 @@ impl NodeResourceRuntime {
             None,
             false,
             None,
+            None,
             initialize,
         )
     }
@@ -609,6 +612,7 @@ impl NodeResourceRuntime {
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
         contained_trial: bool,
         contained: Option<crate::adaptive_resources::ContainedProducerBound>,
+        rebound: Option<finite_terminal::FiniteSuccessorGrant>,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         self.prepare_plan_families(
@@ -632,6 +636,7 @@ impl NodeResourceRuntime {
             collector,
             contained_trial,
             contained,
+            rebound,
             initialize,
         )
     }
@@ -652,6 +657,7 @@ impl NodeResourceRuntime {
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
         contained_trial: bool,
         contained: Option<crate::adaptive_resources::ContainedProducerBound>,
+        rebound: Option<finite_terminal::FiniteSuccessorGrant>,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         if families.is_empty()
@@ -737,19 +743,73 @@ impl NodeResourceRuntime {
                             PreReservationRefusal::Admission(AdmissionRefusal::InvalidBundle),
                         ));
                     }
-                    let owned = self
-                        .ledger
-                        .reserve_families_claiming_contained(
-                            families,
-                            claims,
-                            contained_trial,
-                            contained,
-                        )
-                        .map_err(|error| {
-                            OperationError::BeforeReservation(PreReservationRefusal::Admission(
-                                error,
-                            ))
-                        })?;
+                    let owned = match rebound {
+                        // A successor generation's charge was already moved
+                        // to this exact reservation at its predecessor's
+                        // locked refund. It must be this one new video role
+                        // of the same family with the same resources.
+                        Some(grant) => {
+                            let invalid = || {
+                                OperationError::BeforeReservation(
+                                    PreReservationRefusal::Admission(
+                                        AdmissionRefusal::InvalidBundle,
+                                    ),
+                                )
+                            };
+                            let [family] = families else {
+                                return Err(invalid());
+                            };
+                            let [role] = family.roles else {
+                                return Err(invalid());
+                            };
+                            let binding = grant.reservation.custody_binding();
+                            let matches = {
+                                let ledger = self
+                                    .ledger
+                                    .inner
+                                    .lock()
+                                    .map_err(|_| OperationError::State)?;
+                                ledger.entries.get(&binding.reservation).is_some_and(|entry| {
+                                    entry.binding == binding
+                                        && entry.durable.is_none()
+                                        && entry.state == crate::adaptive_resources::ReservationState::Reserved
+                                        && entry.family_role
+                                            == Some((family.identity, FamilyRole::Video))
+                                        && role.demand.resources
+                                            == crate::process::observation::Metric::Known(
+                                                entry.resources,
+                                            )
+                                        && claims.is_some_and(|claims| {
+                                            claims == [entry.memory_claim].as_slice()
+                                        })
+                                })
+                            };
+                            if missing != 1
+                                || role.role != FamilyRole::Video
+                                || role.retained.is_some()
+                                || role.demand.trial
+                                || contained_trial
+                                || grant.family != family.identity
+                                || !matches
+                            {
+                                return Err(invalid());
+                            }
+                            vec![(grant.reservation, grant.cleanup)]
+                        }
+                        None => self
+                            .ledger
+                            .reserve_families_claiming_contained(
+                                families,
+                                claims,
+                                contained_trial,
+                                contained,
+                            )
+                            .map_err(|error| {
+                                OperationError::BeforeReservation(
+                                    PreReservationRefusal::Admission(error),
+                                )
+                            })?,
+                    };
                     let id = Uuid::new_v4();
                     let typed_obligation_ids: Vec<Uuid> = if typed {
                         (0..missing).map(|_| Uuid::new_v4()).collect()

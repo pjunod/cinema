@@ -452,6 +452,7 @@ fn original_request_with_producer(
         runtime,
         SoftwareVodRequest {
             native_plan,
+            rebound: None,
             rendition_id: "original-finite".into(),
             generation_epoch,
             recipe_source_binding: "actual-original-source".into(),

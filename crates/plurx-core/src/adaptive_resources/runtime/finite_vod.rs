@@ -163,6 +163,10 @@ pub struct SoftwareVodRequest {
     /// native entry, on local clock evidence only; `None` when the platform
     /// has no continuous clock or the work has no create scope.
     pub continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
+    /// A successor generation's reservation, already holding the charge its
+    /// predecessor's close rebound to it. Preparation adopts it as this
+    /// producer's own role instead of reserving another.
+    pub rebound: Option<FiniteSuccessorGrant>,
 }
 
 impl SoftwareVodRequest {
@@ -714,6 +718,7 @@ pub struct FiniteOutput {
 }
 
 pub use super::operations::FiniteCloseWorkspace;
+pub use super::operations::{FiniteSuccessorDemand, FiniteSuccessorGrant};
 
 /// Stable process-local operation/role identity; R-to-S can replace its reservation.
 /// Identity alone grants no native completion or admission authority.
@@ -906,6 +911,32 @@ impl FiniteCloseTicket {
                 .qualify_finalized_finite_stop(profile, Instant::now());
         }
         Ok(())
+    }
+
+    /// Retire this generation and hand its charge to `successor` at the
+    /// locked refund. The outer error is the close's own (the same ticket
+    /// survives it); the inner refusal means the close refunded whole and the
+    /// successor was not admitted.
+    pub async fn finish_retirement_into_successor(
+        &mut self,
+        successor: FiniteSuccessorDemand,
+        deadline: Instant,
+    ) -> Result<
+        Result<FiniteSuccessorGrant, crate::adaptive_resources::AdmissionRefusal>,
+        FiniteVodError,
+    > {
+        self.wait_application_release(deadline).await?;
+        let outcome = self
+            .runtime
+            .finish_finite_close_into_successor(&mut self.preparation, 0, successor, deadline)
+            .await?;
+        self.retirement_succeeded = true;
+        #[cfg(target_os = "linux")]
+        if let Some(profile) = self.stopped_profile.take() {
+            self.runtime
+                .qualify_finalized_finite_stop(profile, Instant::now());
+        }
+        Ok(outcome)
     }
 
     /// The independently owned collector supplies this fixed close workspace.
@@ -1941,7 +1972,7 @@ impl NodeResourceRuntime {
 
     fn prepare_software_vod_with_naming<T>(
         self: &Arc<Self>,
-        request: SoftwareVodRequest,
+        mut request: SoftwareVodRequest,
         deadline: Instant,
         static_artifact: bool,
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
@@ -2390,7 +2421,13 @@ impl NodeResourceRuntime {
             super::finite_lifetime::FiniteAppState::with_application_limit(application_owner_limit);
         let app_guard = app_state.new_guard().ok_or_else(invalid)?;
         let application = application(&app_state)?;
-        let family = self.new_family()?;
+        // A successor generation prepares in the family its charge was
+        // rebound to at the predecessor's locked refund.
+        let rebound = request.rebound.take();
+        let family = match rebound.as_ref() {
+            Some(grant) => grant.family,
+            None => self.new_family()?,
+        };
         let control = Arc::new(FiniteControl::new());
         #[cfg(target_os = "linux")]
         if let Ok(mut timing) = control.timing.lock() {
@@ -2427,6 +2464,7 @@ impl NodeResourceRuntime {
                 collector,
                 contained_trial,
                 contained,
+                rebound,
                 |preparation| {
                     let output = FiniteOutput {
                         runtime: Arc::clone(self),

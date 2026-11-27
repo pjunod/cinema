@@ -358,6 +358,7 @@ pub(super) fn compile(
         #[cfg(target_os = "linux")]
         native_plan,
         continuous_entry_deadline: None,
+        rebound: None,
         rendition_id: key.to_owned(),
         generation_epoch: SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: key.to_owned(),

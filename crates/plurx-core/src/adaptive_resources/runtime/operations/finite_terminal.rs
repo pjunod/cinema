@@ -16,6 +16,30 @@ impl FiniteCloseWorkspace {
     }
 }
 
+/// The demand of a successor generation that takes over a closing finite
+/// role's charge at its locked refund, with the successor's own family.
+pub struct FiniteSuccessorDemand {
+    pub(in crate::adaptive_resources) family: crate::adaptive_resources::FamilyIdentity,
+    pub(in crate::adaptive_resources) demand: crate::adaptive_resources::WorkloadDemand,
+    pub(in crate::adaptive_resources) contained:
+        Option<crate::adaptive_resources::ContainedProducerBound>,
+}
+
+/// The successor's ordinary reservation, made in the same ledger critical
+/// section that released the predecessor. It is not yet journaled: dropping
+/// it before its own preparation is a clean refund.
+pub struct FiniteSuccessorGrant {
+    pub(in crate::adaptive_resources) family: crate::adaptive_resources::FamilyIdentity,
+    pub(in crate::adaptive_resources) reservation: crate::adaptive_resources::ResourceReservation,
+    pub(in crate::adaptive_resources) cleanup: crate::adaptive_resources::CleanupAuthority,
+}
+
+/// One close's successor request and its outcome.
+pub(in crate::adaptive_resources::runtime) struct FiniteSuccessorSlot {
+    demand: Option<FiniteSuccessorDemand>,
+    outcome: Option<Result<FiniteSuccessorGrant, crate::adaptive_resources::AdmissionRefusal>>,
+}
+
 impl NodeResourceRuntime {
     pub(in crate::adaptive_resources::runtime) fn finite_app_state(
         &self,
@@ -64,6 +88,35 @@ impl NodeResourceRuntime {
         .await
     }
 
+    /// The ordinary finite close whose locked refund hands its charge to a
+    /// successor generation. A refused successor leaves an ordinary whole
+    /// refund and returns the typed refusal.
+    pub(in crate::adaptive_resources::runtime) async fn finish_finite_close_into_successor(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+        index: usize,
+        successor: FiniteSuccessorDemand,
+        deadline: Instant,
+    ) -> Result<
+        Result<FiniteSuccessorGrant, crate::adaptive_resources::AdmissionRefusal>,
+        OperationError,
+    > {
+        let mut slot = FiniteSuccessorSlot {
+            demand: Some(successor),
+            outcome: None,
+        };
+        self.finish_application_close_with(
+            selection,
+            index,
+            FinalApplicationRole::Finite,
+            None,
+            Some(&mut slot),
+            deadline,
+        )
+        .await?;
+        slot.outcome.ok_or(OperationError::State)
+    }
+
     #[cfg(target_os = "linux")]
     pub(in crate::adaptive_resources::runtime) async fn finish_planning_metadata_close(
         &self,
@@ -86,9 +139,27 @@ impl NodeResourceRuntime {
         selection: &mut Option<OwnedPreparation>,
         index: usize,
         kind: FinalApplicationRole,
-        mut workspace: Option<&mut FiniteCloseWorkspace>,
+        workspace: Option<&mut FiniteCloseWorkspace>,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        self.finish_application_close_with(selection, index, kind, workspace, None, deadline)
+            .await
+    }
+
+    async fn finish_application_close_with(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+        index: usize,
+        kind: FinalApplicationRole,
+        mut workspace: Option<&mut FiniteCloseWorkspace>,
+        successor: Option<&mut FiniteSuccessorSlot>,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        if successor.as_ref().is_some_and(|slot| {
+            slot.demand.is_none() || !matches!(kind, FinalApplicationRole::Finite)
+        }) {
+            return Err(OperationError::State);
+        }
         if workspace
             .as_ref()
             .is_some_and(|fixed| fixed.pending.is_some())
@@ -371,9 +442,44 @@ impl NodeResourceRuntime {
                     .get_mut(&binding.reservation)
                     .ok_or(OperationError::State)?
                     .durable = None;
-                ledger
-                    .release(binding.reservation)
-                    .expect("prevalidated locked finite refund");
+                match successor {
+                    // The predecessor's journal settlement is committed above;
+                    // its charge moves to the successor in this same section.
+                    Some(slot) => {
+                        let FiniteSuccessorDemand {
+                            family,
+                            demand,
+                            contained,
+                        } = slot.demand.take().expect("validated successor demand");
+                        let rebound = crate::adaptive_resources::successor::rebind_locked(
+                            &self.ledger,
+                            &mut ledger,
+                            binding,
+                            (
+                                Some((family, crate::adaptive_resources::FamilyRole::Video)),
+                                demand,
+                            ),
+                            crate::adaptive_resources::MemoryClaim::UnknownProducerPeak,
+                            contained,
+                        );
+                        slot.outcome = Some(match rebound {
+                            Ok((reservation, cleanup)) => Ok(FiniteSuccessorGrant {
+                                family,
+                                reservation,
+                                cleanup,
+                            }),
+                            Err(refusal) => {
+                                ledger
+                                    .release(binding.reservation)
+                                    .expect("prevalidated locked finite refund");
+                                Err(refusal)
+                            }
+                        });
+                    }
+                    None => ledger
+                        .release(binding.reservation)
+                        .expect("prevalidated locked finite refund"),
+                }
                 if let Some(fixed) = workspace {
                     let close = fixed
                         .pending

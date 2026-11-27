@@ -13,21 +13,20 @@
 //! The successor reservation is ordinary and not yet durable. Its journal
 //! obligation is written only after this commit, so a restart before that
 //! write recovers neither charge: a clean refund, never two entries.
-// The finite successor generation that calls this lands in the next commit.
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "wired by the finite successor generation")
-)]
 use super::{
-    AdmissionRefusal, CleanupAuthority, Entry, FamilyDemand, FamilyIdentity, FamilyRole,
-    MemoryClaim, Metric, PhysicalCloseReceipt, ReservationBinding, ReservationState,
-    ResourceLedger, ResourceReservation, ResourceVector, State, TaskClaim, WorkloadDemand,
+    AdmissionRefusal, CleanupAuthority, Entry, FamilyIdentity, FamilyRole, MemoryClaim, Metric,
+    ReservationBinding, ReservationState, ResourceLedger, ResourceReservation, ResourceVector,
+    State, TaskClaim, WorkloadDemand,
 };
+#[cfg(test)]
+use super::{FamilyDemand, PhysicalCloseReceipt};
 
 impl ResourceLedger {
     /// Replace the closed `predecessor`'s charge with exactly one successor
     /// role reservation. `families` names one family with one role, which
-    /// must not adopt a retained role.
+    /// must not adopt a retained role. The runtime's finite close uses
+    /// [`rebind_locked`] inside its own locked refund.
+    #[cfg(test)]
     pub(crate) fn rebind_closed_successor(
         &self,
         predecessor: &CleanupAuthority,
@@ -57,6 +56,7 @@ impl ResourceLedger {
             predecessor.binding,
             (Some((family.identity, role.role)), role.demand),
             claim,
+            None,
         )
     }
 }
@@ -70,6 +70,7 @@ pub(super) fn rebind_locked(
     predecessor: ReservationBinding,
     (family_role, demand): (Option<(FamilyIdentity, FamilyRole)>, WorkloadDemand),
     claim: MemoryClaim,
+    contained: Option<super::ContainedProducerBound>,
 ) -> Result<(ResourceReservation, CleanupAuthority), AdmissionRefusal> {
     if state.invalid || state.draining {
         return Err(AdmissionRefusal::Unavailable);
@@ -104,8 +105,9 @@ pub(super) fn rebind_locked(
         return Err(AdmissionRefusal::InvalidTransition);
     }
     // A contained predecessor's task ceilings are re-derived by admission.
-    let no_larger =
-        old.contained.is_none() && super::retained::componentwise_le(resources, old.resources);
+    let no_larger = old.contained.is_none()
+        && contained.is_none()
+        && super::retained::componentwise_le(resources, old.resources);
     let old_resources = old.resources;
     let old_task_claim = old.task_claim;
     let Some(without_predecessor) = state.used.checked_sub(old_resources) else {
@@ -129,7 +131,7 @@ pub(super) fn rebind_locked(
                 &[(family_role, demand, None)],
                 Some(&[claim]),
                 false,
-                None,
+                contained,
             )
             .and_then(|mut owned| owned.pop().ok_or(AdmissionRefusal::InvalidBundle))
     };
