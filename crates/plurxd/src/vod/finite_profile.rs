@@ -141,16 +141,17 @@ pub(super) fn compile(
         return Err("finite software source has invalid scanner facts".into());
     }
 
-    let cpu_ns_per_second = match capacity.cpu_ns_per_second {
+    let unspent_cpu_ns_per_second = match capacity.cpu_ns_per_second {
         Metric::Known(value) if value > 0 => value,
         Metric::Known(_) => return Err("finite software CPU capacity is zero".into()),
         Metric::Unknown(_) => return Err("finite software CPU capacity is unknown".into()),
     };
     let software_threads = encoder_threads(
-        cpu_ns_per_second,
+        unspent_cpu_ns_per_second,
         encoding.options.software_threads,
         software_pool_threads,
     )?;
+    let cpu_ns_per_second = cpu_service_claim(unspent_cpu_ns_per_second, software_threads)?;
 
     let mut options = encoding.options.clone();
     options.start_seconds = 0.0;
@@ -458,6 +459,21 @@ fn align_up(value: u64, unit: u64) -> Result<u64, String> {
         .ok_or_else(|| "finite software aligned output bound overflows".into())
 }
 
+/// The CPU service a finite producer is charged: one core per encoder thread
+/// it may create, never more than the unspent hard budget it was planned
+/// against. Charging the encoder's own threads rather than the whole unspent
+/// budget lets other finite builds use what this one cannot. Neither input
+/// may be zero, so the claim is never zero.
+#[cfg(target_os = "linux")]
+fn cpu_service_claim(unspent_cpu_ns_per_second: u64, threads: u32) -> Result<u64, String> {
+    if unspent_cpu_ns_per_second == 0 || threads == 0 {
+        return Err("finite software CPU claim requires positive CPU and threads".into());
+    }
+    Ok(u64::from(threads)
+        .saturating_mul(1_000_000_000)
+        .min(unspent_cpu_ns_per_second))
+}
+
 /// Encoder creation limit, separate from expected CPU service and total kernel
 /// tasks. Zero pool policy means one serialized producer, not zero threads;
 /// the core's unknown producer claims supply that concurrency restriction.
@@ -553,6 +569,36 @@ mod tests {
         assert_eq!(encoder_threads(16_000_000_000, Some(8), 3).unwrap(), 3);
         assert_eq!(encoder_threads(16_000_000_000, Some(2), 8).unwrap(), 2);
         assert_eq!(encoder_threads(1_500_000_000, None, 8).unwrap(), 2);
+    }
+
+    /// Each build is charged its own encoder threads against what the ones
+    /// before it left unspent: two fit side by side, and the third finds no
+    /// unspent budget (which build_inner refuses as vod_family_capacity).
+    #[test]
+    fn finite_builds_are_charged_their_own_threads_so_two_fit_and_a_third_is_refused() {
+        let capacity = 4_000_000_000_u64;
+        let mut used = 0_u64;
+        for _ in 0..2 {
+            let unspent = capacity - used;
+            let threads = encoder_threads(unspent, None, 2).unwrap();
+            assert_eq!(threads, 2);
+            let claim = cpu_service_claim(unspent, threads).unwrap();
+            assert_eq!(
+                claim, 2_000_000_000,
+                "charged its own threads, not all unspent CPU"
+            );
+            used += claim;
+        }
+        assert_eq!(
+            capacity - used,
+            0,
+            "a third build sees no unspent hard CPU budget"
+        );
+        assert!(cpu_service_claim(capacity - used, 2).is_err());
+        assert!(encoder_threads(capacity - used, None, 2).is_err());
+        // A claim never exceeds what was unspent, and is never zero.
+        assert_eq!(cpu_service_claim(1_500_000_000, 2).unwrap(), 1_500_000_000);
+        assert!(cpu_service_claim(4_000_000_000, 0).is_err());
     }
 
     #[test]
