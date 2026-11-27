@@ -52,7 +52,7 @@ not confirm playback preparation", while an H.264 title played. The copy owner
 ## 3. Open
 
 - Index proofs written before this fix keep their refusals (`current_on_node`
-  treats a refusal as current): on m6, 35 `extradata lacks …` and 83
+  treats a refusal as current): on the Source node, 35 `extradata lacks …` and 83
   `parameter sets change` refusals. Re-examining refusals written by the old
   parser needs a proof field, not a `REVISION` bump, which would re-index
   every HEVC file.
