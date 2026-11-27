@@ -2709,18 +2709,45 @@ impl VodServe {
                 ));
             }
         }
-        // The selected finite recipe has no private child rendition. Refuse
-        // any future expansion before changing the predecessor graph; each
-        // private child still uses the legacy map until it has its own finite
-        // accounting contract.
-        #[cfg(target_os = "linux")]
-        if private_media
-            .iter()
-            .any(|child| child.rendition.finite_client_lease.is_some())
-        {
-            return Err("finite private child has no client-state attachment contract".into());
+        // A private child on this session's own finite rendition (a
+        // continuous family's video role) gets its reader from that
+        // rendition's client lease, charged and released like the primary's.
+        // Prepare each before changing the predecessor graph. A finite child
+        // on any other rendition still has no client-state attachment
+        // contract, and is refused here.
+        let child_priority = |bootstrap: bool| {
+            if bootstrap {
+                crate::admission::Priority::Speculative
+            } else {
+                admission_priority
+            }
+        };
+        let mut child_readers = Vec::with_capacity(private_media.len());
+        for child in &private_media {
+            #[cfg(target_os = "linux")]
+            let finite = child.rendition.finite_client_lease.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let finite = false;
+            if !finite {
+                child_readers.push(None);
+                continue;
+            }
+            if !Arc::ptr_eq(&child.rendition, &rendition) {
+                return Err("finite private child has no client-state attachment contract".into());
+            }
+            let entry = media_entry_containing_ms(
+                &child.rendition.plan,
+                (req.start_seconds.max(0.0) * 1000.0) as i64,
+            );
+            child_readers.push(Some(rendition.prepare_client_reader(
+                &child.reader_id,
+                entry,
+                child_priority(child.companion_bootstrap),
+            )?));
         }
-        if !replacement_readers.has_room_for(&session_id) {
+        let mut new_keys = vec![&session_id];
+        new_keys.extend(child_readers.iter().flatten().map(|(key, _)| key));
+        if !replacement_readers.has_room_for_all(&new_keys) {
             return Err("finite reader table has no remaining slot".into());
         }
         let prepared_authority =
@@ -2767,28 +2794,26 @@ impl VodServe {
             obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
         rendition.revoke_preparation();
-        for child in &private_media {
+        for (child, prepared) in private_media.iter().zip(child_readers) {
             let entry = media_entry_containing_ms(
                 &child.rendition.plan,
                 (req.start_seconds.max(0.0) * 1000.0) as i64,
             );
             if Arc::ptr_eq(&child.rendition, &rendition) {
+                let (key, mut reader) = prepared.unwrap_or_else(|| {
+                    (
+                        child.reader_id.clone(),
+                        Reader::with_priority(entry, child_priority(child.companion_bootstrap)),
+                    )
+                });
                 replacement_readers
-                    .try_insert(child.reader_id.clone(), {
-                        let mut reader = Reader::with_priority(
-                            entry,
-                            if child.companion_bootstrap {
-                                crate::admission::Priority::Speculative
-                            } else {
-                                admission_priority
-                            },
-                        );
+                    .try_insert(key, {
                         reader.nonpreemptive_trial = nonpreemptive_trial;
                         reader.companion_bootstrap = child.companion_bootstrap;
                         reader.authority_only = child.companion_bootstrap;
                         reader
                     })
-                    .expect("private-media reader uses the legacy table");
+                    .expect("preflighted private-media reader fits its table");
             } else {
                 let split = split_readers
                     .iter_mut()

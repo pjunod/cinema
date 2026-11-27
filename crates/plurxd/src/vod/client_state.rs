@@ -133,6 +133,32 @@ impl<K: Eq + Hash + Ord, V> ClientTable<K, V> {
         }
     }
 
+    /// Whether every one of `keys` can be inserted together: a finite table
+    /// needs a free slot for each distinct key it does not already hold.
+    pub(super) fn has_room_for_all(&self, keys: &[&K]) -> bool {
+        match self {
+            Self::Legacy(_) => true,
+            Self::Finite(table) => {
+                let mut missing: Vec<&K> = Vec::with_capacity(keys.len());
+                for key in keys {
+                    if table
+                        .entries
+                        .binary_search_by(|(existing, _)| existing.cmp(key))
+                        .is_err()
+                        && !missing.contains(key)
+                    {
+                        missing.push(key);
+                    }
+                }
+                table
+                    .entries
+                    .len()
+                    .checked_add(missing.len())
+                    .is_some_and(|needed| needed <= table.max_entries)
+            }
+        }
+    }
+
     pub(super) fn has_room_for(&self, key: &K) -> bool {
         match self {
             Self::Legacy(_) => true,
