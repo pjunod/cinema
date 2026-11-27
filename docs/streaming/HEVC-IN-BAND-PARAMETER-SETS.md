@@ -79,6 +79,13 @@ with the in-band sets deleted: the copy's HEVC trace refused the change
 (`hevc_configuration_unsupported`) and the title could not be copied from that
 Source until a local play or an index pass measured it.
 
+Taking the census out of the revision re-keys, once, every shared file that
+already carries one (and any whose stored probe is not SQLite's canonical
+text; scans store canonical serde text). While a cluster runs both builds,
+old and new nodes compute different revisions for those files, so a Source
+start of one may be refused until every node runs the new build; receivers
+re-resolve it as any other revision change.
+
 **The decision.** `CopyVideoOptions::from_probe` reads the record, beside the
 `extradata_size` fact that already drives empty-`hvcC` promotion, so every
 copy path and every node decides from the same replicated row:

@@ -253,10 +253,12 @@ pub(crate) async fn ensure_index_census(
 /// file revision (`store::sharing_catalogue_details`), so recording it here
 /// leaves that witness standing; without it a Source-first play of a title
 /// that redefines its parameter sets copied it with them deleted. The read
-/// is the index census's: a held fence on the file, a bounded input, every
-/// child joined before this returns, so nothing outlives the Source's owner.
-/// A local playback or index census already measuring the file is waited
-/// for rather than duplicated. A run that fails or concludes nothing leaves
+/// is the index census's: a held fence on the file, a bounded input, and
+/// bounded single-keyframe children that are joined when the run completes
+/// and killed with the future when a start's deadline abandons it. Like the
+/// local playback census, it runs before the copy's admission: seven
+/// one-keyframe copies within `CENSUS_BUDGET`. A local playback or index
+/// census already measuring the file is waited for rather than duplicated. A run that fails or concludes nothing leaves
 /// the stored decision, and the copy's own HEVC trace then refuses a
 /// configuration change as `hevc_configuration_unsupported`.
 pub(crate) async fn ensure_source_census(
@@ -295,10 +297,17 @@ pub(crate) async fn ensure_source_census(
             Ok(Some(census)) => {
                 record_census(store, file, probe, census, started, CensusScope::Source).await?;
             }
-            Ok(None) => note_failure(file, CensusScope::Source),
+            // As for the index census: an inconclusive complete run is
+            // remembered, a cancelled one and an unreadable source are not,
+            // so a transient mount fault does not cost the next start its
+            // census.
+            Ok(None) => {
+                if plurx_core::process::bounded::check_cancellation().is_ok() {
+                    note_failure(file, CensusScope::Source);
+                }
+            }
             Err(reason) => {
                 tracing::debug!(file_id = file.id, %reason, "Source census source unavailable");
-                note_failure(file, CensusScope::Source);
             }
         }
         Ok(())
