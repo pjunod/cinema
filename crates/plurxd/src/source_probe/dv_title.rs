@@ -78,6 +78,9 @@ pub(super) const CONTENT_REFUSALS: &[&str] = &[
     "complete selected video duration",
     "selected video duration tag",
     "complete selected video duration tag",
+    "complete declared Matroska segment",
+    "declared Matroska segment duration",
+    "Matroska segment tail reached",
     "independent complete selected-video endpoint unavailable",
 ];
 

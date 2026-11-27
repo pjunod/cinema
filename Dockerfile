@@ -113,6 +113,12 @@ RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplace
         $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm \
         -o /build-inputs/test_dm_active_area \
     && LD_LIBRARY_PATH=/opt/dv-bundle/lib /build-inputs/test_dm_active_area
+# The title scanner's untagged-Matroska completeness controls run the scanner
+# just built over byte-edited copies of a committed fixture. Demux only, so
+# CPU only: a failing case fails the image.
+RUN LD_LIBRARY_PATH=/opt/dv-bundle/lib python3 \
+        /build-inputs/dv_processing/controls/test_scan_segment_endpoint.py \
+        --scanner /opt/dv-bundle/bin/scan_title
 # The base reconstruction control drives the production base renderer, which
 # needs a Vulkan device. This stage has the compiler and headers but no
 # Vulkan driver, so it only compiles the control, with the helper's own
