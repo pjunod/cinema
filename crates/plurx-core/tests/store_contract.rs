@@ -750,6 +750,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_title_demands_through",
     "dv_title_demand_for_file",
     "bind_dv_title_demand",
+    "carry_forward_dv_title_verdicts",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
@@ -22040,7 +22041,12 @@ fn contract_inventory_matches_every_store_method() {
     // bookkeeping. Named in BACKGROUND_JOB_METHODS and exercised on both
     // backends by background_jobs::expired_lease_sweep_requeues_with_takeover_bookkeeping.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 644, "review the Store method count");
+    // 644 -> 645: `BackgroundJobStore`'s `carry_forward_dv_title_verdicts`
+    // re-points settled title demand from a reviewed predecessor scanner in
+    // place. Named in BACKGROUND_JOB_METHODS and exercised on both backends by
+    // dv_title_jobs::title_verdicts_carry_forward_only_where_the_successor_reproduces_them.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 645, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

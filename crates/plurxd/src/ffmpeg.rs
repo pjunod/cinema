@@ -38,11 +38,11 @@ pub(crate) fn verify_windows_source_path(
     source: &std::fs::File,
     path: &std::path::Path,
 ) -> Result<(), String> {
-    let held = plurx_core::fs_secure::std_file_identity(source)
+    let held = plurx_core::media_io::identity_in_place(source)
         .map_err(|error| format!("stating held Windows source: {error}"))?;
     let reopened = plurx_core::fs_secure::open_read_nofollow_blocking(path)
         .map_err(|error| format!("reopening Windows source without reparse traversal: {error}"))?;
-    let current = plurx_core::fs_secure::std_file_identity(&reopened)
+    let current = plurx_core::media_io::identity_in_place(&reopened)
         .map_err(|error| format!("stating reopened Windows source: {error}"))?;
     if held != current {
         return Err("Windows source changed before ffmpeg spawn".to_owned());
@@ -985,7 +985,7 @@ pub(crate) async fn held_source_packet_probe_json(
 ) -> Result<Vec<u8>, HeldPacketProbeError> {
     #[cfg(windows)]
     let (source_path, held_identity) = {
-        let held_identity = plurx_core::fs_secure::std_file_identity(source).map_err(|error| {
+        let held_identity = plurx_core::media_io::identity_in_place(source).map_err(|error| {
             HeldPacketProbeError::Source(format!("reading held source identity: {error}"))
         })?;
         let source_path = plurx_core::fs_secure::std_file_path(source).map_err(|error| {
@@ -995,7 +995,7 @@ pub(crate) async fn held_source_packet_probe_json(
             plurx_core::fs_secure::open_read_nofollow_blocking(&source_path).map_err(|error| {
                 HeldPacketProbeError::Source(format!("reopening held source path: {error}"))
             })?;
-        if plurx_core::fs_secure::std_file_identity(&reopened).map_err(|error| {
+        if plurx_core::media_io::identity_in_place(&reopened).map_err(|error| {
             HeldPacketProbeError::Source(format!("reading reopened source identity: {error}"))
         })? != held_identity
         {
@@ -1127,7 +1127,7 @@ pub(crate) async fn held_source_packet_probe_json(
     }
     #[cfg(windows)]
     {
-        if plurx_core::fs_secure::std_file_identity(source).map_err(|error| {
+        if plurx_core::media_io::identity_in_place(source).map_err(|error| {
             HeldPacketProbeError::Source(format!("re-reading held source identity: {error}"))
         })? != held_identity
         {
@@ -1141,7 +1141,7 @@ pub(crate) async fn held_source_packet_probe_json(
                     "reopening packet-probed source path: {error}"
                 ))
             })?;
-        if plurx_core::fs_secure::std_file_identity(&current).map_err(|error| {
+        if plurx_core::media_io::identity_in_place(&current).map_err(|error| {
             HeldPacketProbeError::Source(format!("reading packet-probed source identity: {error}"))
         })? != held_identity
         {
@@ -1292,13 +1292,13 @@ async fn held_source_probe_json_with_limits(
 
     #[cfg(windows)]
     {
-        let held_identity = plurx_core::fs_secure::std_file_identity(source)
+        let held_identity = plurx_core::media_io::identity_in_place(source)
             .map_err(|error| format!("reading held source identity: {error}"))?;
         let source_path = plurx_core::fs_secure::std_file_path(source)
             .map_err(|error| format!("resolving held source path: {error}"))?;
         let reopened = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
             .map_err(|error| format!("reopening held source path: {error}"))?;
-        if plurx_core::fs_secure::std_file_identity(&reopened)
+        if plurx_core::media_io::identity_in_place(&reopened)
             .map_err(|error| format!("reading reopened source identity: {error}"))?
             != held_identity
         {
@@ -1319,7 +1319,7 @@ async fn held_source_probe_json_with_limits(
         command.arg(&source_path);
         let output =
             metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
-        if plurx_core::fs_secure::std_file_identity(source)
+        if plurx_core::media_io::identity_in_place(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
         {
@@ -1327,7 +1327,7 @@ async fn held_source_probe_json_with_limits(
         }
         let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
             .map_err(|error| format!("reopening probed source path: {error}"))?;
-        if plurx_core::fs_secure::std_file_identity(&current)
+        if plurx_core::media_io::identity_in_place(&current)
             .map_err(|error| format!("reading probed source identity: {error}"))?
             != held_identity
         {
@@ -3991,7 +3991,7 @@ fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String>
 #[cfg(windows)]
 fn windows_engine_object_version(file: &std::fs::File) -> Result<String, String> {
     let identity =
-        plurx_core::fs_secure::std_file_identity(file).map_err(|error| error.to_string())?;
+        plurx_core::fs_secure::local_file_identity(file).map_err(|error| error.to_string())?;
     Ok(format!(
         "{}:{}:{}:{}:{}:{}",
         identity.device,
