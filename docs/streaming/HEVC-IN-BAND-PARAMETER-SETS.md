@@ -64,7 +64,20 @@ plays and background index discovery do not measure, so the library is never
 swept. A run in which any sample failed or overran can record a disagreement
 it saw but never agreement; otherwise it records nothing and the copy keeps
 the historical behaviour. The record is not a source fact, so the held-source
-probe comparison ignores it.
+probe comparison ignores it, and so does the shared-library file revision
+(`FILE_REVISION_PROJECTION_SQL` projects the probe without it).
+
+**Shared (Source) starts.** A receiver's copy of a shared title is cut on the
+Source, which must not move the file revision the grant was witnessed against
+and must not start children outside its owner. Both now hold: the Source
+actor measures the census itself (`hevc_census::ensure_source_census`), under
+its preparation authority and on a held fence of the file, before its growing
+copy or cold index reads the probe, and recording it leaves the revision
+standing. Before this, the Source read the stored probe as it stood, so the
+first play of an uncensused title anywhere, if it was a shared one, copied it
+with the in-band sets deleted: the copy's HEVC trace refused the change
+(`hevc_configuration_unsupported`) and the title could not be copied from that
+Source until a local play or an index pass measured it.
 
 **The decision.** `CopyVideoOptions::from_probe` reads the record, beside the
 `extradata_size` fact that already drives empty-`hvcC` promotion, so every
@@ -114,7 +127,9 @@ source repeats them at every keyframe.
 
 Regressions: `crates/plurxd/src/hevc_census.rs::a_redefined_pps_is_measured_retained_and_decodes_to_the_source_pixels`,
 `::a_retained_film_still_indexes_as_vod_presentable`,
-`::an_unreadable_file_records_nothing_and_is_not_retried_at_once`.
+`::an_unreadable_file_records_nothing_and_is_not_retried_at_once`,
+`crates/plurxd/src/transcode/tests/source_actor.rs::source_first_copy_of_an_uncensused_varying_hevc_title_keeps_its_parameter_sets`,
+`crates/plurx-core/src/store/sharing_catalogue_details.rs::recording_the_hevc_census_keeps_the_shared_file_revision`.
 
 ## 5. Open — what is not yet proven
 

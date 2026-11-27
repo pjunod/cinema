@@ -7351,8 +7351,10 @@ pub(crate) async fn prepare_source_playback<
             "processed upgrades require a processing Source".into(),
         ));
     }
-    // Source preparation must not run the local census, which can change
-    // the revision being authorized and starts children outside its owner.
+    // Source preparation must not run the local census, which starts
+    // children outside any owner. The Source actor measures it under its own
+    // preparation authority (`hevc_census::ensure_source_census`) before it
+    // decides the copy; the census is not part of the file revision.
     let probe_json = snapshot.probe_json.as_deref();
     if probe_json.is_some_and(|probe| probe.len() > 1024 * 1024) {
         return Err(refused("stored_probe_bound"));
