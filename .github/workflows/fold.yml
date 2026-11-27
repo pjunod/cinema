@@ -2,25 +2,32 @@ name: fold fragment folders
 
 # Pages that every pull request used to edit at one insertion point are now
 # folded from per-pull-request fragment folders (`scripts/fold --list`).
-# A pull request edits only its own fragment; this rewrites the pages and
-# lands them as a `chore(fold):` pull request that goes through the same
-# paperwork and fast lane as any other and merges itself when they pass. It
-# reads `main` only, so it never races an open pull request; the next fold
-# replaces the `fold/main` branch.
+# A pull request edits only its own fragment; this rewrites the pages, checks
+# the result with `scripts/fold`'s `verify` (only folded pages change, no
+# client-fix row is lost or altered, a second fold changes nothing), and lands
+# it as a `chore(fold):` pull request merged at the head it verified. The fold
+# only moves what is already on `main`, so that check is the only one it waits
+# for; it does not take the requested lane (AGENTS.md, "Landing on main"). A
+# conflict with a later landing fails the run, and the next fold starts again
+# from the new `main` and replaces the `fold/main` branch.
 #
 # It runs on a schedule, not on every push: nearly every landing touches
-# status.d/, and a fold per landing would restart the fold pull request's
-# lane on every merge. A status-only fold is a docs-only lane; the page lags
-# its folder by at most six hours.
+# status.d/, and a fold per landing would mean a fold pull request per merge.
+# The page lags its folder by at most six hours.
 #
-# FOLD_BOT_TOKEN must belong to a bot account with write access whose pushes
-# start workflows. The job's own token cannot: a pull request it opened would
-# never be checked, so it could never merge. Without the secret the job only
-# says so and the pages wait for the next release cut or a hand fold.
+# It uses the job's own token. Pushes and merges made with it start no
+# workflows, and nothing needs them to: the fold waits for no check but its
+# own. A manual run with `all` folds every fragment folder completely, as a
+# release cut does.
 on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+    inputs:
+      all:
+        description: Fold every fragment folder completely, as a release cut does
+        type: boolean
+        default: false
 
 concurrency:
   group: fold-fragment-folders
@@ -45,12 +52,13 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Fold and publish
+      - name: Fold, verify and land
         env:
           # Scoped to this one step; scripts/fold passes it to git through
           # the environment and to the API in a header, never in arguments.
-          FOLD_BOT_TOKEN: ${{ secrets.FOLD_BOT_TOKEN }}
-        run: python3 scripts/fold --publish
+          FOLD_TOKEN: ${{ github.token }}
+          FOLD_ALL: ${{ inputs.all && '--all' || '' }}
+        run: python3 scripts/fold --publish $FOLD_ALL
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |

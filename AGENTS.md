@@ -82,6 +82,15 @@ landing commit is wrong and needs an errata row.
 `.github/workflows/landing-check.yml` fails on `main` for a landing made any
 other way that lost its lines.
 
+The one exception is the fold's own `chore(fold):` pull request
+(`.github/workflows/fold.yml`). It only moves what is already on `main`:
+client-fix rows from their folder into the ledger, and `status.d/` into
+`STATUS.md`. So it lands on the one check that matters for it, `scripts/fold`'s
+`verify` (only folded pages change and only absorbed fragments go; no row is
+lost or altered; a second fold changes nothing). The job merges at the head it
+verified, without the requested lane. Paperwork runs the same check on any
+`chore(fold):` pull request, so a hand fold is held to it too.
+
 ## Before you push: paperwork
 
 `make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the
