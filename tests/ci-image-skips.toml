@@ -8,3 +8,8 @@
 # suite = "tests/operations"            # or "tests/validation"
 # test = "<the id unittest reports>"
 # reason = "<why this test is meant to skip in the image>"
+
+[[skip]]
+suite = "tests/operations"
+test = "test_codec_hdr_cvvdp.CodecHdrCvvdpTests.test_rgb16_worker_known_channel_and_normalization_control"
+reason = "NumPy is not in the image by design: the selected lane stages its pinned NumPy 2.2.6 wheel for the operations process only (docs/ci/RUST-UNIT-FANOUT.md), where this control runs without a skip"
