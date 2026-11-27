@@ -25,7 +25,7 @@ _ALONE = re.compile(rb"(?m)^    if: " + re.escape(GATE) + rb"\n")
 _PLAIN = re.compile(rb"(?m)^    if: " + re.escape(GATE) + rb" && \((.*)\)$")
 _DOLLAR = re.compile(rb"(?m)^    if: \$\{\{ " + re.escape(GATE) + rb" && \((.*)\) \}\}$")
 _FOLDED = re.compile(
-    rb"(?m)^(    if: >-?\n)      " + re.escape(GATE) + rb" && \(\n((?:      .*\n)*?)(      .*?) \)\n"
+    rb"(?m)^(    if: >-?\n)      " + re.escape(GATE) + rb" && \(\n((?:      .*\n)*?)(      .*?) \)\n(?!      )"
 )
 
 

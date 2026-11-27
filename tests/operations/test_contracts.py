@@ -5553,7 +5553,10 @@ assert.equal(context.ACT_TIMER, null);
         # pull_request_target.
         gate = "github.server_url != 'https://github.com'"
         checked = 0
-        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        repository_gated = {".github/workflows/compile.yml", ".github/workflows/validation-marker-units.yml"}
+        for path in sorted(
+            p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern)
+        ):
             relative = path.relative_to(ROOT).as_posix()
             if relative in GITHUB_ONLY_WORKFLOWS or relative == ".github/workflows/media-runtime-public.yml":
                 continue
@@ -5565,11 +5568,23 @@ assert.equal(context.ACT_TIMER, null);
                     header = re.split(r"(?m)^    steps:", code, maxsplit=1)[0]
                     condition = re.search(r"(?ms)^    if:(.*?)(?=^    [a-z_-]+:|\Z)", header)
                     self.assertIsNotNone(condition, f"{relative}:{name} has no job-level if")
-                    self.assertTrue(
-                        gate in condition.group(1)
-                        or "github.repository == 'noirr/plurx'" in condition.group(1),
-                        f"{relative}:{name} is not gated off on the mirror",
-                    )
+                    # The gate leads the condition and everything else is its
+                    # right operand: `gate`, `gate && (...)` or the same inside
+                    # `${{ }}`. `x || gate`, `!(gate)` and `gate || x` all start
+                    # the job on the mirror and are refused.
+                    flat = " ".join(condition.group(1).split())
+                    flat = re.sub(r"^>-? ", "", flat)
+                    if relative in repository_gated:
+                        self.assertTrue(
+                            flat.startswith("${{ github.repository == 'noirr/plurx' && "), relative)
+                    elif flat == gate + " && github.ref == 'refs/heads/main'":
+                        pass  # landing-check and mobile-channels: the original exact form
+                    else:
+                        self.assertRegex(
+                            flat,
+                            r"^(?:\$\{\{ )?" + re.escape(gate) + r"(?: && \(.*\))?(?: \}\})?$",
+                            f"{relative}:{name} is not gated off on the mirror",
+                        )
                     checked += 1
         self.assertGreater(checked, 80)
 

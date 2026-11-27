@@ -42,7 +42,10 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def invocation_digests(commit: str, workspace: Path) -> dict:
-    """Hash actual bounded Git blobs, preserving every byte including newlines."""
+    """Hash actual bounded Git blobs, preserving every byte including newlines.
+
+    A CI workflow is hashed without its public-mirror gate (validation/mirror_guard.py).
+    """
     receipts.require(isinstance(commit, str) and COMMIT.fullmatch(commit) is not None,
                      "Invocation commit must be a full lowercase Git commit")
     def raw(*arguments):
