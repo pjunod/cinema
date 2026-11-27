@@ -12,7 +12,7 @@ mod weights;
 use crate::{http::error::ApiError, state::AppState};
 use plurx_core::{
     domain::MediaFile,
-    fs_secure::{std_file_identity, FileIdentity},
+    fs_secure::{local_file_identity, FileIdentity},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ fn engine_file_identity(held: &std::fs::File) -> Result<FileIdentity, String> {
     {
         return Err("engine_unavailable".to_owned());
     }
-    let identity = std_file_identity(held).map_err(|_| "engine_unavailable".to_owned())?;
+    let identity = local_file_identity(held).map_err(|_| "engine_unavailable".to_owned())?;
     if identity.size == 0 || identity.size > MAX_ENGINE_IDENTITY_BYTES {
         return Err("engine_unavailable".to_owned());
     }
@@ -78,7 +78,7 @@ fn hash_engine_file(mut held: std::fs::File, identity: FileIdentity) -> Result<S
         return Err("engine_changed".to_owned());
     }
     let digest = read_engine_digest(&mut held, identity.size)?;
-    if std_file_identity(&held).ok() != Some(identity) {
+    if local_file_identity(&held).ok() != Some(identity) {
         return Err("engine_changed".to_owned());
     }
     Ok(digest)

@@ -13,10 +13,7 @@ use crate::{
     state::AppState,
 };
 use axum::http::StatusCode;
-use plurx_core::{
-    domain::MediaFile,
-    fs_secure::{std_file_identity, FileIdentity},
-};
+use plurx_core::{domain::MediaFile, fs_secure::FileIdentity};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -48,7 +45,7 @@ struct Work {
 enum Status {
     Running,
     Paused(Work),
-    Ready(SourceFence),
+    Ready(Arc<SourceFence>),
     Failed { changed: bool, retry_at: Instant },
 }
 struct Entry {
@@ -124,33 +121,46 @@ impl ReadAttestations {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    fn lookup(&self, key: &Key) -> Option<Result<(), ApiError>> {
-        let mut entries = self.entries();
-        if let Some(index) = entries.iter().position(|entry| entry.key == *key) {
-            // Every cache hit has already reopened the current pathname and
-            // compared its complete held identity and object version.
+    /// A cached answer for `key`, or `None` when the caller must start (or
+    /// resume) verification.
+    ///
+    /// Every cache hit has already reopened the current pathname and compared
+    /// its complete held identity and object version. Rechecking the held
+    /// source is media I/O, and `entries` is a std mutex that async callers
+    /// take on workers, so the check never runs under it: the ready fence is
+    /// snapshotted, checked on the media bound with the lock released, and
+    /// acted on only if the entry still holds that same fence.
+    async fn lookup(&self, key: &Key) -> Option<Result<(), ApiError>> {
+        let ready = {
+            let entries = self.entries();
+            let index = entries.iter().position(|entry| entry.key == *key)?;
             match &entries[index].status {
-                Status::Ready(fence)
-                    if fence.unchanged_in_place()
-                        && std_file_identity(&fence.handle).ok() == Some(key.identity) =>
-                {
-                    if let Some(entry) = entries.remove(index) {
-                        entries.push_back(entry);
-                    }
-                    return Some(Ok(()));
-                }
-                Status::Ready(_) => {
-                    entries.remove(index);
-                }
+                Status::Ready(fence) => Arc::clone(fence),
                 Status::Running => return Some(Err(pending())),
                 Status::Failed { changed: true, .. } => return Some(Err(changed())),
                 Status::Failed { retry_at, .. } if *retry_at > Instant::now() => {
                     return Some(Err(pending()))
                 }
-                Status::Failed { .. } | Status::Paused(_) => {}
+                Status::Failed { .. } | Status::Paused(_) => return None,
             }
+        };
+        let valid = ready.unchanged().await
+            && plurx_core::media_io::identity(&ready.handle).await.ok() == Some(key.identity);
+        let mut entries = self.entries();
+        // Moved or replaced while the check waited: `start` decides from the
+        // entry as it is now.
+        let index = entries.iter().position(|entry| {
+            entry.key == *key
+                && matches!(&entry.status, Status::Ready(fence) if Arc::ptr_eq(fence, &ready))
+        })?;
+        if !valid {
+            entries.remove(index);
+            return None;
         }
-        None
+        if let Some(entry) = entries.remove(index) {
+            entries.push_back(entry);
+        }
+        Some(Ok(()))
     }
     fn start(&self, key: &Key, fresh: Work) -> Result<Work, ApiError> {
         let mut entries = self.entries();
@@ -207,8 +217,10 @@ impl ReadAttestations {
         .await
         .map_err(|_| pending())?
         .map_err(|_| changed())?;
-        let identity = std_file_identity(&opened.handle).map_err(|_| changed())?;
-        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged_in_place() {
+        let identity = plurx_core::media_io::identity(&opened.handle)
+            .await
+            .map_err(|_| changed())?;
+        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged().await {
             return Err(changed());
         }
         let key = Key {
@@ -220,9 +232,16 @@ impl ReadAttestations {
             identity,
             object_version: opened.object_version().into(),
         };
-        if let Some(result) = self.lookup(&key) {
+        if let Some(result) = self.lookup(&key).await {
             return result;
         }
+        // Built before the hash lane and admission are taken, so neither is
+        // held while this waits for a media slot.
+        let hash_handle = opened.handle.try_clone().map_err(|_| changed())?;
+        let hash = plurx_core::media_io::blocking(move || SourceHash::new(hash_handle, identity))
+            .await
+            .map_err(|_| changed())?
+            .map_err(|_| changed())?;
         let limits = state.transcode.read_attestation_limits().await;
         let lane = Arc::clone(&HASH_IO)
             .try_acquire_owned()
@@ -232,8 +251,7 @@ impl ReadAttestations {
             .admit_read_attestation(limits)
             .ok_or_else(pending)?;
         let fresh = Work {
-            hash: SourceHash::new(opened.handle.try_clone().map_err(|_| changed())?, identity)
-                .map_err(|_| changed())?,
+            hash,
             fence: opened,
         };
         let work = self.start(&key, fresh)?;
@@ -375,7 +393,7 @@ impl ReadAttestations {
                             && work.fence.unchanged().await
                             && final_source(&*store, &key).await;
                         break if valid {
-                            Status::Ready(work.fence)
+                            Status::Ready(Arc::new(work.fence))
                         } else {
                             failed(true)
                         };
@@ -438,7 +456,8 @@ async fn final_source(store: &dyn plurx_core::store::Store, key: &Key) -> bool {
     else {
         return false;
     };
-    fence.unchanged().await && std_file_identity(&fence.handle).ok() == Some(key.identity)
+    fence.unchanged().await
+        && plurx_core::media_io::identity(&fence.handle).await.ok() == Some(key.identity)
 }
 
 #[cfg(test)]
@@ -521,7 +540,9 @@ mod tests {
         let fence = open_source_playback_fence(file, None)
             .await
             .expect("held source");
-        let identity = std_file_identity(&fence.handle).expect("identity");
+        let identity = plurx_core::media_io::identity(&fence.handle)
+            .await
+            .expect("identity");
         let key = Key {
             file_id: file.id,
             size: file.size,
@@ -547,7 +568,7 @@ mod tests {
         let cache = ReadAttestations::new();
         let media = file(path.clone());
         let (key, fresh) = work(&media, &expected).await;
-        assert!(cache.lookup(&key).is_none());
+        assert!(cache.lookup(&key).await.is_none());
         let mut hashing = cache.start(&key, fresh).expect("single flight");
         assert!(hashing
             .hash
@@ -571,21 +592,70 @@ mod tests {
             digest, expected,
             "resume must not restart or skip the prefix"
         );
-        finish(&Arc::downgrade(&cache), &key, Status::Ready(resumed.fence));
-        assert!(cache.lookup(&key).expect("retained proof").is_ok());
+        finish(
+            &Arc::downgrade(&cache),
+            &key,
+            Status::Ready(Arc::new(resumed.fence)),
+        );
+        assert!(cache.lookup(&key).await.expect("retained proof").is_ok());
         let replacement = directory.path().join("replacement");
         std::fs::write(&replacement, &bytes).expect("same-sized replacement");
         std::fs::rename(replacement, &path).expect("replace named object");
         let (replacement_key, _) = work(&file(path), &expected).await;
         assert!(
-            cache.lookup(&replacement_key).is_none(),
+            cache.lookup(&replacement_key).await.is_none(),
             "same bytes/scan revision do not reuse another physical identity"
         );
         let restarted = ReadAttestations::new();
         assert!(
-            restarted.lookup(&replacement_key).is_none(),
+            restarted.lookup(&replacement_key).await.is_none(),
             "an in-memory proof cannot survive restart as an inode receipt"
         );
+    }
+    /// A cache hit rechecks the held source, which is media I/O. With every
+    /// media slot held, as a hung mount leaves them, the recheck must wait on
+    /// the media bound, and it must not wait while holding `entries`: async
+    /// readers take that std mutex on runtime workers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cache_hit_recheck_queues_on_the_media_bound_without_the_entries_lock() {
+        let directory = crate::test_tempdir().expect("directory");
+        let path = directory.path().join("source.mkv");
+        std::fs::write(&path, b"verified source").expect("source");
+        let cache = ReadAttestations::new();
+        let media = file(path);
+        let (key, fresh) = work(&media, &"a".repeat(64)).await;
+        let started = cache.start(&key, fresh).expect("start");
+        finish(
+            &Arc::downgrade(&cache),
+            &key,
+            Status::Ready(Arc::new(started.fence)),
+        );
+
+        let mut held = Vec::with_capacity(plurx_core::media_io::MEDIA_IO_CONCURRENCY);
+        for _ in 0..plurx_core::media_io::MEDIA_IO_CONCURRENCY {
+            held.push(plurx_core::media_io::slot().await);
+        }
+        let lookup = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            async move { cache.lookup(&key).await.map(|result| result.is_ok()) }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !lookup.is_finished(),
+            "the cache-hit recheck ran without a media slot"
+        );
+        assert!(
+            cache.entries.try_lock().is_ok(),
+            "the recheck waits for a media slot while holding the entries lock"
+        );
+
+        drop(held);
+        let hit = tokio::time::timeout(Duration::from_secs(5), lookup)
+            .await
+            .expect("the recheck runs once a slot is free")
+            .expect("lookup task");
+        assert_eq!(hit, Some(true), "an untouched verified source is a hit");
     }
     #[tokio::test]
     async fn concurrent_reads_single_flight_and_cache_budget_preserve_live_work() {
@@ -631,6 +701,7 @@ mod tests {
         assert_eq!(
             cache
                 .lookup(&key)
+                .await
                 .expect("failure")
                 .expect_err("closed")
                 .code(),
