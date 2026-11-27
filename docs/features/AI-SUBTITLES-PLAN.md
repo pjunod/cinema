@@ -222,8 +222,8 @@ through the requested lane and `scripts/land`.
 | # | Task | Area | State |
 |---|---|---|---|
 | T1 | This plan and the corrected queue finding | docs | in review |
-| T2 | One verification record per model for every purpose; self-install and repair on enable (`boot_id` kept, see §3.2) | `subtitle_models`, `subtitle_translation`, `subtitle_text_translation`, store | pending |
-| T3 | `subtitles.ai.v1` with its migration; admission reads it; `who` replaces `is_admin`; per-user bounds | store admission SQL, settings | pending |
+| T2 | `subtitles.ai.v1` with its migration; admission reads it; `who` replaces `is_admin`; per-user bounds | store admission SQL, settings | pending |
+| T3 | One verification record per model for every purpose; self-install and repair on enable (`boot_id` kept, see §3.2) | `subtitle_models`, `subtitle_translation`, `subtitle_text_translation`, store | pending |
 | T4 | One pipeline: finish demand, completion publishes a stored track (cap-safe), remove whole-file and Advanced generation | `subtitle_translation`, `subtitle_transcription.rs`, store | pending |
 | T5 | `/ai-subtitles` API, automatic route and spoken-language detection | server | pending |
 | T6 | VAD, thread budget, measured Fast/Balanced/Best tiers, text-model comparison | engine options, runtime | pending |
@@ -232,8 +232,8 @@ through the requested lane and `scripts/land`.
 | T8 | Confirm the surround `source_clock_unsupported` repair on the deployed build with a real 5.1 film | fleet | after deploy |
 | T9 | End-to-end acceptance of all three routes on the fleet | fleet | after deploy |
 
-The settings and authorization task (T3) comes before the pipeline merge (T4),
-because T4 removes `SubtitleTranscribeManaged`, whose admission reads the
+The settings and authorization task (T2) comes first, because self-install (T3)
+is driven by its switches, and because the pipeline merge (T4) removes `SubtitleTranscribeManaged`, whose admission reads the
 managed key. A fresh-context Fable review of this plan (2026-11-27) supplied
 the authorization gap, the finish demand, the cap rule and this order. Its
 `boot_id` concern (find the re-verify stall first) led to §3.2's finding that
