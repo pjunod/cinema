@@ -651,6 +651,44 @@ impl VodServe {
         .await
     }
 
+    /// The rendition key a parked child will install under: the same
+    /// canonical key `resolve_rendition` derives, without building anything.
+    pub(super) async fn companion_rendition_key(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+    ) -> Result<String, String> {
+        let PreparedVodRecipe {
+            identity,
+            recipe,
+            duration_ms,
+            ..
+        } = self
+            .prepare_recipe(
+                prepared,
+                file,
+                settings,
+                viewer,
+                AttachmentPurpose::Playback,
+            )
+            .await?;
+        #[cfg(target_os = "linux")]
+        let identity = if finite_software::selected_recipe(&recipe, false, false) {
+            recipe
+                .encoding
+                .as_ref()
+                .expect("selected finite recipe has an encoding")
+                .finite_software_identity(&recipe.file, duration_ms as f64 / 1_000.0)?
+        } else {
+            identity
+        };
+        #[cfg(not(target_os = "linux"))]
+        let _ = duration_ms;
+        Ok(rendition_key(&recipe, &identity))
+    }
+
     #[allow(clippy::too_many_arguments)] // the exact recipe, adopted attempt, retained capture and purpose
     pub(super) async fn resolve_rendition_for_purpose(
         &self,
@@ -2178,7 +2216,50 @@ impl VodServe {
                 ));
             }
         }
+        // A controlled v2 companion stays dormant until the first presented
+        // primary. It is created parked: no Rendition, reader, credit, R or
+        // compatibility permit exists for it until promotion installs one.
+        let deferred_companion = req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.controlled && media.version == 2);
+        let mut parked_companion = None;
         let companion_rendition = match prepared.companion.as_ref() {
+            Some((request, encoding)) if deferred_companion => {
+                let rendition_key = self
+                    .companion_rendition_key(
+                        &mut VodRecipeRequest {
+                            split_soundtracks: Vec::new(),
+                            admission_priority,
+                            root_admission: None,
+                            measured_candidate: None,
+                            retained_capture: RetainedOutputCapture::New,
+                            request,
+                            encoding: Some(Arc::clone(encoding)),
+                            soundtrack: None,
+                            companion: None,
+                        },
+                        file,
+                        settings,
+                        fences.viewer.as_ref(),
+                    )
+                    .await?;
+                parked_companion = Some(ParkedMediaReader {
+                    versioned_family: true,
+                    controlled: encoding.shared_audio.is_none(),
+                    candidate_id: req
+                        .continuous_media
+                        .as_ref()
+                        .and_then(|media| media.autonomous_companion),
+                    rendition_key,
+                    request: Box::new(request.clone()),
+                    encoding: Arc::clone(encoding),
+                    settings: settings.clone(),
+                    viewer: fences.viewer.clone(),
+                    admission_priority,
+                });
+                None
+            }
             Some((request, encoding)) => {
                 let attachment = self
                     .resolve_rendition(
@@ -2545,6 +2626,7 @@ impl VodServe {
                 .expected_attempt
                 .map(|(_, reader)| Arc::clone(reader)),
             children: Vec::new(),
+            parked_children: Vec::new(),
             requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
@@ -2867,6 +2949,7 @@ impl VodServe {
             }
         }
         replacement.children = std::mem::take(&mut private_media);
+        replacement.parked_children = parked_companion.take().into_iter().collect();
         let mut authority = prepared_authority.1;
         authority.authority_only = replacement.retained_output.is_some()
             || replacement.children.iter().any(|child| child.controlled);
@@ -3610,6 +3693,7 @@ impl VodServe {
         let replacement = Session {
             adopted_reader: None,
             children: Vec::new(),
+            parked_children: Vec::new(),
             requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,

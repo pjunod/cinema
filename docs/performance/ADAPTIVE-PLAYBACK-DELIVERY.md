@@ -346,3 +346,36 @@ persistent-owner capacities are being checked before the narrower swap. This
 requested-capacity accounting does not establish a whole-RSS or allocator bound.
 The native lifecycle fixture's strict producer-memory return remains unrun.
 No milestone is closed by a helper, lease or compiler alone.
+
+## Decision — a session can outlive a finite incarnation
+
+**Problem.** A finite role's lifetime is its `Rendition` incarnation: its
+metadata and client leases are fields of that object, and its close drains
+them only after every `Arc<Rendition>` drops. A deferred companion admitted
+eagerly at create held a finite compatibility permit and R before the
+primary's first frame, so it could starve the primary it was waiting on.
+
+**Decision.** A session's child role may have no incarnation: it is
+*parked*. A parked child (`ParkedMediaReader`) keeps only what installing it
+needs: its own request and frozen recipe, the create's settings, viewer
+demand and admission purpose, its candidate identity and its rendition key.
+It holds no reader, demand, encode credit, R, compatibility permit or child
+process, and it is absent from the family until installed.
+
+One install routine attaches an incarnation to a parked child. It builds or
+joins the incarnation under that key's build gate, then takes the parent's
+lifecycle and checks its incarnation fence (the order controlled admission
+already uses), then reserves the child's reader from the new rendition's own
+client lease and inserts it carrying the parent's accepted control. Only then
+does ordinary controlled admission run. A refused build leaves the child
+parked and returns its typed refusal. A build that cannot attach is purged at
+once instead of holding its admission until a dormant TTL.
+
+A controlled v2 companion is created parked and installed at the first
+presented primary, or when an accepted selection names it.
+
+**Next.** A successor generation for a seek before a suffix reuses the same
+parked state and install routine. The predecessor incarnation closes through
+the existing finite closing barrier, its charge is rebound to the successor
+at the locked refund, and every attached session's slots are re-reserved
+from the successor's lease.

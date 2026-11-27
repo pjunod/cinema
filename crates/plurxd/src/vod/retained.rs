@@ -3076,6 +3076,7 @@ mod tests {
             adopted_reader: None,
             requested_audio_index: None,
             children: Vec::new(),
+            parked_children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,

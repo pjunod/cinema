@@ -696,6 +696,61 @@ impl VodServe {
                     rendition.kick();
                 }
                 control_rendition.kick();
+                // A parked companion has no reader to accept this control.
+                // If the selection names it, install it with this sequence.
+                if selected_companion.is_none() && pending_companion.is_none() {
+                    let heights = session
+                        .children
+                        .iter()
+                        .filter(|child| child.controlled && child.candidate_id.is_some())
+                        .filter_map(|child| {
+                            child
+                                .rendition
+                                .recipe
+                                .encoding
+                                .as_ref()
+                                .map(|encoding| encoding.options.target_height)
+                        })
+                        .chain(
+                            session
+                                .parked_children
+                                .iter()
+                                .filter(|child| child.controlled && child.candidate_id.is_some())
+                                .map(|child| child.encoding.options.target_height),
+                        )
+                        .collect::<Vec<_>>();
+                    pending_companion = session
+                        .parked_children
+                        .iter()
+                        .find(|child| {
+                            if !child.controlled || child.candidate_id.is_none() {
+                                return false;
+                            }
+                            let height = child.encoding.options.target_height;
+                            match control.snapshot.selection.quality {
+                                crate::playback_control::QualitySelection::Auto {
+                                    candidate_id: Some(id),
+                                    height: named,
+                                } => {
+                                    child.candidate_id == Some(id)
+                                        && named.is_none_or(|named| named == height)
+                                }
+                                crate::playback_control::QualitySelection::Manual {
+                                    height: named,
+                                }
+                                | crate::playback_control::QualitySelection::Auto {
+                                    height: Some(named),
+                                    candidate_id: None,
+                                } => {
+                                    height == named
+                                        && heights.iter().filter(|peer| **peer == named).count()
+                                            == 1
+                                }
+                                _ => false,
+                            }
+                        })
+                        .map(|child| (child.rendition_key.clone(), control.sequence));
+                }
             }
             drop(child_readers);
             drop(readers);

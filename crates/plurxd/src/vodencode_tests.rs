@@ -5140,6 +5140,17 @@ async fn performed_encoded_driver_phases_preserve_original_frontier_and_event_ti
 
 #[tokio::test]
 async fn controlled_continuous_start_defers_companion_until_primary_presentation() {
+    controlled_continuous_companion_case(true).await;
+}
+
+/// The parked companion holds no pool share, so the primary and soundtrack
+/// start under a pool that has no room left for the companion's encoder.
+#[tokio::test]
+async fn controlled_continuous_primary_admits_under_a_pool_the_companion_would_fill() {
+    controlled_continuous_companion_case(false).await;
+}
+
+async fn controlled_continuous_companion_case(pool_includes_companion: bool) {
     use plurx_core::playback::continuous_quality::{
         QualityAttachment, QualityOperation, QualityTransitionRequest,
     };
@@ -5165,7 +5176,11 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
     refresh_encoded_plan(&file, optional);
     let budget = video.resources().cpu_threads
         + soundtrack.resources().cpu_threads
-        + companion.resources().cpu_threads;
+        + if pool_includes_companion {
+            companion.resources().cpu_threads
+        } else {
+            0
+        };
     video
         .store
         .put_setting(
@@ -5235,18 +5250,35 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
         )
         .await
         .expect("foreground pair attaches");
-    let optional_rendition = {
+    // The deferred companion is parked: no Rendition, reader, credit, R or
+    // compatibility permit exists for it before the primary is presented.
+    let companion_key = {
         let sessions = serve.shared.sessions.lock().await;
-        let child = sessions[&parent]
+        let session = &sessions[&parent];
+        assert!(!session
             .children
             .iter()
+            .any(|child| child.candidate_id == Some(companion_id)));
+        let parked = session
+            .parked_children
+            .iter()
             .find(|child| child.candidate_id == Some(companion_id))
-            .expect("companion");
-        assert!(child._reservation.is_none());
-        assert!(child.companion_bootstrap);
-        assert!(child.rendition.readers.lock().await[&child.reader_id].authority_only);
-        Arc::clone(&child.rendition)
+            .expect("parked companion");
+        assert!(parked.controlled);
+        parked.rendition_key.clone()
     };
+    let companion_is_parked = async || {
+        let parked = serve.shared.sessions.lock().await[&parent]
+            .parked_children
+            .iter()
+            .any(|child| child.rendition_key == companion_key);
+        parked && !serve.shared.renditions.lock().await.contains_key(&companion_key)
+    };
+    assert!(companion_is_parked().await);
+    if !pool_includes_companion {
+        assert!(serve.end(&parent, Terminal::Deleted).await);
+        return;
+    }
     let deadline = || Instant::now() + Duration::from_secs(30);
     let first = serve
         .continuous_family_description_before(&parent, deadline())
@@ -5260,7 +5292,7 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
     assert_eq!(first["family_revision"], 1);
     assert_eq!(first["video"].as_array().expect("video").len(), 1);
     assert!(
-        !optional_rendition.dir.has_init().await,
+        companion_is_parked().await,
         "optional producer has no source demand before presentation"
     );
     let transaction = uuid::Uuid::new_v4().to_string();
@@ -5321,7 +5353,7 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
             .await
             .expect("accepted primary bytes");
         assert!(
-            !optional_rendition.dir.has_init().await,
+            companion_is_parked().await,
             "append facts alone do not start companion"
         );
     }
@@ -5336,16 +5368,21 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
         .quality_schedule_before(&parent, &owner, &request, deadline())
         .await
         .expect("first-frame acknowledgement");
-    {
+    let optional_rendition = {
         let sessions = serve.shared.sessions.lock().await;
-        let child = sessions[&parent]
+        let session = &sessions[&parent];
+        assert!(session.parked_children.is_empty(), "presentation installs it");
+        let child = session
             .children
             .iter()
             .find(|child| child.candidate_id == Some(companion_id))
-            .expect("companion");
+            .expect("installed companion");
+        assert_eq!(child.rendition.key, companion_key);
+        assert!(child.companion_bootstrap);
         assert!(child._reservation.is_some());
         assert!(!child.rendition.readers.lock().await[&child.reader_id].authority_only);
-    }
+        Arc::clone(&child.rendition)
+    };
     wait_until(
         "companion verified init",
         Duration::from_secs(15),

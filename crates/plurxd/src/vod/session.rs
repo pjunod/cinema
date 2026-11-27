@@ -981,6 +981,25 @@ pub(super) struct ParentMediaReader {
     /// release this claim. Workers retain their own claim through confirmed reap.
     pub(super) _reservation: Option<crate::vodencode::EncodePermit>,
 }
+/// A child media role with no Rendition incarnation: a deferred companion
+/// before its promotion. It holds no reader, demand, encode credit, R,
+/// compatibility permit or child process, only what installing it needs.
+/// Installation builds its incarnation under its build gate, the parent's
+/// lifecycle and incarnation fence, then attaches it as a ParentMediaReader.
+pub(super) struct ParkedMediaReader {
+    pub(super) versioned_family: bool,
+    pub(super) controlled: bool,
+    pub(super) candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    pub(super) rendition_key: String,
+    /// The child's own create request and frozen recipe, with the create's
+    /// settings, viewer demand and admission purpose.
+    pub(super) request: Box<crate::transcode::SessionRequest>,
+    pub(super) encoding: Arc<crate::vodencode::Encoding>,
+    pub(super) settings: VodSettings,
+    pub(super) viewer: Option<crate::state::PlaybackViewerDemand>,
+    pub(super) admission_priority: crate::admission::Priority,
+}
+
 impl ParentMediaReader {
     pub(super) async fn detach(self, pool: &crate::waitpool::WaitPool) {
         self.rendition
@@ -1020,6 +1039,8 @@ pub(super) struct Session {
     /// Private video/audio readers share this parent's authority and cleanup.
     /// They never allocate additional public playback sessions or captions.
     pub(super) children: Vec<ParentMediaReader>,
+    /// Child roles with no incarnation yet; see [`ParkedMediaReader`].
+    pub(super) parked_children: Vec<ParkedMediaReader>,
     /// The soundtrack this viewer asked for. A split copy's shared video
     /// recipe belongs to whichever viewer created it, so its master marks
     /// this session's own choice as DEFAULT.

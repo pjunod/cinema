@@ -132,6 +132,169 @@ impl VodServe {
         .await
     }
 
+    /// Install a parked child's incarnation and attach its reader. Returns
+    /// false when `rendition_key` names no parked child (already installed).
+    ///
+    /// Order: the incarnation is built or joined under its build gate (held by
+    /// the attachment), then the parent's lifecycle and incarnation fence are
+    /// checked, then the reader is reserved from the new rendition's own lease
+    /// and inserted under the session registry, as create attaches children.
+    /// The reader carries the parent's accepted control, so later control and
+    /// admission treat it exactly like a child attached at create. A refused
+    /// build leaves the child parked and returns its typed refusal.
+    pub(super) async fn install_parked_child(
+        &self,
+        session_id: &str,
+        rendition_key: &str,
+        control_sequence: Option<u64>,
+    ) -> Result<bool, String> {
+        let (lifecycle, incarnation, parked, file, parent_anchor) = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .ok_or("controlled parent disappeared")?;
+            if session.tombstone.is_some() {
+                return Err("controlled parent ended".into());
+            }
+            let Some(parked) = session
+                .parked_children
+                .iter()
+                .find(|child| child.rendition_key == rendition_key)
+            else {
+                return Ok(false);
+            };
+            // The parent's accepted playback anchor, in milliseconds.
+            let parent_anchor = match session.live_rendition() {
+                Some(root) => {
+                    let readers = root.readers.lock().await;
+                    readers
+                        .get(session_id)
+                        .map(|reader| (reader.control_sequence, reader.frontier))
+                        .and_then(|(sequence, frontier)| {
+                            let entry = root.plan.entry(frontier)?;
+                            let ms = (u128::from(entry.start_ticks) * 1000
+                                / u128::from(root.plan.timescale.max(1)))
+                            .min(i64::MAX as u128) as i64;
+                            Some((sequence, ms))
+                        })
+                }
+                None => None,
+            };
+            (
+                Arc::clone(&session.lifecycle),
+                Arc::clone(&session.incarnation),
+                (
+                    parked.request.clone(),
+                    Arc::clone(&parked.encoding),
+                    parked.settings.clone(),
+                    parked.viewer.clone(),
+                    parked.admission_priority,
+                ),
+                Arc::clone(&session.file),
+                parent_anchor,
+            )
+        };
+        let (request, encoding, settings, viewer, admission_priority) = parked;
+        let attachment = self
+            .resolve_rendition(
+                &mut VodRecipeRequest {
+                    split_soundtracks: Vec::new(),
+                    admission_priority,
+                    root_admission: None,
+                    measured_candidate: None,
+                    retained_capture: RetainedOutputCapture::New,
+                    request: &request,
+                    encoding: Some(encoding),
+                    soundtrack: None,
+                    companion: None,
+                },
+                &file,
+                &settings,
+                viewer.as_ref(),
+                None,
+                None,
+                false,
+            )
+            .await?
+            .0;
+        let rendition = Arc::clone(&attachment.rendition);
+        let installed = async {
+            if rendition.key != rendition_key {
+                return Err("parked child resolved to another recipe".to_owned());
+            }
+            let _lifecycle = lifecycle.lock().await;
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or("controlled parent disappeared")?;
+            if session.tombstone.is_some()
+                || !Arc::ptr_eq(&session.incarnation, &incarnation)
+                || !Arc::ptr_eq(&session.lifecycle, &lifecycle)
+            {
+                return Err("controlled attachment changed during installation".to_owned());
+            }
+            let Some(index) = session
+                .parked_children
+                .iter()
+                .position(|child| child.rendition_key == rendition_key)
+            else {
+                return Ok(false);
+            };
+            let entry =
+                media_entry_containing_ms(&rendition.plan, parent_anchor.map_or(0, |(_, ms)| ms));
+            let reader_id = uuid::Uuid::new_v4().to_string();
+            let (key, mut reader) = rendition.prepare_client_reader(
+                &reader_id,
+                entry,
+                crate::admission::Priority::Speculative,
+            )?;
+            reader.companion_bootstrap = true;
+            reader.authority_only = true;
+            if let Some(sequence) = control_sequence {
+                // The accepted selection that names this companion.
+                reader.accept_control(sequence, entry);
+                reader.control_required = true;
+                reader.admission_priority = crate::admission::Priority::Live;
+            } else if let Some(sequence) = parent_anchor.and_then(|(sequence, _)| sequence) {
+                reader.accept_control(sequence, entry);
+            }
+            {
+                let mut readers = rendition.readers.lock().await;
+                readers
+                    .try_insert(key, reader)
+                    .map_err(|_| "finite reader table has no remaining slot".to_owned())?;
+            }
+            *rendition.dormant_since.lock().expect("dormant lock") = None;
+            let parked = session.parked_children.remove(index);
+            session.children.push(ParentMediaReader {
+                versioned_family: parked.versioned_family,
+                companion_bootstrap: true,
+                controlled: parked.controlled,
+                candidate_id: parked.candidate_id,
+                reader_id,
+                rendition: Arc::clone(&rendition),
+                _reservation: None,
+            });
+            Ok(true)
+        }
+        .await;
+        drop(attachment);
+        match installed {
+            Ok(true) => {
+                rendition.kick();
+                Ok(true)
+            }
+            other => {
+                // Nothing attached to this build: its dormant incarnation
+                // returns whatever it admitted rather than waiting a TTL.
+                self.shared
+                    .purge_if_dormant(rendition_key, Duration::ZERO)
+                    .await;
+                other
+            }
+        }
+    }
+
     /// A parent selection may need the deferred companion before any init is
     /// available. Only its still-current accepted sequence may spend credit.
     pub(super) async fn admit_controlled_video_for_control_before(
@@ -143,6 +306,9 @@ impl VodServe {
         expected_sequence: Option<u64>,
     ) -> Result<(), String> {
         let work = async {
+            // A parked companion first gets its incarnation and reader.
+            self.install_parked_child(session_id, rendition_id, expected_sequence)
+                .await?;
             let (lifecycle, incarnation, mut media) = {
                 let sessions = self.shared.sessions.lock().await;
                 let session = sessions
@@ -875,6 +1041,13 @@ impl VodServe {
                         .iter()
                         .find(|child| child.companion_bootstrap && child._reservation.is_none())
                         .map(|child| child.rendition.key.clone())
+                        .or_else(|| {
+                            session
+                                .parked_children
+                                .iter()
+                                .find(|child| child.controlled)
+                                .map(|child| child.rendition_key.clone())
+                        })
                 })
             };
             if let Some(companion) = companion {
