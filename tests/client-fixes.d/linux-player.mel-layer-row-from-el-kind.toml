@@ -37,3 +37,13 @@ source = "clients/linux-player/plurx_player/scripts/cinema.lua"
 source_anchor = "local function renderer_el_kind(view)"
 test = "clients/linux-player/tests/test_cinema.lua"
 test_anchor = "an unscanned title with an active NLQ says FEL"
+
+# Review follow-up: the server's own FEL claim is its side of the
+# cross-check, never a second pill next to the renderer's name.
+[[fixes]]
+id = "linux-player.cinema-el-pill-server-fel-claim"
+commits = ["30285cea20723e56180e1c2d7cb260ce2836d322"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local function server_el_kind(view)"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "a server FEL claim against a renderer MEL is marked"
