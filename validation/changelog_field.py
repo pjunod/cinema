@@ -25,7 +25,11 @@ Three places read it, all through `parse`:
   (`.forgejo/default_merge_message/MERGE_TEMPLATE.md`, `scripts/land` and the
   merge train all copy it), so every first-parent commit of `main` past the
   cutover carries its own entries. `main` accepts merge commits only, so there
-  is always exactly one landing commit per pull request.
+  is always exactly one landing commit per pull request. A landing is any
+  subject shape `validation.history.landing_commit_title` recognises, a
+  squash merge (`<title> (#N)`) included: should squashing ever be allowed,
+  `SQUASH_TEMPLATE.md` carries the description into the squashed commit and
+  this module reads and checks it like any other landing.
 * **At release**, `scripts/release-cut` collects the entries of every landing
   commit since the previous cut (`collect`) into the dated section. Branch
   commits are never read, so nothing is counted twice.
@@ -43,6 +47,8 @@ import re
 import subprocess
 import sys
 
+from validation.history import landing_commit_title
+
 FIELD = "Changelog"
 SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
 NONE = "none"
@@ -52,8 +58,6 @@ _SEPARATOR_RE = re.compile(r"^(?P<head>[A-Za-z]+)(?:\s+(?:—|--|-)\s+|:\s+|\s*$
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
 _CONTINUATION_RE = re.compile(r"^(?:  |\t)\s*\S")
-# The landing commit subjects `main` carries (validation/history.py).
-_MERGE_SUBJECT_RE = re.compile(r"^Merge pull request '.*' \(#(?P<pull>\d+)\) from \S+ into \S+$")
 
 HINT = (
     "add a `Changelog: <Section> — <entry>` line per user-visible change to the pull request "
@@ -220,15 +224,17 @@ def landings(root: Path, since: str | None, until: str = "HEAD") -> list[Landing
             continue
         sha, _, message = record.partition("\n")
         subject = message.split("\n", 1)[0]
-        merged = _MERGE_SUBJECT_RE.match(subject)
-        if merged is None:
+        # One definition of a landing subject for every reader of `main`'s
+        # history, so a shape the audit accepts is never skipped here.
+        landed = landing_commit_title(subject)
+        if landed is None:
             continue
         try:
             field = parse(message)
             problem = ""
         except ChangelogError as error:
             field, problem = None, str(error)
-        found.append(Landing(sha.strip(), int(merged.group("pull")), field, problem))
+        found.append(Landing(sha.strip(), int(landed[1]), field, problem))
     return found
 
 
