@@ -88,10 +88,16 @@ pub(super) fn rebind_locked(
         .entries
         .get(&predecessor.reservation)
         .ok_or(AdmissionRefusal::UnknownReservation)?;
+    // A retired S predecessor holds no producer: its successor is always
+    // admitted in full with the S removed (evict-and-admit).
+    let retained_predecessor = old.memory_claim
+        == (MemoryClaim::KnownBounded {
+            active_producer: false,
+        });
     if old.binding != predecessor
         || old.durable.is_some()
         || old.state == ReservationState::Reserved
-        || old.memory_claim != claim
+        || (old.memory_claim != claim && !retained_predecessor)
         || state
             .trial
             .as_ref()
@@ -105,7 +111,8 @@ pub(super) fn rebind_locked(
         return Err(AdmissionRefusal::InvalidTransition);
     }
     // A contained predecessor's task ceilings are re-derived by admission.
-    let no_larger = old.contained.is_none()
+    let no_larger = !retained_predecessor
+        && old.contained.is_none()
         && contained.is_none()
         && super::retained::componentwise_le(resources, old.resources);
     let old_resources = old.resources;

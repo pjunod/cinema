@@ -285,7 +285,7 @@ impl AdoptedFiniteTerminal {
         let Some(producer) = self.producer.upgrade() else {
             return Ok(None);
         };
-        if !producer.retained_without_producer() || !producer.original_driver_finished() {
+        if !producer.has_retained_output() || !producer.original_driver_finished() {
             return Ok(None);
         }
         // RETAINED follows the original known conserving R→S commit; the

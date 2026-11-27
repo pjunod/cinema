@@ -388,3 +388,14 @@ successor is built and published with that handover under the key's build
 gate, and each parked session is reattached with its reader state,
 re-reserving its slots from the successor's own lease. A refused rebind
 leaves the parked sessions a typed capacity answer. No timer drives any step.
+
+**S is a joined producer's retained output over its planned range.** A
+joined R is read-fenced until its handoff to S, so a finished suffix retires
+its own range [first segment, end) to S just as a full title does, returning
+the producer's CPU and memory and staying readable. Cacheable and
+recoverable are separate properties that require a first segment of 0: a
+suffix S commits no retained cache, closes its cache grant, is never
+admitted, and is evicted (not recovered) after a restart so its key builds
+fresh. Succession from an S is evict-and-admit in one ledger section: the S
+leaves and the successor's whole producer charge is admitted, which may be
+refused for capacity with the typed answer.

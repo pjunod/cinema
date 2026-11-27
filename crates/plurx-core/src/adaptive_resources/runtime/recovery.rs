@@ -671,6 +671,7 @@ impl NodeResourceRuntime {
             PathBuf,
             bool,
             Arc<super::finite_lifetime::FiniteAppGuard>,
+            u32,
         )>,
         RuntimeOpenError,
     > {
@@ -699,10 +700,12 @@ impl NodeResourceRuntime {
                 return Ok(None);
             }
         }
-        let (member, path, marker) = {
+        let (member, path, marker, first_segment) = {
             let owners = self.recovered_s.lock().map_err(|_| unavailable())?;
             let owner = owners.get(id).ok_or_else(unavailable)?;
             let claim = &owner.claim;
+            // S covers its producer's planned range; a suffix starts later.
+            let first_segment = claim.plan().outputs.first_segment;
             let [source] = claim.media_sources() else {
                 return Err(unavailable());
             };
@@ -726,7 +729,8 @@ impl NodeResourceRuntime {
                     OutputKey::CompleteArtifactManifest => return Err(unavailable()),
                     OutputKey::Playlist => return Err(unavailable()),
                     OutputKey::Segment { index } => {
-                        if index >= segment_count
+                        if index < first_segment
+                            || index >= segment_count
                             || file.logical_len == 0
                             || !segments.insert(index)
                         {
@@ -735,13 +739,19 @@ impl NodeResourceRuntime {
                     }
                 }
             }
-            if !init || !identity || !marker || segments.len() != segment_count as usize {
+            if first_segment >= segment_count
+                || !init
+                || !identity
+                || !marker
+                || segments.len() != (segment_count - first_segment) as usize
+            {
                 return Err(unavailable());
             }
             (
                 claim.member_id().uuid(),
                 PathBuf::from(&claim.plan().bootstrap().protected_child_path),
                 marker,
+                first_segment,
             )
         };
         let operation = self
@@ -759,7 +769,14 @@ impl NodeResourceRuntime {
         let guard = self
             .finite_app_guard(&preparation, 0)
             .map_err(|_| unavailable())?;
-        Ok(Some((preparation, member, path, marker, guard)))
+        Ok(Some((
+            preparation,
+            member,
+            path,
+            marker,
+            guard,
+            first_segment,
+        )))
     }
 
     /// The known terminal close has no remaining use for its one internal

@@ -232,10 +232,14 @@ impl NodeResourceRuntime {
             plan.outputs.naming,
             v2::scratch::OutputNamingV1::FiniteVodMetadataV2 { .. }
         ) {
-            // Producer credit returns through S only for the complete title.
-            // A suffix generation (first_segment > 0) or any missing segment
-            // keeps its original R; it is closed, never retained.
-            let segment_count = usize::try_from(plan.outputs.segment_end_exclusive)
+            // S is the retained output of a joined producer over its planned
+            // range: init and every segment of [first_segment, end) must be
+            // present. A suffix (first_segment > 0) retires read-only; only
+            // first_segment == 0 is cacheable or recoverable, which the
+            // daemon and recovery decide, never this transfer.
+            let first =
+                usize::try_from(plan.outputs.first_segment).map_err(|_| OperationError::State)?;
+            let end = usize::try_from(plan.outputs.segment_end_exclusive)
                 .map_err(|_| OperationError::State)?;
             let mut init = false;
             let mut segments = std::collections::BTreeSet::new();
@@ -243,7 +247,8 @@ impl NodeResourceRuntime {
                 match file.published {
                     Some(v2::scratch::OutputKey::Init) => init = file.logical_len > 0,
                     Some(v2::scratch::OutputKey::Segment { index })
-                        if usize::try_from(index).is_ok_and(|index| index < segment_count)
+                        if usize::try_from(index)
+                            .is_ok_and(|index| (first..end).contains(&index))
                             && file.logical_len > 0 =>
                     {
                         segments.insert(index);
@@ -251,11 +256,7 @@ impl NodeResourceRuntime {
                     _ => {}
                 }
             }
-            if plan.outputs.first_segment != 0
-                || segment_count == 0
-                || !init
-                || segments.len() != segment_count
-            {
+            if first >= end || !init || segments.len() != end - first {
                 return Err(OperationError::State);
             }
         }

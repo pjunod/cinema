@@ -91,43 +91,27 @@ impl NodeResourceRuntime {
     /// The ordinary finite close whose locked refund hands its charge to a
     /// successor generation. A refused successor leaves an ordinary whole
     /// refund and returns the typed refusal.
-    /// The demand a successor of this finite owner asks for: exactly the
-    /// charge its own role holds, in a fresh family of the successor's.
+    /// The demand a successor of a finite owner asks for: the producer
+    /// charge that owner was admitted with (its R, even after an R→S
+    /// retirement), in a fresh family of the successor's.
     pub(in crate::adaptive_resources::runtime) fn finite_successor_demand(
         &self,
-        owner: &OwnedPreparation,
+        resources: crate::adaptive_resources::ResourceVector,
+        contained: Option<crate::adaptive_resources::ContainedProducerBound>,
     ) -> Result<FiniteSuccessorDemand, OperationError> {
-        self.validate_preparation(owner)?;
-        let binding = {
-            let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-            if bundle.roles.len() != 1 {
-                return Err(OperationError::State);
-            }
-            bundle.roles[0].binding
-        };
-        let (demand, contained) = {
-            let ledger = self
-                .ledger
-                .inner
-                .lock()
-                .map_err(|_| OperationError::State)?;
-            let entry = ledger
-                .entries
-                .get(&binding.reservation)
-                .filter(|entry| entry.binding == binding)
-                .ok_or(OperationError::State)?;
-            (
-                crate::adaptive_resources::WorkloadDemand {
-                    resources: crate::process::observation::Metric::Known(entry.resources),
-                    limit_epoch: ledger.epoch,
-                    trial: false,
-                },
-                entry.contained,
-            )
-        };
+        let limit_epoch = self
+            .ledger
+            .inner
+            .lock()
+            .map_err(|_| OperationError::State)?
+            .epoch;
         Ok(FiniteSuccessorDemand {
             family: self.new_family()?,
-            demand,
+            demand: crate::adaptive_resources::WorkloadDemand {
+                resources: crate::process::observation::Metric::Known(resources),
+                limit_epoch,
+                trial: false,
+            },
             contained,
         })
     }

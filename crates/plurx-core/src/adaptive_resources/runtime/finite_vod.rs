@@ -675,6 +675,10 @@ pub struct SoftwareVodOwner {
     directory_path: Arc<PathBuf>,
     encoded_process_marker: bool,
     start_entry: u32,
+    /// The producer charge this owner was admitted with, kept after an R→S
+    /// retirement so a successor generation asks for a producer again.
+    original_resources: Option<crate::adaptive_resources::ResourceVector>,
+    original_contained: Option<crate::adaptive_resources::ContainedProducerBound>,
     events: Option<SoftwareVodEvents>,
     control: Arc<FiniteControl>,
     #[cfg(target_os = "linux")]
@@ -1364,18 +1368,30 @@ impl NodeResourceRuntime {
             .recovered_finite_selection(rendition_id, media_file_id, object_version, segment_count)
             .await
             .map_err(|_| OperationError::State)?;
-        Ok(selection.map(
-            |(preparation, member, directory_path, encoded_process_marker, app_guard)| {
-                FiniteOutput {
-                    runtime: self.clone(),
-                    preparation,
-                    member,
-                    directory_path: Arc::new(directory_path),
-                    encoded_process_marker,
-                    _app_guard: app_guard,
-                }
-            },
-        ))
+        let Some((preparation, member, directory_path, encoded_process_marker, app_guard, first)) =
+            selection
+        else {
+            return Ok(None);
+        };
+        let output = FiniteOutput {
+            runtime: self.clone(),
+            preparation,
+            member,
+            directory_path: Arc::new(directory_path),
+            encoded_process_marker,
+            _app_guard: app_guard,
+        };
+        if first != 0 {
+            // A recovered suffix S is not the title: never cacheable or
+            // recoverable. Evict it through the ordinary retained close so
+            // the key builds fresh instead of staying poisoned.
+            let deadline = Instant::now() + std::time::Duration::from_secs(30);
+            let mut ticket = output.prepare_eviction(deadline).await?;
+            drop(output);
+            ticket.finish_retirement(deadline).await?;
+            return Ok(None);
+        }
+        Ok(Some(output))
     }
 }
 
@@ -1582,8 +1598,9 @@ impl SoftwareVodOwner {
     /// Selector only: construction does not open the source or output root.
     /// What a successor generation of this owner asks for: its own charge.
     pub fn successor_demand(&self) -> Result<FiniteSuccessorDemand, FiniteVodError> {
+        let resources = self.original_resources.ok_or(OperationError::State)?;
         self.runtime
-            .finite_successor_demand(&self.preparation)
+            .finite_successor_demand(resources, self.original_contained)
             .map_err(Into::into)
     }
 
@@ -2565,6 +2582,11 @@ impl NodeResourceRuntime {
                 directory_path,
                 encoded_process_marker: request.encoded_process_marker,
                 start_entry,
+                original_resources: match request.demand.resources {
+                    crate::process::observation::Metric::Known(resources) => Some(resources),
+                    crate::process::observation::Metric::Unknown(_) => None,
+                },
+                original_contained: contained,
                 events: Some(events),
                 control,
                 #[cfg(target_os = "linux")]

@@ -16,10 +16,11 @@ const RETIRING: u8 = 2;
 const RETAINED: u8 = 3;
 const FAILED: u8 = 4;
 const PREPARING: u8 = 6;
-/// A suffix producer (nonzero start entry) reached the end of the title. Its
-/// output is not the complete title: it is never frozen, retired to S or
-/// cached, and its original R stays charged until its closing owner.
-const SUFFIX_COMPLETE: u8 = 7;
+/// A suffix producer (nonzero start entry) finished and retired its range to
+/// a read-only S. It is not the complete title: never cached, admitted or
+/// recovered; its readers keep serving and an entry before it gets a
+/// successor generation.
+const SUFFIX_RETAINED: u8 = 7;
 const DRIVER_UNREGISTERED: u8 = 0;
 const DRIVER_REGISTERED: u8 = 1;
 const DRIVER_RETURNED: u8 = 2;
@@ -575,14 +576,13 @@ impl FiniteSoftwareProducer {
                 let owner = self.owner.lock().await;
                 let deadline = Instant::now() + Duration::from_secs(30);
                 match self.stage.load(Acquire) {
-                    RETAINED => {}
+                    RETAINED | SUFFIX_RETAINED => {}
                     RETIRING => {
                         owner
                             .retire_output(deadline)
                             .await
                             .map_err(io::Error::other)?;
-                        self.commit_retained_cache();
-                        self.stage.store(RETAINED, Release);
+                        self.settle_retained_stage(true);
                     }
                     _ => {
                         // A terminal finite role needs the detached closing
@@ -609,7 +609,7 @@ impl FiniteSoftwareProducer {
             RUNNING => "its producer is running",
             RETIRING => "its producer is retiring",
             RETAINED => "its producer finished without publishing it",
-            SUFFIX_COMPLETE => "its producer started after it and has finished",
+            SUFFIX_RETAINED => "its producer started after it and has finished",
             FAILED => "its producer failed",
             _ => "its producer state is unknown",
         }
@@ -646,6 +646,30 @@ impl FiniteSoftwareProducer {
     pub(crate) fn retained_without_producer(&self) -> bool {
         self.stage.load(Acquire) == RETAINED
     }
+    /// Either S stage: the complete title's (cacheable) or a suffix's
+    /// (read-only). Both are evicted through the same retained close.
+    pub(crate) fn has_retained_output(&self) -> bool {
+        matches!(self.stage.load(Acquire), RETAINED | SUFFIX_RETAINED)
+    }
+    /// After this producer's R→S commit: the complete title commits its
+    /// retained cache; a suffix is never cached, so its cache grant and
+    /// compatibility share close instead.
+    fn settle_retained_stage(&self, commit_title_cache: bool) {
+        if self.start_entry == 0 {
+            if commit_title_cache {
+                self.commit_retained_cache();
+            }
+            self.stage.store(RETAINED, Release);
+        } else {
+            if let Some(compatibility) = self.take_compatibility() {
+                compatibility.known_retired();
+            }
+            if let Some(grant) = self.take_cache_grant() {
+                grant.known_closed();
+            }
+            self.stage.store(SUFFIX_RETAINED, Release);
+        }
+    }
     pub(crate) async fn prepare_terminate(
         &self,
         deadline: Instant,
@@ -657,9 +681,11 @@ impl FiniteSoftwareProducer {
                 .retire_output(deadline)
                 .await
                 .map_err(io::Error::other)?;
-            self.stage.store(RETAINED, Release);
+            // An evicting terminate keeps its old behaviour for the title: S
+            // without a cache commit. A suffix closes its cache grant.
+            self.settle_retained_stage(false);
         }
-        if self.stage.load(Acquire) == RETAINED {
+        if self.has_retained_output() {
             owner
                 .output()
                 .prepare_eviction(deadline)
@@ -1742,22 +1768,17 @@ async fn run_body(
         // this driver and the remaining client metadata actually drop.
         return;
     }
-    if producer.start_entry != 0 {
-        // A suffix reached the end of the title. Its segments keep serving
-        // from the original R; entries before its start were never made, so
-        // it is not the complete title and must not freeze, retire to S or
-        // commit a retained cache. Its closing owner refunds the whole R.
-        producer.stage.store(SUFFIX_COMPLETE, Release);
-        owner.invalidate_policy_service(Instant::now());
-        tracing::debug!(target: "plurxd::vodserve", rendition = %rendition.key,
-            start_entry = producer.start_entry, "finite suffix producer finished");
-        rendition.kick();
-        return;
+    // A suffix (nonzero start) retires its own range to a read-only S too:
+    // the joined R is read-fenced until S, and S returns the producer's CPU
+    // and memory. It is never cached or admitted, and entries before it stay
+    // owed so they reach a successor generation.
+    let suffix = producer.start_entry != 0;
+    if !suffix {
+        // A completed output has no missing entry to rematerialize. Abort
+        // every surviving clock before S; its original task slot remains
+        // charged until Tokio actually drops the cancelled future.
+        rendition.clear_all_demands();
     }
-    // A completed output has no missing entry to rematerialize. Abort every
-    // surviving clock before S; its original task slot remains charged until
-    // Tokio actually drops the cancelled future.
-    rendition.clear_all_demands();
     producer.stage.store(RETIRING, Release);
     note_resource_phase(
         &rendition,
@@ -1772,10 +1793,11 @@ async fn run_body(
     .await;
     match retired {
         Ok(_) => {
-            producer.commit_retained_cache();
-            producer.stage.store(RETAINED, Release);
-            let mut manifest = rendition.manifest.lock().await;
-            shared.try_admit(&rendition, &mut manifest).await;
+            producer.settle_retained_stage(true);
+            if !suffix {
+                let mut manifest = rendition.manifest.lock().await;
+                shared.try_admit(&rendition, &mut manifest).await;
+            }
             rendition.kick();
         }
         Err(error) => {

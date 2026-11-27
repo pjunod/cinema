@@ -4002,20 +4002,33 @@ async fn encoded_vod_cold_resume_starts_its_finite_producer_at_the_resume_entry(
     for later in entry + 1..u32::try_from(rendition.plan.len()).expect("plan length") {
         let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(later))).await;
     }
+    // The finished suffix retires its own range to a read-only S.
     wait_until(
-        "the suffix producer finishes",
+        "the suffix producer retires its range",
         Duration::from_secs(30),
-        async || matches!(producer.belief(), crate::prodexec::Producer::Absent { .. }),
+        async || producer.has_retained_output(),
     )
     .await;
     assert!(
         !producer.retained_without_producer(),
-        "a finished suffix is never retired to S"
+        "a suffix S still lets an earlier entry reach a successor"
     );
     assert!(
         !rendition.manifest.lock().await.is_admitted(),
         "a suffix is never admitted as the complete title"
     );
+    wait_until(
+        "the finished suffix returns its producer CPU (S holds none)",
+        Duration::from_secs(30),
+        async || {
+            runtime
+                .accounting()
+                .is_ok_and(|accounting| accounting.used.cpu_ns_per_second == idle.cpu_ns_per_second)
+        },
+    )
+    .await;
+    // It stays readable from S.
+    let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(entry))).await;
     serve.end(&session, Terminal::Deleted).await;
     let key = rendition.key.clone();
     drop((producer, rendition));
@@ -4034,6 +4047,88 @@ async fn encoded_vod_cold_resume_starts_its_finite_producer_at_the_resume_entry(
         async || runtime.accounting().is_ok_and(|accounting| accounting.used == idle),
     )
     .await;
+}
+
+/// A back-seek from a retired suffix S gets a successor generation: the S
+/// is evicted and the successor's R admitted in one ledger section.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn encoded_vod_back_seek_from_a_retired_suffix_gets_a_successor() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("suffix S fixture");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let (serve, serve_runtime) = bare_serve_with_runtime(&base.path().join("suffix-s")).await;
+    let runtime = serve_runtime
+        .as_ref()
+        .map(crate::test_runtime::RealRuntime::handle)
+        .expect("Linux fixture runtime");
+    let entry = 44_u32;
+    let session = encoded_session_at(&serve, &file, &encoding, entry).await;
+    let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(entry))).await;
+    let suffix = rendition_of(&serve, &session).await;
+    let producer = suffix.dir.finite_producer().expect("suffix producer");
+    wait_until(
+        "the suffix retires to S",
+        Duration::from_secs(30),
+        async || producer.has_retained_output(),
+    )
+    .await;
+    drop((producer, suffix));
+    // An entry before the suffix: the successor starts there.
+    let _ = fetched_bytes(&serve, &session, &segment_name(0)).await;
+    let successor = rendition_of(&serve, &session).await;
+    assert_eq!(
+        successor.dir.finite_producer().expect("successor").start_entry(),
+        0
+    );
+    assert_eq!(
+        runtime.accounting().expect("accounting").unknown_peak_producers,
+        1,
+        "the successor's R replaced the S"
+    );
+    drop(successor);
+    serve.end(&session, Terminal::Deleted).await;
+}
+
+/// After a restart, a recovered suffix S is evicted rather than left to
+/// poison its key: a fresh create of the same recipe builds normally.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_restart_evicts_a_recovered_suffix_s_and_its_key_builds_fresh() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("suffix restart fixture");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let cache = base.path().join("suffix-restart");
+    {
+        let (serve, _runtime) = bare_serve_with_runtime(&cache).await;
+        let entry = 44_u32;
+        let session = encoded_session_at(&serve, &file, &encoding, entry).await;
+        let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(entry))).await;
+        let suffix = rendition_of(&serve, &session).await;
+        let producer = suffix.dir.finite_producer().expect("suffix producer");
+        wait_until(
+            "the suffix retires to S",
+            Duration::from_secs(30),
+            async || producer.has_retained_output(),
+        )
+        .await;
+        drop((producer, suffix));
+        serve.end(&session, Terminal::Deleted).await;
+    }
+    let (serve, _runtime) = bare_serve_with_runtime(&cache).await;
+    let session = encoded_session_at(&serve, &file, &encoding, 0).await;
+    let _ = fetched_bytes(&serve, &session, &segment_name(0)).await;
+    assert_eq!(
+        rendition_of(&serve, &session)
+            .await
+            .dir
+            .finite_producer()
+            .expect("fresh producer")
+            .start_entry(),
+        0,
+        "the evicted suffix left the key to a fresh producer"
+    );
+    serve.end(&session, Terminal::Deleted).await;
 }
 
 /// One 144p encoded session whose first demand is at `entry`.

@@ -202,3 +202,74 @@ fn running_predecessor_in_other_ledger() -> CleanupAuthority {
     let ledger = ResourceLedger::with_capacity(1, capacity()).expect("other ledger");
     running_predecessor(&ledger, 1)
 }
+
+/// A retired suffix S (no producer) standing in the ledger as its role.
+fn retained_predecessor(ledger: &ResourceLedger, memory: u64) -> CleanupAuthority {
+    let mut state = ledger.inner.lock().expect("ledger");
+    let id = state.next_reservation;
+    state.next_reservation += 1;
+    let binding = ReservationBinding {
+        ledger: ledger.id,
+        reservation: id,
+        allocation_epoch: state.epoch,
+    };
+    let resources = ResourceVector {
+        peak_memory_bytes: memory,
+        handles: 1,
+        ..ResourceVector::default()
+    };
+    state.entries.insert(
+        id,
+        Entry {
+            binding,
+            family_role: None,
+            resources,
+            memory_claim: MemoryClaim::KnownBounded {
+                active_producer: false,
+            },
+            task_claim: TaskClaim::NoProducer,
+            contained: None,
+            state: ReservationState::Reaping,
+            custody: None,
+            durable: None,
+        },
+    );
+    state.used = state.used.checked_add(resources).expect("used");
+    CleanupAuthority {
+        ledger: ledger.clone(),
+        binding,
+    }
+}
+
+#[test]
+fn a_retained_suffix_predecessor_is_evicted_and_its_successor_admitted_in_one_section() {
+    let ledger = ResourceLedger::with_capacity(1, capacity()).expect("ledger");
+    let old = retained_predecessor(&ledger, 30);
+    let proof = receipt(&old);
+    // The successor asks for a whole producer, which S never held.
+    let (successor, _cleanup) = rebind(&ledger, &old, &proof, 60).expect("evict and admit");
+    assert_eq!(used_cpu(&ledger), (60, 1), "only the successor remains");
+    assert_eq!(
+        ledger.snapshot().expect("snapshot").used.peak_memory_bytes,
+        60,
+        "the S bytes left with it"
+    );
+    drop(successor);
+    assert_eq!(used_cpu(&ledger), (0, 0));
+}
+
+#[test]
+fn a_retained_suffix_predecessor_keeps_its_s_when_its_successor_does_not_fit() {
+    let ledger = ResourceLedger::with_capacity(1, capacity()).expect("ledger");
+    let old = retained_predecessor(&ledger, 30);
+    let proof = receipt(&old);
+    assert_eq!(
+        rebind(&ledger, &old, &proof, 120).err(),
+        Some(AdmissionRefusal::HardLimit(ResourceDimension::Cpu)),
+        "a typed capacity refusal"
+    );
+    let snapshot = ledger.snapshot().expect("unchanged");
+    assert_eq!((snapshot.used.peak_memory_bytes, snapshot.held), (30, 1));
+    old.close(proof).expect("ordinary S close");
+    assert_eq!(used_cpu(&ledger), (0, 0));
+}
