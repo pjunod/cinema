@@ -13,6 +13,11 @@
 //!
 //! `std_file_identity` itself is left to `fs_secure` and `media_io`. The
 //! one other use is pinned below with its reason.
+//!
+//! The guard sees names, not descriptors: `local_file_identity` is a claim
+//! the author makes. A new call to it needs the descriptor's origin (which
+//! node-local directory it was opened from) to be evident at the call site
+//! or stated beside it, and review checks that claim.
 
 /// (path under `crates/`, why it may call `std_file_identity` directly)
 const SANCTIONED: &[(&str, &str)] = &[
@@ -80,6 +85,7 @@ fn media_identity_reads_go_through_media_io() {
         "direct fs_secure::std_file_identity in {direct:?}. Use \
          plurx_core::media_io::identity (or identity_in_place where the caller \
          cannot await) for a descriptor that can be on media storage, or \
-         fs_secure::local_file_identity for one on the node's own disk"
+         fs_secure::local_file_identity for one on the node's own disk, \
+         saying beside the call where that descriptor was opened"
     );
 }

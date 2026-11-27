@@ -235,13 +235,6 @@ impl ReadAttestations {
         if let Some(result) = self.lookup(&key).await {
             return result;
         }
-        // Built before the hash lane and admission are taken, so neither is
-        // held while this waits for a media slot.
-        let hash_handle = opened.handle.try_clone().map_err(|_| changed())?;
-        let hash = plurx_core::media_io::blocking(move || SourceHash::new(hash_handle, identity))
-            .await
-            .map_err(|_| changed())?
-            .map_err(|_| changed())?;
         let limits = state.transcode.read_attestation_limits().await;
         let lane = Arc::clone(&HASH_IO)
             .try_acquire_owned()
@@ -250,6 +243,17 @@ impl ReadAttestations {
             .transcode
             .admit_read_attestation(limits)
             .ok_or_else(pending)?;
+        // The lane and admission are taken without waiting, so a refused
+        // request does no media work. The hash's identity check is an fstat
+        // of the source: it waits on the media bound, and the descriptor is
+        // duplicated only once the slot is held.
+        let slot = plurx_core::media_io::slot().await;
+        let hash_handle = opened.handle.try_clone().map_err(|_| changed())?;
+        let hash = slot
+            .run(move || SourceHash::new(hash_handle, identity))
+            .await
+            .map_err(|_| changed())?
+            .map_err(|_| changed())?;
         let fresh = Work {
             hash,
             fence: opened,
@@ -631,10 +635,7 @@ mod tests {
             Status::Ready(Arc::new(started.fence)),
         );
 
-        let mut held = Vec::with_capacity(plurx_core::media_io::MEDIA_IO_CONCURRENCY);
-        for _ in 0..plurx_core::media_io::MEDIA_IO_CONCURRENCY {
-            held.push(plurx_core::media_io::slot().await);
-        }
+        let held = plurx_core::media_io::hold_every_slot().await;
         let lookup = tokio::spawn({
             let cache = Arc::clone(&cache);
             let key = key.clone();

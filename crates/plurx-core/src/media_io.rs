@@ -180,6 +180,20 @@ pub fn identity_in_place(file: &std::fs::File) -> std::io::Result<crate::fs_secu
     in_place(|| crate::fs_secure::std_file_identity(file))
 }
 
+/// Every media slot at once, the state a hung mount leaves the pool in, for
+/// tests that need awaited media calls to queue.
+///
+/// The slots are taken in one acquisition. Taken one at a time, two such
+/// tests running as threads of one test binary could each hold part of the
+/// pool and wait for the rest forever.
+#[cfg(any(test, feature = "fixtures"))]
+pub async fn hold_every_slot() -> tokio::sync::OwnedSemaphorePermit {
+    Arc::clone(&PERMITS)
+        .acquire_many_owned(MEDIA_IO_CONCURRENCY as u32)
+        .await
+        .expect("the media I/O semaphore is never closed")
+}
+
 struct InPlace;
 
 impl InPlace {
@@ -420,10 +434,7 @@ mod tests {
         let file = std::sync::Arc::new(std::fs::File::open(&path).expect("open"));
         let expected = crate::fs_secure::std_file_identity(&file).expect("identity");
 
-        let mut held = Vec::with_capacity(MEDIA_IO_CONCURRENCY);
-        for _ in 0..MEDIA_IO_CONCURRENCY {
-            held.push(slot().await);
-        }
+        let held = hold_every_slot().await;
         let awaited = tokio::spawn({
             let file = std::sync::Arc::clone(&file);
             async move { identity(&file).await }

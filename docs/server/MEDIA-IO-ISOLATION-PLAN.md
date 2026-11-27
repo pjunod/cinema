@@ -195,7 +195,7 @@ direct, is in the PR description.
 | `subtitle_translation::runtime::VerifiedSource::unchanged` | in-place fence check plus raw `fstat` | `async`: awaited `unchanged()` plus `media_io::identity` |
 | `runtime::VerifiedSource::recheck`, `runtime::verify_source`, `TranslationSources::cached` | raw `fstat` in async code | `media_io::identity` |
 | `read_attestation::ReadAttestations::lookup` | in-place fence check plus raw `fstat` while holding the `entries` std mutex, on a worker | `async`: snapshot the `Arc` fence, release the lock, await both checks, re-lock and act only if the entry still holds that fence |
-| `read_attestation::authorize` | raw `fstat`, `unchanged_in_place`, and `SourceHash::new` on a worker | awaited checks; `SourceHash::new` through `media_io::blocking`, before the hash lane and admission are taken |
+| `read_attestation::authorize` | raw `fstat`, `unchanged_in_place`, and `SourceHash::new` on a worker | awaited checks; `SourceHash::new` under a media slot, after the non-blocking hash lane and admission checks so a refused request does no media work |
 | `read_attestation::final_source` | raw `fstat` | `media_io::identity` |
 | `subtitle_text_translation::manager::current_source` | two raw `fstat`s | `media_io::identity` |
 | `subtitle_transcription::pipeline` (source before decode, after recognition) | raw `fstat` | `media_io::identity` |
