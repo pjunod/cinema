@@ -5297,3 +5297,59 @@ async fn an_expired_finite_verdict_reads_its_own_producer_not_a_sibling_permit_w
     .await;
 }
 
+/// A finite rendition is never a legacy candidate-cache source: its output is
+/// read only under its finite custody, and a completed finite output is
+/// offered through the retained registry's measured proof instead.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_finite_rendition_is_never_read_as_a_legacy_candidate_cache() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("finite candidate cache");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let candidate = [11; 32];
+    Arc::get_mut(&mut encoding)
+        .expect("unique recipe")
+        .candidate_recipe = Some(candidate);
+    let file_id = file.id;
+    let plan_digest = encoding.plan.plan_digest();
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.path().join("renditions")).await;
+    let mut req = request("finite-candidate", 0.0);
+    req.kind = SessionKind::Transcode { height: 144 };
+    serve
+        .try_create(
+            VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&req).into()
+            },
+            &file,
+            &settings(),
+            VodAttribution {
+                user_name: "test",
+                item_title: "finite candidate",
+                supersession_user: "test",
+            },
+            "finite-candidate".into(),
+        )
+        .await
+        .expect("finite attachment");
+    let rendition = rendition_of(&serve, "finite-candidate").await;
+    assert!(rendition.dir.is_finite());
+    assert!(!fetched_bytes(&serve, "finite-candidate", INIT_NAME)
+        .await
+        .is_empty());
+    for index in 0..rendition.plan.len() {
+        assert!(
+            !fetched_bytes(&serve, "finite-candidate", &segment_name(index as u64))
+                .await
+                .is_empty()
+        );
+    }
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, candidate, &plan_digest)
+            .await,
+        "a finite output is not read through its directory as a legacy cache"
+    );
+    serve.end("finite-candidate", Terminal::Deleted).await;
+}

@@ -34,6 +34,7 @@ impl VodServe {
             .values()
             .find(|rendition| {
                 rendition.recipe.file.id == file_id
+                    && is_legacy_candidate_cache_source(rendition)
                     && !rendition.closed.load(Relaxed)
                     && rendition.failure().is_none()
                     && rendition.recipe.encoding.as_ref().is_some_and(|encoding| {
@@ -998,5 +999,22 @@ impl VodServe {
             }),
             owner,
         })
+    }
+}
+
+/// Only a legacy rendition's directory is read here, with plain file reads. A
+/// finite rendition's output is native-owned and read only under its finite
+/// custody; its completed output is offered as a complete cache through the
+/// retained registry's measured proof (`measured_candidate_cost`), never by
+/// reading its directory.
+fn is_legacy_candidate_cache_source(rendition: &Rendition) -> bool {
+    #[cfg(unix)]
+    {
+        !rendition.dir.is_finite()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = rendition;
+        true
     }
 }
