@@ -1967,7 +1967,7 @@ mod processed_terminal;
 mod shared;
 #[cfg(target_os = "linux")]
 #[path = "vod/succession.rs"]
-mod succession;
+pub(crate) mod succession;
 #[cfg(target_os = "linux")]
 pub(crate) use processed_terminal::{
     AdoptedProcessedTerminal, ConfirmedAdoptedProcessedTerminal, OriginalProcessedRoot,
