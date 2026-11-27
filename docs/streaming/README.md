@@ -7,6 +7,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | File | Answers | |
 |---|---|---|
 | [Split HLS as the default](SPLIT-HLS-DEFAULT-INVENTORY.md) | What split layouts ship, what a split default must change on each surface and client, and how its baseline is measured. | open |
+| [Native split muxed readers](NATIVE-SPLIT-MUXED-READERS.md) | What reads the muxed copy once the native split is chosen, and what must move first. | open |
 | [One video for two VOD soundtracks](SHARED-VIDEO-MULTILINGUAL-VOD.md) | How to share indexed copy video across language tracks and prove continuous pictures and a single stored video. | open |
 | [MPV startup](MPV-LIVE-STARTUP.md) | MPV admission. | open |
 | [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour runs and attribution. | done |

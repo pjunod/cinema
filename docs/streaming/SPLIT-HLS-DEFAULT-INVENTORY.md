@@ -109,7 +109,7 @@ Each slice is one batched pull request into `main`.
 | S2 | One rendition contract and a caps v2 split capability; media-pool protocol bump; all masters generated from it | Contract, identity |
 | S3 | VOD copy split by default: audio copied or projected when decodable, AAC otherwise; lifts the 2–3 limit; atomic group publication; muxed admission fallback before exposure | Capacity, identity |
 | S4 | VOD transcode and processed DV/HDR windows on the contract | Contract |
-| S5 | Rolling copy and transcode, recovery, reopen, takeover, cross-node relay; seek and reopen onto the native splice | Identity, recovery |
+| S5 | Rolling copy and transcode, recovery, reopen, takeover, cross-node relay; seek and reopen onto the native splice; stop writing the native split's muxed copy ([readers](NATIVE-SPLIT-MUXED-READERS.md)) | Identity, recovery; the native split's write-saving acceptance ([§3](NATIVE-SPLIT-MUXED-READERS.md#3-what-the-split-only-change-has-to-do)) |
 | S6 | Live TV, sharing and Jellyfin | Matrix |
 | S7 | Apple, Android, web native Safari and Linux clients; diagnostics name the audio rendition | Player matrix |
 | S8 | Qualification on physical devices, failure paths, rolling upgrade, capacity against S1, then the default | All |
