@@ -460,6 +460,7 @@ Things to know:
   Use your registry's retention or cleanup policy to remove old `build-*` tags,
   for example keeping the last five.
 
+Exported in the environment (it does not read `deploy/.env`),
 `PLURX_IMAGE_REPOSITORY` is also the repository `scripts/registry-push`
 publishes versioned `sha-<12hex>` and `main` images to (see "Pull a prebuilt
 fleet image" above). `build-` tags are separate: a host's own build of a

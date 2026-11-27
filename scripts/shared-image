@@ -62,8 +62,12 @@ REVISION_LABEL = "org.opencontainers.image.revision"
 SERVICES = ("plurxd", "plurx-discovery")
 PROBE_IMAGE = "shared-image-probe.invalid/plurxd:probe"
 ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+# An optional registry host (a name, or a bracketed IPv6 address, with an
+# optional port) and one or more lowercase path components, as the OCI
+# distribution spec names them. No tag or digest.
 REPOSITORY_PATTERN = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)+$")
+    r"^(([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?/)?"
+    r"[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*$")
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 MISSING_PATTERN = re.compile(r"manifest unknown|name unknown|not found", re.IGNORECASE)
 TRANSFER_TIMEOUT = 900
@@ -95,7 +99,11 @@ def env_file_value(name: str, path: Path = DEPLOY_ENV) -> str:
             line = line[len("export "):].lstrip()
         key, separator, raw = line.partition("=")
         if separator and key.strip() == name:
-            value = raw.strip().strip("'\"")
+            raw = raw.strip()
+            if raw[:1] in ("'", '"') and raw[-1:] == raw[:1] and len(raw) > 1:
+                value = raw[1:-1]
+            else:
+                value = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
     return value
 
 
@@ -104,7 +112,12 @@ class Unconfigured(Exception):
 
 
 def repository() -> str:
-    name = os.environ.get("PLURX_IMAGE_REPOSITORY", "").strip() or env_file_value("PLURX_IMAGE_REPOSITORY")
+    # Compose's precedence: a variable set in the shell, even to nothing,
+    # overrides deploy/.env, so `PLURX_IMAGE_REPOSITORY= make docker-up` opts out.
+    if "PLURX_IMAGE_REPOSITORY" in os.environ:
+        name = os.environ["PLURX_IMAGE_REPOSITORY"].strip()
+    else:
+        name = env_file_value("PLURX_IMAGE_REPOSITORY")
     if not name:
         raise Unconfigured
     if not REPOSITORY_PATTERN.match(name):
@@ -129,7 +142,7 @@ def clean_head() -> str:
 
 def architecture() -> str:
     platform = os.environ.get("DOCKER_DEFAULT_PLATFORM", "")
-    machine = platform.split("/", 1)[1] if platform.startswith("linux/") else os.uname().machine
+    machine = platform.split("/")[1] if platform.startswith("linux/") else os.uname().machine
     arch = ARCHITECTURES.get(machine)
     if arch is None:
         raise Skip(f"unsupported architecture {machine!r}; building locally without sharing")
@@ -180,19 +193,16 @@ def pull() -> str:
     ref = shared_ref(name, sha := clean_head(), arch := architecture())
     require_standard_image()
     share = f"share {sha}"
-    note(f"looking for {ref}")
     result = run("docker", "pull", "--platform", f"linux/{arch}", ref, timeout=TRANSFER_TIMEOUT)
     if result.returncode != 0:
-        detail = result.stderr.strip()
+        detail = " ".join(result.stderr.split())
         if MISSING_PATTERN.search(detail):
-            note("no host has shared this commit yet; building it here and sharing it")
-        else:
-            note(f"registry pull failed ({detail}); building locally")
-        return share
+            note(f"no host has shared {ref} yet; building it here and sharing it")
+            return share
+        # Unreachable or not logged in: a push would only fail the same way.
+        raise Skip(f"cannot reach {ref} ({detail}); building locally without sharing")
     try:
         image_id = verify(ref, sha, arch)
-    except Unconfigured:
-        pass
     except Skip as skip:
         note(f"{skip}; building locally and replacing it")
         return share

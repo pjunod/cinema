@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -44,9 +45,20 @@ esac
 
 
 class SharedImageCase(unittest.TestCase):
-    def run_script(self, action: str, *extra: str, **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    def run_script(
+        self, action: str, *extra: str, env_file: str | None = None,
+        unset: tuple[str, ...] = (), **overrides: str,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            # A private tree, so the host's own deploy/.env is never read.
+            tree = directory / "tree"
+            (tree / "scripts").mkdir(parents=True)
+            (tree / "deploy").mkdir()
+            script = tree / "scripts" / "shared-image"
+            shutil.copy2(SCRIPT, script)
+            if env_file is not None:
+                (tree / "deploy" / ".env").write_text(env_file, encoding="utf-8")
             for name, body in (("git", GIT_STUB), ("docker", DOCKER_STUB)):
                 stub = directory / name
                 stub.write_text(body, encoding="utf-8")
@@ -69,9 +81,11 @@ class SharedImageCase(unittest.TestCase):
                 STUB_PINNED="0",
             )
             environment.update(overrides)
+            for name in unset:
+                environment.pop(name, None)
             result = subprocess.run(
-                ["python3", str(SCRIPT), action, *extra],
-                cwd=ROOT,
+                ["python3", str(script), action, *extra],
+                cwd=tree,
                 env=environment,
                 text=True,
                 capture_output=True,
@@ -95,12 +109,32 @@ class SharedImageCase(unittest.TestCase):
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(result.stdout.strip(), f"share {SHA}")
 
-    def test_pull_builds_locally_when_nothing_is_shared_or_the_registry_is_down(self):
-        for error in ("manifest unknown", "dial tcp: connection refused"):
+    def test_pull_shares_a_missing_commit_and_skips_an_unreachable_registry(self):
+        result, _ = self.run_script("pull", STUB_PULL_EXIT="1", STUB_PULL_ERROR="manifest unknown")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), f"share {SHA}")
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+        # Down or not logged in: one line, build locally, and no doomed push.
+        for error in ("dial tcp: connection refused", "unauthorized: authentication required"):
             with self.subTest(error=error):
                 result, _ = self.run_script("pull", STUB_PULL_EXIT="1", STUB_PULL_ERROR=error)
                 self.assertEqual(result.returncode, 0)
-                self.assertEqual(result.stdout.strip(), f"share {SHA}")
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+
+    def test_the_setting_comes_from_deploy_env_unless_the_shell_sets_it(self):
+        line = f"PLURX_IMAGE_REPOSITORY={REPOSITORY}  # shared builds\n"
+        result, _ = self.run_script("pull", env_file=line, unset=("PLURX_IMAGE_REPOSITORY",))
+        self.assertEqual(result.stdout.strip(), f"use {IMAGE_ID}", result.stderr)
+        # Set but empty in the shell opts out, as it would for Compose.
+        result, calls = self.run_script("pull", env_file=line, PLURX_IMAGE_REPOSITORY="")
+        self.assertEqual((result.stdout, result.stderr, calls), ("", "", []))
+
+    def test_a_variant_platform_still_names_the_architecture(self):
+        result, calls = self.run_script(
+            "pull", DOCKER_DEFAULT_PLATFORM="linux/arm64/v8", STUB_PLATFORM="linux/arm64")
+        self.assertEqual(result.stdout.strip(), f"use {IMAGE_ID}", result.stderr)
+        self.assertIn(f"pull --platform linux/arm64 {REPOSITORY}:build-{SHA}-arm64", calls)
 
     def test_unconfigured_or_dirty_checkouts_never_touch_the_registry(self):
         for overrides in ({"PLURX_IMAGE_REPOSITORY": ""}, {"STUB_DIRTY": "1"}):
