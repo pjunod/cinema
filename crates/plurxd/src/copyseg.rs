@@ -286,34 +286,6 @@ impl WriteGrants {
     pub(crate) fn register_writer(&self) -> Option<crate::scratch_ledger::ScratchWriter> {
         self.ledger.register_writer(self.key)
     }
-
-    /// Measure the session's flat directory now, as its periodic walk does,
-    /// so bytes this writer just unlinked stop being charged at once. Only a
-    /// complete walk is recorded, and only what had landed before it began is
-    /// subsumed by it.
-    async fn observe_directory(&self, dir: &std::path::Path) {
-        let written_before = self.ledger.written_of(self.key);
-        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-            return;
-        };
-        let mut bytes = 0_i64;
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(_) => return,
-            };
-            let metadata = match entry.metadata().await {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return,
-            };
-            if metadata.is_file() {
-                bytes = bytes.saturating_add(i64::try_from(metadata.len()).unwrap_or(i64::MAX));
-            }
-        }
-        self.ledger.observe_walk(self.key, bytes, written_before);
-    }
 }
 
 /// One writer waiting on a refused grant. Dropping it ends the wait.
@@ -1466,7 +1438,7 @@ impl SessionDir {
     ///   the next write: an ordinary write is authorized at twice its size
     ///   until its rename settles, and the next segment is assumed as large
     ///   as the largest so far.
-    /// - Never more than the estimate.
+    /// - Otherwise never more than the estimate.
     fn ordinary_need(&self, inventory: &NativeSplitInventory) -> u64 {
         let estimate = inventory.ordinary_startup_estimate;
         let Some(rate) = self.ordinary_rate() else {
@@ -1478,7 +1450,9 @@ impl SessionDir {
             .largest_ordinary
             .load(std::sync::atomic::Ordering::Relaxed)
             .saturating_mul(2);
-        measured.max(next).min(estimate)
+        // The next write's authorization is what a refusal before the gate
+        // would fail the start over, so it wins over the estimate's cap.
+        measured.min(estimate).max(next)
     }
 
     /// A warm start's prepared FEL head is staged whole beside both copies,
@@ -1697,7 +1671,7 @@ impl SessionDir {
     }
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
-        let committed = self.publish_file("init.mp4", &init.bytes).await?;
+        let committed = self.publish_ordinary("init.mp4", &init.bytes).await?;
         self.observe_object("init.mp4", committed, None);
         if self.split_inventory.is_some() {
             match NativeSplitAuthor::new(init.clone()) {
@@ -1793,11 +1767,10 @@ impl SessionDir {
                 }
             }
         }
-        // The ledger still charges what the split wrote until a walk subsumes
-        // it. Walk now, so the ordinary copy can use the capacity this returned.
-        if let Some(grants) = self.grants.as_ref() {
-            grants.observe_directory(&self.dir).await;
-        }
+        // The ledger keeps charging what the split wrote until the session's
+        // next walk subsumes it, as it does for anything retention unlinks: a
+        // walk of our own could race that one and leave a newer write
+        // uncharged.
     }
 
     /// Publish an object of the ordinary copy. If its grant is refused while
@@ -1973,7 +1946,7 @@ impl SessionDir {
         // — the client sees VOD from the start.
         self.started = true;
         let text = self.playlist(true);
-        self.publish_file("index.m3u8", text.as_bytes())
+        self.publish_ordinary("index.m3u8", text.as_bytes())
             .await
             .map(|_| ())
     }
@@ -4804,23 +4777,48 @@ mod split_reserve_tests {
 
     /// When the ordinary copy's grant is refused while an undecided split
     /// holds scratch, the split yields: it is declined and removed, and the
-    /// ordinary write goes ahead without waiting for capacity.
+    /// ordinary write lands once the session's walk sees the space it
+    /// returned, rather than the split keeping it.
     #[tokio::test]
     async fn an_undecided_split_yields_before_an_ordinary_write_waits() {
         let root = tempfile::tempdir().expect("tempdir");
         let inventory = inventory(2_000, u64::MAX);
         // A 10_000-byte grant and no room to grow.
-        let (mut session, _permit) = writer(root.path().to_path_buf(), 10_000, 10_000, &inventory);
+        let (mut session, permit) = writer(root.path().to_path_buf(), 10_000, 10_000, &inventory);
         assert!(segment(&mut session, 0, 1_000, 4.0).await);
         assert_eq!(split_objects(root.path()), 2);
-        // 4_200 bytes, authorized at twice that, exceed the 8_000 left.
+        // The session's periodic walk, standing in for its 30 s sample.
+        let ledger = Arc::clone(permit.ledger());
+        let key = permit.key();
+        let dir = root.path().to_path_buf();
+        let walk = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if split_objects(&dir) > 0 {
+                    continue;
+                }
+                let before = ledger.written_of(key);
+                let bytes = std::fs::read_dir(&dir)
+                    .expect("session dir")
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.metadata().ok())
+                    .filter(std::fs::Metadata::is_file)
+                    .map(|metadata| metadata.len() as i64)
+                    .sum();
+                ledger.observe_walk(key, bytes, before);
+                return;
+            }
+        });
+        // 4_200 bytes, authorized at twice that, exceed the 8_000 left while
+        // the split's 1_000 are still charged.
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             session.publish_ordinary("seg00001.m4s", &[0u8; 4_200]),
         )
         .await
-        .expect("the ordinary write never polls for the split's scratch")
+        .expect("the ordinary write lands after the walk")
         .expect("the ordinary write lands");
+        walk.await.expect("walk");
         assert_eq!(inventory.decline_reason(), Some("ordinary_write_starved"));
         assert_eq!(split_objects(root.path()), 0);
         assert!(session.split_author.is_none());
@@ -4843,6 +4841,26 @@ mod split_reserve_tests {
         assert!(waited.is_err(), "the required write waits for capacity");
         assert_eq!(split_objects(root.path()), 2);
         assert_eq!(inventory.decline_reason(), None);
+    }
+
+    /// Before the first playlist, the ordinary copy's next write is
+    /// authorized at twice its size, and a refusal then fails the start. The
+    /// split leaves room for that write even when the estimate is smaller.
+    #[tokio::test]
+    async fn the_next_ordinary_write_wins_over_a_small_estimate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = inventory(10, u64::MAX);
+        let (mut session, _permit) = writer(root.path().to_path_buf(), 4_000, 4_000, &inventory);
+        session.gate_secs = 3600;
+        // 1_000 landed of a 4_000 grant leaves 3_000. The split pair, written
+        // at twice its 1_000 bytes, does not fit beside the 2_000 the next
+        // ordinary write needs, and the budget cannot grow.
+        assert!(!segment(&mut session, 0, 1_000, 1.0).await);
+        assert_eq!(inventory.decline_reason(), Some("optional_write_blocked"));
+        session
+            .publish_ordinary("seg00001.m4s", &[0u8; 1_000])
+            .await
+            .expect("the next ordinary write still fits");
     }
 
     /// Under a session ceiling below two startups, before any media lands,
@@ -4913,10 +4931,11 @@ mod split_reserve_tests {
             } else {
                 inventory
             });
-            // No room to grow: the 12_000 left after the first segment pays
-            // for the pair beside a 4_000 need, but not beside the head too.
+            // No room to grow: the 16_000 left after the first segment pays
+            // for the pair beside the 8_000 next write, but not beside the
+            // head's 4_000 window too.
             let (mut session, _permit) =
-                writer(root.path().to_path_buf(), 16_000, 16_000, &inventory);
+                writer(root.path().to_path_buf(), 20_000, 20_000, &inventory);
             session.started = true;
             let staged = segment(&mut session, 0, 4_000, 4.0).await;
             assert_eq!(staged, !pending, "pending head {pending}");

@@ -2034,10 +2034,13 @@ impl TranscodeManager {
         let split_eligible = native_split_requested && segmenting;
         #[cfg(target_os = "linux")]
         let split_reservation = prepared_scratch.filter(|_| split_eligible).or_else(|| {
-            warm_head.as_ref().filter(|_| split_eligible).and_then(|_| {
-                let sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(3));
-                self.reserve_rolling_scratch_with(sizing, limits).ok()
-            })
+            // A warm head is staged whole beside both copies: it needs the
+            // full 3S grant, not one clamped to the ceiling.
+            warm_head
+                .as_ref()
+                .filter(|_| split_eligible)
+                .and_then(|_| prepared_native_fel_sizing(startup_bytes, limits))
+                .and_then(|sizing| self.reserve_rolling_scratch_with(sizing, limits).ok())
         });
         #[cfg(target_os = "linux")]
         let warm_head = warm_head.filter(|_| split_reservation.is_some());
