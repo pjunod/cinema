@@ -422,7 +422,10 @@ function retirePlaybackPredecessor(p,release=releaseSession){
 }
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
-function beginPlaybackMediaAttachment(p){
+// `sourceVideo` marks a sessionless attachment (direct play or progressive
+// remux): the source's video is on the wire unchanged, so its range is the
+// source's. A session attachment learns its range from the session instead.
+function beginPlaybackMediaAttachment(p,{sourceVideo=false}={}){
   if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(p,"replaced");
   if(typeof translationAttachmentWillChange==="function")translationAttachmentWillChange(p);
   if(typeof sharedCaptionAttachmentWillChange==="function")sharedCaptionAttachmentWillChange(p);
@@ -430,7 +433,8 @@ function beginPlaybackMediaAttachment(p){
   // A Shared direct session is read by exactly one attachment; any new one on
   // this player, whatever its route, ends it.
   if(p.sharedDirect)releaseSharedDirect(p);
-  const token={id:(p._mediaAttachmentOrdinal||0)+1,audioOrdinal:typeof selectedAudioIndex==="function"?selectedAudioIndex(p):p.audio?.[p.curAudio]?.index,captionPositionReady:false,captionPositionApplied:false};
+  const token={id:(p._mediaAttachmentOrdinal||0)+1,audioOrdinal:typeof selectedAudioIndex==="function"?selectedAudioIndex(p):p.audio?.[p.curAudio]?.index,captionPositionReady:false,captionPositionApplied:false,
+    qualityRange:sourceVideo&&p.source?sourceDynamicRange(p.source)||null:null};
   p._mediaAttachmentOrdinal=token.id;
   if(p.mediaAttachment?.captionReadyCleanup)p.mediaAttachment.captionReadyCleanup();
   p.mediaAttachment=token;

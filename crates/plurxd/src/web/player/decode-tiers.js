@@ -700,18 +700,23 @@ function watchDisplayDynamicRange(){
 const QUALITY_MODES=[["auto","Auto"],["original","Original"],
                      ["nomse","Original · one stream"]];
 function playQuality(){ try{ return localStorage.getItem("plurx_quality")||"auto"; }catch(e){ return "auto"; } }
-const STANDARD_QUALITY_HEIGHTS=[144,240,360,480,540,576,720,1080,1440,2160,4320];
+// Standard frames, smallest first, as [long edge, short edge].
+const STANDARD_QUALITY_FRAMES=[[256,144],[426,240],[640,360],[854,480],[960,540],
+  [1024,576],[1280,720],[1920,1080],[2560,1440],[3840,2160],[7680,4320]];
+// A raster names a standard tier in one of two ways, checked in this order:
+// it is a crop of that frame (fits inside and fills one edge: 3840×1608 is a
+// scope 4K picture, 1920×800 a scope 1080p one), or the server scaled a wider
+// source to that frame's height (3438×1440 is the 1440 rung of 3840×1608).
+// Anything else has no honest tier name and is shown by its raster.
 function playbackQualityResolution(width,height){
   if(!(width>0&&height>0)) return null;
-  const shortEdge=Math.min(width,height);
-  if(shortEdge===4320) return "8K";
-  const tier=resLabel(width,height);
-  if(tier==="2160p") return "4K";
-  if(STANDARD_QUALITY_HEIGHTS.includes(shortEdge)) return `${shortEdge}p`;
-  return ["1440p","1080p","720p","480p"].includes(tier)?tier:null;
+  const long=Math.max(width,height),short=Math.min(width,height);
+  const frame=STANDARD_QUALITY_FRAMES.find(([w,h])=>long<=w&&short<=h&&(long===w||short===h))
+    ||STANDARD_QUALITY_FRAMES.find(([,h])=>short===h);
+  return frame?qualityCapLabel(frame[1]):null;
 }
 function qualityCapLabel(height){
-  return height===2160?"4K":`${height}p`;
+  return height===4320?"8K":height===2160?"4K":`${height}p`;
 }
 function qualitySourceIsHdr(){
   const range=sourceDynamicRange(PLAYER?.source||{})||PLAYER?.deliveredRange;
@@ -749,7 +754,12 @@ function qualityOptions(){
     const text=label+consequence;
     labelCounts.set(text,(labelCounts.get(text)||0)+1);
   }
-  return QUALITY_MODES.concat(options.map(({height,label,consequence})=>{
+  // Auto chooses among the decoder-compatible rows of every route. When each
+  // of them is SDR, Auto can only deliver SDR, so it says so like a cap does.
+  const compatible=candidates.filter(candidate=>candidate?.decoder_compatible===true);
+  const autoSdr=hdr&&compatible.length>0&&compatible.every(row=>row.grade==="sdr");
+  const modes=QUALITY_MODES.map(([id,name])=>id==="auto"&&autoSdr?[id,`${name} · SDR transcode`]:[id,name]);
+  return modes.concat(options.map(({height,label,consequence})=>{
     const cap=labelCounts.get(label+consequence)>1?` · ${height}p cap`:"";
     return [String(height),label+consequence+cap];
   }));
@@ -1423,7 +1433,7 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     }
     retireOutgoing();
     resetMediaSource(video);
-    const attachment=beginPlaybackMediaAttachment(openedPlayer);
+    const attachment=beginPlaybackMediaAttachment(openedPlayer,{sourceVideo:true});
     setPlaybackMediaSource(video,url);
     markPlaybackControlSeekExecuted(PLAYER,startSec);
     video.onloadedmetadata=()=>{
@@ -1572,7 +1582,7 @@ async function executePlaybackMediaChange(p,change){
       teardownHls(); resetMediaSource(v); clearSubs(v);
       p.started=false; p.method='remux'; p.copyHls=false; p.offset=pos;
       p.probeUrl=playbackFileUrl(playbackFileContextForPlayer(p),"stream.mp4");
-      const attachment=beginPlaybackMediaAttachment(p);
+      const attachment=beginPlaybackMediaAttachment(p,{sourceVideo:true});
       v.onloadedmetadata=()=>{if(!attachment.current())return;v.onloadedmetadata=null;applyPlaybackAttachmentPosition(v,p,attachment,0);};
       setPlaybackMediaSource(v,remuxUrl(playbackFileContextForPlayer(p),audio,pos));
       markPlaybackControlSeekExecuted(p,pos);
@@ -1711,7 +1721,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       detail:"the HLS index is still building — remuxing without segmentation"});
     resetMediaSource(v);
     if(live && !live()) return false;
-    const player=PLAYER,attachment=beginPlaybackMediaAttachment(player);
+    const player=PLAYER,attachment=beginPlaybackMediaAttachment(player,{sourceVideo:true});
     v.onloadedmetadata=()=>{if(!attachment.current())return;v.onloadedmetadata=null;applyPlaybackAttachmentPosition(v,player,attachment,0);};
     setPlaybackMediaSource(v,remuxUrl(context,aidx,from));
     markPlaybackControlSeekExecuted(PLAYER,from);

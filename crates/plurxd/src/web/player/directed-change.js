@@ -1346,7 +1346,7 @@ function attachSharedDirect(v,t,info,wantSec){
   t.directUrl=info.url; t.probeUrl=info.url;
   if(t===PLAYER) renderPlayerInfo();
   resetMediaSource(v);
-  const attachment=beginPlaybackMediaAttachment(t);
+  const attachment=beginPlaybackMediaAttachment(t,{sourceVideo:true});
   const direct={session_id:info.session_id,attachment,timeline:false};
   t.sharedDirect=direct;
   setPlaybackMediaSource(v,info.url);

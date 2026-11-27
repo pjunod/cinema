@@ -46,14 +46,18 @@ function updatePlaybackQualityChrome(v,p){
     const grade=["sdr","hdr10","hdr10plus","hlg","dolby_vision"].includes(attachedRange)?attachedRange:null;
     const candidate=(p.qualityCandidates||[]).find(row=>row.id===p.qualityCandidateId);
     const codec=["h264","hevc","av1","vp9","vp8"].includes(candidate?.planned_codec)?candidate.planned_codec:null;
-    const tierChanged=!!current&&current.label!==label;
+    // A new raster is a quality change even inside one tier (the 1608 and
+    // 1440 rungs of a scope title are both wide); the label names it when it
+    // can, the raster when both sides share a label.
+    const resized=!!current&&(current.width!==width||current.height!==height);
     const rangeChanged=!!current&&current.grade&&grade&&current.grade!==grade;
     const codecChanged=!!current&&current.codec&&codec&&current.codec!==codec;
-    const changed=tierChanged||rangeChanged||codecChanged;
+    const changed=resized||rangeChanged||codecChanged;
     const range=grade?(grade==="dolby_vision"?"Dolby Vision":grade.toUpperCase()):"";
-    const transition=tierChanged?`${current.label} → ${label}`:label;
-    const noticeRange=(rangeChanged||(!tierChanged&&range!=="SDR"))?range:"";
-    const noticeCodec=!tierChanged&&codec?codec.toUpperCase():"";
+    const transition=!resized?label:current.label!==label?`${current.label} → ${label}`
+      :`${current.width}×${current.height} → ${width}×${height}`;
+    const noticeRange=(rangeChanged||(!resized&&range!=="SDR"))?range:"";
+    const noticeCodec=!resized&&codec?codec.toUpperCase():"";
     const notice=[transition,noticeRange,noticeCodec].filter(Boolean).join(" · ");
     const rangeEvidenceLost=!!current?.grade&&!grade;
     current=p.qualityChrome={width,height,label,grade,range,codec,proof:p.presentationAdvancedAt,

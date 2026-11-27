@@ -162,7 +162,7 @@ function shipped(name) {
 
 test("quality menu uses standard tiers and discloses SDR without changing selection IDs",()=>{
   const modes=bodyScript.match(/const QUALITY_MODES=\[.*?\];/s)[0];
-  const heights=bodyScript.match(/const STANDARD_QUALITY_HEIGHTS=\[.*?\];/s)[0];
+  const heights=bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0];
   const player={source:{hdr:"dolby_vision"},deliveredRange:"hdr10"};
   let saved="1608";
   const policy={
@@ -171,7 +171,7 @@ test("quality menu uses standard tiers and discloses SDR without changing select
   };
   const {options,label}=new Function("PLAYER","localStorage","PlaybackPolicy",
     [modes,heights,...[
-      "sourceDynamicRange","resLabel","playQuality","playbackQualityResolution",
+      "sourceDynamicRange","playQuality","playbackQualityResolution",
       "qualityCapLabel","qualitySourceIsHdr","qualityOptions","qualityLabel"
     ].map(shipped),"return {options:qualityOptions,label:qualityLabel};"].join("\n"))(
       player,{getItem:key=>key==="plurx_quality"?saved:null},policy);
@@ -203,6 +203,26 @@ test("quality menu uses standard tiers and discloses SDR without changing select
   player.qualityCandidates.pop();
   player.qualityCandidates.push(encode(1608,2560,1440,"sdr"));
   assert.deepEqual(options()[4],["1608","Up to 1608p · SDR transcode"]);
+  const mixedCatalog=player.qualityCandidates;
+  // The server's catalog for a 3840×1608 source: the source-height rung keeps
+  // the raster, lower rungs scale the height and keep the scope width ratio.
+  player.qualityCandidates=[
+    encode(1608,3840,1608,"hdr10"),encode(1440,3438,1440,"sdr"),
+    encode(1080,2580,1080,"sdr"),encode(720,1720,720,"sdr"),
+  ];
+  assert.deepEqual(options().slice(3),[
+    ["1608","4K"],["1440","1440p · SDR transcode"],
+    ["1080","1080p · SDR transcode"],["720","720p · SDR transcode"],
+  ],"a scope title's rungs keep distinct tiers instead of two 4K entries");
+  assert.equal(options()[0][1],"Auto","Auto can still reach the HDR10 rung");
+  player.qualityCandidates=[
+    encode(1440,3438,1440,"sdr"),{...encode(1608,3840,1608,"hdr10"),decoder_compatible:false},
+    {...encode(1608,3840,1608,"hdr10"),route:"original",decoder_compatible:false},
+  ];
+  assert.deepEqual(options()[0],["auto","Auto · SDR transcode"],
+    "Auto discloses SDR when every route this decoder can play is SDR");
+  assert.deepEqual(options().slice(1,3),[["original","Original"],["nomse","Original · one stream"]]);
+  player.qualityCandidates=mixedCatalog;
   player.source={hdr:""};
   player.deliveredRange="sdr";
   assert.deepEqual(options().slice(5,7),[["1080","1080p"],["720","720p"]]);
@@ -225,7 +245,7 @@ test("quality controls describe presented frames and announce only completed qua
   const p={mediaAttachment:{id:1,qualityRange:"sdr"},deliveredRange:"sdr",qualityCandidateId:"original"};
   const surface={surface:{kind:"none"}};
   const update=new Function("PLAYER","document","performance","playQuality","playbackOwnsAttachedMedia","PLAYBACK_SURFACE",
-    [bodyScript.match(/const STANDARD_QUALITY_HEIGHTS=\[.*?\];/s)[0],shipped("resLabel"),
+    [bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0],shipped("qualityCapLabel"),
       shipped("statsStreamFormat"),shipped("playbackQualityResolution"),shipped("updatePlaybackQualityChrome"),
       "return updatePlaybackQualityChrome;"].join("\n"))(
       p,{getElementById:id=>id==="video"?video:nodes[id]}, {now:()=>now},()=>mode,()=>owns,surface);
@@ -299,6 +319,25 @@ test("quality controls describe presented frames and announce only completed qua
   p.mediaAttachment={id:3};p.qualityCandidateId="encode-480";present();
   assert.equal(nodes.pbqualitycurrent.textContent,"480p");
   assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 720p → 480p");
+  v.videoWidth=3840;v.videoHeight=1608;video=v;present();
+  v.videoWidth=3438;v.videoHeight=1440;present();
+  assert.equal(nodes.pbqualitycurrent.textContent,"1440p","a scope 1440 rung is not another 4K");
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 4K → 1440p");
+  now=9000;present();
+  v.videoWidth=3840;v.videoHeight=2160;present();
+  v.videoWidth=3840;v.videoHeight=1608;present();
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 3840×2160 → 3840×1608",
+    "a raster change inside one tier is still announced");
+});
+
+test("quality tiers name crops and height-scaled wide encodes, and nothing else",()=>{
+  const resolution=new Function([bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0],
+    shipped("qualityCapLabel"),shipped("playbackQualityResolution"),"return playbackQualityResolution;"].join("\n"))();
+  for(const [w,h,want] of [[3840,1608,"4K"],[3438,1440,"1440p"],[2580,1080,"1080p"],[1720,720,"720p"],
+    [1920,800,"1080p"],[2560,1072,"1440p"],[7680,3200,"8K"],[4096,2160,"4K"],[2160,3840,"4K"],
+    [800,1920,"1080p"],[1280,540,"720p"],[1280,536,"720p"],[960,540,"540p"],[720,576,"576p"],
+    [720,480,"480p"],[1440,1080,"1080p"],[0,1080,null],[1000,1000,null]])
+    assert.equal(resolution(w,h),want,`${w}×${h}`);
 });
 
 test("quality notice stays inside the fullscreen player without adding a transport stop",()=>{

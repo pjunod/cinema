@@ -4028,7 +4028,7 @@ test("attachment and retirement are what the presenter is told about identity", 
   const fed = [];
   const attach = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
-    [shippedSource("clearEffectiveProcessing"), shippedSource("beginPlaybackMediaAttachment"),
+    [shippedSource("clearEffectiveProcessing"), shippedSource("sourceDynamicRange"),shippedSource("beginPlaybackMediaAttachment"),
       "return beginPlaybackMediaAttachment;"].join("\n"),
   )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
   attach({ attemptId: "a7" });
