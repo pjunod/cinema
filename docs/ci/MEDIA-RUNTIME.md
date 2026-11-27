@@ -6,7 +6,8 @@ reach main) and [RUNNER-DISK.md](RUNNER-DISK.md) (builder storage limits).
 **Status:** built; the runtime pin is the `runtime-assets` base in
 `Dockerfile`. The DV helper bundle moved back to the application build on
 2026-11-11; its dependency image is the `dv-processing-dependencies` pin
-beside it, published and pinned on 2026-11-12.
+beside it. Both were republished as the audited amd64 release base and
+pinned on 2026-11-27.
 
 ## Application builds consume the committed digest
 
@@ -119,6 +120,26 @@ public repository before updating source. Publish publicly first, then commit
 the source update. A missing base fails at image resolution; application builds
 never fall back to rebuilding it.
 
+## Audited amd64 release base — 2026-11-27
+
+`publish-release.yml` refuses a pinned amd64 runtime that lacks audited Dolby
+shipping provenance, so v0.9.1 never published from the 2026-11-12 base.
+Forgejo run 9389 built both images from `5963ec88f` with `audited_amd64`
+enabled; its amd64 job passed the Dolby provenance smoke.
+
+| Image | Index (pinned) | linux/amd64 | linux/arm64 |
+|---|---|---|---|
+| Media runtime | `sha256:4ec79d58de22ebb0cb09889de57f245cdd56a884ebec3a5327a90662ce12e6c9` | `sha256:5ab6dd9888f698f7c810af13a84cb7f57381fd0a7ad3ee5812d39457a7f45133` | `sha256:bfe3bd4a9bf77c09f7a2b817e045796f448f392148828a93ca805c41a9dc6fb5` |
+| DV build dependencies | `sha256:dfeb835a147680db0fb90826f99cb4f0a41467c8c42ce1718786686a10bbe066` | `sha256:e9ccb1768b7fa62f496976e7b0d33353294c5268df1379c628148840ed7aeba9` | `sha256:f84379e7c1181c233963c70f4cbd633b12adc34ea311de7e4c7bcc01dbc215c8` |
+
+`pjunod/cinema` no longer has self-hosted runners, so `media-runtime-public.yml`
+could not run. The same `skopeo copy --all --preserve-digests` ran from an
+operator machine instead: it read Forgejo with an existing operator credential
+and wrote GHCR with the owner's `write:packages` login. No Forgejo credential
+was stored on GitHub. The index digests read back from GHCR matched the
+receipt. `pin` and `pin-dv-dependencies` then verified both indexes anonymously
+and rewrote the pins.
+
 ## Republication — 2026-11-12
 
 Republished from `c0a234817` after #1481 changed the renderer sources without a
@@ -129,7 +150,7 @@ worker and arm64 on the release arm64 runner.
 
 | | Digest |
 |---|---|
-| Index (pinned) | `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67` |
+| Index (superseded 2026-11-27) | `sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67` |
 | linux/amd64 | `sha256:7242b24e931f887deb1136a7172cc0e8d163765d7d2702bd61b22b3b7aedb1a9` |
 | linux/arm64 | `sha256:44bda5af679331e52fc699e3b3ba9fb371f30d87f25b8c31a8122768da814c9d` |
 
