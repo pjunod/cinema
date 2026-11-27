@@ -1100,6 +1100,9 @@ async function decideForPlay(attempt){
         });
         d2.reasons=[`${learnedLimitView.reason} `+
           `(Quality → Original bypasses this measurement)`].concat(d2.reasons||[]);
+        // The replaced decision was sessionless, so its range is the server's
+        // answer for the source video that Original plays later.
+        d2._sourceVideoRange=ordinaryRange||null;
         decision=d2;
       }catch(e){
         if(!openIsCurrent()) return null;
@@ -1215,9 +1218,11 @@ function buildPlayer(attempt,decided,prepared){
     deliveredRange:decision.delivered_dynamic_range||null,
     // The server's answer for the source video unchanged on this client
     // (direct play or remux: DV kept or stripped to its base grade). It only
-    // answers that when the decision itself was sessionless; a transcode
-    // decision's range is its encode grade, so the source's stays unknown.
-    sourceVideoRange:decision.method!=='transcode'&&decision.delivered_dynamic_range||null,
+    // answers that for a sessionless decision, including the one a learned
+    // decode limit replaced; a transcode decision's range is its encode
+    // grade, so otherwise the source's stays unknown.
+    sourceVideoRange:decision._sourceVideoRange
+      ??(decision.method!=='transcode'&&decision.delivered_dynamic_range||null),
     deliveredDvProfile:decision.delivered_dolby_vision_profile||null,
     playStartedAt:clickedAt, ttffMs:null, stalls:0, sessionId:null, streamId:null, health:null,
     attemptId:null, attemptReason:null, bufferLimits:null,

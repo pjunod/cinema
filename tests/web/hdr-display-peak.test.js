@@ -100,3 +100,19 @@ test("same-title display peak freezes while open and refreshes after Close",asyn
     assert.equal(retry.decision._capsSnapshot.display.max_nits,value??undefined);
   }
 });
+
+test("a learned-limit transcode keeps the replaced decision's source-video range for a later Original",async()=>{
+  const h=harness();
+  vm.runInContext(`const DECODE_LIMIT_TTL_MS=1,DECODE_LIMIT_RETEST_MS=1;
+    const PlaybackPolicy={learnedDecodeLimitAction:()=>({action:"apply",limit:{}}),
+      learnedDecodeLimitView:()=>({reason:"learned"})};
+    function playQuality(){return "auto";}function clientLog(){}function decodeLimitLabel(){return "";}
+    const answers=[{method:"direct_play",delivered_dynamic_range:"hdr10",source:{hdr:"dolby_vision"}},
+      {method:"transcode",delivered_dynamic_range:"sdr",reasons:[]}];
+    api=async(path,options)=>{requests.push(options.body.caps);return answers.shift();};`,h.ctx);
+  const {decision}=await h.fullDecision({fileId:1,selection:{},sessionAudioOffset:0,
+    preparation:{run:fn=>fn(null)},openIsCurrent:()=>true,failPreparation:error=>{throw error;}});
+  assert.equal(decision.method,"transcode");
+  assert.equal(decision._sourceVideoRange,"hdr10",
+    "the server already said what the unchanged source delivers; Original must not lose it");
+});
