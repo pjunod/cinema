@@ -4,13 +4,14 @@ GLSL has no log1p/expm1. Extract the legacy scalar functions (pq_*) from
 dv_dm.h and map only GLSL builtins/literals to float C; this catches
 cancellation returning when the shader source changes.
 
-The precise CM4 helpers (dfi_eq_finish_eotf, eqpq_oetf3 and the r20q_*/eq*
-split-float functions under them) are three channels wide, so their GLSL is
-compiled unchanged as C++ against a small vec3 shim
-(controls/pq_helper_port.py). With a fused fma and no reassociation they must
-return the correctly rounded float32 of the exact ST 2084 functions on every
-sample; with fma as a*b+c, or compiled as if `precise` were absent, they must
-not, which is what makes the same check meaningful on a GPU.
+The CM4 transfer helpers (dfi_eq_finish_eotf, eqpq_oetf3 and the table-driven
+pqt_* functions under them) read dm_pq_tables.h, so their GLSL is compiled
+unchanged as C++ against a small shim (controls/pq_helper_port.py). Fused or
+with fma as a*b+c they must stay within 1 ULP of the correctly rounded float32
+of the exact ST 2084 functions on every sample (every float32 input:
+controls/pq_helper_exhaustive.py); the two fma modes must differ, and compiled
+as if `precise` were absent they must move further, which is what makes the
+same comparison meaningful on a GPU.
 
 Actual shader compilation and driver behaviour remain the job of
 controls/run_dm_parity.py and controls/run_pq_helper_exact.py.
@@ -158,7 +159,7 @@ class ShaderPQPrecision(unittest.TestCase):
             self.assertAlmostEqual(actual / expected, 1, delta=1e-4)
 
 
-class PreciseHelperExactness(unittest.TestCase):
+class TableHelperBounds(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory()
@@ -173,11 +174,12 @@ class PreciseHelperExactness(unittest.TestCase):
         xs, want = self.samples[helper]
         return pq_helper_port.compare(xs, self.ports[mode].run(helper, xs), want)
 
-    def test_precise_helpers_are_correctly_rounded(self):
-        for helper in pq_helper_port.HELPERS:
-            with self.subTest(helper=helper):
-                self.assertGreater(len(self.samples[helper][0]), 9000)
-                self.assertEqual(self.wrong("fused", helper), (0, 0, None))
+    def test_table_helpers_are_within_one_ulp(self):
+        for mode in ("fused", "unfused-fma"):
+            for helper in pq_helper_port.HELPERS:
+                with self.subTest(mode=mode, helper=helper):
+                    self.assertGreater(len(self.samples[helper][0]), 9000)
+                    self.assertLessEqual(self.wrong(mode, helper)[1], 1)
 
     def test_loading_the_ports_leaves_subnormals_in_this_process(self):
         # setUpClass has loaded every mode, "no-precise" (-ffast-math) included. A port linked
@@ -188,21 +190,43 @@ class PreciseHelperExactness(unittest.TestCase):
         self.assertEqual(smallest_normal.value / 2, 2.0 ** -1023)
         self.assertGreater(ctypes.c_double(smallest_normal.value / 2).value * 1.0, 0.0)
 
-    def test_precise_helpers_need_a_fused_fma(self):
-        # The product's error term is fma(a,b,-a*b): unfused it is zero and the low words are lost.
+    def differ(self, mode, other, helper):
+        xs = self.samples[helper][0]
+        return pq_helper_port.compare(xs, self.ports[mode].run(helper, xs), self.ports[other].run(helper, xs))[0]
+
+    def test_unfused_fma_is_visible(self):
+        # c1_hi tau is split exactly by fma(c1_hi, tau, -c1_hi*tau); unfused its low word is lost,
+        # which stays within 1 ULP but changes results, so a GPU's fusion can be told from them.
         for helper in pq_helper_port.HELPERS:
             with self.subTest(helper=helper):
-                count, worst, _ = self.wrong("unfused-fma", helper)
-                self.assertGreater(count, len(self.samples[helper][0]) // 2)
-                self.assertGreater(worst, 8)
+                self.assertGreater(self.differ("fused", "unfused-fma", helper), 20)
 
-    def test_precise_helpers_need_precise(self):
+    def test_table_helpers_need_precise(self):
         # Free to reassociate, a compiler cancels the error-free sums: (a+b)-a becomes b.
         for helper in pq_helper_port.HELPERS:
             with self.subTest(helper=helper):
-                self.assertGreater(self.wrong("no-precise", helper)[0], len(self.samples[helper][0]) // 2)
+                self.assertGreater(self.differ("fused", "no-precise", helper), len(self.samples[helper][0]) // 8)
+                self.assertGreater(self.wrong("no-precise", helper)[1], 1)
 
-    def test_precise_helper_edges(self):
+    def test_table_generator_reproduces_the_table_layout(self):
+        # The fitted words may differ in their low bits on another libm (a regenerated header
+        # must pass pq_helper_exhaustive.py again); the layout the shader indexes may not.
+        compiler = shutil.which("cc")
+        if not compiler:
+            raise RuntimeError("C compiler required for the PQ table generator")
+        controls = ROOT / "tools/dv_processing/controls"
+        work = Path(self.scratch.name)
+        subprocess.run([compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(controls),
+                        str(controls / "pq_table_gen.c"), "-o", str(work / "pq_table_gen"), "-lm"], check=True)
+        subprocess.run([str(work / "pq_table_gen"), str(work / "tables.h")], check=True, capture_output=True)
+
+        def layout(text):
+            return (pq_helper_port.glsl_literals(text, "DM_PQT_GLSL"),
+                    re.search(r"(\d+) binades", text).group(1), re.search(r"DM_PQT_WIDTH (\d+)", text).group(1))
+
+        self.assertEqual(layout((work / "tables.h").read_text()), layout(pq_helper_port.TABLES.read_text()))
+
+    def test_table_helper_edges(self):
         port, bits = self.ports["fused"], pq_helper_port.bits
         inf = float("inf")
         # Black and below, the unit code, the pole of the extended EOTF and beyond.

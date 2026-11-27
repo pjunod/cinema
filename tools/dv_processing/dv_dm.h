@@ -24,8 +24,9 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/dispatch.h>
 #include "dm_closed_form.h"
+#include "dm_pq_tables.h"
 
-#define DV_DM_METHOD_CM4 "dolby-cm4-closed-form-v1"
+#define DV_DM_METHOD_CM4 "dolby-cm4-closed-form-v2"
 #define DV_DM_METHOD_CM29 "dolby-cm29-measured-gamut-v5"
 
 enum { DV_DM_U = 24 };   // vec4 uniforms
@@ -466,197 +467,72 @@ enum { DV_DM_LATTICE_X = 66 };
   "const float GY[5]=float[5](0.05448868455,0.244201342,0.4026199469,0.244201342,0.05448868455);\n"
 
 #define DV_DM_GLSL_CM4_PQ \
-  "// Split-float (double-word) ST 2084 helpers, three channels wide: every arithmetic step is the\n" \
-  "// componentwise form of the scalar algorithm, and wherever that algorithm branches a lane selects between\n" \
-  "// values computed for all lanes, so each lane keeps the scalar result's bits.\n" \
-  "struct r20q_dw { vec3 hi; vec3 lo; };\n" \
-  "r20q_dw r20q_make(vec3 hi,vec3 lo) {\n" \
-  "    r20q_dw result;\n" \
-  "    result.hi=hi; result.lo=lo;\n" \
+  DM_PQT_GLSL \
+  "// Table-driven ST 2084 helpers (dm_pq_tables.h, controls/pq_table_gen.c). Each positive float32\n" \
+  "// input selects one segment of its binade; tau, the input's position in it, is exact, and the\n" \
+  "// segment's polynomial is N + c1 tau (both double-word, c1 tau exact by fma) plus a float32 tail\n" \
+  "// far below N, so one rounding at the end leaves every result within 1 ULP of the correctly\n" \
+  "// rounded value: controls/pq_helper_exhaustive.py checks all float32 inputs, fused and unfused.\n" \
+  "// No float operation here produces a subnormal; subnormal light is assembled from integers.\n" \
+  "// pqt_mad is fma written as a multiply and an add (the control's unfused-fma mutation uses it).\n" \
+  "float pqt_mad(float a,float b,float c) { precise float p=a*b; precise float r=p+c; return r; }\n" \
+  "vec4 pqt_texel(int i) { return texelFetch(pqtab,ivec2(i&((1<<PQT_WIDTH_LOG2)-1),i>>PQT_WIDTH_LOG2),0); }\n" \
+  "// The segment of binade entry `entry` holding the float32 with mantissa m.\n" \
+  "float pqt_segment(int entry,uint m) {\n" \
+  "    vec4 b=pqt_texel(entry);\n" \
+  "    int s=int(b.y);\n" \
+  "    int t=int(b.x)+3*int(m>>uint(s));\n" \
+  "    precise float tau=float(m&((1u<<uint(s))-1u))*uintBitsToFloat(uint(127-s)<<23u);\n" \
+  "    vec4 n=pqt_texel(t), c=pqt_texel(t+1), d=pqt_texel(t+2);\n" \
+  "    precise float r=fma(d.x,tau,c.w);\n" \
+  "    r=fma(r,tau,c.z); r=fma(r,tau,c.y); r=fma(r,tau,c.x); r=fma(r,tau,n.w);\n" \
+  "    precise float rest=r*tau;\n" \
+  "    precise float ph=n.z*tau;\n" \
+  "    precise float pl=fma(n.z,tau,-ph);\n" \
+  "    precise float s0=n.x+ph;\n" \
+  "    precise float v=s0-n.x;\n" \
+  "    precise float lost=s0-v;\n" \
+  "    precise float e1=(n.x-lost)+(ph-v);\n" \
+  "    precise float low=pl+rest;\n" \
+  "    precise float tail=e1+(n.y+low);\n" \
+  "    precise float result=s0+tail;\n" \
   "    return result;\n" \
   "}\n" \
-  "r20q_dw r20q_F(vec3 a) { return r20q_make(a,vec3(0.0)); }\n" \
-  "r20q_dw r20q_K(float a) { return r20q_make(vec3(a),vec3(0.0)); }\n" \
-  "r20q_dw r20q_C(uint hi,uint lo) { return r20q_make(vec3(uintBitsToFloat(hi)),vec3(uintBitsToFloat(lo))); }\n" \
-  "r20q_dw r20q_sel(bvec3 c,r20q_dw a,r20q_dw b) { return r20q_make(mix(b.hi,a.hi,c),mix(b.lo,a.lo,c)); }\n" \
-  "bvec3 r20q_and(bvec3 a,bvec3 b) { return bvec3(ivec3(a)&ivec3(b)); }\n" \
-  "bvec3 r20q_or(bvec3 a,bvec3 b) { return bvec3(ivec3(a)|ivec3(b)); }\n" \
-  "r20q_dw r20q_ln2() { return r20q_C(0x3f317218u,0xb102e308u); }\n" \
-  "r20q_dw r20q_i_m1() { return r20q_C(0x40c8e06bu,0xb4118e9du); }\n" \
-  "r20q_dw r20q_i_m2() { return r20q_C(0x3c4fcdacu,0x2f413136u); }\n" \
-  "r20q_dw r20q_ts(vec3 a,vec3 b) {\n" \
-  "    precise vec3 sum=a+b;\n" \
-  "    precise vec3 v=sum-a;\n" \
-  "    precise vec3 left=sum-v;\n" \
-  "    precise vec3 da=a-left;\n" \
-  "    precise vec3 db=b-v;\n" \
-  "    precise vec3 error=da+db;\n" \
-  "    return r20q_make(sum,error);\n" \
+  "// Extended ST 2084 EOTF in nits for one finite PQ code: zero light below PQT_ZERO, +inf from the\n" \
+  "// pole on, exactly 10000 at code 1. Near black the segments are in u = e - E0F and hold light\n" \
+  "// scaled by 2^64; near the pole in v = EPF - e (both subtractions exact).\n" \
+  "float pqt_eotf(float e) {\n" \
+  "    uint key=floatBitsToUint(e);\n" \
+  "    if(key<PQT_ZERO||key>=0x80000000u) return 0.0;\n" \
+  "    if(key>=PQT_POLE) return uintBitsToFloat(0x7f800000u);\n" \
+  "    if(key==0x3f800000u) return 10000.0;\n" \
+  "    uint x=key; int entry=PQT_EOTF_B; bool dark=key<PQT_TWO_E0;\n" \
+  "    if(dark) { precise float u=e-uintBitsToFloat(PQT_E0F); x=floatBitsToUint(u); entry=PQT_EOTF_A; }\n" \
+  "    else if(key>=0x3f800000u) { precise float v=uintBitsToFloat(PQT_EPF)-e; x=floatBitsToUint(v); entry=PQT_EOTF_C; }\n" \
+  "    precise float r=pqt_segment(entry+int(x>>23u),x&0x7fffffu);\n" \
+  "    if(!dark) return r;\n" \
+  "    if(r>=uintBitsToFloat(0x20800000u)) { precise float light=r*uintBitsToFloat(0x1f800000u); return light; }\n" \
+  "    precise float q=max(r,0.0)*uintBitsToFloat(0x6a000000u);\n" \
+  "    return uintBitsToFloat(uint(roundEven(q)));\n" \
   "}\n" \
-  "r20q_dw r20q_add(r20q_dw a,r20q_dw b) {\n" \
-  "    r20q_dw p=r20q_ts(a.hi,b.hi);\n" \
-  "    r20q_dw q=r20q_ts(a.lo,b.lo);\n" \
-  "    precise vec3 center=p.lo+q.hi;\n" \
-  "    r20q_dw r=r20q_ts(p.hi,center);\n" \
-  "    precise vec3 tail=r.lo+q.lo;\n" \
-  "    return r20q_ts(r.hi,tail);\n" \
-  "}\n" \
-  "r20q_dw r20q_neg(r20q_dw a) {\n" \
-  "    precise vec3 hi=-a.hi;\n" \
-  "    precise vec3 lo=-a.lo;\n" \
-  "    return r20q_make(hi,lo);\n" \
-  "}\n" \
-  "r20q_dw r20q_sub(r20q_dw a,r20q_dw b) { return r20q_add(a,r20q_neg(b)); }\n" \
-  "r20q_dw r20q_mul(r20q_dw a,r20q_dw b) {\n" \
-  "    precise vec3 product=a.hi*b.hi;\n" \
-  "    precise vec3 negative_product=-product;\n" \
-  "    precise vec3 error=fma(a.hi,b.hi,negative_product);\n" \
-  "    precise vec3 cross0=a.hi*b.lo;\n" \
-  "    error=error+cross0;\n" \
-  "    precise vec3 cross1=a.lo*b.hi;\n" \
-  "    error=error+cross1;\n" \
-  "    precise vec3 cross2=a.lo*b.lo;\n" \
-  "    error=error+cross2;\n" \
-  "    return r20q_ts(product,error);\n" \
-  "}\n" \
-  "r20q_dw r20q_divide(r20q_dw a,r20q_dw b) {\n" \
-  "    precise vec3 q=a.hi/b.hi;\n" \
-  "    r20q_dw r=r20q_sub(a,r20q_mul(b,r20q_F(q)));\n" \
-  "    precise vec3 residual=r.hi+r.lo;\n" \
-  "    precise vec3 low=residual/b.hi;\n" \
-  "    return r20q_ts(q,low);\n" \
-  "}\n" \
-  "r20q_dw r20q_scale(r20q_dw a,ivec3 k) {\n" \
-  "    precise vec3 hi=ldexp(a.hi,k);\n" \
-  "    precise vec3 lo=ldexp(a.lo,k);\n" \
-  "    return r20q_make(hi,lo);\n" \
-  "}\n" \
-  "// Horner evaluation of a tail of one of the two coefficient tables (split-float words, highest\n" \
-  "// power first): the odd series of 2*atanh from term `first`, the exponential series over [first,last].\n" \
-  "const uint EQ_ODD[22]=uint[22](0x3d430c31u,0xb073cf3du,0x3d579436u,0xafd79436u,0x3d70f0f1u,0xaf70f0f1u,0x3d888889u,0xb16eeeefu,0x3d9d89d9u,0xb144ec4fu,0x3dba2e8cu,0xb13a2e8cu,0x3de38e39u,0xb0638e39u,0x3e124925u,0xb1db6db7u,0x3e4ccccdu,0xb14ccccdu,0x3eaaaaabu,0xb22aaaabu,0x3f800000u,0x00000000u);\n" \
-  "const uint EQ_EXP[30]=uint[30](0x2d49cba5u,0x208c07cau,0x2f309231u,0xa2c5792fu,0x310f76c7u,0x24ff8d89u,0x32d7322bu,0x25fea89cu,0x3493f27eu,0xa808760au,0x3638ef1du,0x292ad8e6u,0x37d00d01u,0xaabfcbfdu,0x39500d01u,0xac3fcbfdu,0x3ab60b61u,0xae13e93fu,0x3c088889u,0xafeeeeefu,0x3d2aaaabu,0xb0aaaaabu,0x3e2aaaabu,0xb1aaaaabu,0x3f000000u,0x00000000u,0x3f800000u,0x00000000u,0x3f800000u,0x00000000u);\n" \
-  "r20q_dw eqOddSeries(r20q_dw z,int first) {\n" \
-  "    r20q_dw p=r20q_C(EQ_ODD[2*first],EQ_ODD[2*first+1]);\n" \
-  "    for(int i=first+1;i<11;i++) p=r20q_add(r20q_C(EQ_ODD[2*i],EQ_ODD[2*i+1]),r20q_mul(z,p));\n" \
-  "    return p;\n" \
-  "}\n" \
-  "r20q_dw eqExpSeries(r20q_dw x,int first,int last) {\n" \
-  "    r20q_dw p=r20q_C(EQ_EXP[2*first],EQ_EXP[2*first+1]);\n" \
-  "    for(int i=first+1;i<=last;i++) p=r20q_add(r20q_C(EQ_EXP[2*i],EQ_EXP[2*i+1]),r20q_mul(x,p));\n" \
-  "    return p;\n" \
-  "}\n" \
-  "r20q_dw eqAtanh(r20q_dw t) {\n" \
-  "    r20q_dw z=r20q_mul(t,t);\n" \
-  "    r20q_dw p=eqOddSeries(z,0);\n" \
-  "    return r20q_scale(r20q_mul(t,p),ivec3(1));\n" \
-  "}\n" \
-  "// direct ? log(x) : log1p(x). The scalar log, and both branches of the scalar log1p, end in the\n" \
-  "// same odd series; here they share one evaluation of it.\n" \
-  "r20q_dw eqLogSel(r20q_dw x,bvec3 direct) {\n" \
-  "    bvec3 small=r20q_and(not(direct),lessThan(abs(x.hi),vec3(.125)));\n" \
-  "    r20q_dw a=r20q_sel(direct,x,r20q_add(r20q_K(1.0),x));\n" \
-  "    ivec3 k=ivec3(0);\n" \
-  "    precise vec3 q=frexp(a.hi,k);\n" \
-  "    k-=ivec3(lessThan(q,vec3(uintBitsToFloat(0x3f3504f3u))));\n" \
-  "    r20q_dw v=r20q_scale(a,-k);\n" \
-  "    r20q_dw n=r20q_sel(small,x,r20q_sub(v,r20q_K(1.0)));\n" \
-  "    r20q_dw d=r20q_add(r20q_sel(small,r20q_K(2.0),v),r20q_sel(small,x,r20q_K(1.0)));\n" \
-  "    r20q_dw s=eqAtanh(r20q_divide(n,d));\n" \
-  "    return r20q_sel(small,s,r20q_add(r20q_mul(r20q_ln2(),r20q_F(vec3(k))),s));\n" \
-  "}\n" \
-  "r20q_dw eqExpm1(r20q_dw x) {\n" \
-  "    r20q_dw p=eqExpSeries(x,2,13);\n" \
-  "    return r20q_mul(x,p);\n" \
-  "}\n" \
-  "uvec3 eqInteger(r20q_dw x) {\n" \
-  "    ivec3 anchor=ivec3(roundEven(x.hi));\n" \
-  "    r20q_dw r=r20q_sub(x,r20q_F(vec3(anchor)));\n" \
-  "    bvec3 tie=r20q_and(equal(r.lo,vec3(0.0)),notEqual(anchor&1,ivec3(0)));\n" \
-  "    anchor+=ivec3(r20q_or(greaterThan(r.hi,vec3(.5)),r20q_and(equal(r.hi,vec3(.5)),r20q_or(greaterThan(r.lo,vec3(0.0)),tie))));\n" \
-  "    tie=r20q_and(equal(r.lo,vec3(0.0)),notEqual(anchor&1,ivec3(0)));\n" \
-  "    anchor-=ivec3(r20q_or(lessThan(r.hi,vec3(-.5)),r20q_and(equal(r.hi,vec3(-.5)),r20q_or(lessThan(r.lo,vec3(0.0)),tie))));\n" \
-  "    return uvec3(anchor);\n" \
-  "}\n" \
-  "uvec3 eqPackedExp(r20q_dw z) {\n" \
-  "    precise vec3 scaled=z.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
-  "    ivec3 k=ivec3(roundEven(scaled));\n" \
-  "    r20q_dw r=r20q_sub(z,r20q_mul(r20q_F(vec3(k)),r20q_ln2()));\n" \
-  "    r20q_dw p=eqExpSeries(r,0,14);\n" \
-  "    bvec3 low=r20q_or(lessThan(p.hi,vec3(1.0)),r20q_and(equal(p.hi,vec3(1.0)),lessThan(p.lo,vec3(0.0))));\n" \
-  "    p=r20q_sel(low,r20q_scale(p,ivec3(1)),p); k-=ivec3(low);\n" \
-  "    bvec3 tiny=lessThan(k,ivec3(-126));\n" \
-  "    uvec3 sig=eqInteger(r20q_scale(p,mix(ivec3(23),k+149,tiny)));\n" \
-  "    return mix(uvec3(k+126)*0x800000u+sig,sig,tiny);\n" \
-  "}\n" \
-  "// The scalar EOTF's three input ranges (above 1, ordinary, next to black) differ only in the\n" \
-  "// operands of the same operations, so each lane selects its operands and the series run once.\n" \
-  "uvec3 eqFinite(uvec3 key) {\n" \
-  "    bvec3 zero=r20q_or(notEqual(key>>31u,uvec3(0u)),lessThan(key,uvec3(0x35443723u)));\n" \
-  "    bvec3 pole=greaterThanEqual(key,uvec3(0x3ffefbaeu));\n" \
-  "    bvec3 unit=equal(key,uvec3(0x3f800000u));\n" \
-  "    vec3 e=mix(uintBitsToFloat(key),vec3(.5),r20q_or(zero,r20q_or(pole,unit)));\n" \
-  "    bvec3 high=greaterThanEqual(e,vec3(1.0));\n" \
-  "    bvec3 mid=r20q_and(not(high),greaterThanEqual(e,vec3(.0012)));\n" \
-  "    bvec3 dark=not(r20q_or(high,mid));\n" \
-  "    r20q_dw ref=r20q_sel(high,r20q_C(0x3ffefbd3u,0x328e7b3eu),r20q_C(0x354436e8u,0x2869e7c3u));\n" \
-  "    r20q_dw diff=r20q_sub(r20q_F(e),ref);\n" \
-  "    diff=r20q_sel(high,r20q_sub(diff,r20q_K(uintBitsToFloat(0x2615be9bu))),diff);\n" \
-  "    r20q_dw h=eqExpm1(r20q_mul(eqLogSel(r20q_sel(mid,r20q_F(e),r20q_divide(diff,ref)),mid),r20q_i_m2()));\n" \
-  "    r20q_dw c=r20q_C(0x3f811faeu,0xb2c6a2adu);\n" \
-  "    r20q_dw g=r20q_mul(r20q_sel(high,c,r20q_K(.8359375)),h);\n" \
-  "    r20q_dw n=r20q_sel(dark,g,r20q_add(r20q_sel(high,r20q_sub(c,r20q_K(.8359375)),r20q_K(.1640625)),r20q_sel(high,g,h)));\n" \
-  "    r20q_dw s=r20q_mul(r20q_sel(high,r20q_K(-18.8515625),r20q_K(18.6875)),r20q_sel(dark,n,h));\n" \
-  "    r20q_dw d=r20q_sel(high,s,r20q_sub(r20q_sel(mid,r20q_K(.1640625),r20q_K(3.22998046875)),s));\n" \
-  "    r20q_dw z=r20q_add(r20q_C(0x41135d8eu,0xb409555du),r20q_mul(eqLogSel(r20q_divide(n,d),bvec3(true)),r20q_i_m1()));\n" \
-  "    return mix(mix(mix(eqPackedExp(z),uvec3(0x461c4000u),unit),uvec3(0x7f800000u),pole),uvec3(0u),zero);\n" \
+  "// Inverse EOTF (PQ code) for finite light in nits: c1^m2 at or below zero, 1 from 10000 on.\n" \
+  "float pqt_oetf(float y) {\n" \
+  "    uint w=floatBitsToUint(y);\n" \
+  "    if(w==0u||w>=0x80000000u) return uintBitsToFloat(0x354436e8u);\n" \
+  "    if(w>=0x461c4000u) return 1.0;\n" \
+  "    int e=int(w>>23u); uint m=w&0x7fffffu;\n" \
+  "    if(e==0) { int top=findMSB(m); e=top-22; m=(m<<uint(23-top))&0x7fffffu; }\n" \
+  "    return pqt_segment(PQT_OETF+e,m);\n" \
   "}\n" \
   "vec3 dfi_eq_finish_eotf(vec3 e) {\n" \
   "    uvec3 key=floatBitsToUint(e);\n" \
-  "    return mix(uintBitsToFloat(eqFinite(key)),vec3(pq_eotf_ext(e.x),pq_eotf_ext(e.y),pq_eotf_ext(e.z)),greaterThanEqual(key&0x7fffffffu,uvec3(0x7f800000u)));\n" \
-  "}\n" \
-  "r20q_dw eqpq_odd_log_luminance(r20q_dw u) {\n" \
-  "    r20q_dw z=r20q_mul(u,u);\n" \
-  "    r20q_dw p=eqOddSeries(z,1);\n" \
-  "    return r20q_scale(r20q_mul(u,p),ivec3(1));\n" \
-  "}\n" \
-  "r20q_dw eqpq_odd_log_ratio(r20q_dw u) {\n" \
-  "    r20q_dw z=r20q_mul(u,u);\n" \
-  "    r20q_dw p=eqOddSeries(z,3);\n" \
-  "    return r20q_scale(r20q_mul(u,p),ivec3(1));\n" \
-  "}\n" \
-  "r20q_dw eqpq_log_luminance(uvec3 w) {\n" \
-  "    ivec3 e=ivec3(w>>23u)-127;\n" \
-  "    uvec3 m=w&0x007fffffu;\n" \
-  "    bvec3 subnormal=equal(e,ivec3(-127));\n" \
-  "    ivec3 top=findMSB(m);\n" \
-  "    e=mix(e,top-149,subnormal);\n" \
-  "    m=mix(m,(m<<uvec3(23-top))&0x007fffffu,subnormal);\n" \
-  "    precise vec3 v=uintBitsToFloat(0x3f800000u|m);\n" \
-  "    bvec3 upper=greaterThan(v,vec3(uintBitsToFloat(0x3fb504f3u)));\n" \
-  "    precise vec3 halved=v*0.5;\n" \
-  "    v=mix(v,halved,upper); e+=ivec3(upper);\n" \
-  "    r20q_dw t=r20q_divide(r20q_sub(r20q_F(v),r20q_K(1.0)),r20q_add(r20q_F(v),r20q_K(1.0)));\n" \
-  "    return r20q_add(r20q_mul(r20q_F(vec3(e)),r20q_ln2()),eqpq_odd_log_luminance(t));\n" \
-  "}\n" \
-  "r20q_dw eqpq_exp(r20q_dw x) {\n" \
-  "    precise vec3 scaled=x.hi*uintBitsToFloat(0x3fb8aa3bu);\n" \
-  "    ivec3 k=ivec3(roundEven(scaled));\n" \
-  "    r20q_dw r=r20q_sub(x,r20q_mul(r20q_F(vec3(k)),r20q_ln2()));\n" \
-  "    r20q_dw p=eqExpSeries(r,1,14);\n" \
-  "    return r20q_scale(p,k);\n" \
+  "    vec3 r=vec3(pqt_eotf(e.x),pqt_eotf(e.y),pqt_eotf(e.z));\n" \
+  "    return mix(r,vec3(pq_eotf_ext(e.x),pq_eotf_ext(e.y),pq_eotf_ext(e.z)),greaterThanEqual(key&0x7fffffffu,uvec3(0x7f800000u)));\n" \
   "}\n" \
   "vec3 eqpq_oetf3(vec3 y) {\n" \
   "    uvec3 w=floatBitsToUint(y);\n" \
-  "    bvec3 nan=greaterThan(w&0x7fffffffu,uvec3(0x7f800000u));\n" \
-  "    bvec3 black=r20q_or(equal(w,uvec3(0u)),notEqual(w>>31u,uvec3(0u)));\n" \
-  "    bvec3 white=greaterThanEqual(w,uvec3(0x461c4000u));\n" \
-  "    w=mix(w,uvec3(0x3f800000u),r20q_or(nan,r20q_or(black,white)));\n" \
-  "    r20q_dw z=r20q_mul(r20q_K(0.1593017578125),r20q_sub(eqpq_log_luminance(w),r20q_C(0x41135d8eu,0xb409555du)));\n" \
-  "    r20q_dw t=eqpq_exp(z);\n" \
-  "    r20q_dw h=r20q_divide(r20q_mul(r20q_K(0.1640625),r20q_sub(t,r20q_K(1.0))),r20q_add(r20q_K(1.0),r20q_mul(r20q_K(18.6875),t)));\n" \
-  "    r20q_dw g=eqpq_odd_log_ratio(r20q_divide(h,r20q_add(r20q_K(2.0),h)));\n" \
-  "    vec3 r=mix(mix(eqpq_exp(r20q_mul(r20q_K(78.84375),g)).hi,vec3(1.0),white),vec3(uintBitsToFloat(0x354436e8u)),black);\n" \
-  "    return mix(r,vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)),nan);\n" \
+  "    vec3 r=vec3(pqt_oetf(y.x),pqt_oetf(y.y),pqt_oetf(y.z));\n" \
+  "    return mix(r,vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)),greaterThan(w&0x7fffffffu,uvec3(0x7f800000u)));\n" \
   "}\n"
 
 #define DV_DM_GLSL_CM4_FINISH(LMS, OETF) \
@@ -776,7 +652,7 @@ static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
   " vec3 res=c29finish(lpass,p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   ;
 
-static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, mtex, out; const uint16_t *measured; } dv_dm_gpu;
+static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, mtex, ptex, out; const uint16_t *measured; } dv_dm_gpu;
 
 // Only partial CM v2.9 active areas use this shader. Both detail planes (Ib, and Io when the
 // chroma weight is live) filter inside the rectangle; bars take the pointwise mapping alone.
@@ -835,28 +711,44 @@ static inline pl_tex dv_dm_measured_tex(pl_gpu gpu, const uint16_t *table) {
   dv_dm_gpu.measured = table;
   return dv_dm_gpu.mtex;
 }
+// The CM4 transfer helpers' segment tables, uploaded once per GPU: texel words are the
+// generated float32 bit patterns, so a 32-bit float texture returns them exactly.
+static inline pl_tex dv_dm_pq_tex(pl_gpu gpu) {
+  if (dv_dm_gpu.ptex) return dv_dm_gpu.ptex;
+  pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+  if (!fmt) return NULL;
+  dv_dm_gpu.ptex = pl_tex_create(gpu, pl_tex_params(.w = DM_PQT_WIDTH, .h = DM_PQT_HEIGHT, .format = fmt,
+                                                    .sampleable = true, .host_writable = true));
+  if (dv_dm_gpu.ptex && !pl_tex_upload(gpu, pl_tex_transfer_params(.tex = dv_dm_gpu.ptex, .ptr = (void *)dm_pqt_words)))   // read only
+    pl_tex_destroy(gpu, &dv_dm_gpu.ptex);
+  return dv_dm_gpu.ptex;
+}
 static inline bool dv_dm_pass(pl_shader sh, const char *desc, dv_dm_header header_id, const char *body,
                               pl_tex in, const char *in_name,
                               pl_tex in2, const char *in2_name, pl_tex in3, const char *in3_name,
                               float (*u)[4], int w, int h) {
-  struct pl_shader_desc d[3] = {
-    {.desc = {.name = in_name, .type = PL_DESC_SAMPLED_TEX},
-     .binding = {.object = in, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
-    {.desc = {.name = in2_name, .type = PL_DESC_SAMPLED_TEX},
-     .binding = {.object = in2, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
-    {.desc = {.name = in3_name, .type = PL_DESC_SAMPLED_TEX},
-     .binding = {.object = in3, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
-  };
-  struct pl_var var = pl_var_vec4("u"); var.dim_a = DV_DM_U;
-  struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
-  // Only CM4 point and final passes use precise transfer math. In particular,
-  // horizontal and CM2.9/lattice headers remain the legacy literal expansion.
+  // Only CM4 point and final passes use the table-driven transfer helpers, which read pqtab.
+  // In particular, horizontal and CM2.9/lattice headers remain the legacy literal expansion.
   const char *header = dv_dm_header_glsl(header_id);
   if (!header) return false;
+  bool tables = header_id == DV_DM_HEADER_CM4_POINT || header_id == DV_DM_HEADER_CM4_FINAL;
+  pl_tex pq = tables ? dv_dm_gpu.ptex : NULL;   // dv_dm_render uploads it first
+  if (tables && !pq) return false;
+  struct pl_shader_desc d[4];
+  int n = 0;
+  pl_tex objects[4] = {in, in2, in3, pq};
+  const char *names[4] = {in_name, in2_name, in3_name, "pqtab"};
+  for (int i = 0; i < 4; i++) {
+    if (!objects[i]) continue;
+    d[n++] = (struct pl_shader_desc){.desc = {.name = names[i], .type = PL_DESC_SAMPLED_TEX},
+        .binding = {.object = objects[i], .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}};
+  }
+  struct pl_var var = pl_var_vec4("u"); var.dim_a = DV_DM_U;
+  struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
   return pl_shader_custom(sh, &(struct pl_custom_shader){
       .description = desc, .header = header, .body = body,
       .input = PL_SHADER_SIG_NONE, .output = PL_SHADER_SIG_COLOR,
-      .descriptors = d, .num_descriptors = in3 ? 3 : in2 ? 2 : 1, .variables = &v, .num_variables = 1,
+      .descriptors = d, .num_descriptors = n, .variables = &v, .num_variables = 1,
       .output_w = w, .output_h = h});
 }
 
@@ -878,6 +770,7 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
   pl_shader sh;
   pl_tex lattice = NULL;   // CM v2.9 only
   if (f->algo == 4) {
+    if (!dv_dm_pq_tex(gpu)) return NULL;
     dv_dm_put(f->u[18], 4, f->weight, 0, 0);
   } else {
     // The same step the shader computes; R chroma steps each side of zero cover DV_DM_LATTICE_CHROMA.
@@ -917,7 +810,7 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
 }
 static inline void dv_dm_destroy(pl_gpu gpu) {
   pl_tex_destroy(gpu, &dv_dm_gpu.dtex); pl_tex_destroy(gpu, &dv_dm_gpu.htex); pl_tex_destroy(gpu, &dv_dm_gpu.ltex);
-  pl_tex_destroy(gpu, &dv_dm_gpu.out); pl_tex_destroy(gpu, &dv_dm_gpu.mtex);
+  pl_tex_destroy(gpu, &dv_dm_gpu.out); pl_tex_destroy(gpu, &dv_dm_gpu.mtex); pl_tex_destroy(gpu, &dv_dm_gpu.ptex);
   dv_dm_gpu.measured = NULL;
   pl_dispatch_destroy(&dv_dm_gpu.dispatch);
 }

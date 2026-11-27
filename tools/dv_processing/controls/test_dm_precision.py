@@ -15,12 +15,12 @@ bound: the retained 600-nit crop differs by 2.42e-5 PQ but only 3.99e-8 nits.
 An instrumented pre-PQ readback reproduces that light residue with every RGB
 bit unchanged. This content-scaled acceptance does not weaken helper exactness.
 
-test_helpers_are_bit_exact is the check that can: every helper result must be the correctly
-rounded float32 (run_pq_helper_exact.py: EXACT), and the two deliberately broken headers must not
-be. On a device that does not fuse fma the results cannot be correctly rounded; they must then be
-bit-identical to the same header evaluated on the CPU with fma as a*b+c (UNFUSED), which still
-fails without `precise`. That fma itself is needed for correct rounding is then shown without a
-GPU by tests/operations/test_dv_dm_pq_precision.py.
+test_helpers_match_their_cpu_evaluation is the check that can: every helper result must be the
+header's own CPU evaluation (run_pq_helper_exact.py: FUSED), which is within 1 ULP of correctly
+rounded on every float32 input (pq_helper_exhaustive.py), and the two deliberately broken headers
+must not be. On a device that does not fuse fma the results must instead be bit-identical to the
+header evaluated with fma as a*b+c (UNFUSED), also within 1 ULP everywhere, and the check still
+fails without `precise`.
 """
 from pathlib import Path
 import os
@@ -37,7 +37,7 @@ CM4_REAL = ("cm4_real_300_p1", "cm4_real_100_p1", "cm4_real_1000_p1", "cm4_real_
 # Every case is its own process and compiles its shaders again: about 4 s a case on a two-core
 # lavapipe, tens of seconds on a driver's first use. Two minutes a case leaves room for both.
 CASE_TIMEOUT = 120
-EXACT, UNFUSED = 0, 3   # run_pq_helper_exact.py exit statuses
+FUSED, UNFUSED = 0, 3   # run_pq_helper_exact.py exit statuses
 
 
 def required_file(name, what):
@@ -85,22 +85,20 @@ class PreciseCm4(unittest.TestCase):
                                  self.work, *mutation], capture_output=True, text=True, timeout=2 * CASE_TIMEOUT)
         return result.returncode, result.stdout + result.stderr
 
-    def test_helpers_are_bit_exact(self):
+    def test_helpers_match_their_cpu_evaluation(self):
         status, report = self.helper_check()
-        self.assertIn(status, (EXACT, UNFUSED), report)
+        self.assertIn(status, (FUSED, UNFUSED), report)
         without_precise, broken_report = self.helper_check("no-precise")
-        self.assertNotIn(without_precise, (EXACT, UNFUSED), "the check passes without `precise`:\n" + broken_report)
+        self.assertNotIn(without_precise, (FUSED, UNFUSED), "the check passes without `precise`:\n" + broken_report)
         unfused, unfused_report = self.helper_check("unfused-fma")
-        if status == EXACT:
-            self.assertNotEqual(unfused, EXACT, "the check passes with fma as a*b+c:\n" + unfused_report)
-            return
-        # Not correctly rounded, yet exactly the header with fma as a*b+c: the device does not fuse.
+        # Whether or not the device fuses, the mutated header is exactly the unfused evaluation.
         self.assertEqual(unfused, UNFUSED, unfused_report)
+        if status == FUSED:
+            return
         if os.environ.get("PLURX_DM_REQUIRE_FUSED_FMA") == "1":
-            self.fail("this device does not fuse fma; the helpers are not correctly rounded on it:\n" + report)
+            self.fail("this device does not fuse fma:\n" + report)
         print("\nthis device does not fuse fma: helpers bit-identical to the header with fma as a*b+c, "
-              "not correctly rounded\n" + report, file=sys.stderr)
-
+              "within 1 ULP of correctly rounded\n" + report, file=sys.stderr)
 
 if __name__ == "__main__":
     unittest.main()
