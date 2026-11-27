@@ -29,6 +29,7 @@ import urllib.request
 import zipfile
 import zlib
 
+from validation import mirror_guard
 from validation.apple_simulator_runtime import runtime_identifier
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, input_digest,
@@ -152,8 +153,8 @@ def native_block(workflow):
 
 
 def producer(commit, current):
-    old = native_block(git('show', commit + ':' + WORKFLOW))
-    now = native_block(git('show', current + ':' + WORKFLOW))
+    old = native_block(mirror_guard.strip(git('show', commit + ':' + WORKFLOW)))
+    now = native_block(mirror_guard.strip(git('show', current + ':' + WORKFLOW)))
     require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
                                                          RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
