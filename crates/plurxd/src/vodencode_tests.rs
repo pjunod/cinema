@@ -744,14 +744,39 @@ async fn playback_info_stream_format_copy_does_not_relabel_source_hdr_as_output(
 
 async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<u8> {
     let mut ready = fetch(serve, session, name).await;
-    let bytes = ready
+    let read = ready
         .file
         .read_all_bounded(
             ready.len,
             Instant::now() + std::time::Duration::from_secs(30),
         )
-        .await
-        .expect("read served file");
+        .await;
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // Name the exact file and, for a finite rendition, where its
+            // producer stood, so a lane failure localizes itself.
+            #[cfg(target_os = "linux")]
+            let producer = rendition_of(serve, session)
+                .await
+                .dir
+                .finite_producer()
+                .map(|producer| {
+                    format!(
+                        "{:?}, {}, start entry {}",
+                        producer.belief(),
+                        producer.idle_stage(),
+                        producer.start_entry()
+                    )
+                });
+            #[cfg(not(target_os = "linux"))]
+            let producer: Option<String> = None;
+            panic!(
+                "read served {name} ({} bytes): {error:?}; finite producer: {producer:?}",
+                ready.len
+            );
+        }
+    };
     assert_eq!(bytes.len() as u64, ready.len);
     bytes.to_vec()
 }
