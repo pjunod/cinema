@@ -849,6 +849,8 @@ impl VodServe {
             priority: prepared.admission_priority,
             prepared: transferred_root_credit(prepared.root_admission.as_ref(), &recipe),
             start_seconds: prepared.request.start_seconds,
+            #[cfg(target_os = "linux")]
+            successor: None,
         };
         let attachment = self
             .shared
@@ -961,6 +963,8 @@ impl VodServe {
                     priority: admission_priority,
                     prepared: None,
                     start_seconds,
+                    #[cfg(target_os = "linux")]
+                    successor: None,
                 },
                 application_owner_bytes,
                 continuous_entry_deadline,
@@ -1111,6 +1115,8 @@ impl VodServe {
                     prepared: None,
                     // A static artifact is the complete title.
                     start_seconds: 0.0,
+                    #[cfg(target_os = "linux")]
+                    successor: None,
                 },
                 deadline,
                 None,
@@ -2627,6 +2633,8 @@ impl VodServe {
                 .map(|(_, reader)| Arc::clone(reader)),
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
@@ -3694,6 +3702,8 @@ impl VodServe {
             adopted_reader: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             requested_audio_index: req.audio_index,
             root_admission,
             processed_reuse_scope,
@@ -4361,6 +4371,8 @@ impl VodServe {
             priority: prepared.admission_priority,
             prepared: transferred_root_credit(prepared.root_admission.as_ref(), &recipe),
             start_seconds: prepared.request.start_seconds,
+            #[cfg(target_os = "linux")]
+            successor: None,
         };
         let attachment = self
             .shared

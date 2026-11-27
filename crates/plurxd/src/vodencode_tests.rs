@@ -4007,6 +4007,157 @@ async fn encoded_vod_cold_resume_starts_its_finite_producer_at_the_resume_entry(
     .await;
 }
 
+/// One 144p encoded session whose first demand is at `entry`.
+#[cfg(target_os = "linux")]
+async fn encoded_session_at(
+    serve: &Arc<VodServe>,
+    file: &MediaFile,
+    encoding: &Arc<crate::vodencode::Encoding>,
+    entry: u32,
+) -> String {
+    let session = uuid::Uuid::new_v4().to_string();
+    let start = f64::from(entry) * encoding.grid.segment_ticks() as f64
+        / f64::from(encoding.grid.numerator);
+    let mut req = request(&session, start);
+    req.kind = SessionKind::Transcode { height: 144 };
+    serve
+        .try_create(
+            VodRecipeRequest {
+                split_soundtracks: Vec::new(),
+                admission_priority: crate::admission::Priority::Live,
+                root_admission: None,
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
+                companion: None,
+                soundtrack: None,
+                request: &req,
+                encoding: Some(Arc::clone(encoding)),
+            },
+            file,
+            &settings(),
+            VodAttribution {
+                user_name: "test",
+                item_title: "Successor generation",
+                supersession_user: "test",
+            },
+            session.clone(),
+        )
+        .await
+        .expect("encoded session");
+    session
+}
+
+/// A seek further than a restart costs, on a fresh finite rendition, is
+/// served by a successor generation at that entry, which holds the one
+/// rebound charge; retiring it returns the whole charge.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn encoded_vod_far_seek_is_served_by_a_successor_generation_with_one_charge() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("far seek fixture");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let (serve, serve_runtime) = bare_serve_with_runtime(&base.path().join("successor")).await;
+    let runtime = serve_runtime
+        .as_ref()
+        .map(crate::test_runtime::RealRuntime::handle)
+        .expect("Linux fixture runtime");
+    let idle = runtime.accounting().expect("idle accounting").used;
+    let session = encoded_session_at(&serve, &file, &encoding, 0).await;
+    let _ = fetched_bytes(&serve, &session, &segment_name(0)).await;
+    let predecessor = rendition_of(&serve, &session).await;
+    let held = runtime.accounting().expect("one producer").used;
+    let far = 44_u32;
+    let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(far))).await;
+    let successor = rendition_of(&serve, &session).await;
+    assert!(
+        !Arc::ptr_eq(&predecessor, &successor),
+        "a successor incarnation replaced the producer started at 0"
+    );
+    drop(predecessor);
+    assert_eq!(
+        successor
+            .dir
+            .finite_producer()
+            .expect("successor producer")
+            .start_entry(),
+        far,
+        "the successor starts at the far entry"
+    );
+    let accounting = runtime.accounting().expect("successor accounting");
+    assert_eq!(accounting.unknown_peak_producers, 1, "exactly one live producer charge");
+    assert!(
+        accounting.used.cpu_ns_per_second <= held.cpu_ns_per_second,
+        "the successor holds the rebound charge, not a second one"
+    );
+    serve.end(&session, Terminal::Deleted).await;
+    let key = successor.key.clone();
+    drop(successor);
+    wait_until(
+        "the successor retires",
+        Duration::from_secs(30),
+        async || {
+            serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+            !serve.shared.renditions.lock().await.contains_key(&key)
+        },
+    )
+    .await;
+    wait_until(
+        "the successor's whole charge returns",
+        Duration::from_secs(30),
+        async || runtime.accounting().is_ok_and(|accounting| accounting.used == idle),
+    )
+    .await;
+}
+
+/// Two sessions share one suffix rendition. One seeks before the suffix;
+/// the successor generation starts there and both sessions keep playing on
+/// it, each with its reader re-reserved from the successor's lease.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn encoded_vod_two_sessions_both_play_after_one_seeks_before_the_suffix() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("shared suffix fixture");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let (serve, serve_runtime) = bare_serve_with_runtime(&base.path().join("shared-suffix")).await;
+    let runtime = serve_runtime
+        .as_ref()
+        .map(crate::test_runtime::RealRuntime::handle)
+        .expect("Linux fixture runtime");
+    let suffix = 10_u32;
+    let watcher = encoded_session_at(&serve, &file, &encoding, suffix).await;
+    let seeker = encoded_session_at(&serve, &file, &encoding, suffix).await;
+    let _ = fetched_bytes(&serve, &watcher, &segment_name(u64::from(suffix))).await;
+    let predecessor = rendition_of(&serve, &watcher).await;
+    assert!(Arc::ptr_eq(&predecessor, &rendition_of(&serve, &seeker).await));
+    drop(predecessor);
+    // The seeker wants the start of the title, before the suffix.
+    let _ = fetched_bytes(&serve, &seeker, &segment_name(0)).await;
+    let successor = rendition_of(&serve, &seeker).await;
+    assert_eq!(
+        successor.dir.finite_producer().expect("successor").start_entry(),
+        0
+    );
+    assert!(
+        Arc::ptr_eq(&successor, &rendition_of(&serve, &watcher).await),
+        "the watcher moved to the same successor"
+    );
+    {
+        let readers = successor.readers.lock().await;
+        assert!(readers.get(&watcher).is_some() && readers.get(&seeker).is_some());
+    }
+    drop(successor);
+    // Both keep playing on the successor.
+    let _ = fetched_bytes(&serve, &seeker, &segment_name(1)).await;
+    let _ = fetched_bytes(&serve, &watcher, &segment_name(u64::from(suffix + 1))).await;
+    assert_eq!(
+        runtime.accounting().expect("accounting").unknown_peak_producers,
+        1,
+        "one charge across both generations"
+    );
+    serve.end(&watcher, Terminal::Deleted).await;
+    serve.end(&seeker, Terminal::Deleted).await;
+}
+
 async fn assert_encoded_neighbor_continuity(
     base: &Path,
     file: &MediaFile,

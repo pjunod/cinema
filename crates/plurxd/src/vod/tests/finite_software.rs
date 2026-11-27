@@ -1992,6 +1992,8 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
                     priority: crate::admission::Priority::Live,
                     prepared: None,
                     start_seconds: 0.0,
+                    #[cfg(target_os = "linux")]
+                    successor: None,
                 },
                 application_bytes,
                 None,
@@ -2133,6 +2135,8 @@ async fn original_driver_pending(
                 priority: crate::admission::Priority::Live,
                 prepared: None,
                 start_seconds: 0.0,
+                #[cfg(target_os = "linux")]
+                successor: None,
             },
             application_bytes,
             None,

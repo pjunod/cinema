@@ -3006,6 +3006,8 @@ async fn status_describes_vod_without_touching_its_idle_lease() {
             adopted_reader: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,
@@ -3162,6 +3164,8 @@ async fn a_far_seek_reports_the_frontier_the_client_can_actually_fetch() {
             adopted_reader: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,

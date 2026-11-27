@@ -38,6 +38,16 @@ pub(super) struct Rendition {
     pub(super) materialize_budget: Duration,
     /// Seconds a generation's transfer input reads before epoch pacing.
     pub(super) source_burst_secs: f64,
+    /// The settings this incarnation was built with; a finite successor
+    /// generation is built with the same ones. Inline, no heap.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Only a Linux finite successor rebuilds from them."
+        )
+    )]
+    pub(super) build_settings: Option<VodSettings>,
     pub(super) manifest: Mutex<Manifest>,
     pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     /// Immutable storage domain. Job release cannot turn private bytes ordinary.
@@ -1041,6 +1051,10 @@ pub(super) struct Session {
     pub(super) children: Vec<ParentMediaReader>,
     /// Child roles with no incarnation yet; see [`ParkedMediaReader`].
     pub(super) parked_children: Vec<ParkedMediaReader>,
+    /// Attachments parked while a finite successor generation replaces the
+    /// incarnation they were on.
+    #[cfg(target_os = "linux")]
+    pub(super) succession: Option<super::succession::SuccessionState>,
     /// The soundtrack this viewer asked for. A split copy's shared video
     /// recipe belongs to whichever viewer created it, so its master marks
     /// this session's own choice as DEFAULT.
@@ -1738,6 +1752,13 @@ impl Session {
         if let Some(value) = &self.prepared_incarnation {
             bytes = bytes
                 .checked_add(value.capacity())
+                .ok_or("finite session size overflow")?;
+        }
+        // Inline in Session; only its keys and refusal are separate heap.
+        if let Some(state) = &self.succession {
+            bytes = state
+                .requested_heap_bytes()
+                .and_then(|heap| bytes.checked_add(heap))
                 .ok_or("finite session size overflow")?;
         }
         bytes = bytes

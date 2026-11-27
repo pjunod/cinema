@@ -969,6 +969,45 @@ impl CoreServicePort {
         meta.phase = Phase::Completed;
         Ok(())
     }
+    /// `finish_retirement`, handing the role's charge to `successor` at its
+    /// locked refund. The inner refusal means the close refunded whole.
+    pub async fn finish_retirement_into_successor(
+        &self,
+        work: &OrdinaryCloseWork,
+        successor: super::super::finite_vod::FiniteSuccessorDemand,
+        deadline: std::time::Instant,
+    ) -> Result<
+        Result<super::super::finite_vod::FiniteSuccessorGrant, AdmissionRefusal>,
+        FiniteVodError,
+    > {
+        let record = &self.payload.records[self.index];
+        let mut held = record.ticket.lock().await;
+        {
+            let meta = record.meta.lock().map_err(|_| finite_state())?;
+            self.check(work, &meta).map_err(|_| finite_state())?;
+        }
+        let ticket = held.as_mut().ok_or_else(finite_state)?;
+        let mut workspace = FiniteCloseWorkspace::new();
+        let outcome = ticket
+            .finish_retirement_into_successor_in(&mut workspace, successor, deadline)
+            .await?;
+        let ticket = held.take().ok_or_else(finite_state)?;
+        let completed = match ticket.into_completed() {
+            Ok(completed) => completed,
+            Err(ticket) => {
+                *held = Some(*ticket);
+                return Err(finite_state());
+            }
+        };
+        let mut meta = record.meta.lock().map_err(|_| finite_state())?;
+        if meta.identity != Some(completed.original_identity()) {
+            self.control.fail();
+            return Err(finite_state());
+        }
+        meta.phase = Phase::Completed;
+        Ok(outcome)
+    }
+
     pub fn complete(&self, work: &OrdinaryCloseWork) -> Result<(), AdmissionRefusal> {
         let record = &self.payload.records[self.index];
         let mut meta = record

@@ -775,10 +775,16 @@ impl NodeResourceRuntime {
                                         && entry.state == crate::adaptive_resources::ReservationState::Reserved
                                         && entry.family_role
                                             == Some((family.identity, FamilyRole::Video))
-                                        && role.demand.resources
-                                            == crate::process::observation::Metric::Known(
-                                                entry.resources,
-                                            )
+                                        // The rebound charge covers the
+                                        // successor's own computed demand.
+                                        && matches!(
+                                            role.demand.resources,
+                                            crate::process::observation::Metric::Known(resources)
+                                                if crate::adaptive_resources::retained::componentwise_le(
+                                                    resources,
+                                                    entry.resources,
+                                                )
+                                        )
                                         && claims.is_some_and(|claims| {
                                             claims == [entry.memory_claim].as_slice()
                                         })

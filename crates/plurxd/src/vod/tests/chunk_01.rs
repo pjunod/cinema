@@ -837,6 +837,8 @@ async fn insert_control_session(
             requested_audio_index: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,
@@ -977,6 +979,8 @@ async fn insert_terminal_session(
             requested_audio_index: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,
@@ -1092,6 +1096,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         completed_cache_budget: 50 << 30,
         materialize_budget: Duration::from_secs(30),
         source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
+        build_settings: None,
         manifest: Mutex::new(Manifest::new(plan.clone())),
         output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
         private_storage: None,
@@ -2826,6 +2831,8 @@ async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader(
                 priority: crate::admission::Priority::Live,
                 prepared: None,
                 start_seconds: 0.0,
+                #[cfg(target_os = "linux")]
+                successor: None,
             },
         )
     };

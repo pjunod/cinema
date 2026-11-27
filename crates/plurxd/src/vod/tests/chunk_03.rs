@@ -386,6 +386,8 @@ async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
             adopted_reader: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,
@@ -447,6 +449,8 @@ async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
             adopted_reader: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,
@@ -5192,6 +5196,8 @@ async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
             adopted_reader: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,

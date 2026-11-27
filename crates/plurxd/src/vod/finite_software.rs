@@ -214,6 +214,24 @@ impl FiniteSoftwareProducer {
     pub(crate) fn generation_epoch(&self) -> u64 {
         self.generation_epoch
     }
+    /// The demand a successor generation of this producer asks for: the
+    /// charge its own role holds, in a fresh family.
+    pub(super) async fn successor_demand(
+        &self,
+    ) -> Result<plurx_core::adaptive_resources::runtime::finite_vod::FiniteSuccessorDemand, String>
+    {
+        self.owner
+            .lock()
+            .await
+            .successor_demand()
+            .map_err(|error| format!("finite successor demand: {error}"))
+    }
+
+    /// The first entry this producer writes; nonzero for a suffix.
+    pub(crate) fn start_entry(&self) -> u32 {
+        self.start_entry
+    }
+
     pub(super) fn take_cache_grant(&self) -> Option<crate::playback_cache::FiniteCacheReservation> {
         self.cache_grant
             .lock()
@@ -1058,48 +1076,75 @@ async fn build_inner(
             .map_err(|error| format!("charging adaptive attempt owner: {error}"))?;
     }
     request.continuous_entry_deadline = continuous_entry_deadline;
+    // A successor generation inherits its predecessor's compatibility share,
+    // cache grant and (rebound) R instead of admitting new ones.
+    let handover = admission.successor.as_ref().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    });
+    let (handover_compatibility, handover_cache, handover_grant) = match handover {
+        Some(handover) => (
+            handover.compatibility,
+            handover.cache_grant,
+            Some(handover.grant),
+        ),
+        None => (None, None, None),
+    };
+    let successor_generation = handover_grant.is_some();
+    request.rebound = handover_grant;
     // This aliases the same selected request for legacy compatibility only.
     // The core CPU demand above came from hard total capacity; do not subtract
     // this thread-pool claim again or add it as another physical core role.
-    let mut compatibility = recipe
-        .encoding
-        .as_ref()
-        .expect("selected finite encoding")
-        .admit_finite_compatibility(
-            software_pool_threads,
-            finalized_encoder_threads,
-            admission,
-            admission_deadline,
-            request.continuous_entry_deadline.as_ref(),
-        )
-        .await
-        .map_err(|error| {
-            if application_owner_bytes.is_some()
-                && matches!(
-                    error,
-                    crate::vodencode::FiniteCompatibilityRefusal::Capacity
-                )
-            {
-                *failed_attempt_trial_refusal = Some(runtime.finite_trial_refusal(
-                    &request,
-                    original_policy_cutoff,
-                    Instant::now(),
-                ));
-            }
-            crate::transcode::vod_refusal_error("vod_family_capacity", error.to_string())
-        })?;
+    let mut compatibility = if let Some(compatibility) = handover_compatibility {
+        compatibility
+    } else {
+        recipe
+            .encoding
+            .as_ref()
+            .expect("selected finite encoding")
+            .admit_finite_compatibility(
+                software_pool_threads,
+                finalized_encoder_threads,
+                admission,
+                admission_deadline,
+                request.continuous_entry_deadline.as_ref(),
+            )
+            .await
+            .map_err(|error| {
+                if application_owner_bytes.is_some()
+                    && matches!(
+                        error,
+                        crate::vodencode::FiniteCompatibilityRefusal::Capacity
+                    )
+                {
+                    *failed_attempt_trial_refusal = Some(runtime.finite_trial_refusal(
+                        &request,
+                        original_policy_cutoff,
+                        Instant::now(),
+                    ));
+                }
+                crate::transcode::vod_refusal_error("vod_family_capacity", error.to_string())
+            })?
+    };
     // Reserve before the cleanup-map lock: global pressure calls back into
     // owners. No R/output IO exists while this borrowed await is pending.
-    let cache_grant = tokio::time::timeout_at(
-        admission_deadline.into(),
-        crate::playback_cache::reserve_finite(
-            &shared.base.join(&request.rendition_id),
-            request.output.reserved_storage_bytes,
-        ),
-    )
-    .await
-    .map_err(|_| "finite operator cache quota deadline elapsed".to_owned())?
-    .map_err(|error| format!("reserving finite operator cache quota: {error}"))?;
+    let reserved_cache = if handover_cache.is_some() {
+        None
+    } else {
+        Some(
+            tokio::time::timeout_at(
+                admission_deadline.into(),
+                crate::playback_cache::reserve_finite(
+                    &shared.base.join(&request.rendition_id),
+                    request.output.reserved_storage_bytes,
+                ),
+            )
+            .await
+            .map_err(|_| "finite operator cache quota deadline elapsed".to_owned())?
+            .map_err(|error| format!("reserving finite operator cache quota: {error}"))?,
+        )
+    };
     // No selected source/root/marker has been opened. Core synchronously
     // reserves the complete role and retains its prepare operation before return.
     // Acquire the original cleanup slot before R acceptance. The synchronous
@@ -1135,8 +1180,18 @@ async fn build_inner(
             .checked_sub(moved)
             .ok_or("collected finite memory partition is inconsistent")?;
     }
-    let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+    let cache_grant = match handover_cache {
+        Some(cache_grant) => cache_grant,
+        None => crate::playback_cache::FiniteCacheReservation::enter(
+            reserved_cache.expect("reserved unless handed over"),
+        ),
+    };
     let trial = async {
+        if successor_generation {
+            return Err(
+                "a successor generation keeps its predecessor's ordinary charge".to_owned(),
+            );
+        }
         let Some(authority) = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
             .try_with(Clone::clone)
             .ok()

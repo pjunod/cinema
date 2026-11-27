@@ -3077,6 +3077,8 @@ mod tests {
             requested_audio_index: None,
             children: Vec::new(),
             parked_children: Vec::new(),
+            #[cfg(target_os = "linux")]
+            succession: None,
             root_admission: None,
             processed_reuse_scope: None,
             processed_reuse_seed: None,

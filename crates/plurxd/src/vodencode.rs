@@ -1079,6 +1079,11 @@ pub(crate) struct FiniteAdmissionRequest {
     /// Where the request's first demand points. A fresh finite producer
     /// starts at the video entry containing it, not at the title's start.
     pub(crate) start_seconds: f64,
+    /// A successor generation's handover from its predecessor's close.
+    #[cfg(target_os = "linux")]
+    pub(crate) successor: Option<
+        std::sync::Arc<std::sync::Mutex<Option<crate::vodserve::succession::SuccessorHandover>>>,
+    >,
 }
 
 #[cfg(target_os = "linux")]

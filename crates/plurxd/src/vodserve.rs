@@ -1607,6 +1607,13 @@ struct Shared {
     /// rather than on the next repair tick.
     #[cfg(target_os = "linux")]
     finite_close_progress: Arc<Notify>,
+    /// A successor generation waiting for its key's finite close to hand
+    /// over the predecessor's charge, compatibility share and cache grant.
+    #[cfg(target_os = "linux")]
+    pending_successors: std::sync::Mutex<HashMap<String, succession::PendingSuccessor>>,
+    /// Keys whose finite succession is in flight (single-flight per key).
+    #[cfg(target_os = "linux")]
+    successions: std::sync::Mutex<std::collections::HashSet<String>>,
     head_regeneration_slots: Arc<Semaphore>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
@@ -1958,6 +1965,9 @@ pub(crate) mod finite_software;
 mod processed_terminal;
 #[path = "vod/shared.rs"]
 mod shared;
+#[cfg(target_os = "linux")]
+#[path = "vod/succession.rs"]
+mod succession;
 #[cfg(target_os = "linux")]
 pub(crate) use processed_terminal::{
     AdoptedProcessedTerminal, ConfirmedAdoptedProcessedTerminal, OriginalProcessedRoot,

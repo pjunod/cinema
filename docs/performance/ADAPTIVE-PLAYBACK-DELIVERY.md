@@ -374,8 +374,17 @@ once instead of holding its admission until a dormant TTL.
 A controlled v2 companion is created parked and installed at the first
 presented primary, or when an accepted selection names it.
 
-**Next.** A successor generation for a seek before a suffix reuses the same
-parked state and install routine. The predecessor incarnation closes through
-the existing finite closing barrier, its charge is rebound to the successor
-at the locked refund, and every attached session's slots are re-reserved
-from the successor's lease.
+**Successor generations.** A fresh finite producer encodes one suffix of
+the title, from the entry its request needs. When readers need an entry it
+cannot reach (before its start, or further ahead than a restart costs, by
+the legacy scheduler's own placement rule), a new incarnation of the same key
+replaces it at the lowest owed entry, one succession per key at a time. Every
+attached session (primary or child) is parked first: its reader and finite
+client slots are released so the predecessor can drain, and its GETs answer
+Pending. The predecessor then closes through the ordinary finite close; at
+its locked refund the charge is rebound to the successor, and its
+compatibility share and cache grant are handed over instead of retired. The
+successor is built and published with that handover under the key's build
+gate, and each parked session is reattached with its reader state,
+re-reserving its slots from the successor's own lease. A refused rebind
+leaves the parked sessions a typed capacity answer. No timer drives any step.

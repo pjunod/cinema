@@ -2844,6 +2844,8 @@ pattern = "rendition_build_gate"
 "crates/plurxd/src/vod/serve/quality.rs" = 1
 "crates/plurxd/src/vod/serve/serve.rs" = 1
 "crates/plurxd/src/vod/shared.rs" = 6
+# A-C6EECF11 finite successor generation (vod/succession.rs): the successor is built and published under its key's build gate, after the predecessor's close released it.
+"crates/plurxd/src/vod/succession.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 16
 "crates/plurxd/src/vod/tests/chunk_03.rs" = 1
@@ -2962,6 +2964,8 @@ id = "m4-vod-terminal-rendition-compaction"
 pattern = "session\\.rendition\\s*=\\s*None"
 [module_symbols.occurrences]
 "crates/plurxd/src/vod/serve/end.rs" = 1
+# A-C6EECF11 finite successor generation (vod/succession.rs): a parked primary attachment clears its rendition while its incarnation is replaced, and a failed reattach clears it again; neither is a terminal.
+"crates/plurxd/src/vod/succession.rs" = 2
 
 [[module_symbols]]
 id = "m4-vod-terminal-route-confirm-eviction"
@@ -3001,7 +3005,8 @@ pattern = "purge_if_dormant"
 # run 9504: restarts, prepared root and AAC neighbors retire their finite renditions through the dormant purge.
 # run 9504 follow-up: shared_audio's leak check and the finite verdict test retire through the dormant purge.
 # A-149C1506 suffix start: the cold-resume test retires its finished suffix through the dormant purge.
-"crates/plurxd/src/vodencode_tests.rs" = 6
+# A-C6EECF11 successor: the far-seek test retires its successor generation through the dormant purge.
+"crates/plurxd/src/vodencode_tests.rs" = 7
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -3359,6 +3364,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/vod/session.rs" = 3
 "crates/plurxd/src/vod/shared.rs" = 8
 "crates/plurxd/src/vod/startup_prediction.rs" = 1
+# A-C6EECF11 finite successor generation (vod/succession.rs): one single-flight succession task per key; it owns no producer and waits only on its real owners (close reply, build gate).
+"crates/plurxd/src/vod/succession.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 12
 "crates/plurxd/src/vod/tests/chunk_03.rs" = 22

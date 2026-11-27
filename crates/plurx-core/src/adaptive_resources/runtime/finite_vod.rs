@@ -925,10 +925,43 @@ impl FiniteCloseTicket {
         Result<FiniteSuccessorGrant, crate::adaptive_resources::AdmissionRefusal>,
         FiniteVodError,
     > {
+        self.finish_retirement_into_successor_with(None, successor, deadline)
+            .await
+    }
+
+    /// The collector's fixed-workspace form of the successor close.
+    pub async fn finish_retirement_into_successor_in(
+        &mut self,
+        workspace: &mut FiniteCloseWorkspace,
+        successor: FiniteSuccessorDemand,
+        deadline: Instant,
+    ) -> Result<
+        Result<FiniteSuccessorGrant, crate::adaptive_resources::AdmissionRefusal>,
+        FiniteVodError,
+    > {
+        self.finish_retirement_into_successor_with(Some(workspace), successor, deadline)
+            .await
+    }
+
+    async fn finish_retirement_into_successor_with(
+        &mut self,
+        workspace: Option<&mut FiniteCloseWorkspace>,
+        successor: FiniteSuccessorDemand,
+        deadline: Instant,
+    ) -> Result<
+        Result<FiniteSuccessorGrant, crate::adaptive_resources::AdmissionRefusal>,
+        FiniteVodError,
+    > {
         self.wait_application_release(deadline).await?;
         let outcome = self
             .runtime
-            .finish_finite_close_into_successor(&mut self.preparation, 0, successor, deadline)
+            .finish_finite_close_into_successor(
+                &mut self.preparation,
+                0,
+                workspace,
+                successor,
+                deadline,
+            )
             .await?;
         self.retirement_succeeded = true;
         #[cfg(target_os = "linux")]
@@ -1547,6 +1580,13 @@ impl SoftwareVodOwner {
         }
     }
     /// Selector only: construction does not open the source or output root.
+    /// What a successor generation of this owner asks for: its own charge.
+    pub fn successor_demand(&self) -> Result<FiniteSuccessorDemand, FiniteVodError> {
+        self.runtime
+            .finite_successor_demand(&self.preparation)
+            .map_err(Into::into)
+    }
+
     pub fn output(&self) -> FiniteOutput {
         FiniteOutput {
             runtime: Arc::clone(&self.runtime),

@@ -1527,6 +1527,8 @@ impl Shared {
                 priority: crate::admission::Priority::Live,
                 prepared: None,
                 start_seconds: 0.0,
+                #[cfg(target_os = "linux")]
+                successor: None,
             },
         )
         .await
@@ -1880,6 +1882,41 @@ impl Shared {
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             phase = "build_rendition", elapsed_ms = phase_started.elapsed().as_millis(),
             "rendition attachment phase completed");
+        self.publish_built_rendition_with(
+            key,
+            rendition,
+            build_guard,
+            private_storage,
+            source_telemetry,
+            initial_hardware,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// Publish one built incarnation under its held build gate, exactly as a
+    /// cold attach does: driver, registry, counters, then cache admission.
+    /// A finite successor generation publishes through here too.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn publish_built_rendition(
+        self: &Arc<Shared>,
+        key: &str,
+        rendition: Arc<Rendition>,
+        build_guard: RenditionBuildGuard,
+    ) -> Result<RenditionAttachment, String> {
+        self.publish_built_rendition_with(key, rendition, build_guard, None, false, None)
+            .await
+    }
+
+    async fn publish_built_rendition_with(
+        self: &Arc<Shared>,
+        key: &str,
+        rendition: Arc<Rendition>,
+        build_guard: RenditionBuildGuard,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        source_telemetry: bool,
+        initial_hardware: Option<super::session::InitialHardwarePermit>,
+    ) -> Result<RenditionAttachment, String> {
         let adopted_bytes = rendition.manifest.lock().await.materialized_bytes();
         let (rendition, installed) = {
             #[cfg(target_os = "linux")]
@@ -1959,11 +1996,11 @@ impl Shared {
                 self.try_admit(&rendition, &mut manifest).await;
             }
         }
-        Ok(Some(RenditionAttachment {
+        Ok(RenditionAttachment {
             rendition,
             initial_hardware: initial_hardware.filter(|_| installed),
             _build_guard: build_guard,
-        }))
+        })
     }
 
     /// Plan acquisition (put-if-absent): the first plan written under a key
@@ -2047,13 +2084,15 @@ impl Shared {
                 priority: crate::admission::Priority::Live,
                 prepared: None,
                 start_seconds: 0.0,
+                #[cfg(target_os = "linux")]
+                successor: None,
             },
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn build_rendition_with_storage(
+    pub(super) async fn build_rendition_with_storage(
         self: &Arc<Shared>,
         key: &str,
         index: Option<FragmentIndex>,
@@ -2387,6 +2426,7 @@ impl Shared {
             },
             materialize_budget: settings.materialize_budget,
             source_burst_secs: settings.source_burst_secs,
+            build_settings: Some(settings.clone()),
             manifest: Mutex::new(manifest),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage,
@@ -2568,7 +2608,7 @@ impl Shared {
             .await;
     }
 
-    async fn purge_dormant_inner(
+    pub(super) async fn purge_dormant_inner(
         self: &Arc<Shared>,
         key: &str,
         ttl: Duration,
@@ -3275,29 +3315,46 @@ impl Shared {
             .gate(work)
             .map_err(|error| format!("original finite finalization gate: {error:?}"))?;
         let _gate = gate.lock_owned().await;
-        port.finish_retirement(work, deadline)
-            .await
-            .map_err(|error| error.to_string())?;
+        // A pending successor generation takes this role's charge at the
+        // locked refund instead of a refund.
+        let successor = match self.take_pending_successor(key) {
+            Some(super::succession::PendingSuccessor { demand, reply }) => Some((
+                port.finish_retirement_into_successor(work, demand, deadline)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                reply,
+            )),
+            None => {
+                port.finish_retirement(work, deadline)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                None
+            }
+        };
+        // Without a daemon envelope there is no permit or grant to hand over.
+        let successor = if closing.is_none() {
+            super::succession::settle_successor_handover(None, None, successor);
+            None
+        } else {
+            successor
+        };
         // The ticket was consumed only after real native/application close.
         // Any surviving empty daemon envelope remains independently charged
         // until its outer reference drops the actual Arc/header completely.
         if let Some(closing) = closing.as_ref() {
-            if let Some(compatibility) = closing
-                .compatibility
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                compatibility.known_retired();
-            }
-            if let Some(grant) = closing
-                .cache_grant
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                grant.known_closed();
-            }
+            super::succession::settle_successor_handover(
+                closing
+                    .compatibility
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+                closing
+                    .cache_grant
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+                successor,
+            );
             closing.known_closed.store(true, Release);
             let (removed, empty_backing) = {
                 let mut closings = self.finite_closing.lock().await;
@@ -3480,28 +3537,44 @@ impl Shared {
             let Some(ticket) = held.as_mut() else {
                 return;
             };
-            if let Err(error) = ticket.finish_retirement(deadline).await {
-                tracing::warn!(target: "plurxd::vodserve", rendition = %key,
-                    %error, "finite terminal close remains charged for retry");
-                return;
-            }
-
-            if let Some(compatibility) = closing
-                .compatibility
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                compatibility.known_retired();
-            }
-            if let Some(grant) = closing
-                .cache_grant
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                grant.known_closed();
-            }
+            // A pending successor generation takes this role's charge at
+            // the locked refund instead of a refund.
+            let successor = match self.take_pending_successor(key) {
+                Some(super::succession::PendingSuccessor { demand, reply }) => {
+                    match ticket
+                        .finish_retirement_into_successor(demand, deadline)
+                        .await
+                    {
+                        Ok(outcome) => Some((outcome, reply)),
+                        Err(error) => {
+                            tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                                %error, "finite terminal close remains charged for retry");
+                            return;
+                        }
+                    }
+                }
+                None => {
+                    if let Err(error) = ticket.finish_retirement(deadline).await {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                            %error, "finite terminal close remains charged for retry");
+                        return;
+                    }
+                    None
+                }
+            };
+            super::succession::settle_successor_handover(
+                closing
+                    .compatibility
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+                closing
+                    .cache_grant
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+                successor,
+            );
             closing.known_closed.store(true, Release);
             held.take();
         }

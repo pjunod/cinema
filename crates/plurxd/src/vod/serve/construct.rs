@@ -285,6 +285,7 @@ impl VodServe {
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
             source_burst_secs: crate::transcode::HLS_BURST_SECS_DEFAULT,
+            build_settings: None,
             manifest: Mutex::new(Manifest::new(plan.clone())),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage: None,
@@ -361,6 +362,8 @@ impl VodServe {
                 requested_audio_index: None,
                 children: Vec::new(),
                 parked_children: Vec::new(),
+                #[cfg(target_os = "linux")]
+                succession: None,
                 root_admission: None,
                 processed_reuse_scope: None,
                 processed_reuse_seed: None,
@@ -546,6 +549,10 @@ impl VodServe {
                 finite_closing: Mutex::new(std::collections::BTreeMap::new()),
                 #[cfg(target_os = "linux")]
                 finite_close_progress: Arc::new(tokio::sync::Notify::new()),
+                #[cfg(target_os = "linux")]
+                pending_successors: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(target_os = "linux")]
+                successions: std::sync::Mutex::new(std::collections::HashSet::new()),
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),

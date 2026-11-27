@@ -1022,7 +1022,10 @@ async fn drive_resume_preparation(shared: &Arc<Shared>, rendition: &Arc<Renditio
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     #[cfg(target_os = "linux")]
     if rendition.dir.is_finite() {
-        if rendition.dir.finite_producer().is_some() {
+        if let Some(producer) = rendition.dir.finite_producer() {
+            if let Some(entry) = finite_reposition(shared, rendition, &producer).await {
+                shared.request_finite_succession(rendition, entry);
+            }
             rendition.kick();
         }
         return;
@@ -1543,6 +1546,53 @@ pub(super) fn reader_admission_priority(
         }
     }
     priority
+}
+
+/// Where a finite rendition's readers need its producer to be, if its one
+/// suffix pass cannot get there: an owed entry before its start, or further
+/// ahead than a restart costs. The same placement rule as the legacy
+/// scheduler (`prodsched::decide`), with the producer positioned at its own
+/// start entry whether or not it has started.
+#[cfg(target_os = "linux")]
+async fn finite_reposition(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    producer: &super::finite_software::FiniteSoftwareProducer,
+) -> Option<u32> {
+    if rendition.closed.load(Relaxed)
+        || rendition.failure().is_some()
+        || rendition.build_settings.is_none()
+        || rendition.ephemeral_processing
+        || rendition.private_storage.is_some()
+        || rendition.dir.borrows_retained_output()
+    {
+        return None;
+    }
+    let belief = producer.belief();
+    let manifest = rendition.manifest.lock().await;
+    let demands = {
+        let readers = rendition.readers.lock().await;
+        playback_demands(&shared.pool, rendition, &readers, &manifest)
+    };
+    if demands.is_empty() {
+        return None;
+    }
+    let position = Position {
+        produced_through: belief.produced_through(),
+        positioned_at: Some(producer.start_entry()),
+        seconds_per_segment: rendition.seconds_per_segment,
+        ahead_held: false,
+        permit_wanted: false,
+        working_set: WorkingSet {
+            used_bytes: 0,
+            budget_bytes: 0,
+            held: false,
+        },
+    };
+    match crate::prodsched::decide(&manifest, &demands, position, &[]) {
+        crate::prodsched::Action::Reposition { to } => Some(to),
+        _ => None,
+    }
 }
 
 pub(super) fn playback_demands(

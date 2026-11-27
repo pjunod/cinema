@@ -824,8 +824,35 @@ impl VodServe {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
         let mut owner = session.response_owner();
+        // A parked attachment is between finite incarnations: its GETs wait
+        // and re-resolve, or carry the typed refusal its successor received.
+        #[cfg(target_os = "linux")]
+        let parked = session.tombstone.is_none()
+            && session.succession.as_ref().is_some_and(|state| {
+                let key = child_rendition_id.unwrap_or(session.rendition_key.as_str());
+                state.keys.iter().any(|parked| parked == key)
+            });
+        #[cfg(not(target_os = "linux"))]
+        let parked = false;
         let result = if let Some(cause) = session.tombstone {
             Err(VodError::Gone(cause))
+        } else if parked {
+            #[cfg(target_os = "linux")]
+            let refused = session
+                .succession
+                .as_ref()
+                .and_then(|state| state.refused.clone());
+            #[cfg(not(target_os = "linux"))]
+            let refused: Option<String> = None;
+            Err(match refused {
+                Some(reason) => VodError::CapacityUnavailable {
+                    reason,
+                    retry_after: PENDING_RETRY_AFTER,
+                },
+                None => VodError::Pending {
+                    retry_after: PENDING_RETRY_AFTER,
+                },
+            })
         } else {
             let selected = match child_rendition_id {
                 None => session.live_rendition().map(Arc::clone),
