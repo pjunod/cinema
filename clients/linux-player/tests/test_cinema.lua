@@ -409,6 +409,39 @@ test('el_pill_names_the_scanned_layer_kind',function()
     local _,fels=data:gsub('}FEL\n','');eq(fels,1)
     assert(has(pills_case(dv,native,nil,{active={'DYN'}}),'EL'),'an unclassified layer keeps EL')
 end)
+-- The renderer names the composed layer from its own per-frame NLQ level,
+-- before any title scan, and the server's el_kind is only the cross-check.
+test('el_pill_names_the_renderer_layer_kind',function()
+    read_overrides['native-dovi-target-state']=function() error('native-dovi-target-state read on render') end
+    local function state(nlq) return {active=true,generation=1,['enhancement-layer-composed']=true,['enhancement-layer-nlq-active']=nlq} end
+    update('native-dovi-target-state',state(true))
+    local data=pills_case(dv,native,nil,{active={'DYN'}})
+    assert(has(data,'FEL') and not has(data,'EL'),'an unscanned title with an active NLQ says FEL')
+    update('native-dovi-target-state',state(false))
+    assert(has(overlay.data,'MEL') and not has(overlay.data,'FEL'),'the pill follows the level')
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel'})
+    assert(has(data,'MEL') and not has(data,'MEL!'),'agreement draws one plain name')
+    -- A disagreement keeps the renderer's name, marked; the panel names both.
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='fel'})
+    assert(has(data,'MEL!') and not has(data,'FEL'),'a disagreement is marked')
+    update('native-dovi-target-state',state(true))
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel'})
+    assert(has(data,'FEL!'),'a renderer FEL against a scanned MEL is marked')
+    -- No composed layer: no EL pill, whatever the NLQ field says.
+    update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=false,['enhancement-layer-nlq-active']=false})
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='fel'})
+    assert(not has(data,'FEL') and not has(data,'MEL') and not has(data,'EL'))
+    -- An mpv without the field keeps the server's name alone.
+    update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true})
+    data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel'})
+    assert(has(data,'MEL') and not has(data,'MEL!'))
+    -- Another renderer ignores the native level.
+    update('native-dovi-target-state',state(true))
+    data=pills_case(dv,{kind='closed_form',label='closed-form CM v4.0'},nil,{active={'DYN'},el_kind='mel'})
+    assert(has(data,'MEL') and not has(data,'FEL!'))
+    update('native-dovi-target-state',nil)
+    read_overrides['native-dovi-target-state']=nil
+end)
 pills_case(dv,native,nil,{active={'DYN'},el_kind='mel',details={{badge='FEL',active=false,text=mel_row}}});click(1125,681)
 for i=1,60 do if overlay.data:find('Dolby Vision mapper:',1,true) then break end; press('down') end
 -- The panel wraps long rows; read its visible text as one run.
