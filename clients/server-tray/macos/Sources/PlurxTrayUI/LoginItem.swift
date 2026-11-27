@@ -1,7 +1,9 @@
 // "Show tray app at login" is the app's own SMAppService.mainApp
-// registration. Status is always read back from the OS; the app never
-// registers itself at launch and never touches the server's LaunchAgent here
-// (that is "Start server at login", owned by the controller).
+// registration. Status is always read back from the OS. It is on by default:
+// the first launch registers it once (TrayController.applyDefaultTrayLogin)
+// and records that in the user's defaults, so later launches never override
+// the user's choice. It never touches the server's LaunchAgent here (that is
+// "Start server at login", owned by the controller).
 import AppKit
 import PlurxTrayCore
 import ServiceManagement
@@ -34,6 +36,12 @@ public enum LoginItem {
                 "The login item could not be \(enabled ? "added" : "removed"): \(error.localizedDescription)"))
         }
         return .success(status())
+    }
+
+    private static let defaultDecidedKey = "DefaultTrayLoginDecided"
+    public static var defaultDecided: Bool {
+        get { UserDefaults.standard.bool(forKey: defaultDecidedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: defaultDecidedKey) }
     }
 
     public static func openSettings() {

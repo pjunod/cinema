@@ -23,7 +23,8 @@ controller and Swift companion as well as the daemon, prepares the complete
 runtime before changing the service, and opens the installed app in the GUI
 login. Building or copying `plurxd` alone does not install a menu-bar app. To
 reopen the installed companion, run `open "$HOME/Applications/Plurx Server.app"`.
-Choose **Show tray app at login** in its menu for future logins. The explicit
+Its first launch turns **Show tray app at login** on once; an explicit Off in
+its menu is kept on every later launch. The explicit
 `--server-only` installer option retains the legacy daemon-only installation
 for operators who deliberately do not want desktop controls.
 
@@ -121,7 +122,7 @@ the tray available so it can be started again.
 | Preference | macOS | Linux |
 |---|---|---|
 | Start server automatically | Per-user LaunchAgent at GUI login; a menu-bar service is not a pre-login root daemon. | System service enablement at boot, independent of whether a GUI is present. |
-| Show tray app at login | Native login-item registration for the stable app. macOS may require approval in System Settings. The menu reflects the OS readback. | XDG autostart override for the current desktop user. The daemon's boot policy is unchanged. |
+| Show tray app at login | Native login-item registration for the stable app, on by default: the first launch registers it once and never again. macOS may require approval in System Settings. The menu reflects the OS readback. | XDG autostart override for the current desktop user. The daemon's boot policy is unchanged. |
 
 Changing automatic startup does not imply Start or Stop now. Existing disabled
 and stopped installations retain those choices across ordinary installation and

@@ -16,6 +16,9 @@ public protocol TrayEnvironment: AnyObject {
     /// OS reports afterwards.
     func setTrayLogin(_ enabled: Bool) -> Result<TrayLoginStatus, LoginItemFailure>
     func openLoginItemsSettings()
+    /// Persisted per user: whether the one default login registration has been
+    /// decided (made, or overtaken by an explicit choice). Never cleared.
+    var defaultTrayLoginDecided: Bool { get set }
     func snapshotDidChange(_ snapshot: TraySnapshot)
     func showLogs(lines: [String], truncated: Bool)
     func showUpgrade(_ update: UpdateResult?)
@@ -217,10 +220,37 @@ public final class TrayController {
         await refresh()
     }
 
-    /// SMAppService is the authority for the tray's own login item. The app
-    /// changes it only on this explicit action, never at launch.
+    /// The tray is on at login by default, like the server's LaunchAgent: the
+    /// first launch that can register the app does so once, and records that
+    /// the default is decided. Later launches never register again, so a user
+    /// who turns it off stays off. An app outside its registrable location
+    /// (`notFound`) leaves the default undecided for the installed copy.
+    public func applyDefaultTrayLogin() {
+        guard let environment, !environment.defaultTrayLoginDecided else { return }
+        switch environment.trayLoginStatus() {
+        case .notFound, .unavailable:
+            return
+        case .enabled, .requiresApproval:
+            environment.defaultTrayLoginDecided = true
+        case .notRegistered:
+            environment.defaultTrayLoginDecided = true
+            switch environment.setTrayLogin(true) {
+            case let .success(status):
+                snapshot.trayLogin = status
+            case let .failure(failure):
+                snapshot.trayLogin = environment.trayLoginStatus()
+                snapshot.lastError = failure.message
+            }
+            publish()
+        }
+    }
+
+    /// SMAppService is the authority for the tray's own login item. Besides
+    /// the one default registration above, the app changes it only on this
+    /// explicit action, which also settles the default.
     private func toggleTrayLogin() {
         guard let environment else { return }
+        environment.defaultTrayLoginDecided = true
         let current = environment.trayLoginStatus()
         switch current {
         case .requiresApproval:

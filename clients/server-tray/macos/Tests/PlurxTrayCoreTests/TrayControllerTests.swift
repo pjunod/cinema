@@ -64,6 +64,7 @@ final class RecordingEnvironment: TrayEnvironment {
         return result
     }
     func openLoginItemsSettings() { settingsOpened += 1 }
+    var defaultTrayLoginDecided = false
     func snapshotDidChange(_ snapshot: TraySnapshot) { snapshots.append(snapshot) }
     func showLogs(lines: [String], truncated: Bool) { logs.append(lines) }
     func showUpgrade(_ update: UpdateResult?) { upgrades.append(update) }
@@ -453,5 +454,63 @@ final class TrayControllerTests: XCTestCase {
         async let second: Void = controller.perform(.start)
         _ = await (first, second)
         XCTAssertEqual(control.commands.filter { $0 == .start }.count, 1)
+    }
+}
+
+@MainActor
+final class DefaultTrayLoginTests: XCTestCase {
+    func testFirstLaunchRegistersOnceAndNeverAgain() {
+        let environment = RecordingEnvironment()
+        let controller = TrayController(control: FakeControl(), environment: environment, appVersion: "0.7.0", appBuild: "b")
+        controller.applyDefaultTrayLogin()
+        XCTAssertEqual(environment.loginSets, [true])
+        XCTAssertTrue(environment.defaultTrayLoginDecided)
+        XCTAssertEqual(controller.snapshot.trayLogin, .enabled)
+        // The user turns it off; the next launch respects that.
+        environment.login = .notRegistered
+        controller.applyDefaultTrayLogin()
+        XCTAssertEqual(environment.loginSets, [true])
+    }
+
+    func testExplicitToggleSettlesTheDefault() async {
+        let environment = RecordingEnvironment()
+        environment.login = .enabled
+        let controller = TrayController(control: FakeControl(), environment: environment, appVersion: "0.7.0", appBuild: "b")
+        await controller.perform(.toggleTrayLogin)
+        XCTAssertEqual(environment.loginSets, [false])
+        controller.applyDefaultTrayLogin()
+        XCTAssertEqual(environment.loginSets, [false])
+    }
+
+    func testUnregistrableCopyLeavesTheDefaultForTheInstalledApp() {
+        for status in [TrayLoginStatus.notFound, .unavailable("x")] {
+            let environment = RecordingEnvironment()
+            environment.login = status
+            let controller = TrayController(control: FakeControl(), environment: environment, appVersion: "0.7.0", appBuild: "b")
+            controller.applyDefaultTrayLogin()
+            XCTAssertEqual(environment.loginSets, [])
+            XCTAssertFalse(environment.defaultTrayLoginDecided)
+        }
+    }
+
+    func testAlreadyOnOrAwaitingApprovalIsLeftAlone() {
+        for status in [TrayLoginStatus.enabled, .requiresApproval] {
+            let environment = RecordingEnvironment()
+            environment.login = status
+            let controller = TrayController(control: FakeControl(), environment: environment, appVersion: "0.7.0", appBuild: "b")
+            controller.applyDefaultTrayLogin()
+            XCTAssertEqual(environment.loginSets, [])
+            XCTAssertTrue(environment.defaultTrayLoginDecided)
+        }
+    }
+
+    func testFailedRegistrationIsReportedWithoutAModal() {
+        let environment = RecordingEnvironment()
+        environment.loginSetResult = .failure(LoginItemFailure("denied"))
+        let controller = TrayController(control: FakeControl(), environment: environment, appVersion: "0.7.0", appBuild: "b")
+        controller.applyDefaultTrayLogin()
+        XCTAssertEqual(controller.snapshot.lastError, "denied")
+        XCTAssertEqual(environment.errors, [])
+        XCTAssertTrue(environment.defaultTrayLoginDecided)
     }
 }

@@ -83,8 +83,10 @@ That one command:
    web interface, logs, Start/Stop/Restart, startup choices and release updates.
 
 A bare daemon build or binary replacement does not install the tray. Reopen an
-installed companion with `open "$HOME/Applications/Plurx Server.app"`; choose
-**Show tray app at login** in its menu to retain it across future logins. See
+installed companion with `open "$HOME/Applications/Plurx Server.app"`. Its
+first launch turns **Show tray app at login** on once, so the menu-bar icon
+returns after a restart (macOS notes the new login item); turn it off in the
+menu and later launches leave it off. See
 [desktop controls](../docs/server/DESKTOP-CONTROL.md) for observed startup state
 and the distinction between local source installs and signed release upgrades.
 

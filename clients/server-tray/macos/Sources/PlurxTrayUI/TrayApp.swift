@@ -38,7 +38,12 @@ public final class TrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, Tra
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         install()
-        if let smokeDriver { smokeDriver.start(on: self) } else { controller.startPolling() }
+        if let smokeDriver {
+            smokeDriver.start(on: self)
+        } else {
+            controller.applyDefaultTrayLogin()
+            controller.startPolling()
+        }
     }
 
     /// Creates the status item and first menu. Separate from launch so tests
@@ -133,6 +138,10 @@ public final class TrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, Tra
     public func trayLoginStatus() -> TrayLoginStatus { LoginItem.status() }
     public func setTrayLogin(_ enabled: Bool) -> Result<TrayLoginStatus, LoginItemFailure> { LoginItem.set(enabled) }
     public func openLoginItemsSettings() { LoginItem.openSettings() }
+    public var defaultTrayLoginDecided: Bool {
+        get { LoginItem.defaultDecided }
+        set { LoginItem.defaultDecided = newValue }
+    }
 
     public func showLogs(lines: [String], truncated: Bool) { logs.show(lines: lines, truncated: truncated) }
 
