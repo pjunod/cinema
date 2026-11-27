@@ -231,7 +231,7 @@ where
         census.first_dts,
         fill.canonical_title_start,
         fill.recipe.tracks(file),
-        video.retains_hevc_parameter_sets(),
+        video,
         file.video_codec.as_deref() == Some("hevc"),
         memory,
     )

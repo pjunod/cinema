@@ -239,9 +239,39 @@ pub struct Trace {
     evidence: Evidence,
     refusal: Option<String>,
     faults: FaultScan,
+    /// A copy whose filter builds its decoder configuration from the first
+    /// packet's in-band parameter sets ([`Trace::for_copy`]).
+    in_band_first: bool,
+    /// The bit position of the last field of the current unit. Positions rise
+    /// within a unit, so a fall means a unit header was lost.
+    position: Option<i64>,
+    /// Whether a unit header opened the fields that follow. A field straight
+    /// after `Packet:` or `Extradata` belongs to a unit whose header was lost.
+    unit_open: bool,
+    /// The `forbidden_zero_bit` that opened a unit whose header line was lost,
+    /// held until its `nal_unit_type` names the unit.
+    inferring: Option<String>,
+    /// Whether the current parameter set took a field recovered from a
+    /// prefix-less line. Text the file controls (a title in the header dump)
+    /// can take that form, so a change it alone could cause is not a fact
+    /// about the source's configuration.
+    recovered: bool,
 }
 
 impl Trace {
+    /// The trace of a copy. A copy that promotes its parameter sets
+    /// (`hevc_mp4toannexb,extract_extradata`) writes the decoder configuration
+    /// the first packet carries in band, so its source may have no parameter
+    /// sets in extradata: they must then arrive in a packet before its first
+    /// slice, and every later repetition must still be identical. Any other
+    /// copy ships the source's own record, which must be complete.
+    pub fn for_copy(promotes_parameter_sets: bool) -> Self {
+        Self {
+            in_band_first: promotes_parameter_sets,
+            ..Self::default()
+        }
+    }
+
     /// The first FFmpeg message showing the pass read a damaged source, if
     /// any. Independent of the trace verdict: the caller refuses the index.
     pub fn source_fault(&self) -> Option<&'static str> {
@@ -346,7 +376,11 @@ impl Trace {
                 self.reject("incomplete parameter-set trace");
             } else if let Some(previous) = &self.sets[kind] {
                 if previous != &self.fields {
-                    self.reject(PARAMETER_SETS_CHANGE);
+                    self.reject(if self.recovered {
+                        "a glued trace line changed a parameter set"
+                    } else {
+                        PARAMETER_SETS_CHANGE
+                    });
                 }
             } else {
                 self.sets[kind] = Some(std::mem::take(&mut self.fields));
@@ -358,10 +392,12 @@ impl Trace {
         self.id = None;
         self.parent = None;
         self.ended = false;
+        self.recovered = false;
     }
 
     fn parse(&mut self, line: &str) {
         let Some((_, line)) = line.split_once("[trace_headers @ ") else {
+            self.parse_unprefixed(line);
             return;
         };
         let Some((_, line)) = line.split_once("] ") else {
@@ -370,25 +406,26 @@ impl Trace {
         };
         let line = line.trim();
         if !line.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            self.header(line);
+            return;
+        }
+        self.field(line);
+    }
+
+    /// A unit header, `Packet:` or `Extradata` line.
+    fn header(&mut self, line: &str) {
+        if self.inferring.take().is_some() {
+            self.reject("trace unit header lost");
+        }
+        {
             self.end_section();
+            self.position = None;
+            self.unit_open = !line.starts_with("Packet:") && line != "Extradata";
             if line.starts_with("Packet:") {
-                if self.sets.iter().any(Option::is_none) {
+                if !self.in_band_first && self.sets.iter().any(Option::is_none) {
                     self.reject(MISSING_EXTRADATA_CONFIGURATION);
                 }
                 self.close_packet();
-                if self.configuration_sha256.is_none()
-                    && self.refusal.is_none()
-                    && self.sets.iter().all(Option::is_some)
-                {
-                    use sha2::{Digest, Sha256};
-                    let mut digest = Sha256::new();
-                    digest.update(b"plurx.hevc-inspected-configuration.v1\0");
-                    for fields in self.sets.iter().flatten() {
-                        digest.update((fields.len() as u64).to_be_bytes());
-                        digest.update(fields);
-                    }
-                    self.configuration_sha256 = Some(format!("{:x}", digest.finalize()));
-                }
                 self.packets += 1;
                 self.packet_slices = 0;
             } else if !matches!(
@@ -423,10 +460,81 @@ impl Trace {
                 _ => None,
             };
             self.slice = line == "Slice Segment Header";
+        }
+    }
+
+    /// A trace line printed straight after another thread's unterminated
+    /// message (FFmpeg's output header dump, written in pieces once a late
+    /// audio encoder opens) loses its prefix and is glued onto that message.
+    /// Dropped, it made the next repetition of an unchanged parameter set
+    /// read as a change (Avatar 6751, 2026-11-27). A `Packet:` line or a
+    /// trace field the line ends with, in their exact forms, is taken as that
+    /// line; a lost unit header is rebuilt from the unit's own first fields
+    /// (see [`Trace::field`]). Any other trace field inside a parameter set or
+    /// slice fails the inspection, never the source's configuration. A line
+    /// with neither form is not trace output.
+    fn parse_unprefixed(&mut self, line: &str) {
+        if let Some(packet) = glued_packet(line) {
+            self.header(packet);
             return;
         }
+        let mut evidence = Evidence::default();
+        if !line.bytes().any(|byte| evidence.advance(byte)) {
+            return;
+        }
+        let inside = self.section.is_some() || self.slice || self.inferring.is_some();
+        match glued_field(line) {
+            Some((position, field))
+                if position == 0 || self.position.is_some_and(|last| position > last) =>
+            {
+                self.field(field);
+                self.recovered |= self.section.is_some();
+            }
+            _ if inside => self.reject("trace line lost its prefix"),
+            _ => (),
+        }
+    }
+
+    fn field(&mut self, line: &str) {
         let mut parts = line.split_whitespace();
-        let _position = parts.next();
+        let Ok(position) = parts.next().unwrap_or_default().parse::<i64>() else {
+            self.reject("malformed trace field");
+            return;
+        };
+        if let Some(first) = self.inferring.take() {
+            // The unit whose header was lost names itself in its second field.
+            let unit = match (position, parts.clone().next(), line.rsplit_once(" = ")) {
+                (1, Some("nal_unit_type"), Some((_, value))) => match value.parse::<i64>() {
+                    Ok(32) => Some("Video Parameter Set"),
+                    Ok(33) => Some("Sequence Parameter Set"),
+                    Ok(34) => Some("Picture Parameter Set"),
+                    Ok(0..=9 | 16..=21) => Some("Slice Segment Header"),
+                    Ok(35) => Some("Access Unit Delimiter"),
+                    Ok(36) => Some("End of Sequence"),
+                    Ok(37) => Some("End of Bitstream"),
+                    Ok(38) => Some("Filler Data"),
+                    Ok(39) => Some("Prefix Supplemental Enhancement Information"),
+                    Ok(40) => Some("Suffix Supplemental Enhancement Information"),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(unit) = unit else {
+                self.reject("trace unit header lost");
+                return;
+            };
+            self.header(unit);
+            self.field(&first);
+        } else if !self.unit_open || self.position.is_some_and(|last| position < last) {
+            // Every unit opens with its NAL header at bit zero.
+            if position == 0 && parts.clone().next() == Some("forbidden_zero_bit") {
+                self.inferring = Some(line.to_owned());
+            } else {
+                self.reject("trace unit header lost");
+            }
+            return;
+        }
+        self.position = Some(position);
         let Some(name) = parts.next() else {
             self.reject("malformed trace field");
             return;
@@ -475,7 +583,27 @@ impl Trace {
         }
     }
 
+    /// The digest of the decoder configuration, once all of it is known: at
+    /// the first packet for a complete record, or once the first packet's
+    /// in-band parameter sets have been read for a promoting copy.
+    fn seal_configuration(&mut self) {
+        if self.configuration_sha256.is_none()
+            && self.refusal.is_none()
+            && self.sets.iter().all(Option::is_some)
+        {
+            use sha2::{Digest, Sha256};
+            let mut digest = Sha256::new();
+            digest.update(b"plurx.hevc-inspected-configuration.v1\0");
+            for fields in self.sets.iter().flatten() {
+                digest.update((fields.len() as u64).to_be_bytes());
+                digest.update(fields);
+            }
+            self.configuration_sha256 = Some(format!("{:x}", digest.finalize()));
+        }
+    }
+
     fn close_packet(&mut self) {
+        self.seal_configuration();
         if self.packets == 0 {
             return;
         }
@@ -496,6 +624,9 @@ impl Trace {
     fn finish_input(&mut self) {
         if !self.line.is_empty() || self.skipping {
             self.reject("truncated trace line");
+        }
+        if self.inferring.take().is_some() {
+            self.reject("trace unit header lost");
         }
         self.end_section();
         if self.slices == 0
@@ -543,6 +674,85 @@ impl Trace {
             refusal: self.refusal,
         }
     }
+}
+
+/// The `Packet:` line a prefix-less line ends with, in the form
+/// `trace_headers` writes it: `Packet: <n> bytes` and then, each optional
+/// and in this order, `, key frame`, `, corrupt`, `, pts <t>` or `, no pts`,
+/// `, dts <t>` or `, no dts`, `, duration <d>` (left out when zero), and `.`.
+fn glued_packet(line: &str) -> Option<&str> {
+    let at = line.rfind("Packet: ")?;
+    let packet = line[at..].trim_end();
+    let (bytes, mut rest) = packet
+        .strip_prefix("Packet: ")?
+        .strip_suffix('.')?
+        .split_once(" bytes")?;
+    bytes.parse::<u64>().ok()?;
+    for (fixed, numbered) in [
+        (Some("key frame"), None),
+        (Some("corrupt"), None),
+        (Some("no pts"), Some("pts ")),
+        (Some("no dts"), Some("dts ")),
+        (None, Some("duration ")),
+    ] {
+        let Some(piece) = rest.strip_prefix(", ") else {
+            break;
+        };
+        let (head, tail) = piece.split_at(piece.find(", ").unwrap_or(piece.len()));
+        let taken = fixed == Some(head)
+            || numbered.is_some_and(|name| {
+                head.strip_prefix(name)
+                    .is_some_and(|value| value.parse::<i64>().is_ok())
+            });
+        if taken {
+            rest = tail;
+        }
+    }
+    rest.is_empty().then_some(packet)
+}
+
+/// The one trace field a prefix-less line ends with, and its bit position.
+/// CBS writes every field as `%-10d  %s%*s = %d`: the position fills the
+/// twelve columns before the field name, digits then spaces, and the name,
+/// bits and value follow as whole tokens. Those twelve columns find where the
+/// field starts even when the foreign text it is glued onto ends in digits
+/// (`IMDB : tt1757678` then `2448        scaling_list_delta_coeff…`).
+fn glued_field(line: &str) -> Option<(i64, &str)> {
+    const POSITION_COLUMNS: usize = 12;
+    let line = line.trim_end();
+    let tokens: Vec<(usize, &str)> = line
+        .split_ascii_whitespace()
+        .map(|token| (token.as_ptr() as usize - line.as_ptr() as usize, token))
+        .collect();
+    let [.., (name_at, name), (_, bits), (_, "="), (_, value)] = tokens[..] else {
+        return None;
+    };
+    let identifier = name
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'[' | b']'));
+    if !identifier
+        || bits.is_empty()
+        || !bits.bytes().all(|byte| matches!(byte, b'0' | b'1'))
+        || value.parse::<i64>().is_err()
+    {
+        return None;
+    }
+    let start = name_at.checked_sub(POSITION_COLUMNS)?;
+    let columns = line.get(start..name_at)?;
+    let digits = columns.bytes().take_while(u8::is_ascii_digit).count();
+    // `%-10d` then two spaces: at least one digit, at least two spaces.
+    if digits == 0
+        || digits > POSITION_COLUMNS - 2
+        || !columns.bytes().skip(digits).all(|byte| byte == b' ')
+    {
+        return None;
+    }
+    let position = columns[..digits].parse::<i64>().ok()?;
+    Some((position, &line[start..]))
 }
 
 #[cfg(test)]
@@ -832,5 +1042,334 @@ mod tests {
             trace.feed(bytes.as_bytes());
             assert!(!trace.finish("source".into(), 0).permits("source"));
         }
+    }
+
+    /// One CBS trace field as FFmpeg writes it: `%-10d  %s%*s = %d`.
+    fn cbs(position: u32, name: &str, bits: &str, value: i64) -> String {
+        format!(
+            "{position:<10}  {name}{bits:>width$} = {value}",
+            width = 60 - name.len()
+        )
+    }
+    fn nal(kind: &str, nal_unit_type: i64, fields: &[(u32, &str, &str, i64)]) -> Vec<String> {
+        let mut unit = vec![
+            line(kind),
+            line(&cbs(0, "forbidden_zero_bit", "0", 0)),
+            line(&cbs(1, "nal_unit_type", "100000", nal_unit_type)),
+        ];
+        unit.extend(fields.iter().map(|(p, n, b, v)| line(&cbs(*p, n, b, *v))));
+        unit
+    }
+    fn vps() -> Vec<String> {
+        nal(
+            "Video Parameter Set",
+            32,
+            &[
+                (16, "vps_video_parameter_set_id", "0000", 0),
+                (20, "rbsp_stop_one_bit", "1", 1),
+            ],
+        )
+    }
+    fn sps() -> Vec<String> {
+        nal(
+            "Sequence Parameter Set",
+            33,
+            &[
+                (16, "sps_video_parameter_set_id", "0000", 0),
+                (20, "sps_seq_parameter_set_id", "1", 0),
+                (2742, "scaling_list_delta_coeff[2][0][54]", "0001100", 6),
+                (
+                    2749,
+                    "scaling_list_delta_coeff[2][0][55]",
+                    "0000010000",
+                    -16,
+                ),
+                (2800, "rbsp_stop_one_bit", "1", 1),
+            ],
+        )
+    }
+    fn pps(cb_qp_offset: i64) -> Vec<String> {
+        nal(
+            "Picture Parameter Set",
+            34,
+            &[
+                (16, "pps_pic_parameter_set_id", "1", 0),
+                (17, "pps_seq_parameter_set_id", "1", 0),
+                (18, "pps_cb_qp_offset", "0001101", cb_qp_offset),
+                (25, "rbsp_stop_one_bit", "1", 1),
+            ],
+        )
+    }
+    fn slice() -> Vec<String> {
+        nal(
+            "Slice Segment Header",
+            19,
+            &[
+                (16, "first_slice_segment_in_pic_flag", "1", 1),
+                (18, "slice_pic_parameter_set_id", "1", 0),
+            ],
+        )
+    }
+    /// A packet whose parameter sets travel in band, as a 4K remux's
+    /// keyframes and a WEB-DL's first packet carry them.
+    fn keyframe(cb_qp_offset: i64) -> Vec<String> {
+        let mut packet = vec![line(
+            "Packet: 529679 bytes, key frame, pts -963, dts -1005, duration 41.",
+        )];
+        for unit in [vps(), sps(), pps(cb_qp_offset), slice(), slice()] {
+            packet.extend(unit);
+        }
+        packet
+    }
+    fn record() -> Vec<String> {
+        let mut record = vec![line("Extradata")];
+        for unit in [vps(), sps(), pps(-6)] {
+            record.extend(unit);
+        }
+        record
+    }
+    fn range(trace: &mut Trace, lines: &[String]) -> Result<RangeInspection, String> {
+        let input = lines.concat();
+        for chunk in input.as_bytes().chunks(5) {
+            trace.feed(chunk);
+        }
+        std::mem::take(trace).finish_range(|_| {})
+    }
+    /// What a line becomes when FFmpeg prints it straight after another
+    /// thread's unterminated message: no prefix, glued onto that message.
+    fn glue(lines: &mut [String], at: usize, onto: &str) {
+        let bare = lines[at].split_once("] ").expect("trace line").1.to_owned();
+        lines[at] = format!("{onto}{bare}");
+    }
+    fn find(lines: &[String], text: &str, nth: usize) -> usize {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(text))
+            .nth(nth)
+            .expect("fixture line")
+            .0
+    }
+
+    /// Avatar 6751 (2026-11-27): the live copy transcodes its audio, and
+    /// FFmpeg writes that output's header once the encoder opens, in pieces,
+    /// from another thread. A trace field printed between two pieces lost its
+    /// prefix, was dropped, and the next repetition of the unchanged SPS read
+    /// as a change: the title was refused as an unsafe configuration. A field
+    /// glued onto a foreign message is read as itself, wherever its digits
+    /// start.
+    #[test]
+    fn a_trace_field_glued_onto_another_message_is_read_as_itself() {
+        let clean = [record(), keyframe(-6), keyframe(-6)].concat();
+        let expected = range(&mut Trace::default(), &clean).expect("clean range");
+        for onto in [
+            "    title           : ",
+            "    IMDB            : tt1757678",
+            "  Stream #0:1(eng)",
+        ] {
+            let mut glued = clean.clone();
+            let at = find(&glued, "scaling_list_delta_coeff[2][0][54]", 2);
+            glue(&mut glued, at, onto);
+            let inspected = range(&mut Trace::default(), &glued).expect("glued field read");
+            assert_eq!(inspected, expected, "{onto}");
+        }
+    }
+
+    /// 3 Body Problem 1421 (2026-11-27): a slice header line and a field of
+    /// its NAL header were glued onto the header dump. A unit whose header
+    /// line was lost names itself in its `nal_unit_type`, and is read as
+    /// that unit: an in-band parameter set that changed behind a lost header
+    /// is still refused.
+    #[test]
+    fn a_unit_header_glued_onto_another_message_is_rebuilt_from_its_unit_type() {
+        let clean = [record(), keyframe(-6), keyframe(-6)].concat();
+        let expected = range(&mut Trace::default(), &clean).expect("clean range");
+        let mut glued = clean.clone();
+        let at = find(&glued, "Slice Segment Header", 3);
+        glue(&mut glued, at, "      _STATISTICS_WRITING_APP: ");
+        glue(&mut glued, at + 1, "      _STATISTICS_TAGS: ");
+        assert_eq!(range(&mut Trace::default(), &glued), Ok(expected));
+
+        let changed = [record(), keyframe(-6), keyframe(-1)].concat();
+        for lost in [false, true] {
+            let mut lines = changed.clone();
+            if lost {
+                let at = find(&lines, "Picture Parameter Set", 2);
+                glue(&mut lines, at, "    encoder         : ");
+            }
+            assert_eq!(
+                range(&mut Trace::default(), &lines),
+                Err(PARAMETER_SETS_CHANGE.to_owned()),
+                "lost header {lost}"
+            );
+        }
+    }
+
+    /// A prefix-less trace field that cannot be read exactly fails this
+    /// inspection, never the source: another read meets no such line.
+    #[test]
+    fn an_unreadable_glued_field_fails_the_inspection_not_the_source() {
+        let mut lines = [record(), keyframe(-6)].concat();
+        let at = find(&lines, "scaling_list_delta_coeff[2][0][55]", 1);
+        lines[at] =
+            "    title : x2749 scaling_list_delta_coeff[2][0][55] 0000010000 = -16\n".into();
+        let mut trace = Trace::default();
+        trace.feed(lines.concat().as_bytes());
+        assert_eq!(trace.refusal(), Some("trace line lost its prefix"));
+        assert!(!trace.refused_configuration());
+
+        let mut lines = [record(), keyframe(-6)].concat();
+        let at = find(&lines, "Sequence Parameter Set", 1);
+        lines.remove(at);
+        lines.remove(at);
+        let mut trace = Trace::default();
+        trace.feed(lines.concat().as_bytes());
+        assert_eq!(trace.refusal(), Some("trace unit header lost"));
+        assert!(!trace.refused_configuration());
+    }
+
+    /// A `Packet:` line glued onto a foreign message still opens its packet.
+    #[test]
+    fn a_packet_line_glued_onto_another_message_still_opens_its_packet() {
+        let clean = [record(), keyframe(-6), keyframe(-6)].concat();
+        let expected = range(&mut Trace::default(), &clean).expect("clean range");
+        let mut glued = clean.clone();
+        let at = find(&glued, "Packet:", 1);
+        glue(
+            &mut glued,
+            at,
+            "frame=   41 fps=0.0 q=-1.0 size=N/A time=00:00:01.70 bitrate=N/A    ",
+        );
+        let glued_range = range(&mut Trace::default(), &glued).expect("glued packet read");
+        assert_eq!(glued_range, expected);
+        assert_eq!(glued_range.packets, 2);
+    }
+
+    /// 3 Body Problem 1421 (2026-11-27): a WEB-DL whose Matroska record
+    /// carries no parameter sets, copied with `hevc_mp4toannexb,
+    /// extract_extradata`, which writes the decoder configuration the first
+    /// packet carries. Such a copy takes its sets from that packet, before
+    /// its first slice, and refuses any later change. Any other copy ships
+    /// the source's own record and still needs it complete.
+    #[test]
+    fn a_promoting_copy_takes_its_parameter_sets_from_the_first_packet() {
+        let empty = vec![line("Extradata")];
+        let web = [empty.clone(), keyframe(-6), keyframe(-6)].concat();
+        let promoted = range(&mut Trace::for_copy(true), &web).expect("promoting copy");
+        assert_eq!(promoted.packets, 2);
+        let mut emitted = Vec::new();
+        let mut trace = Trace::for_copy(true);
+        trace.feed_with_packets(web.concat().as_bytes(), |packet| emitted.push(packet));
+        trace
+            .finish_range(|packet| emitted.push(packet))
+            .expect("range");
+        assert_eq!(
+            emitted.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        let mut plain = Trace::default();
+        plain.feed(web.concat().as_bytes());
+        assert_eq!(plain.refusal(), Some(MISSING_EXTRADATA_CONFIGURATION));
+        assert!(plain.refused_configuration());
+
+        let changed = [empty.clone(), keyframe(-6), keyframe(-1)].concat();
+        assert_eq!(
+            range(&mut Trace::for_copy(true), &changed),
+            Err(PARAMETER_SETS_CHANGE.to_owned())
+        );
+        let mut early = [
+            empty,
+            vec![line(
+                "Packet: 100 bytes, key frame, pts 0, dts 0, duration 41.",
+            )],
+        ]
+        .concat();
+        early.extend(slice());
+        early.extend(keyframe(-6));
+        assert_eq!(
+            range(&mut Trace::for_copy(true), &early),
+            Err(UNPROVED_SLICE_CONFIGURATION.to_owned())
+        );
+    }
+
+    /// Every form `trace_headers` writes a packet line in is read when glued;
+    /// a near miss is not a packet.
+    #[test]
+    fn a_glued_packet_line_is_read_only_in_the_forms_trace_headers_writes() {
+        for packet in [
+            "Packet: 529679 bytes, key frame, pts -963, dts -1005, duration 41.",
+            "Packet: 4096 bytes, pts 0, dts 0.",
+            "Packet: 10 bytes, key frame, no pts, no dts.",
+            "Packet: 10 bytes, key frame, corrupt, pts 3, dts 1, duration 41.",
+            "Packet: 10 bytes.",
+        ] {
+            let glued = format!("    title           : {packet}");
+            assert_eq!(glued_packet(&glued), Some(packet), "{packet}");
+        }
+        for near in [
+            "Packet: 10 bytes, pts x, dts 0.",
+            "Packet: 10 bytes, dts 0, pts 0.",
+            "Packet: 10 bytes, pts 0, dts 0, duration 41",
+            "Packet: ten bytes.",
+            "Packet: 10 bytes, pts 0, dts 0, duration 41. and more",
+        ] {
+            assert_eq!(glued_packet(&format!("x {near}")), None, "{near}");
+        }
+    }
+
+    /// A glued field is taken only where it can stand: later in its unit
+    /// than the field before it. One that is not fails the inspection.
+    #[test]
+    fn a_glued_field_out_of_order_fails_the_inspection() {
+        let mut lines = [record(), keyframe(-6)].concat();
+        let at = find(&lines, "scaling_list_delta_coeff[2][0][55]", 1);
+        lines[at] = format!(
+            "    title           : {}\n",
+            cbs(
+                2742,
+                "scaling_list_delta_coeff[2][0][55]",
+                "0000010000",
+                -16
+            )
+        );
+        let mut trace = Trace::default();
+        trace.feed(lines.concat().as_bytes());
+        assert_eq!(trace.refusal(), Some("trace line lost its prefix"));
+        assert!(!trace.refused_configuration());
+    }
+
+    /// Text the file controls can take a trace field's form in the header
+    /// dump. A change that a recovered field alone accounts for fails the
+    /// inspection, not the source; a change without one is still the source's.
+    #[test]
+    fn a_change_a_glued_line_accounts_for_is_not_the_sources_configuration() {
+        let mut lines = [record(), keyframe(-6)].concat();
+        let at = find(&lines, "rbsp_stop_one_bit", 4);
+        lines.insert(
+            at,
+            format!(
+                "    title           : {}\n",
+                cbs(2790, "forged_field", "1", 1)
+            ),
+        );
+        let mut trace = Trace::default();
+        trace.feed(lines.concat().as_bytes());
+        assert_eq!(
+            trace.refusal(),
+            Some("a glued trace line changed a parameter set")
+        );
+        assert!(!trace.refused_configuration());
+    }
+
+    /// A promoting copy whose source record is complete still refuses first
+    /// in-band sets that differ from it.
+    #[test]
+    fn a_promoting_copy_refuses_in_band_sets_that_differ_from_its_record() {
+        let lines = [record(), keyframe(-1)].concat();
+        assert_eq!(
+            range(&mut Trace::for_copy(true), &lines),
+            Err(PARAMETER_SETS_CHANGE.to_owned())
+        );
     }
 }

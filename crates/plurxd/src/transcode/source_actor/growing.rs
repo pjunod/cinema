@@ -726,7 +726,7 @@ impl TranscodeManager {
             census.first_dts,
             0,
             recipe.tracks(&file),
-            video.retains_hevc_parameter_sets(),
+            video,
             file.video_codec.as_deref() == Some("hevc"),
             memory,
         )

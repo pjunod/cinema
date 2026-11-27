@@ -1871,9 +1871,6 @@ impl ReceiverStartActor {
             .source_retry
             .map_or(0, |(count, _)| count);
         loop {
-            if self.0.stop.is_cancelled() {
-                return Err(ReceiverStartError::Unresolved);
-            }
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -1887,6 +1884,13 @@ impl ReceiverStartActor {
                         return Err(ReceiverStartError::NotYet(retry));
                     }
                 }
+            }
+            // A failed owner stores its typed result and only then begins
+            // the retirement that stops it, so a stop is read after the
+            // result: before it, the Source's own refusal of the title was
+            // answered as "unresolved".
+            if self.0.stop.is_cancelled() {
+                return Err(ReceiverStartError::Unresolved);
             }
             if tokio::time::timeout_at(deadline.into(), changed)
                 .await
@@ -3321,6 +3325,51 @@ mod tests {
             Err(ReceiverStartError::Capacity)
         ));
         assert_eq!(registry.entries.lock().expect("entries").len(), 8);
+    }
+
+    /// Avatar 6751 and 3 Body Problem 1421 (2026-11-27): the Source refused
+    /// each title with a typed 422, the failed owner stored that refusal and
+    /// began the retirement that stops it, and the waiter read the stop first
+    /// and told the viewer "could not confirm playback preparation". A stored
+    /// result is answered as itself, whether or not the owner is stopping.
+    #[tokio::test]
+    async fn a_stored_refusal_is_answered_after_the_owner_stops() {
+        let registry = ReceiverStartRegistry::default();
+        let first = intent("attempt");
+        let (entry, _) = registry
+            .register(first.clone(), "attempt".into(), "player", &wrapper(&first))
+            .expect("owner");
+        let actor = ReceiverStartActor(entry.clone());
+        let waiting = {
+            let actor = actor.clone();
+            tokio::spawn(async move {
+                actor
+                    .wait_ready(Instant::now() + Duration::from_secs(60), false)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        entry.state.lock().expect("state").start = Some(Err(ReceiverStartError::SourceRefused(
+            "hevc_configuration_unsupported",
+        )));
+        entry.changed.notify_waiters();
+        actor.close_dispatch();
+        let answered = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("answered at once")
+            .expect("waiter");
+        assert!(matches!(
+            answered,
+            Err(ReceiverStartError::SourceRefused(
+                "hevc_configuration_unsupported"
+            ))
+        ));
+        assert!(matches!(
+            actor.wait_ready(Instant::now(), false).await,
+            Err(ReceiverStartError::SourceRefused(
+                "hevc_configuration_unsupported"
+            ))
+        ));
     }
 
     /// S7 at B: a viewer that sent its start clock is answered with a typed
