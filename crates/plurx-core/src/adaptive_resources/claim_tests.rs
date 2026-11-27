@@ -167,6 +167,88 @@ fn dropping_spawn_possible_unknown_reservation_keeps_claim_and_charge() {
     assert_eq!(ledger.snapshot().expect("still held").used, vector(1, 8));
 }
 
+/// A direct read role: known bytes and CPU, no process.
+fn processless_demand(epoch: u64, cpu: u64, memory: u64) -> WorkloadDemand {
+    WorkloadDemand {
+        resources: Metric::Known(ResourceVector {
+            processes: 0,
+            ..vector(cpu, memory)
+        }),
+        limit_epoch: epoch,
+        trial: false,
+    }
+}
+
+#[test]
+fn a_processless_known_role_coexists_with_an_unknown_peak_and_still_spends_headroom() {
+    let cap = || capacity(Metric::Known(100), Metric::Known(100));
+    let unknown = MemoryClaim::UnknownProducerPeak;
+
+    // A live direct role, then a serialized-cold finite producer.
+    let direct_first = ResourceLedger::with_capacity(1, cap()).expect("ledger");
+    let mut direct = reserve_single(
+        &direct_first,
+        FamilyRole::Companion,
+        processless_demand(1, 1, 60),
+        None,
+    )
+    .expect("direct read role");
+    assert!(matches!(
+        reserve_single(
+            &direct_first,
+            FamilyRole::Video,
+            demand(1, 1, 50),
+            Some(unknown)
+        ),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
+    ));
+    let mut producer = reserve_single(
+        &direct_first,
+        FamilyRole::Video,
+        demand(1, 1, 40),
+        Some(unknown),
+    )
+    .expect("an unknown peak fits beside a processless known role");
+    let snapshot = direct_first.snapshot().expect("snapshot");
+    assert_eq!(snapshot.used.peak_memory_bytes, 100);
+    assert_eq!(snapshot.unknown_peak_producers, 1);
+    drop(producer.pop());
+    drop(direct.pop());
+
+    // The producer first, then a direct role.
+    let producer_first = ResourceLedger::with_capacity(1, cap()).expect("ledger");
+    let mut producer = reserve_single(
+        &producer_first,
+        FamilyRole::Video,
+        demand(1, 1, 40),
+        Some(unknown),
+    )
+    .expect("serialized cold producer");
+    let mut direct = reserve_single(
+        &producer_first,
+        FamilyRole::Companion,
+        processless_demand(1, 1, 60),
+        None,
+    )
+    .expect("a direct role fits beside an unknown peak");
+    assert!(matches!(
+        reserve_single(
+            &producer_first,
+            FamilyRole::Audio,
+            processless_demand(1, 1, 1),
+            None
+        ),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
+    ));
+    // A second process still serializes against the unknown peak.
+    drop(direct.pop());
+    assert!(matches!(
+        reserve_single(&producer_first, FamilyRole::Audio, demand(1, 1, 8), None),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(producer.pop());
+}
+
 #[test]
 fn resident_claim_cannot_be_requested_without_retirement_swap() {
     let ledger = ledger(Metric::Known(100), Metric::Known(100));

@@ -461,6 +461,19 @@ pub struct LedgerSnapshot {
     pub native_overage_fenced: bool,
 }
 
+/// A rootless role, such as a direct read domain or source, whose memory is
+/// a known bound and which runs no process. Its bytes stay charged in `used`
+/// and checked against capacity, but it has no native peak, so an unknown
+/// producer peak need not serialize against it. Finalization support's
+/// cohort rule still counts it.
+fn processless_known(memory: MemoryClaim, task: TaskClaim) -> bool {
+    memory
+        == (MemoryClaim::KnownBounded {
+            active_producer: true,
+        })
+        && task == TaskClaim::NoProducer
+}
+
 /// A producer admitted with its domain's enforced memory and task ceilings.
 fn contained_claims(memory: MemoryClaim, task: TaskClaim) -> bool {
     memory
@@ -501,6 +514,7 @@ impl State {
         additional: &[(MemoryClaim, TaskClaim)],
     ) -> Result<(), AdmissionRefusal> {
         let mut active = 0usize;
+        let mut with_process = 0usize;
         let mut unknown = false;
         let mut uncontained = false;
         for (memory, task) in self.producer_claims_with(additional) {
@@ -508,10 +522,20 @@ impl State {
                 continue;
             }
             active += 1;
+            if !processless_known(memory, task) {
+                with_process += 1;
+            }
             unknown |= memory == MemoryClaim::UnknownProducerPeak;
             uncontained |= !contained_claims(memory, task);
         }
-        if active > 1 && (unknown || (self.support.is_some() && uncontained)) {
+        // An unknown peak serializes against every other producer that has a
+        // process; a processless known role spends only its charged bytes.
+        if with_process > 1 && unknown {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        // Support's unknown cohort still counts zero-root direct-I/O roles,
+        // as its installation does.
+        if active > 1 && self.support.is_some() && uncontained {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         Ok(())
