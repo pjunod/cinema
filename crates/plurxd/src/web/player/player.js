@@ -36,6 +36,7 @@
  * @property {boolean} [retainOutputOff]  this playback opted out of keeping a reusable copy
  * @property {boolean} [requestHdr10]      what `/decision` asked the session to preserve; survives reopens
  * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
+ * @property {string|null} [sourceVideoRange] the server's range for the unchanged source video; null after a transcode decision
  * @property {number|null} deliveredDvProfile
  * @property {any} [effectiveProcessing] the accepted current-generation DV processing report behind HDR10-E, or null
  * @property {any} [processingSkip] the current-generation optional-upgrade refusal shown as the FEL/RPU skip reason, or null

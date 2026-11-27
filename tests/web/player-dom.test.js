@@ -162,7 +162,7 @@ function shipped(name) {
 
 test("quality menu uses standard tiers and discloses SDR without changing selection IDs",()=>{
   const modes=bodyScript.match(/const QUALITY_MODES=\[.*?\];/s)[0];
-  const heights=bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0];
+  const heights=bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0]+bodyScript.match(/const QUALITY_CROP_TOLERANCE=.*?;/)[0];
   const player={source:{hdr:"dolby_vision"},deliveredRange:"hdr10"};
   let saved="1608";
   const policy={
@@ -215,6 +215,10 @@ test("quality menu uses standard tiers and discloses SDR without changing select
     ["1080","1080p · SDR transcode"],["720","720p · SDR transcode"],
   ],"a scope title's rungs keep distinct tiers instead of two 4K entries");
   assert.equal(options()[0][1],"Auto","Auto can still reach the HDR10 rung");
+  player.qualityCandidates=[encode(1620,3840,1620,"hdr10"),encode(1440,3414,1440,"hdr10"),
+    encode(1080,2560,1080,"hdr10"),encode(480,1138,480,"hdr10")];
+  assert.deepEqual(options().slice(3).map(([,label])=>label),["4K","1440p","1080p","480p"],
+    "a rung whose width lands on a standard long edge keeps its own height's tier");
   player.qualityCandidates=[
     encode(1440,3438,1440,"sdr"),{...encode(1608,3840,1608,"hdr10"),decoder_compatible:false},
     {...encode(1608,3840,1608,"hdr10"),route:"original",decoder_compatible:false},
@@ -245,8 +249,8 @@ test("quality controls describe presented frames and announce only completed qua
   const p={mediaAttachment:{id:1,qualityRange:"sdr"},deliveredRange:"sdr",qualityCandidateId:"original"};
   const surface={surface:{kind:"none"}};
   const update=new Function("PLAYER","document","performance","playQuality","playbackOwnsAttachedMedia","PLAYBACK_SURFACE",
-    [bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0],shipped("qualityCapLabel"),
-      shipped("statsStreamFormat"),shipped("playbackQualityResolution"),shipped("updatePlaybackQualityChrome"),
+    [bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0],bodyScript.match(/const QUALITY_CROP_TOLERANCE=.*?;/)[0],
+      shipped("qualityCapLabel"),shipped("statsStreamFormat"),shipped("playbackQualityResolution"),shipped("updatePlaybackQualityChrome"),
       "return updatePlaybackQualityChrome;"].join("\n"))(
       p,{getElementById:id=>id==="video"?video:nodes[id]}, {now:()=>now},()=>mode,()=>owns,surface);
   const present=()=>{p.presentationAdvancedAt=(p.presentationAdvancedAt||0)+1;
@@ -332,11 +336,16 @@ test("quality controls describe presented frames and announce only completed qua
 
 test("quality tiers name crops and height-scaled wide encodes, and nothing else",()=>{
   const resolution=new Function([bodyScript.match(/const STANDARD_QUALITY_FRAMES=\[.*?\];/s)[0],
-    shipped("qualityCapLabel"),shipped("playbackQualityResolution"),"return playbackQualityResolution;"].join("\n"))();
+    bodyScript.match(/const QUALITY_CROP_TOLERANCE=.*?;/)[0],shipped("qualityCapLabel"),shipped("playbackQualityResolution"),"return playbackQualityResolution;"].join("\n"))();
   for(const [w,h,want] of [[3840,1608,"4K"],[3438,1440,"1440p"],[2580,1080,"1080p"],[1720,720,"720p"],
     [1920,800,"1080p"],[2560,1072,"1440p"],[7680,3200,"8K"],[4096,2160,"4K"],[2160,3840,"4K"],
-    [800,1920,"1080p"],[1280,540,"720p"],[1280,536,"720p"],[960,540,"540p"],[720,576,"576p"],
-    [720,480,"480p"],[1440,1080,"1080p"],[0,1080,null],[1000,1000,null]])
+    [800,1920,"1080p"],[1280,540,"540p"],[1280,536,"720p"],[960,540,"540p"],[720,576,"576p"],
+    [720,480,"480p"],[1440,1080,"1080p"],[0,1080,null],[1000,1000,null],
+    [3832,1596,"4K"],[1916,796,"1080p"],[4096,1716,"4K"],[3440,1440,"1440p"]])
+    assert.equal(resolution(w,h),want,`${w}×${h}`);
+  // A rung the server scaled to a standard height is that height, even when
+  // its width is a standard frame's long edge.
+  for(const [w,h,want] of [[2560,1080,"1080p"],[960,480,"480p"]])
     assert.equal(resolution(w,h),want,`${w}×${h}`);
 });
 

@@ -703,16 +703,24 @@ function playQuality(){ try{ return localStorage.getItem("plurx_quality")||"auto
 // Standard frames, smallest first, as [long edge, short edge].
 const STANDARD_QUALITY_FRAMES=[[256,144],[426,240],[640,360],[854,480],[960,540],
   [1024,576],[1280,720],[1920,1080],[2560,1440],[3840,2160],[7680,4320]];
-// A raster names a standard tier in one of two ways, checked in this order:
-// it is a crop of that frame (fits inside and fills one edge: 3840×1608 is a
-// scope 4K picture, 1920×800 a scope 1080p one), or the server scaled a wider
-// source to that frame's height (3438×1440 is the 1440 rung of 3840×1608).
-// Anything else has no honest tier name and is shown by its raster.
+// How close a crop's long edge must be to a standard frame's: DCI 4096 and
+// slightly trimmed masters (3832, 1916) are that frame; a 3438-wide picture
+// is not a 4K one.
+const QUALITY_CROP_TOLERANCE=0.08;
+// The tier a raster honestly names, in this order:
+// 1. Its short edge is a standard height. The server scales every lower rung
+//    to its target height whatever the width, so the 3438×1440 and 2560×1080
+//    rungs of a scope title are 1440p and 1080p, as is an ultrawide master.
+// 2. It is a crop of a standard frame: its long edge is that frame's (within
+//    the tolerance) and it fits inside it, so 3840×1608 is 4K and 1920×800
+//    is 1080p.
+// Anything else has no tier name and is shown by its raster.
 function playbackQualityResolution(width,height){
   if(!(width>0&&height>0)) return null;
   const long=Math.max(width,height),short=Math.min(width,height);
-  const frame=STANDARD_QUALITY_FRAMES.find(([w,h])=>long<=w&&short<=h&&(long===w||short===h))
-    ||STANDARD_QUALITY_FRAMES.find(([,h])=>short===h);
+  const crop=([w,h])=>short<=h&&Math.abs(long/w-1)<=QUALITY_CROP_TOLERANCE;
+  const frame=STANDARD_QUALITY_FRAMES.find(([,h])=>short===h)
+    ||STANDARD_QUALITY_FRAMES.filter(crop).sort(([a],[b])=>Math.abs(long/a-1)-Math.abs(long/b-1))[0];
   return frame?qualityCapLabel(frame[1]):null;
 }
 function qualityCapLabel(height){
@@ -1205,6 +1213,11 @@ function buildPlayer(attempt,decided,prepared){
     // decision never promised); direct play has no session, so this stands for
     // the whole playback. MEDIA-BADGES-PLAN.md §3.2.
     deliveredRange:decision.delivered_dynamic_range||null,
+    // The server's answer for the source video unchanged on this client
+    // (direct play or remux: DV kept or stripped to its base grade). It only
+    // answers that when the decision itself was sessionless; a transcode
+    // decision's range is its encode grade, so the source's stays unknown.
+    sourceVideoRange:decision.method!=='transcode'&&decision.delivered_dynamic_range||null,
     deliveredDvProfile:decision.delivered_dolby_vision_profile||null,
     playStartedAt:clickedAt, ttffMs:null, stalls:0, sessionId:null, streamId:null, health:null,
     attemptId:null, attemptReason:null, bufferLimits:null,

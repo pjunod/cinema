@@ -4028,7 +4028,7 @@ test("attachment and retirement are what the presenter is told about identity", 
   const fed = [];
   const attach = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
-    [shippedSource("clearEffectiveProcessing"), shippedSource("sourceDynamicRange"),shippedSource("beginPlaybackMediaAttachment"),
+    [shippedSource("clearEffectiveProcessing"), shippedSource("beginPlaybackMediaAttachment"),
       "return beginPlaybackMediaAttachment;"].join("\n"),
   )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
   attach({ attemptId: "a7" });
@@ -4040,6 +4040,14 @@ test("attachment and retirement are what the presenter is told about identity", 
   attach(reattached);
   assert.equal(reattached.effectiveProcessing, null,
     "a new attachment cannot inherit the previous one's processing report");
+  // A sessionless attachment carries the source video, so its range is the
+  // server's answer for that; a session attachment waits for its session.
+  const direct = { attemptId: "b1", sourceVideoRange: "hdr10", source: { hdr: "dolby_vision" } };
+  assert.equal(attach(direct, { sourceVideo: true }).token.qualityRange, "hdr10",
+    "a stripped Dolby Vision direct play is the HDR10 the server said, not the source's DV");
+  assert.equal(attach(direct).token.qualityRange, null, "a session attachment starts ungraded");
+  assert.equal(attach({ attemptId: "b2", sourceVideoRange: null }, { sourceVideo: true }).token.qualityRange, null,
+    "after a transcode decision the source video's range is unknown, not guessed");
 
   fed.length = 0;
   const retire = new PlaybackContextFunction(
