@@ -118,7 +118,10 @@ async fn lost_store_close_reply_reconciles_only_the_same_original_attempt() {
         fence.settle(JobSettlement::Yield {
             error_code: Some("fixture_yield".into()),
             checkpoint: None,
-            not_before_ms: unix_ms().unwrap(),
+            // The Store refuses a yield time already behind its own clock,
+            // which settle reads later; a future time keeps this a valid
+            // Yield however long the runner takes to get there.
+            not_before_ms: unix_ms().unwrap() + 60_000,
         }),
     )
     .await;
