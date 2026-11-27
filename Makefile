@@ -1818,15 +1818,29 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # mutation, rather than depending on `docker-startup-budget-check` and letting
 # each recipe derive its own. A preflight that proves one number while
 # `compose up` applies another is not a preflight.
+# Build once per commit, not once per node. `scripts/fleet-image pull` asks
+# the fleet registry (PLURX_REGISTRY in deploy/.env) for this exact clean
+# commit's `build-<sha>-<arch>` image; when another node already built it, the
+# verified image ID is proved and started with --no-build instead of
+# compiling. Otherwise Compose builds as before and `fleet-image push` shares
+# the result for the next node. Neither step can fail the deploy; with no
+# registry configured, or a dirty checkout, this is the plain source build.
 .PHONY: docker-up
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
 	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && shared="$$(python3 ../scripts/fleet-image pull)" \
+	  && if test -n "$$shared"; then export PLURX_IMAGE="$$shared"; fi \
 	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && if test -n "$$shared"; then \
+	       PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never; \
+	     else \
+	       PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build \
+	         && python3 ../scripts/fleet-image push; \
+	     fi
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
