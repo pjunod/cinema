@@ -1032,7 +1032,8 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         base.path().join("shared-audio-cache"),
         schedule_store.clone(),
     ).await;
-    let (cached_init, first, second) = encoded_pair(&serve, &file, &encoding, 0).await;
+    // The soundtrack stays registered and dormant, as production caches it.
+    let (cached_init, first, second, _) = encoded_pair_kept(&serve, &file, &encoding, 0).await;
     let soundtrack = serve
         .shared
         .renditions
@@ -2112,7 +2113,9 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let legacy = serve
         .shared
         .build_rendition(
-            "legacy-candidate-cache",
+            // A source- key is the legacy directory Source renditions still
+            // take on Linux; any other key there is a finite producer's own.
+            "source-legacy-candidate-cache",
             None,
             Recipe {
                 audio_excluded: false,
@@ -3768,6 +3771,28 @@ async fn encoded_pair(
     encoding: &Arc<crate::vodencode::Encoding>,
     entry: u32,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (init, first, next, key) = encoded_pair_kept(serve, file, encoding, entry).await;
+    // Force a fresh generation the way the daemon does: retire the dormant
+    // rendition (on Linux, its finite producer and output) so the next pair
+    // builds a new owner from its own entry rather than reusing this one.
+    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+    wait_until(
+        "the pair's rendition is retired",
+        Duration::from_secs(30),
+        async || !serve.shared.renditions.lock().await.contains_key(&key),
+    )
+    .await;
+    (init, first, next)
+}
+
+/// The pair's session ends, and its rendition stays registered and dormant
+/// as production keeps it within its TTL.
+async fn encoded_pair_kept(
+    serve: &Arc<VodServe>,
+    file: &MediaFile,
+    encoding: &Arc<crate::vodencode::Encoding>,
+    entry: u32,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>, String) {
     let session = uuid::Uuid::new_v4().to_string();
     let start = f64::from(entry) * encoding.grid.segment_ticks() as f64
         / f64::from(encoding.grid.numerator);
@@ -3811,19 +3836,9 @@ async fn encoded_pair(
     let rendition = rendition_of(serve, &session).await;
     assert!(rendition.failure().is_none(), "{:?}", rendition.failure());
     serve.end(&session, Terminal::Deleted).await;
-    // Force a fresh generation the way the daemon does: retire the dormant
-    // rendition (on Linux, its finite producer and output) so the next pair
-    // builds a new owner from its own entry rather than reusing this one.
     let key = rendition.key.clone();
     drop(rendition);
-    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
-    wait_until(
-        "the pair's rendition is retired",
-        Duration::from_secs(30),
-        async || !serve.shared.renditions.lock().await.contains_key(&key),
-    )
-    .await;
-    (init, first, next)
+    (init, first, next, key)
 }
 
 fn audio_interval(init: &[u8], media: &[u8]) -> (u64, u64) {
