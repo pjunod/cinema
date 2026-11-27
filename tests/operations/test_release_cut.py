@@ -8,6 +8,7 @@ scheduled release-readiness run tags only a green, untagged, dated release.
 from __future__ import annotations
 
 import importlib.machinery
+import hashlib
 import importlib.util
 from pathlib import Path
 import re
@@ -111,6 +112,26 @@ DOCUMENTS = {
     ),
 }
 STATUS_PAGE = "docs/STATUS.html"
+RECEIPTS = "validation/native_receipts.py"
+# The shape of validation/native_receipts.py's reviewed Apple project pins.
+NATIVE_RECEIPTS = (
+    "BUILD_SPECS = {{\n"
+    "    # release: v0.3.0 changes only MARKETING_VERSION \"0.2.9\" -> \"0.3.0\".\n"
+    "    'clients/apple/project.yml': '{pin}',\n"
+    "}}\n"
+    'APPLE_PROJECT_SHAPE = "{shape}"\n'
+    "APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: \")[1-9][0-9]*(\")$')\n"
+)
+
+
+def load_native_receipts(path: Path):
+    """A copy of validation/native_receipts.py, loaded from where the cut rewrote it."""
+
+    loader = importlib.machinery.SourceFileLoader("native_receipts_copy", str(path))
+    spec = importlib.util.spec_from_loader("native_receipts_copy", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def git(root: Path, *args: str) -> str:
@@ -272,7 +293,7 @@ class ReleaseCutCase(unittest.TestCase):
         root = Path(temporary.name)
         for path in (
             "CHANGELOG.md", "Cargo.toml", release_cut.ANDROID, release_cut.APPLE,
-            *DOCUMENTS, STATUS_PAGE,
+            *DOCUMENTS, STATUS_PAGE, RECEIPTS,
         ):
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / path, root / path)
@@ -298,6 +319,74 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(validate_documented_builds(read), ())
         self.assertEqual(check_repository(root), ())
         self.assertEqual(validate_versions(after), ())
+        # v0.9.1 and v0.9.2 each needed a second push: the cut left the
+        # reviewed project.yml fingerprints in validation/native_receipts.py
+        # describing the old MARKETING_VERSION, failing the fast lane.
+        receipts = load_native_receipts(root / RECEIPTS)
+        project = (root / release_cut.APPLE).read_bytes()
+        self.assertEqual(
+            receipts.BUILD_SPECS[release_cut.APPLE], hashlib.sha256(project).hexdigest()
+        )
+        normalized = receipts.APPLE_BUILD_COUNTER.sub(rb"\g<1>0\g<2>", project)
+        self.assertEqual(receipts.APPLE_PROJECT_SHAPE, hashlib.sha256(normalized).hexdigest())
+        self.assertIn(
+            f'# release: v{after.workspace} changes only MARKETING_VERSION '
+            f'"{before.workspace}" -> "{after.workspace}".',
+            read(RECEIPTS),
+        )
+
+    def receipts_tree(self) -> tuple[Path, str]:
+        """A fixture whose native receipts pin its project.yml the way the real file does."""
+
+        root = self.tree()
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        receipts = NATIVE_RECEIPTS.format(
+            pin=digest(APPLE), shape=digest(APPLE.replace('VERSION: "1"', 'VERSION: "0"'))
+        )
+        (root / RECEIPTS).parent.mkdir(exist_ok=True)
+        (root / RECEIPTS).write_text(receipts, encoding="utf-8")
+        self.commit(root, "pin the reviewed boundary")
+        return root, receipts
+
+    def test_the_cut_moves_the_reviewed_apple_boundary_with_the_marketing_version(self):
+        root, receipts = self.receipts_tree()
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"changed {RECEIPTS}", result.stdout)
+        bumped = APPLE.replace('"0.3.0"', '"0.3.1"')
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        self.assertEqual(
+            (root / RECEIPTS).read_text(encoding="utf-8"),
+            NATIVE_RECEIPTS.format(
+                pin=digest(bumped), shape=digest(bumped.replace('VERSION: "1"', 'VERSION: "0"'))
+            ).replace('v0.3.0 changes only MARKETING_VERSION "0.2.9" -> "0.3.0"',
+                      'v0.3.1 changes only MARKETING_VERSION "0.3.0" -> "0.3.1"'),
+        )
+
+    def test_an_unreviewed_project_change_refuses_the_cut_before_anything_is_written(self):
+        """The cut never widens the reviewed boundary: only its own version bump re-pins."""
+
+        root, receipts = self.receipts_tree()
+        edited = APPLE + "    preBuildScripts: [{script: cat ../../extra/file}]\n"
+        (root / release_cut.APPLE).write_text(edited, encoding="utf-8")
+        self.commit(root, "an unreviewed project change")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no longer matches its reviewed fingerprint", result.stderr)
+        self.assertEqual((root / release_cut.APPLE).read_text(encoding="utf-8"), edited)
+        self.assertEqual((root / RECEIPTS).read_text(encoding="utf-8"), receipts)
+        self.assertEqual((root / "Cargo.toml").read_text(encoding="utf-8"), CARGO)
+
+    def test_a_cut_that_moves_more_than_the_marketing_version_is_refused(self):
+        module = load_release_cut()
+        before = APPLE
+        after = APPLE.replace('"0.3.0"', '"0.3.1"').replace("tvOS:", "watchOS:")
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        receipts = NATIVE_RECEIPTS.format(
+            pin=digest(before), shape=digest(before.replace('VERSION: "1"', 'VERSION: "0"'))
+        )
+        with self.assertRaisesRegex(module.CutError, "only its MARKETING_VERSION line"):
+            module.repin_native_receipts(receipts, before, after, "0.3.0", "0.3.1")
 
     def test_a_reworded_claim_refuses_the_cut_before_anything_is_written(self):
         root = self.tree()
