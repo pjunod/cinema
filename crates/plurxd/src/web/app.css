@@ -4112,6 +4112,7 @@ button.listtoggle.fav.on{border-color:var(--bad);color:var(--bad)}
 .home-entry{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)}
 .home-entry:last-child{border-bottom:0}
 .home-entry.hidden-entry .home-entry-name{opacity:.55}
+.home-entry-empty{display:block;font-size:.85em;color:var(--warn);margin-top:2px}
 .row-group{border:1px solid var(--line);border-radius:var(--radius);padding:8px 12px;margin:10px 0}
 .tag-pick{display:inline-flex!important;align-items:center;gap:4px;margin:0!important}
 .tag-option{display:flex;width:100%;justify-content:space-between;align-items:center;margin:4px 0;text-align:left}

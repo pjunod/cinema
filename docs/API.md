@@ -2928,7 +2928,7 @@ valid URL, the only way forward is to release and start over.
 | PATCH / DELETE | `/api/v1/rows/{id}` | bearer, editable | Edit `{title?, spec?}` or delete |
 | GET | `/api/v1/rows/{id}/items` | bearer | A row's result ("See all"): `{items, total, offset, limit}` |
 | GET | `/api/v1/home/rows` | bearer | What Home draws: `{layout:[{key, kind, row_id}], rows:{id:{title, items, total}}}`, visible entries only, empty rows left out. Built-in keys: `continue_watching`, `next_up`, `watchlist`, `favorites`, `recently_added`, `coming_soon`, `libraries` |
-| GET / PUT / DELETE | `/api/v1/home/layout` | bearer | The reader's order with hidden entries: `{entries:[{key, hidden}], source:"user"\|"household"\|"builtin", rows, can_manage_household, is_admin}`; PUT `{entries}`; DELETE returns to the household default |
+| GET / PUT / DELETE | `/api/v1/home/layout` | bearer | The reader's order with hidden entries: `{entries:[{key, hidden}], source:"user"\|"household"\|"builtin", rows, can_manage_household, is_admin}`. Each of `rows` is a saved row plus `matching` (playable titles it matches now) and `empty_tags:[{id, name, editable}]` (when `matching` is 0, the tags its rule needs that no title carries), so Customize Home can say why a row is not on Home; PUT `{entries}`; DELETE returns to the household default |
 | PUT / DELETE | `/api/v1/home/default-layout` | admin | The household default Home order (household rows only) |
 | GET / PUT | `/api/v1/users/{id}/grants` | admin | `{grants:["manage_tags"]}` |
 

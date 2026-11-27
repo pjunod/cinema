@@ -1298,11 +1298,87 @@ async fn resolved_layout(
     Ok((stored.resolve(&ids), source))
 }
 
+/// A tag a row's rule needs that no title carries yet.
+#[derive(Serialize)]
+pub struct EmptyTag {
+    pub id: i64,
+    pub name: String,
+    /// Whether the caller may tag titles with it (and so review its
+    /// suggestions), which decides where the panel links.
+    pub editable: bool,
+}
+
+/// A row as the Customize Home panel lists it: how many playable titles it
+/// matches now, and — when that is none — the tags it needs that nobody has
+/// applied yet. Home leaves an empty row out, so this is the one place that
+/// says why a row the layout lists is not on Home.
+#[derive(Serialize)]
+pub struct LayoutRowDto {
+    #[serde(flatten)]
+    pub row: RowDto,
+    pub matching: i64,
+    pub empty_tags: Vec<EmptyTag>,
+}
+
+/// The tags a matching title must carry that no title carries: every empty
+/// `all_of` tag, and the `any_of` tags when all of them are empty. Tagging a
+/// title with these is what brings the row back.
+fn empty_tags(spec: &RowSpec, tags: &[Tag], user: &User, curate: bool) -> Vec<EmptyTag> {
+    let empty = |term: &Term| match term {
+        Term::Tag(id) => tags
+            .iter()
+            .find(|t| t.id == *id)
+            .filter(|t| t.item_count == 0)
+            .map(|t| EmptyTag {
+                id: t.id,
+                name: t.name.clone(),
+                editable: may_edit(t.owner_user_id, user, curate),
+            }),
+        Term::Genre(_) => None,
+    };
+    let mut out: Vec<EmptyTag> = spec.all_of.iter().filter_map(empty).collect();
+    let any: Vec<EmptyTag> = spec.any_of.iter().filter_map(empty).collect();
+    if !spec.any_of.is_empty() && any.len() == spec.any_of.len() {
+        out.extend(any);
+    }
+    out
+}
+
+async fn layout_row(
+    state: &AppState,
+    user: &User,
+    row: SavedRow,
+    tags: &[Tag],
+    curate: bool,
+) -> Result<LayoutRowDto, ApiError> {
+    let query = RuleQuery {
+        viewer: user.id,
+        spec: &row.spec,
+        only_items: None,
+        top_level_only: false,
+        day: today(),
+        presence: ItemPresence::OnDisk,
+    };
+    // The same rule and presence Home's `/home/rows` draws with, so "empty"
+    // here is exactly "left off Home".
+    let matching = state.store.rule_items(&query, 0, 1).await?.total;
+    let empty_tags = if matching == 0 {
+        empty_tags(&row.spec, tags, user, curate)
+    } else {
+        Vec::new()
+    };
+    Ok(LayoutRowDto {
+        row: row_dto(row, user, curate),
+        matching,
+        empty_tags,
+    })
+}
+
 #[derive(Serialize)]
 pub struct LayoutResponse {
     pub entries: Vec<HomeEntry>,
     pub source: LayoutSource,
-    pub rows: Vec<RowDto>,
+    pub rows: Vec<LayoutRowDto>,
     pub can_manage_household: bool,
     pub is_admin: bool,
 }
@@ -1316,13 +1392,16 @@ pub async fn home_layout(
     let curate = can_curate(&state, &user).await?;
     let rows = state.store.visible_rows(user.id).await?;
     let (layout, source) = resolved_layout(&state, &user, &rows).await?;
+    let tags = state.store.visible_tags(user.id).await?;
+    let rows = try_join_all(
+        rows.into_iter()
+            .map(|r| layout_row(&state, &user, r, &tags, curate)),
+    )
+    .await?;
     Ok(Json(LayoutResponse {
         entries: layout.entries,
         source,
-        rows: rows
-            .into_iter()
-            .map(|r| row_dto(r, &user, curate))
-            .collect(),
+        rows,
         can_manage_household: curate,
         is_admin: user.is_admin,
     }))

@@ -24551,6 +24551,63 @@ async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
         "{home}"
     );
 
+    // Customize Home says which listed rows are empty and why; Home leaves
+    // them out. A row on a tag nobody has applied names that tag.
+    let (status, empty_tag) = call(
+        &app,
+        post("/api/v1/tags", Some(&admin), json!({"name": "gay-themed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{empty_tag}");
+    let empty_tag = empty_tag["id"].as_i64().expect("id");
+    let (status, empty_row) = call(
+        &app,
+        post(
+            "/api/v1/rows",
+            Some(&admin),
+            json!({"title": "Gay-Themed", "spec": {"all_of": [{"tag": empty_tag}]}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{empty_row}");
+    let empty_row = empty_row["id"].as_i64().expect("id");
+    let (_, layout) = call(&app, get("/api/v1/home/layout", Some(&admin))).await;
+    let listed = |id: i64| {
+        layout["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .expect("row listed")
+    };
+    let full = listed(row_id);
+    assert_eq!(full["matching"], 1, "{layout}");
+    assert_eq!(full["empty_tags"], json!([]), "{layout}");
+    assert_eq!(
+        full["title"], "Date night",
+        "row fields stay flat: {layout}"
+    );
+    let empty = listed(empty_row);
+    assert_eq!(empty["matching"], 0, "{layout}");
+    assert_eq!(
+        empty["empty_tags"],
+        json!([{"id": empty_tag, "name": "gay-themed", "editable": true}]),
+        "{layout}"
+    );
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert!(
+        home["rows"].get(empty_row.to_string()).is_none(),
+        "an empty row stays off Home: {home}"
+    );
+    for uri in [
+        format!("/api/v1/rows/{empty_row}"),
+        format!("/api/v1/tags/{empty_tag}"),
+    ] {
+        let (status, _) = call(&app, delete(&uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{uri}");
+    }
+
     // Move the row first and hide Next up.
     let (status, _) = call(
         &app,
