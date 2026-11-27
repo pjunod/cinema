@@ -9183,3 +9183,21 @@ source = "clients/linux-player/debian/changelog"
 source_anchor = "Sat, 21 Nov 2026 22:41:14 -0500"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_no_changelog_entry_is_dated_in_the_future(self):"
+
+# The macOS tray never added its own login item, so its icon was gone after
+# the first restart; the installed app's first launch now registers it once.
+[[fixes]]
+id = "desktop.macos-tray-login-default"
+commits = ["20c24a4936c8c6a71c448563a758016d002d22e9"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "public func applyDefaultTrayLogin() {"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testFirstLaunchRegistersOnceAndNeverAgain"
+
+[[fixes]]
+id = "desktop.macos-tray-login-default-installed-copy"
+commits = ["9ee03d8a825be0a886af4c89971f1ca152f24a7b"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "guard let environment, environment.isInstalledTrayApp,"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testOnlyTheInstalledCopyTakesTheDefault"
