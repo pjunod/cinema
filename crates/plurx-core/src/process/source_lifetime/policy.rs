@@ -415,6 +415,20 @@ fn canonical_argument(path: &Path, cwd: &Path) -> Result<PathBuf, &'static str> 
     let name = path.file_name().ok_or("path_identity")?;
     Ok(parent.join(name))
 }
+fn numeric_ratio(value: &str) -> bool {
+    let number = |part: &str| {
+        let mut pieces = part.splitn(2, '.');
+        let whole = pieces.next().unwrap_or_default();
+        !whole.is_empty()
+            && whole.bytes().all(|byte| byte.is_ascii_digit())
+            && pieces.next().is_none_or(|fraction| {
+                !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    };
+    value
+        .split_once('/')
+        .is_some_and(|(numerator, denominator)| number(numerator) && number(denominator))
+}
 fn fd_token(value: &str) -> Option<Result<i32, &'static str>> {
     for prefix in ["/proc/self/fd/", "/dev/fd/", "pipe:"] {
         if let Some(number) = value.strip_prefix(prefix) {
@@ -521,11 +535,14 @@ fn check_fragment(value: &str, cwd: &Path, context: InputContext<'_>) -> Result<
         } else {
             cwd.join(path_value)
         };
-        let path_like = path_value.contains('/')
-            || Path::new(path_value).is_absolute()
-            || path_value.starts_with("./")
-            || path_value.starts_with("../")
-            || candidate.is_file();
+        // A numeric rational such as `24000/1001` is a rate or time base, not
+        // a path, unless a file of that name really exists.
+        let path_like = candidate.is_file()
+            || (!numeric_ratio(path_value)
+                && (path_value.contains('/')
+                    || Path::new(path_value).is_absolute()
+                    || path_value.starts_with("./")
+                    || path_value.starts_with("../")));
         if !path_like {
             continue;
         }
@@ -1222,6 +1239,87 @@ mod tests {
             verify(&["-i", "fd:", "-f", "null", "pipe:1", "-fd"], 6),
             Err(("missing_option_value", true))
         );
+    }
+    #[test]
+    fn m7_np1_child_argv_passes_the_input_checks() {
+        // The argv shapes built in plurxd's m7_candidate/production.rs
+        // (`baseline` and the trace-header proof), with Eclipse's frozen
+        // recipe values. Each must reach the advisory confinement verdict.
+        let mut fixture = Fixture::new();
+        let media = fixture.data.join("composed.yuv");
+        std::fs::write(&media, b"planes").expect("media");
+        fixture.asset(&media);
+        let file = File::open(&media).expect("source");
+        let x265 = "hdr10=1:hdr10-opt=0:aq-mode=2:repeat-headers=1:open-gop=0:bframes=0:level-idc=5.1:high-tier=1:hrd=1:chromaloc=2:scenecut=0:pools=none:frame-threads=1:wpp=0:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):cbqpoffs=-9:crqpoffs=-9:qg-size=32";
+        let baseline = [
+            "-nostdin", "-loglevel", "verbose", "-filter_threads", "1", "-threads", "1",
+            "-f", "rawvideo", "-pixel_format", "yuv420p10le", "-video_size", "3840x2160",
+            "-framerate", "24000/1001", "-fd", "6", "-i", "fd:", "-map", "0:v:0", "-an",
+            "-sn", "-vf",
+            "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le,settb=expr=1/24000,setpts=N*1001",
+            "-c:v", "libx265", "-preset", "slow", "-profile:v", "main10", "-x265-params", x265,
+            "-b:v", "85068k", "-maxrate", "125000k", "-bufsize", "136000k", "-bf", "0",
+            "-flags", "+cgop", "-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
+            "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace",
+            "bt2020nc", "-color_range", "tv", "-threads:v", "1", "-force_key_frames",
+            "expr:eq(mod(n,48),0)", "-fps_mode", "passthrough", "-enc_time_base", "1:24000",
+            "-frames:v", "48", "-movflags",
+            "+empty_moov+default_base_moof+frag_keyframe+frag_discont",
+            "-video_track_timescale", "24000", "-tag:v", "hvc1", "-f", "mp4", "pipe:1",
+        ];
+        let trace = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "verbose",
+            "-xerror",
+            "-fd",
+            "6",
+            "-i",
+            "fd:",
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "trace_headers",
+            "-f",
+            "null",
+            "pipe:1",
+        ];
+        for args in [&baseline[..], &trace[..]] {
+            let command = fixture.command("ffmpeg", args);
+            let manifest = fixture.manifest(
+                &command,
+                vec![InheritedFd::duplicate(&file, 6).expect("source descriptor")],
+            );
+            let refusal = verify_state(
+                &fixture.state,
+                &command,
+                SourceAccess::NoSource,
+                Some(&manifest),
+                "policy fixture",
+                &[],
+            )
+            .expect_err("registered media reaches the advisory confinement verdict");
+            assert_eq!(
+                (refusal.check, refusal.enforce),
+                ("asset_input_confinement_unqualified", false)
+            );
+        }
+        // A real file named like a ratio is still a path and must be registered.
+        std::fs::create_dir(fixture.data.join("24000")).expect("ratio dir");
+        std::fs::write(fixture.data.join("24000/1001"), b"x").expect("ratio file");
+        let command = fixture.command("ffmpeg", &["-framerate", "24000/1001"]);
+        assert_eq!(
+            fixture
+                .verify(&command, SourceAccess::NoSource)
+                .expect_err("unregistered")
+                .check,
+            "unregistered_daemon_file"
+        );
+        assert!(numeric_ratio("1/24000") && numeric_ratio("29.97/1"));
+        assert!(!numeric_ratio("a/b") && !numeric_ratio("1/") && !numeric_ratio("/1"));
     }
     #[test]
     fn data_root_does_not_register_a_media_file_as_an_asset() {
