@@ -427,6 +427,19 @@ test('el_pill_names_the_renderer_layer_kind',function()
     update('native-dovi-target-state',state(true))
     data=pills_case(dv,native,nil,{active={'DYN'},el_kind='mel'})
     assert(has(data,'FEL!'),'a renderer FEL against a scanned MEL is marked')
+    -- The server's own FEL claim is its side of the cross-check: never a
+    -- second pill, and marked when the renderer disagrees.
+    update('native-dovi-target-state',state(false))
+    data=pills_case(dv,native,nil,{active={'FEL','DYN'}})
+    assert(has(data,'MEL!') and not has(data,'FEL'),'a server FEL claim against a renderer MEL is marked')
+    update('native-dovi-target-state',state(true))
+    data=pills_case(dv,native,nil,{active={'FEL','DYN'},el_kind='fel'})
+    local _,fels=data:gsub('}FEL\n','');eq(fels,1);assert(not has(data,'FEL!'))
+    -- The level speaks only for a Dolby Vision picture.
+    data=pills_case({w=3840,h=2160,colormatrix='bt.2020-ncl',gamma='pq',profile=7},native,nil,{active={'DYN'},el_kind='mel'})
+    assert(not has(data,'FEL!') and not has(data,'FEL'))
+    -- Without a renderer line the native level still names the layer.
+    data=pills_case(dv,nil,nil,{active={'DYN'}});assert(has(data,'FEL'))
     -- No composed layer: no EL pill, whatever the NLQ field says.
     update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=false,['enhancement-layer-nlq-active']=false})
     data=pills_case(dv,native,nil,{active={'DYN'},el_kind='fel'})
@@ -460,6 +473,13 @@ assert(shown:find('Dolby Vision enhancements: MEL · RPU · DYN',1,true))
 update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true})
 timers[1]()
 assert(panel_run():find("mapping — a minimal enhancement layer (MEL), which adds no picture detail",1,true))
+-- With the renderer's kind the row names its source and the cross-check.
+update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true,['enhancement-layer-nlq-active']=true})
+timers[1]()
+assert(panel_run():find("the full enhancement layer (FEL); the server's title scan says MEL, which disagrees",1,true))
+update('native-dovi-target-state',{active=true,generation=1,['enhancement-layer-composed']=true,['enhancement-layer-nlq-active']=false})
+timers[1]()
+assert(panel_run():find("which adds no picture detail, as the server's title scan says",1,true))
 update('native-dovi-target-state',nil)
 update('user-data/cinema-video',{});P['video-params']={};P['track-list']={};reset()
 -- No path, including the Info panel's 5 Hz refresh, ever reads the level synchronously.
