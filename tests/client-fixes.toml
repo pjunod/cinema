@@ -1256,7 +1256,7 @@ test_anchor = "seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe"
 id = "web.composed-playback-and-attachment-intent"
 commits = ["ca0913c1"]
 source = "crates/plurxd/src/web/player/decode-margin.js"
-source_anchor = "function beginPlaybackMediaAttachment(p)"
+source_anchor = "function beginPlaybackMediaAttachment(p,"
 test = "tests/playback/web-control.test.js"
 test_anchor = "a seek during manifest loading cannot suppress playback startup"
 

@@ -1433,7 +1433,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     dispatchPlaybackSeekTelemetry(me,seekIntent);
     resetMediaSource(v);
     if(!live()) return;
-    const attachment=beginPlaybackMediaAttachment(me);
+    const attachment=beginPlaybackMediaAttachment(me,{sourceVideo:true});
     v.onloadedmetadata=()=>{
       if(!attachment.current()) return;
       v.onloadedmetadata=null;

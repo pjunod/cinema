@@ -1425,7 +1425,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     probeUrl:p.probeUrl,offset:p.offset,vod:p.vod,rangePresentation:p.rangePresentation,wantsPlayback:p.wantsPlayback,
     method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
     qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
-    deliveredDvProfile:p.deliveredDvProfile,
+    deliveredDvProfile:p.deliveredDvProfile,qualityRange:p.mediaAttachment?.qualityRange,
     enhancement:p.enhancement||null,health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
@@ -1465,6 +1465,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   // The built successor's delivery overrides the candidate's PQ base grade.
   // This also applies when the predecessor's catalog lacks the new candidate.
   if(state.selection?.dynamic_range) p.deliveredRange=state.selection.dynamic_range;
+  if(p.mediaAttachment) p.mediaAttachment.qualityRange=state.selection?.dynamic_range||null;
   p.deliveredDvProfile=state.deliveredDvProfile??null;
   p.health=null;
   p.healthObservedAt=null;
