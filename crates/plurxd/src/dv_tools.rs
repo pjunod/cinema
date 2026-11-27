@@ -59,6 +59,32 @@ pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v3";
 pub(crate) const REFIT_MODE_SOURCES: &str =
     "310e490a68f0c80b3219e3d56a8c3de56b149ebcbc483ac91b88a917e20bc03b";
 
+/// Title scanner digests whose settled verdicts the scanner built from this
+/// tree reproduces exactly. Title demand such a scanner settled with a
+/// complete aggregate, or with a refusal of a non-Matroska title, is carried
+/// forward to this scanner in place (`carry_forward_dv_title_verdicts`)
+/// instead of read again, which would cost the whole library and drop every
+/// published aggregate until its title was read. Refused or open Matroska
+/// titles still rotate and are read again.
+///
+/// An entry holds only while every title its scanner accepted is accepted
+/// here with the same aggregate, and every non-Matroska verdict is the same.
+/// [`TITLE_SCANNER_SOURCES`] makes any change to the scanner's sources fail
+/// a test until this list is reviewed against it.
+pub(crate) const TITLE_SCANNER_PREDECESSORS: &[&str] = &[
+    // The scanner on main through d33e7975a (scan_title.c last changed in
+    // 247f43a90). Its successor adds the untagged-Matroska Segment endpoint,
+    // reached only where this one refused "independent complete
+    // selected-video endpoint unavailable"; with a declared endpoint it reads
+    // only the selected video, exactly as before.
+    "5e4c9012fec9fd3087d0cf62ac7819fda7b86f57cb4d21de9f3045c153306953",
+];
+/// sha256 of `scan_title.c`, `movie_source_io.h` and `title_constants.h`
+/// concatenated, as [`TITLE_SCANNER_PREDECESSORS`] was last reviewed against.
+#[cfg(test)]
+pub(crate) const TITLE_SCANNER_SOURCES: &str =
+    "ecbcc9c0d73ba1ca42ddd28173ba8b7d41d28c5304e534e7f60a3c6a43433329";
+
 #[cfg(test)]
 impl ToolSet {
     /// An explicitly controlled scanner result with the ordinary executable
@@ -570,6 +596,36 @@ mod title_scanner_identity_tests {
             REFIT_MODE_SOURCES,
             "the refit mode changed: bump REFIT_MODE_VERSION if what it prints changed, then re-pin"
         );
+    }
+
+    /// A carried-forward verdict is a claim about the scanner's sources, so
+    /// any change to them must review the predecessor list before re-pinning.
+    #[test]
+    fn title_scanner_predecessors_are_reviewed_against_the_scanner_sources() {
+        use sha2::{Digest, Sha256};
+        let mut sources = Sha256::new();
+        sources.update(include_bytes!("../../../tools/dv_processing/scan_title.c"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/movie_source_io.h"
+        ));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/title_constants.h"
+        ));
+        assert_eq!(
+            hex::encode(sources.finalize()),
+            TITLE_SCANNER_SOURCES,
+            "the title scanner changed: drop every TITLE_SCANNER_PREDECESSORS entry whose \
+             accepted aggregates or non-Matroska verdicts it no longer reproduces, then re-pin"
+        );
+        for predecessor in TITLE_SCANNER_PREDECESSORS {
+            assert!(
+                predecessor.len() == 64
+                    && predecessor
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "{predecessor} is not a title scanner digest"
+            );
+        }
     }
 
     /// Every title-demand reader and writer uses the scanner key; FEL verdicts

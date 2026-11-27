@@ -3209,6 +3209,13 @@ pub trait BackgroundJobStore: Send + Sync {
         revision: i64,
         scanner: &str,
     ) -> Result<Option<i64>, StoreError>;
+    /// Re-point settled title verdicts `scanner` reproduces from its named
+    /// predecessors, keeping their aggregates; see `dv_title_jobs::carry_forward`.
+    async fn carry_forward_dv_title_verdicts(
+        &self,
+        scanner: &str,
+        predecessors: &[String],
+    ) -> Result<u64, StoreError>;
     async fn publish_dv_title_job(
         &self,
         request: super::dv_title_jobs::PublishTitleJob,
@@ -4404,6 +4411,13 @@ LIMIT 1
         scanner: &str,
     ) -> Result<Option<i64>, StoreError> {
         super::dv_title_jobs::bind(self, revision, scanner).await
+    }
+    async fn carry_forward_dv_title_verdicts(
+        &self,
+        scanner: &str,
+        predecessors: &[String],
+    ) -> Result<u64, StoreError> {
+        super::dv_title_jobs::carry_forward(self, scanner, predecessors).await
     }
     async fn publish_dv_title_job(
         &self,

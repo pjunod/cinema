@@ -2835,3 +2835,143 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
     })
     .await;
 }
+
+/// A Dolby Vision title stored as MP4, on an item of its own.
+async fn seed_mp4(store: &Arc<dyn Store>, name: &str) -> MediaFile {
+    let (item, _) = seed_file(store, name).await;
+    let id = store
+        .upsert_file(item, &format!("/{name}/title.mp4"), 20_000, 30, &probe())
+        .await
+        .expect("MP4 title");
+    store.get_file(id).await.expect("file").expect("file")
+}
+async fn refuse(store: &Arc<dyn Store>, job: BackgroundJob, now: i64) {
+    assert!(store
+        .settle_job(SettleJob {
+            token: job.token.expect("token"),
+            settlement: JobSettlement::Fail {
+                error_code: "title_scan_refused".into(),
+            },
+            now_ms: now,
+        })
+        .await
+        .expect("refusal verdict"));
+}
+
+/// A successor scanner keeps what it would only reproduce: a predecessor's
+/// complete aggregate, and its refusal of a title that is not Matroska. A
+/// refused or open Matroska title, a title another scanner settled, and a
+/// title with work in flight are left for the ordinary rotation, which reads
+/// them again. Nothing is written when there is nothing to carry.
+#[tokio::test]
+async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them() {
+    for_each_backend(|store, backend| async move {
+        let predecessor = "a".repeat(64);
+        let successor = "b".repeat(64);
+        let stranger = "c".repeat(64);
+        let predecessors = vec![predecessor.clone()];
+
+        let published = seed(&store, "carry-published").await;
+        let (demand, job) = active(&store, published.id, &predecessor, 1_000).await;
+        let carried = demand.probe_revision;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &predecessor, 1_001))
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let refused_mkv = seed(&store, "carry-refused-mkv").await;
+        let (_, job) = active(&store, refused_mkv.id, &predecessor, 1_000).await;
+        refuse(&store, job, 1_001).await;
+        let refused_mp4 = seed_mp4(&store, "carry-refused-mp4").await;
+        assert_eq!(refused_mp4.container.as_deref(), Some("mp4"), "{backend}");
+        let (_, job) = active(&store, refused_mp4.id, &predecessor, 1_000).await;
+        refuse(&store, job, 1_001).await;
+        let open = seed(&store, "carry-open").await;
+        let open_demand = bound(&store, open.id, &predecessor).await;
+        assert!(matches!(
+            enqueue(&store, &open_demand, &predecessor, 1_000).await,
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let foreign = seed(&store, "carry-foreign").await;
+        let (demand, job) = active(&store, foreign.id, &stranger, 1_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &stranger, 1_001))
+                .await
+                .expect("publish under another scanner"),
+            JobPublishOutcome::Published { .. }
+        ));
+
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, &predecessors)
+                .await
+                .expect("carry"),
+            2,
+            "{backend}: the aggregate and the MP4 refusal"
+        );
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, &predecessors)
+                .await
+                .expect("carry again"),
+            0,
+            "{backend}: nothing left to carry"
+        );
+        let mut reread: Vec<i64> = store
+            .dv_title_demands(&successor, 0, 2_000)
+            .await
+            .expect("successor demands")
+            .into_iter()
+            .map(|d| d.file_id)
+            .collect();
+        reread.sort_unstable();
+        let mut expected = vec![refused_mkv.id, open.id, foreign.id];
+        expected.sort_unstable();
+        assert_eq!(
+            reread, expected,
+            "{backend}: what the successor reads again"
+        );
+        assert_eq!(
+            stored_aggregate(&store, published.id).await,
+            Some(stats()),
+            "{backend}: the carried aggregate stays published"
+        );
+        // The carried generation is the successor's own: binding it is a no-op,
+        // and it still reopens when the source changes.
+        assert_eq!(
+            store
+                .bind_dv_title_demand(carried, &successor)
+                .await
+                .expect("bind carried"),
+            Some(carried),
+            "{backend}"
+        );
+        assert_eq!(stored_aggregate(&store, published.id).await, Some(stats()));
+        reprobe(&store, &published).await;
+        assert!(
+            demand_for(&store, published.id, &successor).await > carried,
+            "{backend}: a changed source is read again"
+        );
+
+        for invalid in [vec!["not a digest".to_owned()], vec![successor.clone()]] {
+            assert!(
+                store
+                    .carry_forward_dv_title_verdicts(&successor, &invalid)
+                    .await
+                    .is_err(),
+                "{backend}: {invalid:?}"
+            );
+        }
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, &[])
+                .await
+                .expect("no predecessors"),
+            0
+        );
+    })
+    .await;
+}

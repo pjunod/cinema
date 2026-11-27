@@ -107,6 +107,49 @@ static void open_title_io(AVFormatContext *input, const char *source) {
   input->flags |= AVFMT_FLAG_CUSTOM_IO;
   need(movie_source_bind_demuxer(input) >= 0, "closed title demux protocol authority");
 }
+// Where the source's Matroska Segment ends by its own declaration, read from
+// the first bytes before libavformat sees them: the EBML header, then a
+// known-size Segment directly after it. Zero when the source is not shaped so.
+static int64_t declared_segment_end;
+static bool ebml_number(const uint8_t *data, size_t size, size_t *at, bool id,
+                        uint64_t *value, bool *unknown) {
+  if (*at >= size || !data[*at]) return false;
+  unsigned length = 1;
+  while (!(data[*at] & (0x80 >> (length - 1)))) length++;
+  if (length > (id ? 4u : 8u) || size - *at < length) return false;
+  unsigned mask = 0xffu >> length;
+  uint64_t number = id ? data[*at] : (data[*at] & mask);
+  bool ones = (data[*at] & mask) == mask;
+  for (unsigned i = 1; i < length; i++) {
+    number = (number << 8) | data[*at + i];
+    ones = ones && data[*at + i] == 0xff;
+  }
+  *at += length;
+  *value = number;
+  if (unknown) *unknown = ones;
+  return true;
+}
+// Reads only bytes the demuxer's probe reads next, then rewinds inside the IO
+// buffer, so no source range is requested twice.
+static void read_declared_segment(AVIOContext *pb) {
+  uint8_t head[4096];
+  int got = avio_read(pb, head, sizeof(head));
+  need(avio_seek(pb, 0, SEEK_SET) == 0, "title IO rewind");
+  if (got <= 0) return;
+  size_t at = 0, size = (size_t)got;
+  uint64_t id, length;
+  bool unknown;
+  if (!ebml_number(head, size, &at, true, &id, NULL) || id != 0x1A45DFA3 ||
+      !ebml_number(head, size, &at, false, &length, &unknown) || unknown ||
+      length > size - at)
+    return;
+  at += (size_t)length;
+  if (!ebml_number(head, size, &at, true, &id, NULL) || id != 0x18538067 ||
+      !ebml_number(head, size, &at, false, &length, &unknown) || unknown ||
+      length > (uint64_t)INT64_MAX - at)
+    return;
+  declared_segment_end = (int64_t)(at + length);
+}
 static void unknown_constants(void) {
   dv_title_constants_unknown(&stats.mastering);
   stats.unknown_el = true;
@@ -430,6 +473,7 @@ int main(int argc, char **argv) {
   input->probesize = 1024 * 1024;
   input->max_analyze_duration = AV_TIME_BASE;
   open_title_io(input, argv[1]);
+  read_declared_segment(title_avio);
   need(avformat_open_input(&input, argv[1], NULL, NULL) >= 0, "source open");
   // Supported catalogue containers expose codec parameters on opening. Avoid
   // a second analysis pass and never seek past the start of the title.
@@ -441,8 +485,21 @@ int main(int argc, char **argv) {
   need(stream->codecpar->width > 0 && stream->codecpar->height > 0 &&
        (int64_t)stream->codecpar->width * stream->codecpar->height <= 4096 * 2160,
        "bounded picture size");
+  const AVDictionaryEntry *duration = av_dict_get(stream->metadata, "DURATION", NULL, 0);
+  // Matroska that declares no selected-video endpoint (MakeMKV and older
+  // mkvmerge write no per-track statistics tags) is proven complete by its
+  // Segment instead, which needs the audio tracks' timing: they are demuxed,
+  // never decoded. A title with any declared endpoint reads only its video.
+  bool segment_endpoint = stream->nb_frames <= 0 &&
+      !(stream->duration > 0 && stream->duration != AV_NOPTS_VALUE) && !duration &&
+      strncmp(input->iformat->name, "matroska", 8) == 0;
   for (unsigned i = 0; i < input->nb_streams; i++)
-    if (i != (unsigned long)index) input->streams[i]->discard = AVDISCARD_ALL;
+    if (i != (unsigned long)index &&
+        !(segment_endpoint && input->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO))
+      input->streams[i]->discard = AVDISCARD_ALL;
+  // The latest audio packet end, in its stream's time base.
+  int64_t audio_end = AV_NOPTS_VALUE;
+  AVRational audio_time_base = {0, 1};
   int length_size = configuration(stream->codecpar);
   if (argc == 5) {
     rpu_timeline = fopen(argv[4], "wx");
@@ -457,6 +514,15 @@ int main(int argc, char **argv) {
     if (packet->stream_index == index) {
       need(!(packet->flags & AV_PKT_FLAG_CORRUPT), "corrupt demux packet");
       observe_unit(packet, length_size);
+    } else if (segment_endpoint && packet->pts != AV_NOPTS_VALUE && packet->duration >= 0 &&
+               packet->pts <= INT64_MAX - packet->duration) {
+      AVRational time_base = input->streams[packet->stream_index]->time_base;
+      int64_t end = packet->pts + packet->duration;
+      if (audio_end == AV_NOPTS_VALUE ||
+          av_compare_ts(end, time_base, audio_end, audio_time_base) > 0) {
+        audio_end = end;
+        audio_time_base = time_base;
+      }
     }
     av_packet_unref(packet);
   }
@@ -487,7 +553,6 @@ int main(int argc, char **argv) {
          "complete selected video duration");
     endpoint_known = true;
   }
-  const AVDictionaryEntry *duration = av_dict_get(stream->metadata, "DURATION", NULL, 0);
   if (duration) {
     int64_t duration_us;
     need(av_parse_time(&duration_us, duration->value, 1) >= 0 && duration_us > 0,
@@ -499,6 +564,33 @@ int main(int argc, char **argv) {
          av_compare_ts(last_end - 1, stream->time_base,
                       duration_us, AV_TIME_BASE_Q) <= 0,
          "complete selected video duration tag");
+    endpoint_known = true;
+  }
+  if (segment_endpoint) {
+    // The Segment's declared byte span must be the whole source, so no byte
+    // of it is missing, and the latest audio or video end must reach its
+    // declared duration, so the demuxer did not stop or resynchronise past a
+    // lost tail (matroskadec drops some damaged blocks without an error).
+    // The video itself may end earlier, as authored. Subtitle durations are
+    // display times, so they are not counted. The Segment Info duration is
+    // a timestamp endpoint like the DURATION tag, and comes from the header
+    // alone, since no stream analysis pass runs. Every track shares the
+    // Segment's TimestampScale time base, the rounding allowed here.
+    int64_t source_size = avio_size(input->pb);
+    need(declared_segment_end > 0 && source_size == declared_segment_end,
+         "complete declared Matroska segment");
+    need(input->duration > 0 && input->duration != AV_NOPTS_VALUE,
+         "declared Matroska segment duration");
+    int64_t tail = last_end;
+    AVRational tail_time_base = stream->time_base;
+    if (audio_end != AV_NOPTS_VALUE &&
+        av_compare_ts(audio_end, audio_time_base, tail, tail_time_base) > 0) {
+      tail = audio_end;
+      tail_time_base = audio_time_base;
+    }
+    need(tail < INT64_MAX &&
+         av_compare_ts(tail + 1, tail_time_base, input->duration, AV_TIME_BASE_Q) >= 0,
+         "Matroska segment tail reached");
     endpoint_known = true;
   }
   need(endpoint_known, "independent complete selected-video endpoint unavailable");

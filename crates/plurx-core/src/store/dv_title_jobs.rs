@@ -324,6 +324,79 @@ RETURNING result_json
         .transpose()
 }
 
+/// Settled title demand a predecessor scanner left whose verdict `scanner`
+/// reproduces exactly: a complete published aggregate, or a refusal of a
+/// title the successor reads the same way (any container but Matroska, the
+/// only one whose acceptance it widened). Nothing with title work in flight.
+const CARRY_FORWARD_FROM: &str = r#"
+FROM dv_title_jobs_demand AS d JOIN files AS f ON f.id=d.file_id
+WHERE d.terminal=1 AND json_valid(f.probe_json)
+ AND d.scanner_digest IN (SELECT value FROM json_each(json_extract($1,'$.predecessors')))
+ AND (json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
+  OR f.container IS NULL OR f.container NOT IN ('mkv','webm'))
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
+  AND j.state IN ('queued','running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=d.file_id)
+"#;
+
+/// Re-point settled title demand from a predecessor scanner to `scanner` in
+/// place, keeping its generation, its terminal verdict and its published
+/// aggregate, instead of the rotation [`bind`] performs, which drops the
+/// aggregate and reads the whole title again. Everything else still rotates
+/// when the worker reaches it. A read decides first, so a pass with nothing
+/// to carry writes nothing. Returns how many titles were carried.
+pub(super) async fn carry_forward<T: QueueSql>(
+    store: &T,
+    scanner: &str,
+    predecessors: &[String],
+) -> Result<u64, StoreError> {
+    if !digest(scanner)
+        || predecessors
+            .iter()
+            .any(|predecessor| !digest(predecessor) || predecessor == scanner)
+    {
+        return Err(StoreError::Task(
+            "invalid title scanner carry-forward".into(),
+        ));
+    }
+    if predecessors.is_empty() {
+        return Ok(0);
+    }
+    let body = encode(&serde_json::json!({"scanner": scanner, "predecessors": predecessors}))?;
+    #[derive(Deserialize)]
+    struct Count {
+        count: u64,
+    }
+    // The maintenance pass asks every turn, so ask the local replica: a lagging
+    // answer only defers the carry to a later turn, and the write re-decides.
+    let count = format!("SELECT json_object('count',count(*)) AS result_json {CARRY_FORWARD_FROM}");
+    let pending = match store.local_replica_sql(count.clone(), body.clone()).await? {
+        Some(rows) => rows,
+        None => store.queue_sql(count, body.clone(), false, true).await?,
+    };
+    let pending = pending
+        .first()
+        .map(|row| decode::<Count>(row).map(|count| count.count))
+        .transpose()?
+        .unwrap_or(0);
+    if pending == 0 {
+        return Ok(0);
+    }
+    let carried = store
+        .queue_sql(
+            format!(
+                "UPDATE dv_title_jobs_demand SET scanner_digest=json_extract($1,'$.scanner')
+WHERE revision IN (SELECT d.revision {CARRY_FORWARD_FROM})
+RETURNING 'true' AS result_json"
+            ),
+            body,
+            true,
+            true,
+        )
+        .await?;
+    Ok(carried.len() as u64)
+}
+
 pub(super) async fn publish<T: QueueSql>(
     store: &T,
     input: PublishTitleJob,

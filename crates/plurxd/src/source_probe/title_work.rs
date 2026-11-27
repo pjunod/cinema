@@ -170,6 +170,27 @@ impl TitleTask {
                 (demands, None)
             }
             TitleDispatch::Maintenance => {
+                // Before any title is rotated to this scanner, keep the
+                // verdicts it would only reproduce (a read, then a write
+                // only when there is something to carry).
+                match state
+                    .store
+                    .carry_forward_dv_title_verdicts(
+                        &scanner,
+                        &crate::dv_tools::TITLE_SCANNER_PREDECESSORS
+                            .iter()
+                            .map(|digest| (*digest).to_owned())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(carried) => tracing::info!(
+                        carried,
+                        "kept title verdicts this scanner reproduces from its predecessor"
+                    ),
+                    Err(error) => tracing::warn!(%error, "carrying title verdicts forward"),
+                }
                 let (demands, after) = maintenance
                     .next_page(state.store.as_ref(), &scanner, now_ms())
                     .await?;
