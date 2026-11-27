@@ -1237,6 +1237,7 @@ paths = [
   "crates/plurxd/src/source_custody.rs",
   "crates/plurxd/src/source_custody/**",
   "crates/plurxd/src/source_input.rs",
+  "crates/plurxd/src/media_io_guard_tests.rs",
   "crates/plurxd/src/source_input/tests.rs",
   "crates/plurxd/src/fragment_index_cluster/source_digest.rs",
   "crates/plurxd/src/vod/**",

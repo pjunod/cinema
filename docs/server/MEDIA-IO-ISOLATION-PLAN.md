@@ -1,8 +1,8 @@
 # Media I/O isolation: a hung media mount must not stop the daemon
 
-**Status:** built; awaitable fence checks bounded (A-0A22BF6A) · owned by Claude · **Updated:** 2026-11-26 · **Source baseline:** `origin/main` at `97e528d00`
+**Status:** built; awaitable fence checks bounded (A-0A22BF6A); media identity reads bounded (E-AA7C9C6A48) · owned by Claude · **Updated:** 2026-11-27 · **Source baseline:** `origin/main` at `5eccbf85e`
 
-Effort E-08DAF9B91B, related to E-E154B131A2 (Raft cluster rebuild, audit C4/R1).
+Effort E-08DAF9B91B, related to E-E154B131A2 (Raft cluster rebuild, audit C4/R1). Identity reads: E-AA7C9C6A48.
 
 ## 1. What happened
 
@@ -103,6 +103,33 @@ blocking pool, never a worker) and adds a bound for media storage.
   locks, the retained collector and validation locks, the manifest lock in
   generation start, the publication clock). A lock must never be held while
   its holder queues for a media slot.
+- **Metadata calls on a media descriptor are media I/O.** `fstat`,
+  `File::metadata` and `fs_secure::std_file_identity` on a descriptor that
+  can be on media storage revalidate with the server on NFS just as a read
+  does, so they go through `media_io` like any other media call. Identity has
+  its own pair: `media_io::identity(file).await` (slot first, then `dup`, then
+  the `fstat` under the slot) and `media_io::identity_in_place(file)` for the
+  same callers that may use `in_place`. Descriptors on the node's own disk
+  (engines, models, private scratch, the playback cache) use
+  `fs_secure::local_file_identity`, so each call site's name says which kind
+  of descriptor it holds. `media_io_guard_tests` fails on any
+  `std_file_identity` outside `fs_secure` and `media_io`, other than the
+  one pinned call in `fragment_index_cluster::windows_object_version`, which
+  only runs inside a fence check that is already on the media path.
+- **Sanctioned in-place exceptions.** `in_place`, `fstat`,
+  `identity_in_place`, `unchanged_in_place` and `drift_in_place` are allowed
+  only where the caller cannot await without changing what it protects:
+  - synchronous decision code and `filter`/`is_some_and` closures (§4);
+  - code already on the blocking pool, under a media slot or not, where the
+    call runs directly (`SourceHash::new`/`step` inside the hash workers);
+  - checks made while a lock is held that cannot be restructured without
+    changing what the lock protects (the `VodServe` preparation readers and
+    manifest locks, the retained collector and validation locks, the
+    manifest lock in generation start, the publication clock);
+
+  Where a lock can be released across the check, it is: snapshot, drop the
+  lock, await the bounded check, re-lock and revalidate (the subtitle read
+  attestation cache).
 - **Cheap state is re-read after an awaited check that guards a destructive
   step.** The check can wait for a slot, so a lease or cancellation read
   before it may be stale by the time it returns. The DV disk publication
@@ -159,6 +186,22 @@ below ran on a worker before this change.
 | `source_input::read_source` | already `spawn_blocking` | `media_io::slot()` around lock, fence and `read_at`, after the grant revalidation |
 | Source readers (`source_input` close and valid checks, `source_custody` direct reader), developer DVR probe, playback fence open | already `spawn_blocking` | `media_io::blocking`, so they count against the bound |
 
+Media identity reads (E-AA7C9C6A48). Each ran on a worker, outside the bound,
+before this change. The full audit, including the local-descriptor sites left
+direct, is in the PR description.
+
+| Site | Call | Now |
+|---|---|---|
+| `subtitle_translation::runtime::VerifiedSource::unchanged` | in-place fence check plus raw `fstat` | `async`: awaited `unchanged()` plus `media_io::identity` |
+| `runtime::VerifiedSource::recheck`, `runtime::verify_source`, `TranslationSources::cached` | raw `fstat` in async code | `media_io::identity` |
+| `read_attestation::ReadAttestations::lookup` | in-place fence check plus raw `fstat` while holding the `entries` std mutex, on a worker | `async`: snapshot the `Arc` fence, release the lock, await both checks, re-lock and act only if the entry still holds that fence |
+| `read_attestation::authorize` | raw `fstat`, `unchanged_in_place`, and `SourceHash::new` on a worker | awaited checks; `SourceHash::new` under a media slot, after the non-blocking hash lane and admission checks so a refused request does no media work |
+| `read_attestation::final_source` | raw `fstat` | `media_io::identity` |
+| `subtitle_text_translation::manager::current_source` | two raw `fstat`s | `media_io::identity` |
+| `subtitle_transcription::pipeline` (source before decode, after recognition) | raw `fstat` | `media_io::identity` |
+| `SourceHash::new` / `step` (hash workers on the blocking pool) | raw `fstat` | `media_io::identity_in_place` |
+| Windows-only source handoffs: `ffmpeg` held-source probes, `producer_spawn` path handoffs, `decode_facts::source_observation_windows`, `pretranscode::source` | raw `fstat` | `media_io::identity_in_place`: an interim step, not a sanctioned exception (§6) |
+
 Left as they are, because they already run off the workers:
 
 - the scan walk;
@@ -192,6 +235,14 @@ worker is parked, nothing inside the runtime can run, timers included.
   can fail.
 - `media_io::tests::hung_media_opens_do_not_stall_a_heartbeat` covers the
   primitive.
+- `media_io::tests::an_awaited_identity_read_queues_on_the_media_bound` and
+  `read_attestation::tests::a_cache_hit_recheck_queues_on_the_media_bound_without_the_entries_lock`
+  hold every media slot and require an awaited identity read, and the
+  attestation cache's recheck, to wait for a slot. The second also requires
+  the `entries` lock to be free while the recheck waits. Before
+  E-AA7C9C6A48 both read in place and completed.
+- `media_io_guard_tests::media_identity_reads_go_through_media_io` fails on a
+  direct `std_file_identity` call outside `fs_secure` and `media_io`.
 - `fragment_index_cluster::tests::an_awaited_source_check_queues_on_the_media_bound`
   holds every media slot, as a hung mount leaves them, and requires an awaited
   `unchanged()` to wait for a slot while `unchanged_in_place()` still
@@ -207,6 +258,21 @@ is on time only because nothing hung fails the test.
   `sessions` lock (`vod/serve/create.rs`). With this change the workers keep
   running, but a hung mount holds that lock for the length of the hang. This
   predates this change; it is a follow-up.
+
+- The subtitle hash workers (`verify_source`, the read-attestation task) read
+  source chunks on plain `spawn_blocking`, outside the media bound. The
+  read-attestation worker is capped by its one-permit `HASH_IO` lane and
+  read-attestation admission; `verify_source` by the fragment admission its
+  job holds. The eventual shape is a slot per chunk, taken after the lane
+  and admission, as `source_input::read_source` does. That is a follow-up,
+  not part of the identity change.
+- The Windows-only source handoffs use `identity_in_place` inside async
+  functions and still open the source path inline
+  (`open_read_nofollow_blocking`). Both are unbounded, and `block_in_place`
+  also stalls sibling branches of the same task. They are debt, not finished
+  work. Moving them onto `media_io::blocking` needs a Windows build to verify
+  (`cargo xwin check --target x86_64-pc-windows-msvc`), and the lane does not
+  run one.
 
 - Pre-vote, so that a stalled voter cannot depose a healthy leader (R1,
   E-E154B131A2).

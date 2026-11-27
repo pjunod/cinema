@@ -1,9 +1,0 @@
-# The iOS version picker was a menu, which renders only a row's first line,
-# so each version's Dolby Vision line never appeared on iPhone and iPad.
-[[fixes]]
-id = "apple.ios-version-rows"
-commits = ["ada9f5596fc83f91ef56bbbb83cbab4fb34de3c9", "15b87edcf858fc7ef5cec44fcbacdecfff84d6f1"]
-source = "clients/apple/Sources/DetailView.swift"
-source_anchor = "struct VersionChoiceList: View {"
-test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "func testIOSVersionRowsShowEachVersionsDolbyVisionLine()"
