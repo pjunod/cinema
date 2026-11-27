@@ -1710,7 +1710,8 @@ qualification; the design is
   `display_aware_auto_protocol`, `quality_candidate_id` and
   `quality_candidates` (`QualityCandidate`,
   `crates/plurx-core/src/playback/candidate.rs`); all three are omitted when
-  absent. Create sets the protocol only when a quality owner was negotiated
+  absent. `quality_candidates` lists each candidate ID once, however many
+  workers offer that recipe. Create sets the protocol only when a quality owner was negotiated
   (`crates/plurxd/src/http/hls/create.rs`). An optional candidate
   `planned_codec` describes its actual immutable output contract, such as
   `h264` or `hevc`; it is not selection authority. Absent values preserve
