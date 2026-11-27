@@ -8,6 +8,7 @@
 
 mod admission;
 mod availability;
+mod node_memory;
 use plurx_core::process::bounded as bounded_process;
 #[cfg(test)]
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]

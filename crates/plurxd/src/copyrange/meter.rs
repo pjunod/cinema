@@ -15,13 +15,13 @@ use tokio::time::Instant;
 /// counts holds begun, so a wait can ask whether the bank held at any point
 /// since it started, not only at the instant it is reported.
 #[derive(Default)]
-pub(super) struct HoldMirror {
+pub(crate) struct HoldMirror {
     held: AtomicBool,
     holds: AtomicU64,
 }
 impl HoldMirror {
     /// Record the bank's state after each transition it commits.
-    pub(super) fn set(&self, held: bool) {
+    pub(crate) fn set(&self, held: bool) {
         if held {
             if !self.held.swap(true, Ordering::SeqCst) {
                 self.holds.fetch_add(1, Ordering::SeqCst);
@@ -59,6 +59,7 @@ pub(crate) struct ProductionMark {
     committed: usize,
     outputs: u64,
     holds: u64,
+    memory_waits: u64,
 }
 
 /// Whether a wait that saw no commit and no child output met a stuck
@@ -75,6 +76,9 @@ pub(crate) struct ProductionMark {
 /// deadline must not wait behind the very read it timed out on.
 pub(super) struct ProductionStall {
     holding: HoldMirror,
+    /// The copy waiting for node memory to grow its charge
+    /// ([`crate::admission::CopyMemoryPermit::resize`]).
+    memory: HoldMirror,
     /// Child outputs the mux has accepted.
     outputs: AtomicU64,
     /// The range's init and published segments, as last committed.
@@ -95,6 +99,7 @@ impl Default for ProductionStall {
     fn default() -> Self {
         Self {
             holding: HoldMirror::default(),
+            memory: HoldMirror::default(),
             outputs: AtomicU64::new(0),
             committed: AtomicUsize::new(0),
             complete: AtomicBool::new(false),
@@ -107,6 +112,11 @@ impl Default for ProductionStall {
 impl ProductionStall {
     pub(super) fn holding(&self) -> &HoldMirror {
         &self.holding
+    }
+    /// Whether the copy waits for node memory: set by
+    /// [`super::observed::ObservedCopyMux::fit`] while its growth waits.
+    pub(super) fn memory_wait(&self) -> &HoldMirror {
+        &self.memory
     }
     /// Mirror what the range has committed.
     pub(super) fn record(&self, committed: usize, complete: bool, produced_end_ms: Option<i64>) {
@@ -172,6 +182,7 @@ impl ProductionStall {
             committed,
             outputs: self.outputs.load(Ordering::SeqCst),
             holds: self.holding.mark(),
+            memory_waits: self.memory.mark(),
         }
     }
     /// The mux accepted one more output from the child.
@@ -186,7 +197,9 @@ impl ProductionStall {
     /// Stuck since `mark`: still running and unfinished, nothing committed
     /// and no child output accepted, and no hold that still excuses it. A
     /// copy that stopped or finished is not stuck; its callers' own checks
-    /// end those.
+    /// end those. A copy that waited for node memory at any point since
+    /// `mark` is not stuck either: it pauses for other copies, and their
+    /// ending (or its own stop) ends the wait.
     pub(super) fn stalled_since(
         &self,
         mark: ProductionMark,
@@ -201,6 +214,9 @@ impl ProductionStall {
         {
             return false;
         }
+        if self.memory.held_since(mark.memory_waits) {
+            return false;
+        }
         let excused = self.holding.held_since(mark.holds)
             && self.reanchored_at.load(Ordering::SeqCst) != committed;
         !excused
@@ -212,7 +228,8 @@ impl ProductionStall {
 /// `child` is time spent waiting for the FFmpeg child's next output, which
 /// covers the source read (through the held Source input), demux and the
 /// child's own mux. `convert` is plurx's normalisation, Dolby Vision RPU
-/// rewrite and segment kernel. `commit` is writing and checkpointing what the
+/// rewrite and segment kernel. `memory` is waiting for node memory to grow
+/// the copy's charge while other copies hold it. `commit` is writing and checkpointing what the
 /// kernel produced. A slow NAS read shows as `child`, a slow conversion as
 /// `convert`, a slow disk as `commit`.
 pub(super) struct ProductionMeter {
@@ -223,6 +240,7 @@ pub(super) struct ProductionMeter {
     interval_media_start_ms: Option<f64>,
     child: Duration,
     convert: Duration,
+    memory: Duration,
     commit: Duration,
     segments: u32,
     media_end_ms: Option<f64>,
@@ -238,6 +256,7 @@ impl ProductionMeter {
             interval_media_start_ms: None,
             child: Duration::ZERO,
             convert: Duration::ZERO,
+            memory: Duration::ZERO,
             commit: Duration::ZERO,
             segments: 0,
             media_end_ms: None,
@@ -248,6 +267,9 @@ impl ProductionMeter {
     }
     pub(super) fn convert(&mut self, spent: Duration) {
         self.convert = self.convert.saturating_add(spent);
+    }
+    pub(super) fn memory(&mut self, spent: Duration) {
+        self.memory = self.memory.saturating_add(spent);
     }
     pub(super) fn commit(&mut self, spent: Duration) {
         self.commit = self.commit.saturating_add(spent);
@@ -306,6 +328,7 @@ impl ProductionMeter {
             rate = rate.unwrap_or(f64::NAN),
             child_ms = self.child.as_millis() as u64,
             convert_ms = self.convert.as_millis() as u64,
+            memory_ms = self.memory.as_millis() as u64,
             commit_ms = self.commit.as_millis() as u64,
             "Source copy segment published"
         );
@@ -315,7 +338,22 @@ impl ProductionMeter {
         self.interval_media_start_ms = Some(media_end_ms);
         self.child = Duration::ZERO;
         self.convert = Duration::ZERO;
+        self.memory = Duration::ZERO;
         self.commit = Duration::ZERO;
+    }
+
+    /// One line for a wait for node memory that outlasted the advertised
+    /// target duration: the copy paused behind other copies' holds.
+    pub(super) fn waited_for_memory(&self, waited: Duration) {
+        tracing::info!(
+            target: "plurxd::transcode",
+            incarnation = %self.incarnation,
+            range = %self.range_id,
+            waited_ms = waited.as_millis() as u64,
+            segments = self.segments,
+            media_end_ms = self.media_end_ms.map_or(-1, |end| end.round() as i64),
+            "Source copy producer waited for node memory"
+        );
     }
 
     /// One line for a wait that outlasted the advertised target duration.
@@ -352,13 +390,21 @@ impl ProductionMeter {
     /// The one line production ends with: how far it got and how long it
     /// ran. A failure's producer cause is warned where it is relabelled; this
     /// line carries the outcome code beside the totals.
-    pub(super) fn finished(&self, now: Instant, outcome: &Result<(), String>) {
+    pub(super) fn finished(
+        &self,
+        now: Instant,
+        outcome: &Result<(), String>,
+        peak_held_bytes: usize,
+        charged_bytes: u64,
+    ) {
         tracing::info!(
             target: "plurxd::transcode",
             incarnation = %self.incarnation,
             range = %self.range_id,
             outcome = outcome.as_ref().err().map_or("complete", String::as_str),
             segments = self.segments,
+            peak_held_bytes,
+            charged_bytes,
             media_end_ms = self.media_end_ms.map_or(-1, |end| end.round() as i64),
             elapsed_ms = now.saturating_duration_since(self.started).as_millis() as u64,
             "Source copy production ended"
@@ -495,8 +541,10 @@ mod tests {
         meter.finished(
             start + Duration::from_secs(9),
             &Err("copy_sync_unverified".into()),
+            0,
+            0,
         );
-        meter.finished(start + Duration::from_secs(9), &Ok(()));
+        meter.finished(start + Duration::from_secs(9), &Ok(()), 0, 0);
         let lines = lines(&logs);
         let failed = &lines[1];
         assert!(

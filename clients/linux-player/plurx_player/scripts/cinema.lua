@@ -175,6 +175,20 @@ local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=tru
 local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
 local EL_KIND = {fel=' — the full enhancement layer (FEL)',
     mel=' — a minimal enhancement layer (MEL), which adds no picture detail'}
+-- A badge's pill text. When the server's title scan names the layer, the EL
+-- pill names it too: FEL for a full layer, MEL for a minimal one, as the panel
+-- does; an unclassified layer keeps EL. A FEL label already on a pill (the
+-- server's own FEL claim) is not drawn twice.
+local EL_LABEL = {fel='FEL', mel='MEL'}
+local function badge_labels(badges,view)
+    local kind=view.enhancement and EL_LABEL[view.enhancement.el_kind]
+    local labels,seen={},{}
+    for _,badge in ipairs(badges) do
+        local label=(badge=='EL' and kind) or badge
+        if not seen[label] then seen[label]=true; labels[#labels+1]=label end
+    end
+    return labels
+end
 local function table_of(value) return type(value)=='table' and value or {} end
 -- One read of each property per render; the info timer runs at 5 Hz.
 local function snapshot()
@@ -343,7 +357,7 @@ local function quality_pills(view)
     if res then pills[#pills+1]={text=res,colour=PILL.res,rank=3} end
     local range=range_pill(view)
     if range then range.rank=1; pills[#pills+1]=range end
-    for _,badge in ipairs((enhancement_state(view))) do pills[#pills+1]={text=badge,colour=PILL.enh,rank=2} end
+    for _,label in ipairs(badge_labels((enhancement_state(view)),view)) do pills[#pills+1]={text=label,colour=PILL.enh,rank=2} end
     local audio=audio_pill(view.audio)
     if audio then audio.rank=4; pills[#pills+1]=audio end
     return pills
@@ -408,7 +422,8 @@ local function playback_info()
     if #order==0 then
         row('Dolby Vision enhancements',source_range(source)=='dolby_vision' and 'None reported' or 'Not a Dolby Vision source')
     else
-        row('Dolby Vision enhancements',#active>0 and table.concat(active,' · ') or 'None active')
+        local names=badge_labels(active,view)
+        row('Dolby Vision enhancements',#names>0 and table.concat(names,' · ') or 'None active')
         for _,badge in ipairs(order) do
             for _,line in ipairs(wrapped((details[badge].active and '● ' or '○ ')..details[badge].text,columns)) do
                 r[#r+1]={text=line}

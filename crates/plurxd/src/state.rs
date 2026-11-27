@@ -7215,6 +7215,7 @@ impl JobManager {
                             renew_every: policy.renew_every(),
                             retry_ms: policy.backoff_base_ms,
                             metrics: Arc::clone(&jobs.analysis_metrics),
+                            copy_memory: transcode.admissions().copy_memory(),
                         };
                         crate::copy_analysis::work_copy_observations(
                             &jobs.copy_analysis,
@@ -7316,6 +7317,16 @@ impl JobManager {
         let _guard = BackgroundUpkeepGuard(Arc::clone(&self));
         if !self.may_run_cluster_jobs().await {
             return;
+        }
+        // A dead worker's job otherwise stays `running` until a claimer
+        // happens to reach it in candidate order. The sweep revokes leases on
+        // this node's clock, so it runs only where the rest of queue upkeep
+        // does (committed voters, behind `may_run_cluster_jobs`), not on
+        // every node the way the custody reap must. It runs after that reap,
+        // which `schedule_tick` performs first on the same tick, so a job
+        // whose lapsed custody was just released is requeued now.
+        if let Err(error) = self.store.requeue_expired_running_jobs(clock_ms()).await {
+            tracing::warn!(%error, "requeueing expired-lease background jobs");
         }
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");

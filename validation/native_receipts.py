@@ -106,10 +106,12 @@ BUILD_SPECS = {
     # the web-unit-check recipe (a Node web test); no native recipe changes.
     # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
     # no native recipe changes.
+    # plurx#1953 changes only cluster-transport-recovery-contracts' expected
+    # test count from 76 to 79; no native recipe changes.
     # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
     # to the web-unit-check recipe (a Node playback-lab test); no native
     # recipe changes.
-    'Makefile': '33beed31218800740e46627e53860dc2f4aca44074d7b6f649e7df2aff924e3c',
+    'Makefile': '9394e64e6bec4d6291d15a3aed5386f0e7e0a62d8e84ee00e7e1efc1e5ffd34f',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,

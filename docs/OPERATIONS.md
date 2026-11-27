@@ -3444,6 +3444,7 @@ membership addresses and token-file paths are intentionally file-only:
 | — | `cluster.artwork_url` | `http://<advertise_host>:<server port>` | Node-specific public plurxd base peers use to recover local artwork. Set an explicit per-node URL when `join_url` names a shared proxy or load balancer |
 | — | `cluster.join_token_file` | empty | Owner-only file containing one token on a fresh joining node. Empty bootstraps or reopens; a successful join deletes it |
 | `PLURX_CONFIG` | — | — | Explicit config-file path (must exist if set) |
+| `PLURX_COPY_MEMORY_BUDGET` | — | ⅛ of node memory | Bytes this node's verified copies may hold in plurxd's heap at once (not FFmpeg children; per node). Admission, growth and refusal: [COPY-MEMORY-BUDGET](server/COPY-MEMORY-BUDGET.md) |
 | `PLURX_FFMPEG` | — | `ffmpeg` | ffmpeg binary — point at jellyfin-ffmpeg for best hwaccel |
 | `PLURX_FFPROBE` | — | `ffprobe` | ffprobe binary (inspection + chapter markers) |
 | `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |
@@ -6095,6 +6096,20 @@ lacks the create's catalog scope.
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
 `admission_refused`, `not_applicable`, `qualification_pending`, `displaced`,
 `cancelled`).
+`plurx_playback_preparation_processed_recovery_unavailable_total{stage,reason}`
+counts the reads of a playback's recovery memory, for a processed recipe, that
+could not answer. `stage` is `before_trial` (the trial still runs, and the
+check after it decides) or `after_trial` (the upgrade is refused as
+`admission_refused`). `reason` names the read and the exit:
+`deadline_route_read`, `deadline_source_identity`, `deadline_route_reread`
+and `deadline_memory_read` are the deadline passing during that read. The
+others are an answer that could not bind the incumbent: `route_*` (including
+`route_reread_store_error`, `route_reread_missing` and `route_moved` at the
+re-read after the source fence), `no_route`, `recipe_mismatch`,
+`response_mismatch`, `candidate_mismatch`, `candidate_identity`,
+`no_network_user`, `no_credential_generation`, `source_fence_open`,
+`source_changed`, `scope_invalid`, `memory_store_error`. A refusal after the
+trial carries the same label in its `processing_skip` reason.
 `plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
 prepared switches the clients reported at their seam (`committed`, `refused`,
 `switched_without_a_frame`) and

@@ -220,19 +220,45 @@ pub(crate) struct SourceLinkIdentity {
     source_object_version: String,
 }
 
+/// Why [`SourceLinkIdentity::capture`] captured no identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceIdentityMiss {
+    /// The network identity names no local user.
+    NoUser,
+    /// The network identity carries no credential generation.
+    NoCredentialGeneration,
+    /// The source could not be opened or stat'ed for its fence.
+    FenceOpen,
+    /// The source changed while it was fenced.
+    Changed,
+}
+
 impl SourceLinkIdentity {
     /// Fences the source once. It carries no timer of its own: the caller's
     /// advisory deadline bounds it, and a miss is Unknown, never a refusal.
     pub(crate) async fn capture(network: &NetworkIdentity, file: &MediaFile) -> Option<Self> {
-        let user_id = network.user_id?;
-        let credential_generation = network.credential_generation.as_ref()?.as_str().to_owned();
+        Self::capture_classified(network, file).await.ok()
+    }
+
+    /// [`Self::capture`], naming why no identity was captured.
+    pub(crate) async fn capture_classified(
+        network: &NetworkIdentity,
+        file: &MediaFile,
+    ) -> Result<Self, SourceIdentityMiss> {
+        let user_id = network.user_id.ok_or(SourceIdentityMiss::NoUser)?;
+        let credential_generation = network
+            .credential_generation
+            .as_ref()
+            .ok_or(SourceIdentityMiss::NoCredentialGeneration)?
+            .as_str()
+            .to_owned();
         let fence = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
-            .ok()?;
+            .map_err(|_| SourceIdentityMiss::FenceOpen)?;
         if !fence.unchanged().await {
-            return None;
+            return Err(SourceIdentityMiss::Changed);
         }
-        Some(Self {
+        Ok(Self {
             user_id,
             credential_generation,
             client_class: network.client_class.clone(),
@@ -253,10 +279,18 @@ impl SourceLinkIdentity {
     /// post-acceptance comparison, the staged registration — uses
     /// [`Self::capture`] (via [`binding`]) instead, so it fences again.
     pub(crate) async fn for_request(network: &NetworkIdentity, file: &MediaFile) -> Option<Self> {
+        Self::for_request_classified(network, file).await.ok()
+    }
+
+    /// [`Self::for_request`], naming why no identity was captured.
+    pub(crate) async fn for_request_classified(
+        network: &NetworkIdentity,
+        file: &MediaFile,
+    ) -> Result<Self, SourceIdentityMiss> {
         if let Some(identity) =
             crate::media_pool::create_source_link(|identity| identity.describes(network, file))
         {
-            return Some(identity);
+            return Ok(identity);
         }
         if let Some(identity) = DECISION_SOURCE_LINK
             .try_with(|cell| {
@@ -269,16 +303,16 @@ impl SourceLinkIdentity {
             .ok()
             .flatten()
         {
-            return Some(identity);
+            return Ok(identity);
         }
-        let identity = Self::capture(network, file).await?;
+        let identity = Self::capture_classified(network, file).await?;
         crate::media_pool::remember_create_source_link(&identity);
         let _ = DECISION_SOURCE_LINK.try_with(|cell| {
             *cell
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity.clone());
         });
-        Some(identity)
+        Ok(identity)
     }
 
     fn describes(&self, network: &NetworkIdentity, file: &MediaFile) -> bool {

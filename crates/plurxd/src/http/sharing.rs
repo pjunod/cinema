@@ -904,7 +904,8 @@ pub(crate) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'sta
         | PeerError::Busy { .. }
         | PeerError::StartNotPrepared { .. }
         | PeerError::StartNotYet { .. }
-        | PeerError::DolbyVisionUnsupported => "sharing_peer_unavailable",
+        | PeerError::DolbyVisionUnsupported
+        | PeerError::SourceRefused { .. } => "sharing_peer_unavailable",
     }
 }
 fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
