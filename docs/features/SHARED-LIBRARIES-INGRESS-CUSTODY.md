@@ -70,6 +70,50 @@ session owner; retiring one owner cannot substitute its proof for, or revoke,
 a surviving owner's permission. Sealing prevents new admission and renewal
 for that owner while actual closure remains a separate retirement condition.
 
+## Amendment 2026-11-27: a superseded owner boot
+
+Item 4 stands for the missing entry and for a boot that is merely new. It
+does not stand for a boot that is gone. A Source owner process that dies
+leaves its incarnation's durable rows behind:
+- a `held` binding that counts against the grant's occupancy;
+- the request row;
+- the media session;
+- an unsealed ledger.
+
+The restarted process had no entry for it, so every End was refused as
+retryable and the binding never released (observed on a Source owner,
+2026-11-27, request `4f1f2061`).
+
+**Rule.** A superseded boot marker proves that boot's writers are gone. It
+is recorded as supersession, never as a closure receipt. A node's heartbeat
+replaces its `sharing_ingress_boot_v1:` marker in the same write that
+publishes the new one, and one data directory admits one process. So a live,
+non-removed member whose latest heartbeat names another boot has no writer
+left on the old one.
+
+`crates/plurxd/src/http/shared_source_superseded.rs` settles such an
+incarnation from durable rows only. That happens on its End, and from a
+reconciliation loop for incarnations no receiver asks about. The steps:
+1. Seal the ledger.
+2. Close every slot whose ingress driver is still alive with its actual
+   closure receipt, through the close exchange above.
+3. Close a slot whose own boot is superseded with a supersession record.
+   That record is a hash in its own domain and is CASed on the marker in the
+   same write.
+4. End the media session the dead process owned.
+5. Release through the unchanged guarded SQL, and answer with a settled
+   receipt that replays exactly.
+
+**What stays fail-closed.**
+- A slot whose node still publishes the slot's boot, or that has stopped
+  heartbeating, stays open, and End stays unresolved, because that custody
+  is real.
+- Start, media and Register never take this path.
+- A request this node never assigned finds no row.
+- A forwarded control or ACK takes this path only when its signed authority
+  names this node under the exact boot the ledger routes to, and every
+  identity field agrees with the durable rows.
+
 ## Options considered
 
 | Option | Complexity and cost | Result |

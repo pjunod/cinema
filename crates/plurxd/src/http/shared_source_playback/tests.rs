@@ -4393,6 +4393,186 @@ async fn actual_source_genuine_invitation() {
     );
     fixture.shutdown().await;
 }
+/// The owner process restarts under a live Source playback. The new process
+/// has no entry for it and a new driver registry boot, so the receiver's End
+/// was refused as retryable forever and the binding stayed held against the
+/// grant (nynuc, 2026-11-27). It now settles from the durable rows: the
+/// binding releases, the session ends, and a replay gets the same receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_end_after_owner_restart_settles_the_superseded_incarnation() {
+    Box::pin(actual_source_end_after_owner_restart()).await;
+}
+async fn actual_source_end_after_owner_restart() {
+    use std::time::Duration;
+    let mut fixture = real_source_start_fixture().await;
+    fixture.keep_fixture_membership_stable().await;
+    let serve = |state: crate::state::AppState| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("actual private listener");
+        let address = listener.local_addr().expect("address");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(crate::serve_http(
+            listener,
+            super::super::sharing::peer_router(state),
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        (address, stop, server)
+    };
+    let sessions = |address: std::net::SocketAddr| {
+        format!(
+            "http://{address}/sharing/v1/items/{}/files/{}/sessions",
+            fixture.reference.item_id.as_str(),
+            fixture.reference.file_id.as_str()
+        )
+    };
+    let (address, stop, server) = Box::pin(serve((*fixture.state).clone())).await;
+    let started = Box::pin(actual_resource_request(
+        address,
+        true,
+        &sessions(address),
+        fixture.headers.clone(),
+        fixture.request.clone(),
+    ))
+    .await;
+    assert_eq!(started.status(), StatusCode::OK);
+    let start_bytes = axum::body::to_bytes(started.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("actual full Source envelope");
+    let decoded = super::super::decode_source_start_response(&start_bytes, &fixture.reference)
+        .expect("actual full strict Start");
+    assert_eq!(fixture.held_source_bindings().await, 1);
+    // The owner process dies: its listener and every connection go.
+    let _ = stop.send(());
+    let _ = server.await;
+    let restarted = Box::pin(fixture.restarted_state()).await;
+    assert_eq!(restarted.transcode.source_http_starts.live_entries(), 0);
+    // The forwarded gate: only the exact signed authority for this node's
+    // superseded boot passes; any other field keeps it fail-closed.
+    let found = super::superseded::lookup(&restarted, None, 4)
+        .await
+        .expect("durable lookup");
+    assert_eq!(found.len(), 1, "the dead boot's held incarnation");
+    let found = &found[0];
+    assert_eq!(
+        found.dead_boot(),
+        fixture.state.sharing.accepted_drivers.boot_id()
+    );
+    let binding = found.assignment().binding();
+    let wire = forwarding::ForwardAuthority {
+        credential_hash: found.initial_credential_hash().to_owned(),
+        principal: binding.principal().clone(),
+        owner_node_id: restarted.node_id.clone(),
+        incarnation_id: binding.incarnation_id(),
+        dispatch_generation: 1,
+        expected_registry_boot: found.dead_boot(),
+        reference: fixture.reference.clone(),
+        request_id: binding.request_id().parse().expect("request uuid"),
+        request_fingerprint: binding.request_fingerprint().to_owned(),
+        playback_id: binding.playback_id().to_owned(),
+        owner_identity: found.assignment().custody_identity(),
+        cleanup_only: true,
+    };
+    assert!(super::superseded::forwarded(&restarted, &wire)
+        .await
+        .is_some());
+    let refused = |change: fn(&mut forwarding::ForwardAuthority, Uuid)| {
+        let mut wire = wire.clone();
+        change(&mut wire, restarted.sharing.accepted_drivers.boot_id());
+        wire
+    };
+    for wire in [
+        refused(|wire, current| wire.expected_registry_boot = current),
+        refused(|wire, _| wire.expected_registry_boot = Uuid::new_v4()),
+        refused(|wire, _| wire.owner_node_id = "another-node".into()),
+        refused(|wire, _| wire.owner_identity = "e".repeat(64)),
+        refused(|wire, _| wire.incarnation_id = Uuid::new_v4()),
+        refused(|wire, _| wire.request_fingerprint = "f".repeat(64)),
+    ] {
+        assert!(super::superseded::forwarded(&restarted, &wire)
+            .await
+            .is_none());
+    }
+    let (address, stop, server) = Box::pin(serve((*restarted).clone())).await;
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request = recipe["session"]["request_id"].as_str().expect("request");
+    let end = format!("{}/{request}/end", sessions(address));
+    let mut receipts = Vec::new();
+    // The receiver keeps retrying End. Before the fix every attempt was 503.
+    for _ in 0..20 {
+        let response = Box::pin(actual_resource_request(
+            address,
+            true,
+            &end,
+            fixture.headers.clone(),
+            fixture.request.clone(),
+        ))
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("End body");
+        if status == StatusCode::OK {
+            receipts.push(serde_json::from_slice::<Value>(&bytes).expect("End receipt"));
+            if receipts.len() == 2 {
+                break;
+            }
+            continue;
+        }
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        receipts.len(),
+        2,
+        "End across the owner restart must settle, not retry forever"
+    );
+    assert_eq!(
+        receipts[0], receipts[1],
+        "an exact replay keeps its receipt"
+    );
+    let receipt = &receipts[0];
+    assert_eq!(receipt["settled"], json!(true));
+    assert_eq!(receipt["state"], json!("settled"));
+    assert_eq!(receipt["incarnation_id"], json!(decoded.incarnation_id()));
+    assert_eq!(receipt["reference"], json!(fixture.reference));
+    assert_eq!(receipt["request_id"], json!(request));
+    assert_eq!(
+        fixture.held_source_bindings().await,
+        0,
+        "the grant's occupancy is released"
+    );
+    assert_eq!(fixture.active_source_sessions().await, 0);
+    assert!(super::superseded::lookup(&restarted, None, 4)
+        .await
+        .expect("durable lookup")
+        .is_empty());
+    // A request this node never assigned still finds nothing to settle.
+    let mut unknown = recipe.clone();
+    let stranger = Uuid::new_v4();
+    unknown["session"]["request_id"] = json!(stranger);
+    let refused = Box::pin(actual_resource_request(
+        address,
+        true,
+        &format!("{}/{stranger}/end", sessions(address)),
+        fixture.headers.clone(),
+        serde_json::to_vec(&unknown).expect("unknown request"),
+    ))
+    .await;
+    assert_ne!(refused.status(), StatusCode::OK);
+    let _ = stop.send(());
+    let _ = server.await;
+    drop(restarted);
+    fixture.shutdown().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_end_retains_actual_owner_after_disconnect_and_revoke() {
     Box::pin(actual_source_http_end()).await;

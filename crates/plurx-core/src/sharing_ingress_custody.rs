@@ -331,6 +331,37 @@ impl IngressCustodyState {
             }
         }
     }
+    /// Record that one open slot's driver registry boot was superseded: its
+    /// node has since published a different boot, and a boot is one process
+    /// lifetime, so that boot's writers are gone. This is supersession, never
+    /// a closure receipt: `confirmation` must be a hash in its own domain
+    /// ([`superseded_confirmation`]), and only a sealed ledger accepts it, so
+    /// nothing can register behind it. The caller proves the superseding boot
+    /// in the same transaction.
+    pub fn supersede_registration(
+        &mut self,
+        registration: &IngressRegistration,
+        confirmation: &str,
+    ) -> CustodyMutation {
+        if !self.sealed || !crate::sharing::is_hash(confirmation) {
+            return CustodyMutation::Refused;
+        }
+        let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.same_driver(registration))
+        else {
+            return CustodyMutation::Refused;
+        };
+        match &slot.closed_confirmation {
+            Some(existing) if existing == confirmation => CustodyMutation::Replay,
+            Some(_) => CustodyMutation::Refused,
+            None => {
+                slot.closed_confirmation = Some(confirmation.to_owned());
+                CustodyMutation::Applied
+            }
+        }
+    }
     pub fn contains_driver(&self, registration: &IngressRegistration) -> bool {
         self.slots.iter().any(|slot| slot.same_driver(registration))
     }
@@ -342,6 +373,25 @@ impl IngressCustodyState {
     pub fn settled(&self) -> bool {
         self.sealed && self.open().next().is_none()
     }
+}
+/// Confirmation recorded for a slot closed by boot supersession. Its domain
+/// keeps it distinct from every actual driver-closure receipt hash.
+pub fn superseded_confirmation(owner_identity: &str, registration: &IngressRegistration) -> String {
+    use sha2::Digest;
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"plurx.sharing-ingress-boot-superseded.v1\0");
+    for part in [
+        owner_identity,
+        registration.node_id.as_str(),
+        &registration.boot_id.to_string(),
+        &registration.connection_id.to_string(),
+        &registration.driver_sequence.to_string(),
+        &registration.registration_sequence.to_string(),
+    ] {
+        hash.update(part.as_bytes());
+        hash.update(b"\0");
+    }
+    format!("{:x}", hash.finalize())
 }
 
 #[cfg(test)]
@@ -463,5 +513,39 @@ mod tests {
         assert_eq!(state.register(registration(137)), CustodyMutation::Refused);
         state.acknowledge(&held[0], &"b".repeat(64));
         assert_eq!(state.register(registration(138)), CustodyMutation::Applied);
+    }
+    #[test]
+    fn sharing_ingress_superseded_boot_closes_only_sealed_open_slots_in_its_own_domain() {
+        let mut state = IngressCustodyState::default();
+        let dead = registration(1);
+        assert_eq!(state.register(dead.clone()), CustodyMutation::Applied);
+        let mark = superseded_confirmation(&"c".repeat(64), &dead);
+        assert_ne!(mark, superseded_confirmation(&"d".repeat(64), &dead));
+        assert_eq!(
+            state.supersede_registration(&dead, &mark),
+            CustodyMutation::Refused,
+            "an unsealed ledger could still admit behind a supersession"
+        );
+        state.seal();
+        assert!(!state.settled());
+        assert_eq!(
+            state.supersede_registration(&registration(2), &mark),
+            CustodyMutation::Refused,
+            "never a slot the ledger does not hold"
+        );
+        assert_eq!(
+            state.supersede_registration(&dead, &mark),
+            CustodyMutation::Applied
+        );
+        assert_eq!(
+            state.supersede_registration(&dead, &mark),
+            CustodyMutation::Replay
+        );
+        assert_eq!(
+            state.supersede_registration(&dead, &"e".repeat(64)),
+            CustodyMutation::Refused
+        );
+        assert!(state.settled());
+        assert_eq!(state.register(dead), CustodyMutation::Refused);
     }
 }

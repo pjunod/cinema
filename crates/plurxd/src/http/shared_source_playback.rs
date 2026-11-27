@@ -22,6 +22,10 @@ use ingress::{
 #[path = "shared_source_direct.rs"]
 pub(crate) mod direct;
 
+#[path = "shared_source_superseded.rs"]
+mod superseded;
+pub(crate) use superseded::reconcile_loop as superseded_reconcile_loop;
+
 struct SourceStartInput {
     reference: SourcePlaybackTarget,
     session: CreateSession,
@@ -1086,6 +1090,20 @@ async fn status(
             .transcode
             .source_http_starts
             .cleanup_entry(&hash, &viewer, &input.start),
+    };
+    let entry = match entry {
+        Ok(entry) => Ok(entry),
+        // Cleanup-only observation of a superseded boot's incarnation: the
+        // durable terminal fact only, never live content or readiness.
+        Err(missing) if current.is_err() => {
+            if let Some(facts) =
+                Box::pin(superseded::status(&state, &hash, &viewer, &input.start)).await
+            {
+                return Ok(axum::Json(facts).into_response());
+            }
+            Err(missing)
+        }
+        Err(missing) => Err(missing),
     }
     .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.entry", error_class = "operation_refused", "Source status refused"); }).map_err(SourceStartFailure::response)?;
     entry
@@ -1222,11 +1240,27 @@ async fn end(
     let hash = source_credential_hash(&headers)?;
     // Cleanup authenticates only the exact previously owned obligation. It
     // grants no resource/status content permission and reads no expired grant.
-    let entry = state
+    let entry = match state
         .transcode
         .source_http_starts
         .cleanup_entry(&hash, &viewer, &input.start)
-        .map_err(SourceStartFailure::response)?;
+    {
+        Ok(entry) => entry,
+        // No entry in this process. A superseded boot of this node may have
+        // owned it; that settles from durable rows, anything else refuses.
+        Err(missing) => {
+            return Box::pin(superseded::end(
+                &state,
+                &headers,
+                &hash,
+                &viewer,
+                &input.start,
+                missing,
+            ))
+            .await
+            .map(axum::Json);
+        }
+    };
     entry
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
@@ -2665,6 +2699,60 @@ impl RealSourceStartFixture {
             .await
             .expect("read the fresh fixture roster")
             .is_some());
+    }
+    /// The State a restarted owner process builds over this fixture's store
+    /// and node: an empty Source registry and a new accepted-driver registry
+    /// boot, published to membership as the restart publishes it.
+    pub(crate) async fn restarted_state(&self) -> std::sync::Arc<crate::state::AppState> {
+        let mut state = std::sync::Arc::new(super::tests::test_state_with_store(
+            std::sync::Arc::clone(&self.selected.store),
+            self.selected.identity.node_id.clone(),
+        ));
+        let restarted = std::sync::Arc::get_mut(&mut state).expect("sole restarted State");
+        restarted.replace_membership(self.selected.membership_manager());
+        restarted.clock_observer =
+            crate::clock_offset::ClockObserver::new(restarted.cluster.operations().clock());
+        restarted.node_id = self.selected.identity.node_id.clone();
+        restarted.catalogue = self.selected.catalogue_reader();
+        restarted.replace_replication(self.selected.replication_monitor());
+        restarted.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+            restarted.cluster.test_membership().clone(),
+            std::sync::Arc::clone(&restarted.store),
+        );
+        restarted.sharing = std::sync::Arc::new(crate::sharing::SharingManager::new(
+            std::sync::Arc::clone(&self.selected.credential_key),
+            self._directory.path().join("database"),
+            plurx_core::config::Config::default().sharing,
+        ));
+        assert_ne!(
+            restarted.sharing.accepted_drivers.boot_id(),
+            self.state.sharing.accepted_drivers.boot_id()
+        );
+        let membership = restarted.cluster.test_membership();
+        membership.set_ingress_custody_boot(Some(restarted.sharing.accepted_drivers.boot_id()));
+        membership
+            .publish_ingress_custody_boot()
+            .await
+            .expect("restarted registry boot publication");
+        membership.heartbeat().await.expect("restarted roster");
+        state
+    }
+    /// Source bindings still holding a grant's occupancy.
+    pub(crate) async fn held_source_bindings(&self) -> i64 {
+        let client = self
+            .selected
+            .local_client()
+            .expect("actual Source selected voter client");
+        let mut rows = client
+            .query_consistent(
+                "SELECT CAST(COUNT(*) AS TEXT) AS payload FROM sharing_source_session_bindings WHERE reservation_state=$1",
+                hiqlite::params!("held"),
+            )
+            .await
+            .expect("actual Source read-only binding count");
+        assert_eq!(rows.len(), 1);
+        let count: String = rows.remove(0).get("payload");
+        count.parse().expect("decimal count")
     }
     pub async fn shutdown(self) {
         drop(self.shutdown_retaining_fixture_budget().await);

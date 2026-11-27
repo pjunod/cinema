@@ -280,6 +280,86 @@ async fn binding_row<T: Backend>(
         .transpose()
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupersededRow {
+    binding: BindingRow,
+    routing_boot: String,
+    initial_credential_hash: String,
+    owner_identity: String,
+}
+/// Dispatched Source incarnations whose custody routes to `owner` under a
+/// registry boot other than `current_boot`, read only while `owner`'s live
+/// membership publishes `current_boot`. Held and released bindings are both
+/// returned: a released one answers an exact End or ACK replay.
+async fn superseded_incarnations<T: Backend>(
+    backend: &T,
+    owner: &str,
+    current_boot: Uuid,
+    incarnation: Option<Uuid>,
+    members: &SourceAdmissionMembers,
+    limit: usize,
+) -> Result<Vec<SupersededSourceIncarnation>, StoreError> {
+    if owner.is_empty()
+        || owner.len() > 256
+        || current_boot.is_nil()
+        || current_boot.get_version_num() != 4
+        || !(1..=64).contains(&limit)
+        || !present(backend).await?
+    {
+        return Ok(Vec::new());
+    }
+    let only = match incarnation {
+        Some(incarnation) => format!("b.incarnation_id='{incarnation}'"),
+        None => "b.reservation_state='held'".to_owned(),
+    };
+    let rows = backend
+        .sharing_read(
+            &format!(
+                "SELECT json_object('binding',json({BINDING_JSON}),'routing_boot',json_extract(c.custody_json,'$.source_routing.registry_boot_id'),'initial_credential_hash',json_extract(c.custody_json,'$.source_routing.initial_credential_hash'),'owner_identity',c.owner_identity) AS payload
+         FROM sharing_source_session_bindings b
+         JOIN media_session_requests r ON r.owner_key=b.owner_key
+           AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id
+           AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id
+           AND r.principal_kind='sharing' AND r.user_id IS NULL
+           AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key
+         JOIN sharing_ingress_custody c ON c.principal_kind='source' AND c.incarnation_id=b.incarnation_id
+         WHERE {only} AND b.dispatch_generation=1 AND r.owner_node_id=$1
+           AND json_extract(c.custody_json,'$.source_routing.owner_node_id')=$1
+           AND json_extract(c.custody_json,'$.source_routing.registry_boot_id')<>$2
+           AND EXISTS(SELECT 1 FROM cluster_nodes n JOIN cluster_node_capabilities k ON k.node_id=n.node_id AND k.last_seen_at=n.last_seen_at WHERE n.node_id=$1 AND n.removed_at IS NULL AND k.capability='sharing_ingress_boot_v1:'||$2)
+         ORDER BY b.incarnation_id LIMIT {limit}"
+            ),
+            vec![owner.to_owned().into(), current_boot.to_string().into()],
+        )
+        .await?;
+    let mut found = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row: SupersededRow = serde_json::from_str(&row).map_err(|_| invalid())?;
+        let dead_boot = canonical_uuid(&row.routing_boot)?;
+        if dead_boot == current_boot || !is_hash(&row.initial_credential_hash) {
+            return Err(invalid());
+        }
+        let assignment = SourceDispatchAssignment {
+            binding: row.binding.handle()?,
+            owner_node_id: owner.to_owned(),
+            dispatch_generation: 1,
+            members: members.clone(),
+        };
+        // The ledger row is keyed by the exact custody identity this
+        // assignment derives; any other row is not this dispatch's ledger.
+        if assignment.custody_identity() != row.owner_identity {
+            continue;
+        }
+        found.push(SupersededSourceIncarnation {
+            assignment,
+            dead_boot,
+            initial_credential_hash: row.initial_credential_hash,
+        });
+    }
+    Ok(found)
+}
+
 const OCCUPANCY: &str = "WITH obligations(incarnation_id,grant_id) AS (
  SELECT incarnation_id,share_grant_id FROM sharing_source_session_bindings WHERE reservation_state='held'
  UNION SELECT incarnation_id,share_grant_id FROM media_session_requests WHERE principal_kind='sharing' AND state='starting'
@@ -1449,6 +1529,17 @@ pub trait SharingSourceSessionStore: Send + Sync {
         &self,
         intent: &SourceSessionIntent,
     ) -> Result<SourceReleaseOutcome, StoreError>;
+    /// Dispatched incarnations `owner` routed under a registry boot it has
+    /// superseded (see [`SupersededSourceIncarnation`]). With `incarnation`,
+    /// that one incarnation, held or released; without, held ones only.
+    async fn superseded_source_incarnations(
+        &self,
+        owner: &str,
+        current_boot: Uuid,
+        incarnation: Option<Uuid>,
+        members: &SourceAdmissionMembers,
+        limit: usize,
+    ) -> Result<Vec<SupersededSourceIncarnation>, StoreError>;
     /// This callback is limited to the immutable, provably undispatched CAS.
     async fn release_source_never_dispatched(
         &self,
@@ -1464,6 +1555,16 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         terminal: &crate::domain::MediaSessionRoute,
     ) -> Result<SourceReleaseOutcome, StoreError> {
         settle_terminal_worker(self, assignment, terminal).await
+    }
+    async fn superseded_source_incarnations(
+        &self,
+        owner: &str,
+        current_boot: Uuid,
+        incarnation: Option<Uuid>,
+        members: &SourceAdmissionMembers,
+        limit: usize,
+    ) -> Result<Vec<SupersededSourceIncarnation>, StoreError> {
+        superseded_incarnations(self, owner, current_boot, incarnation, members, limit).await
     }
     async fn settle_source_assigned_without_activation(
         &self,

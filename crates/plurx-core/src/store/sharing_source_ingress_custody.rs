@@ -361,6 +361,25 @@ fn admission_guard(
         vec![roster.into(), cutoff.into(), observed.into()],
     ))
 }
+/// The slot's node is a live member whose latest heartbeat published a
+/// registry boot other than the slot's. The heartbeat replaces every prior
+/// boot marker in the same write, so this proves the slot's boot is gone.
+fn superseded_boot_guard(registration: &IngressRegistration) -> String {
+    #[cfg(feature = "hiqlite-store")]
+    {
+        let node = quote(&registration.node_id);
+        format!(
+            "EXISTS(SELECT 1 FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.node_id={node} AND n.removed_at IS NULL AND c.capability GLOB 'sharing_ingress_boot_v1:*' AND c.capability<>{}) AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities c WHERE c.node_id={node} AND c.capability={})",
+            quote(&format!("sharing_ingress_boot_v1:{}", registration.boot_id)),
+            quote(&format!("sharing_ingress_boot_v1:{}", registration.boot_id)),
+        )
+    }
+    #[cfg(not(feature = "hiqlite-store"))]
+    {
+        let _ = registration;
+        "0".to_owned()
+    }
+}
 async fn ingress_admission<T: Backend>(
     store: &T,
     assignment: &SourceDispatchAssignment,
@@ -450,6 +469,13 @@ pub trait SharingSourceIngressCustodyStore: Send + Sync {
         assignment: &SourceDispatchAssignment,
         registration: &IngressRegistration,
         confirmation: &str,
+    ) -> Result<SourceCustodyWrite, StoreError>;
+    /// Close one open slot of a sealed ledger whose registry boot its node
+    /// has superseded. Recorded as supersession, never as a closure receipt.
+    async fn supersede_source_ingress_custody(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        registration: &IngressRegistration,
     ) -> Result<SourceCustodyWrite, StoreError>;
     async fn current_source_ingress_owner(
         &self,
@@ -649,6 +675,43 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
                     // Seal or another exact closure ACK may move this ledger
                     // after the read. Recompute only when its revision moved;
                     // every attempt retains the same owner and receipt guards.
+                    let Some(current) = snapshot(self, assignment).await? else {
+                        return Err(error);
+                    };
+                    if current.revision == observed.revision {
+                        return Err(error);
+                    }
+                    observed = current;
+                }
+            }
+        }
+        Err(invalid())
+    }
+    async fn supersede_source_ingress_custody(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        registration: &IngressRegistration,
+    ) -> Result<SourceCustodyWrite, StoreError> {
+        let confirmation = crate::sharing_ingress_custody::superseded_confirmation(
+            &assignment.custody_identity(),
+            registration,
+        );
+        let Some(mut observed) = snapshot(self, assignment).await? else {
+            return Ok(SourceCustodyWrite::Refused);
+        };
+        for _ in 0..4 {
+            let mut next = observed.state.clone();
+            match next.supersede_registration(registration, &confirmation) {
+                CustodyMutation::Refused => return Ok(SourceCustodyWrite::Refused),
+                CustodyMutation::Replay => return Ok(SourceCustodyWrite::ExactReplay),
+                CustodyMutation::Applied => {}
+            }
+            let guard = superseded_boot_guard(registration);
+            match replace(self, assignment, &observed, &next, &guard, vec![]).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    // A real closure ACK may land between the read and this
+                    // CAS. Recompute only when the exact ledger moved.
                     let Some(current) = snapshot(self, assignment).await? else {
                         return Err(error);
                     };

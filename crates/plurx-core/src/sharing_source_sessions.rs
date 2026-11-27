@@ -328,6 +328,35 @@ impl SourceIngressAdmissionPermission {
     }
 }
 
+/// A dispatched Source incarnation this node owned under a driver registry
+/// boot it has since superseded: the binding's request names this node, the
+/// custody ledger routes to this node under `dead_boot`, and this node's live
+/// membership now publishes a different boot. Only the Store constructs it.
+/// It authorizes settling what that dead process left behind (seal, boot
+/// supersession, the guarded release), never Start, media or Register.
+#[derive(Clone)]
+pub struct SupersededSourceIncarnation {
+    pub(crate) assignment: SourceDispatchAssignment,
+    pub(crate) dead_boot: Uuid,
+    pub(crate) initial_credential_hash: String,
+}
+impl SupersededSourceIncarnation {
+    pub fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.assignment
+    }
+    /// The registry boot the dead process routed this incarnation under.
+    pub fn dead_boot(&self) -> Uuid {
+        self.dead_boot
+    }
+    /// Whether the binding was already released, by this path or another.
+    pub fn released(&self) -> bool {
+        self.assignment.binding.released
+    }
+    pub fn initial_credential_hash(&self) -> &str {
+        &self.initial_credential_hash
+    }
+}
+
 /// Fresh assignment-stage authority for a first blocked Source activation.
 /// It is not renewable route, replacement, or takeover authority.
 #[derive(Clone)]

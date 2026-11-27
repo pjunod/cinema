@@ -581,7 +581,24 @@ pub(super) async fn validate_retained_forward(
     bytes: &[u8],
     deadline: Instant,
 ) -> Result<(), ApiError> {
-    let (entry, value) = retained(state, wire)?;
+    let cleanup = path.ends_with("/end") || (path.ends_with("/status") && wire.cleanup_only);
+    let (entry, value) = match retained(state, wire) {
+        Ok(retained) => retained,
+        // Absent after a restart. End and cleanup-only Status alone may
+        // reach the owner's handler, and only when the signed authority
+        // names this node under the exact boot the durable ledger routes to
+        // and that boot is superseded; the handler settles from those rows.
+        Err(refused) => {
+            if cleanup && super::superseded::forwarded(state, wire).await.is_some() {
+                let input = input(path, bytes)?;
+                if input.reference != wire.reference || input.request_id != wire.request_id {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
+            return Err(refused);
+        }
+    };
     let input = input(path, bytes)?;
     if input.reference != entry.identity.reference || input.request_id != entry.identity.request_id
     {
@@ -629,6 +646,35 @@ pub(super) async fn apply_forward_custody(
     #[cfg(test)]
     if retained_result.is_err() {
         eprintln!("Source custody diagnostic stage=retained_authority");
+    }
+    if retained_result.is_err() {
+        // An ingress whose upstream to a dead owner process closed still
+        // holds an actual closure receipt. Its ACK settles the durable slot;
+        // Register for a superseded boot stays refused.
+        if let CustodyAction::Ack { receipt } = &custody.action {
+            if let Some(found) = super::superseded::forwarded(state, wire).await {
+                if !receipt.matches(&custody.ingress.driver) {
+                    return Err(unavailable());
+                }
+                let reg = registration(&custody.ingress)?;
+                return Ok(
+                    match super::superseded::acknowledge(
+                        state,
+                        &found,
+                        &reg,
+                        receipt.confirmation(),
+                    )
+                    .await?
+                    {
+                        SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay => {
+                            CustodyReply::Acknowledged
+                        }
+                        SourceCustodyWrite::ReconciledClosed => CustodyReply::ReconciledClosed,
+                        SourceCustodyWrite::Refused => CustodyReply::Unresolved,
+                    },
+                );
+            }
+        }
     }
     let (entry, value) = retained_result?;
     let reg = registration(&custody.ingress)?;

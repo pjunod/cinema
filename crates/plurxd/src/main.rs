@@ -3784,6 +3784,14 @@ fn spawn_background_loops(
             background_shutdown.clone(),
         ),
     );
+    // Source counterpart: settle incarnations an earlier boot of this node
+    // owned, so their bindings and the grant's occupancy release.
+    tokio::spawn(
+        crate::http::shared_source_playback::superseded_reconcile_loop(
+            state.clone(),
+            background_shutdown.clone(),
+        ),
+    );
     tokio::spawn(crate::clock_offset::run(
         state.clone(),
         background_shutdown.clone(),
