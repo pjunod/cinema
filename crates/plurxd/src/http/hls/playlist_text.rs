@@ -236,6 +236,12 @@ pub(super) fn native_split_presentation(
                 .find(|stream| stream.index == index)
         })
         .or_else(|| file.audio_streams.first());
+    // RESOLUTION is written only as a proved pair.
+    let raster = file
+        .width
+        .zip(file.height)
+        .and_then(|(width, height)| Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?)))
+        .filter(|(width, height)| *width > 0 && *height > 0);
     SplitPresentation {
         variants: vec![SplitVideo {
             rendition_id: ids.video.clone(),
@@ -244,8 +250,8 @@ pub(super) fn native_split_presentation(
                 .supplemental_codecs
                 .as_ref()
                 .map(|codecs| codecs.replacen("dvh1.", "dvhe.", 1)),
-            width: file.width.and_then(|width| u32::try_from(width).ok()),
-            height: file.height.and_then(|height| u32::try_from(height).ok()),
+            width: raster.map(|(width, _)| width),
+            height: raster.map(|(_, height)| height),
             frame_rate: context
                 .frame_rate
                 .filter(|rate| rate.is_finite() && *rate > 0.0),

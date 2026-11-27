@@ -2746,17 +2746,20 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
                 && probe.target_supported
                 && (request.output_contract == OFFER_MUXED || request.split_copy());
             let pressure_ok = !matches!(egress_pressure, PressureBand::Unavailable);
+            // A held muxed output needs neither source nor scratch. A held
+            // split video still needs both: its soundtracks are encoded here.
+            let reuse_suffices = cache_hit && !request.split_copy();
             let eligible = capability_ok
                 && pressure_ok
-                && (cache_hit || (source_likely_readable && scratch_ok));
+                && (reuse_suffices || (source_likely_readable && scratch_ok));
             let refusal_code = (!eligible).then(|| {
                 if !capability_ok {
                     "incapable"
                 } else if !pressure_ok {
                     "egress_saturated"
-                } else if !source_likely_readable && !cache_hit {
+                } else if !source_likely_readable && !reuse_suffices {
                     "source_unverified"
-                } else if !scratch_ok && !cache_hit {
+                } else if !scratch_ok && !reuse_suffices {
                     "scratch_full"
                 } else {
                     "temporarily_busy"

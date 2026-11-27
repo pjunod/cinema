@@ -1709,7 +1709,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
         .catch(error=>{
           // Soundtrack alternates need encoder capacity a plain copy does not;
           // when the encoders are busy, keep the copy without alternates.
-          if(!options.split_audio||!error||error.code!=="vod_family_capacity") throw error;
+          // The server reports the family's encoder refusal as the typed
+          // `transcode_capacity_pending`; older builds named it directly.
+          if(!options.split_audio||!error||!["vod_family_capacity","transcode_capacity_pending"].includes(error.code)) throw error;
           // `false` is the explicit muxed request; it outranks the caps token.
           const muxed={...options,split_audio:false};
           return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);

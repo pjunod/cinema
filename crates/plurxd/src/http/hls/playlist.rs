@@ -238,10 +238,23 @@ pub(super) async fn master_playlist_response_local_before(
     } else {
         None
     };
-    if let Some((ids, audio_index)) = native_split {
+    // The muxed copy keeps being written beside the split, so a split master
+    // the writer refuses (a fact it cannot prove) falls back to the muxed
+    // master rather than failing every later fetch of this session.
+    let native_split = native_split.and_then(|(ids, audio_index)| {
         let presentation = native_split_presentation(&file, &context, &ids, audio_index);
-        let bytes = split_master_with_subtitles(presentation, &file, query.subtitle)
-            .map_err(ApiError::Internal)?;
+        split_master_with_subtitles(presentation, &file, query.subtitle)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    target: "plurxd::http::hls",
+                    session = %crate::transcode::session_log_id(session),
+                    %error,
+                    "native split master refused; serving the muxed master"
+                );
+            })
+            .ok()
+    });
+    if let Some(bytes) = native_split {
         return complete_buffered_response_before(
             state,
             session,

@@ -143,8 +143,10 @@ The fix:
   `audio_index == None`, so the fingerprint and rendezvous are audio-free. The
   selected default audio still travels in the `SessionRequest`.
 - **What the worker answers.** It accepts both values. For the split value it
-  reports `cache_hit` when it holds a verified generation under the video-only
-  rendition key (`P/vod/plan.rs`, `video-only-v1`).
+  reports `cache_hit` when it holds a live shared video of the source
+  (`VodServe::holds_split_video`); retained generations on disk are not
+  consulted. Unlike a held muxed output, the hit does not waive the source
+  and scratch checks, because the soundtracks are still encoded there.
 - **Protocol 13.** `PROTOCOL_VERSION` becomes 13, with a dated line under
   rolling upgrades in [OPERATIONS](../OPERATIONS.md). Protocols already form
   exact cohorts, so a 13 ingress places only on 13 workers. The worst case

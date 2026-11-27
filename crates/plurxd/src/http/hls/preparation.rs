@@ -1906,7 +1906,10 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
-        split_audio: None,
+        // A server-built successor never reads the per-start caps token from
+        // the retained caps: it is muxed here, and `preserve_prepared_audio`
+        // carries a split predecessor's alternates onto a successor copy.
+        split_audio: Some(false),
         processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),

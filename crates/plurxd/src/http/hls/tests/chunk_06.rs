@@ -2346,6 +2346,16 @@ video/{a}/index.m3u8\n",
     assert!(master.contains("BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,"));
     assert!(master.contains("NAME=\"fre\",LANGUAGE=\"fr\""));
     assert!(master.contains("STABLE-RENDITION-ID=\"a0\""));
+    // A half-known raster is no RESOLUTION, never a refused master.
+    file.height = None;
+    let master = native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .expect("raster-free master");
+    assert!(!master.contains("RESOLUTION="));
+    file.height = Some(0);
+    assert!(native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .is_ok());
 }
 
 #[tokio::test]
