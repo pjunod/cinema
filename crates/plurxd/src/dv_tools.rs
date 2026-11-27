@@ -60,15 +60,14 @@ pub(crate) const REFIT_MODE_SOURCES: &str =
     "310e490a68f0c80b3219e3d56a8c3de56b149ebcbc483ac91b88a917e20bc03b";
 
 /// Title scanner digests whose settled verdicts the scanner built from this
-/// tree reproduces exactly. Title demand such a scanner settled with a
-/// complete aggregate, or with a refusal of a non-Matroska title, is carried
-/// forward to this scanner in place (`carry_forward_dv_title_verdicts`)
-/// instead of read again, which would cost the whole library and drop every
-/// published aggregate until its title was read. Refused or open Matroska
-/// titles still rotate and are read again.
+/// tree reproduces exactly. Title demand holding a complete aggregate such a
+/// scanner published is carried forward to this scanner in place
+/// (`carry_forward_dv_title_verdicts`) instead of read again, which would
+/// cost the whole library and drop every published aggregate until its title
+/// was read. Everything else, refusals included, rotates and is read again.
 ///
 /// An entry holds only while every title its scanner accepted is accepted
-/// here with the same aggregate, and every non-Matroska verdict is the same.
+/// here with the same aggregate.
 /// [`TITLE_SCANNER_SOURCES`] makes any change to the scanner's sources fail
 /// a test until this list is reviewed against it.
 pub(crate) const TITLE_SCANNER_PREDECESSORS: &[&str] = &[

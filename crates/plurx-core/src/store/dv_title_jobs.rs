@@ -324,25 +324,27 @@ RETURNING result_json
         .transpose()
 }
 
-/// Settled title demand a predecessor scanner left whose verdict `scanner`
-/// reproduces exactly: a complete published aggregate, or a refusal of a
-/// title the successor reads the same way (any container but Matroska, the
-/// only one whose acceptance it widened). Nothing with title work in flight.
+/// Title demand a predecessor scanner left with a complete published
+/// aggregate, settled or still open (an index pass's ride-along, or a title
+/// reopened for FEL recipes): `scanner` reproduces exactly that aggregate.
+/// Refusals are never carried: a terminal row without an aggregate may be a
+/// cancellation or an exhausted retry rather than a verdict on the bytes, and
+/// the catalogue's container is the file extension, not what the scanner
+/// sniffs. Nothing with title work in flight.
 const CARRY_FORWARD_FROM: &str = r#"
 FROM dv_title_jobs_demand AS d JOIN files AS f ON f.id=d.file_id
-WHERE d.terminal=1 AND json_valid(f.probe_json)
+WHERE json_valid(f.probe_json)
  AND d.scanner_digest IN (SELECT value FROM json_each(json_extract($1,'$.predecessors')))
- AND (json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
-  OR f.container IS NULL OR f.container NOT IN ('mkv','webm'))
+ AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
  AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
   AND j.state IN ('queued','running','cancelling')
   AND json_extract(j.payload_json,'$.file_id')=d.file_id)
 "#;
 
-/// Re-point settled title demand from a predecessor scanner to `scanner` in
-/// place, keeping its generation, its terminal verdict and its published
-/// aggregate, instead of the rotation [`bind`] performs, which drops the
-/// aggregate and reads the whole title again. Everything else still rotates
+/// Re-point title demand from a predecessor scanner to `scanner` in place,
+/// keeping its generation, its terminal state and its published aggregate,
+/// instead of the rotation [`bind`] performs, which drops the aggregate and
+/// reads the whole title again. Everything else still rotates
 /// when the worker reaches it. A read decides first, so a pass with nothing
 /// to carry writes nothing. Returns how many titles were carried.
 pub(super) async fn carry_forward<T: QueueSql>(

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 fn probe() -> ProbeResult {
     ProbeResult {
+        container: Some("mkv".into()),
         video_codec: Some("hevc".into()),
         dolby_vision: DolbyVisionFacts {
             profile: Some(7),
@@ -2840,7 +2841,16 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
 async fn seed_mp4(store: &Arc<dyn Store>, name: &str) -> MediaFile {
     let (item, _) = seed_file(store, name).await;
     let id = store
-        .upsert_file(item, &format!("/{name}/title.mp4"), 20_000, 30, &probe())
+        .upsert_file(
+            item,
+            &format!("/{name}/title.mp4"),
+            20_000,
+            30,
+            &ProbeResult {
+                container: Some("mp4".into()),
+                ..probe()
+            },
+        )
         .await
         .expect("MP4 title");
     store.get_file(id).await.expect("file").expect("file")
@@ -2859,10 +2869,10 @@ async fn refuse(store: &Arc<dyn Store>, job: BackgroundJob, now: i64) {
 }
 
 /// A successor scanner keeps what it would only reproduce: a predecessor's
-/// complete aggregate, and its refusal of a title that is not Matroska. A
-/// refused or open Matroska title, a title another scanner settled, and a
-/// title with work in flight are left for the ordinary rotation, which reads
-/// them again. Nothing is written when there is nothing to carry.
+/// complete aggregate, settled or on still-open demand. Refusals (whatever
+/// the container), open work, and another scanner's aggregate are left for
+/// the ordinary rotation, which reads them again. Nothing is written when
+/// there is nothing to carry.
 #[tokio::test]
 async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them() {
     for_each_backend(|store, backend| async move {
@@ -2872,6 +2882,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
         let predecessors = vec![predecessor.clone()];
 
         let published = seed(&store, "carry-published").await;
+        assert_eq!(published.container.as_deref(), Some("mkv"), "{backend}");
         let (demand, job) = active(&store, published.id, &predecessor, 1_000).await;
         let carried = demand.probe_revision;
         assert!(matches!(
@@ -2894,6 +2905,14 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
             enqueue(&store, &open_demand, &predecessor, 1_000).await,
             EnqueueOutcome::Accepted { .. }
         ));
+        let open_aggregate = seed(&store, "carry-open-aggregate").await;
+        assert!(matches!(
+            store
+                .publish_dv_title_from_analysis(analysis(&open_aggregate, &predecessor))
+                .await
+                .expect("index pass aggregate"),
+            AnalysisTitleOutcome::Published
+        ));
         let foreign = seed(&store, "carry-foreign").await;
         let (demand, job) = active(&store, foreign.id, &stranger, 1_000).await;
         assert!(matches!(
@@ -2910,7 +2929,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
                 .await
                 .expect("carry"),
             2,
-            "{backend}: the aggregate and the MP4 refusal"
+            "{backend}: the settled and the open aggregate"
         );
         assert_eq!(
             store
@@ -2928,7 +2947,13 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
             .map(|d| d.file_id)
             .collect();
         reread.sort_unstable();
-        let mut expected = vec![refused_mkv.id, open.id, foreign.id];
+        let mut expected = vec![
+            refused_mkv.id,
+            refused_mp4.id,
+            open.id,
+            open_aggregate.id,
+            foreign.id,
+        ];
         expected.sort_unstable();
         assert_eq!(
             reread, expected,
@@ -2938,6 +2963,18 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
             stored_aggregate(&store, published.id).await,
             Some(stats()),
             "{backend}: the carried aggregate stays published"
+        );
+        let reopened = store
+            .dv_title_demands(&successor, 0, 2_000)
+            .await
+            .expect("successor demands")
+            .into_iter()
+            .find(|d| d.file_id == open_aggregate.id)
+            .expect("open demand stays open");
+        assert_eq!(
+            DvTitleStats::from_probe_json(&reopened.probe_json),
+            Some(stats()),
+            "{backend}: the open title settles from its carried aggregate, without a read"
         );
         // The carried generation is the successor's own: binding it is a no-op,
         // and it still reopens when the source changes.
