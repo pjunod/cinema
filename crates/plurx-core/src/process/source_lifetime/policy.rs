@@ -867,10 +867,18 @@ fn verify_state(
     let mut source_next = false;
     let mut script_next = false;
     let mut format_next = false;
+    // FFmpeg's `fd:` input reads the descriptor named by the preceding
+    // per-input `-fd N` option (stdin when absent), keeping it seekable.
+    let mut fd_next = false;
+    let mut fd_option: Option<&str> = None;
     let mut concat = false;
     let mut lavfi = false;
     for (index, arg) in args.iter().enumerate() {
         let role = roles.get(index).copied().unwrap_or(ArgumentRole::Ordinary);
+        if fd_next {
+            fd_option = Some(*arg);
+            fd_next = false;
+        }
         if format_next {
             concat = *arg == "concat";
             lavfi = *arg == "lavfi";
@@ -898,7 +906,16 @@ fn verify_state(
                 check_argument(arg, &cwd, context).map_err(Refusal::configured)?;
                 return Err(Refusal::unavailable("broker_confinement_unqualified"));
             }
-            if list {
+            if source_next && *arg == "fd:" {
+                let target = fd_option
+                    .map_or(Ok(0), |value| {
+                        value.parse::<i32>().map_err(|_| "invalid_descriptor_token")
+                    })
+                    .map_err(Refusal::configured)?;
+                if !registered_descriptor(target, manifest) {
+                    return Err(Refusal::configured("unregistered_descriptor_token"));
+                }
+            } else if list {
                 check_script(&input_path, &cwd, context, concat).map_err(Refusal::configured)?;
             } else if !arg.contains("://")
                 && fd_token(arg).is_none()
@@ -909,6 +926,7 @@ fn verify_state(
             }
             source_next = false;
             script_next = false;
+            fd_option = None;
         }
         if FILTER_INPUTS.is_match(arg) {
             media_input = true;
@@ -925,8 +943,11 @@ fn verify_state(
         if *arg == "-f" {
             format_next = true;
         }
+        if *arg == "-fd" {
+            fd_next = true;
+        }
     }
-    if source_next || script_next || format_next {
+    if source_next || script_next || format_next || fd_next {
         return Err(Refusal::configured("missing_option_value"));
     }
     // A live URL proves current ownership, not what a demuxer can open after
@@ -1152,6 +1173,55 @@ mod tests {
         std::fs::write(&media, b"source").expect("media");
         let command = fixture.command("ffmpeg", &["-i", media.to_str().expect("path")]);
         assert!(fixture.verify(&command, SourceAccess::Brokered).is_err());
+    }
+    #[test]
+    fn an_fd_protocol_input_is_checked_against_the_descriptor_named_by_its_fd_option() {
+        let mut fixture = Fixture::new();
+        let media = fixture.data.join("clip.mp4");
+        std::fs::write(&media, b"source").expect("media");
+        fixture.asset(&media);
+        let file = File::open(&media).expect("source");
+        let verify = |args: &[&str], target: i32| {
+            let command = fixture.command("ffmpeg", args);
+            let manifest = fixture.manifest(
+                &command,
+                vec![InheritedFd::duplicate(&file, target).expect("source descriptor")],
+            );
+            verify_state(
+                &fixture.state,
+                &command,
+                SourceAccess::NoSource,
+                Some(&manifest),
+                "policy fixture",
+                &[],
+            )
+            .map_err(|refusal| (refusal.check, refusal.enforce))
+        };
+        // A registered input passes every input check and then meets the
+        // advisory (non-enforcing) parser-confinement verdict.
+        let accepted = Err(("asset_input_confinement_unqualified", false));
+        let args = ["-fd", "6", "-i", "fd:", "-f", "null", "pipe:1"];
+        assert_eq!(verify(&args, 6), accepted);
+        assert_eq!(
+            verify(&args, 7),
+            Err(("unregistered_descriptor_token", true))
+        );
+        assert_eq!(
+            verify(&["-fd", "x", "-i", "fd:", "-f", "null", "pipe:1"], 6),
+            Err(("invalid_descriptor_token", true))
+        );
+        // The option belongs to one input: a second `fd:` falls back to stdin.
+        assert_eq!(
+            verify(
+                &["-fd", "6", "-i", "fd:", "-i", "fd:", "-f", "null", "pipe:1"],
+                6
+            ),
+            accepted
+        );
+        assert_eq!(
+            verify(&["-i", "fd:", "-f", "null", "pipe:1", "-fd"], 6),
+            Err(("missing_option_value", true))
+        );
     }
     #[test]
     fn data_root_does_not_register_a_media_file_as_an_asset() {
