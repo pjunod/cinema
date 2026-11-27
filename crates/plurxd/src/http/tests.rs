@@ -7762,12 +7762,35 @@ async fn a_logout_that_waits_out_the_admission_window_is_refused_and_changes_not
 /// A file-backed app plus a second handle on the same database, for the
 /// one thing a request cannot do: make a token look 91 days idle.
 fn test_app_with_fixture_store() -> (Router, AppState, SqliteStore) {
+    let (app, state, fixture, _) = test_app_with_fixture_store_and_runtime(None);
+    (app, state, fixture)
+}
+
+/// [`test_app_with_fixture_store`] holding a real node resource runtime, for
+/// a test whose route serves a direct play; keep the fixture alive with it.
+async fn test_app_with_fixture_store_with_runtime() -> (
+    Router,
+    AppState,
+    SqliteStore,
+    Option<crate::test_runtime::RealRuntime>,
+) {
+    test_app_with_fixture_store_and_runtime(crate::test_runtime::for_finite_serving().await)
+}
+
+fn test_app_with_fixture_store_and_runtime(
+    runtime: Option<crate::test_runtime::RealRuntime>,
+) -> (
+    Router,
+    AppState,
+    SqliteStore,
+    Option<crate::test_runtime::RealRuntime>,
+) {
     let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&base).expect("test directory");
     let db = base.join("plurx.db");
     let store = SqliteStore::open(&db).expect("store");
     let fixture = SqliteStore::open(&db).expect("fixture handle");
-    let state = AppState::new(
+    let state = AppState::new_with_runtime(
         "test".into(),
         Arc::new(store),
         test_dirs(&base),
@@ -7775,8 +7798,11 @@ fn test_app_with_fixture_store() -> (Router, AppState, SqliteStore) {
         Default::default(),
         Default::default(),
         Arc::new(crate::logbuf::LogBuffer::new(64)),
+        runtime
+            .as_ref()
+            .map(crate::test_runtime::RealRuntime::handle),
     );
-    (router(state.clone()), state, fixture)
+    (router(state.clone()), state, fixture, runtime)
 }
 
 #[tokio::test]
@@ -11112,7 +11138,7 @@ async fn a_ttff_beacon_is_labelled_by_the_requesters_client_class() {
 #[tokio::test]
 async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
     use crate::playstart::StartPhase;
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let user = state
         .store
@@ -11358,7 +11384,7 @@ async fn a_replayed_create_and_a_direct_start_are_settled_by_their_first_frame()
     use plurx_core::domain::PlaybackEventQuery;
 
     crate::transcode::require_ffmpeg();
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     prepare_vod_copy_fixture(&state, s.file, 16).await;
@@ -13135,7 +13161,9 @@ fn test_state() -> (Router, AppState) {
 }
 
 /// [`test_state`] holding a real node resource runtime, for a test whose
-/// route serves finite VOD; keep the returned fixture alive with the state.
+/// route serves finite VOD or a direct play (on Linux both open through the
+/// runtime, as the daemon's state always holds one); keep the returned
+/// fixture alive with the state.
 async fn test_state_with_runtime() -> (Router, AppState, Option<crate::test_runtime::RealRuntime>) {
     let runtime = crate::test_runtime::for_finite_serving().await;
     let store = SqliteStore::open_in_memory().expect("store");
@@ -15153,7 +15181,7 @@ async fn seed_home(state: &AppState) -> HomeSeed {
 
 #[tokio::test]
 async fn photos_serve_as_bytes_with_ranges() {
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let token = setup_admin(&app).await;
     let h = seed_home(&state).await;
 
@@ -17025,7 +17053,7 @@ async fn library_resolution_sort_is_ordered_by_the_resolution_each_row_carries()
 
 #[tokio::test]
 async fn seeded_read_surface() {
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
 
@@ -19258,7 +19286,7 @@ fn ranged(uri: &str, from: u64, to: u64) -> Request<Body> {
 /// guard" and no test would have objected.
 #[tokio::test]
 async fn serving_refuses_a_file_whose_length_left_its_recorded_size_behind() {
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let uri = format!("/api/v1/files/{}/direct?token={admin}", seeded.file);
@@ -19288,7 +19316,7 @@ async fn serving_refuses_a_file_whose_length_left_its_recorded_size_behind() {
 
 #[tokio::test]
 async fn original_download_supports_ranges_without_registering_playback() {
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let seeded = seed_content(&state).await;
     let uri = format!("/api/v1/files/{}/download?token={admin}", seeded.file);
@@ -19325,7 +19353,7 @@ async fn original_download_supports_ranges_without_registering_playback() {
 #[tokio::test]
 async fn a_direct_play_get_credits_exactly_its_body_to_delivered_bytes() {
     use crate::telemetry::delivered_bytes_on_this_thread;
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     let uri = format!("/api/v1/files/{}/direct?token={admin}", s.file);
@@ -19411,7 +19439,7 @@ async fn a_direct_play_get_credits_exactly_its_body_to_delivered_bytes() {
 /// the player rather than the request.
 #[tokio::test]
 async fn a_direct_play_is_one_viewer_however_many_ranges_it_takes() {
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
 
@@ -21635,7 +21663,7 @@ async fn decision_marks_which_subtitles_can_be_native_hls_renditions() {
 
 #[tokio::test]
 async fn plex_write_image_and_part_paths() {
-    let (app, state) = test_state();
+    let (app, state, _runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
 

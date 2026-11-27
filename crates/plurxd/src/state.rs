@@ -1235,9 +1235,11 @@ impl AppState {
         state
     }
 
+    /// [`AppState::new_unhooked`] holding the node resource runtime the
+    /// daemon builds its state with.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    fn new_unhooked_with_runtime(
+    pub(crate) fn new_unhooked_with_runtime(
         server_name: String,
         store: Arc<dyn Store>,
         dirs: Dirs,

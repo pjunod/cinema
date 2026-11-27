@@ -4874,6 +4874,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Run 9493: +1 test-only timeout in local_direct/tests.rs bounds the settled
+# custody wait after the test opens through production open_local_direct (as
+# direct_start_failure_tests does); reaching (0, 0) custody, not the bound, passes.
 # Cinema chapter enrichment: two deadline branches bound one worker-owned
 # child before and after spawn. One obsolete state-layer deadline wait was
 # removed, and the affected regression waits have no net change.
@@ -5201,6 +5204,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/transcode/background_static.rs" = 1
 "crates/plurxd/src/transcode/content_encoding.rs" = 3
 "crates/plurxd/src/transcode/local_direct.rs" = 1
+"crates/plurxd/src/transcode/local_direct/tests.rs" = 1
 "crates/plurxd/src/transcode/manager/cache.rs" = 1
 "crates/plurxd/src/transcode/manager/candidates.rs" = 4
 "crates/plurxd/src/transcode/manager/construct.rs" = 3

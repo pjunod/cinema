@@ -245,7 +245,7 @@ async fn handoff_carries_subtitles_off_as_minus_one() {
 
 #[tokio::test]
 async fn handoff_token_is_accepted_only_on_its_own_files_playback_routes() {
-    let (app, state, _fixture) = test_app_with_fixture_store();
+    let (app, state, _fixture, _runtime) = test_app_with_fixture_store_with_runtime().await;
     let admin = setup_admin(&app).await;
     let seed = seed_content(&state).await;
     let (own_item, other_item, other) = own_item_and_other_file(&state, &seed).await;

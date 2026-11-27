@@ -60,7 +60,8 @@ async fn local_direct_play_prepares_on_the_real_node_runtime() {
         .refresh_admission_capacity(deadline)
         .await
         .expect("this node observes its admission capacity");
-    let request = TranscodeManager::local_direct_request(
+    // The request `open_local_direct` makes; it must fit its bounds here.
+    let _request = TranscodeManager::local_direct_request(
         DirectSourceBinding::Local {
             authenticated_user_id: 7,
             file_id: file.id,
@@ -102,28 +103,65 @@ async fn local_direct_play_prepares_on_the_real_node_runtime() {
         known(&snapshot.capacity_observation_age_ms),
     );
 
-    let (owner, lease) = match runtime.prepare_direct_source(request, deadline) {
-        Ok(prepared) => prepared,
-        Err(error) => panic!("local direct play refused: {error:?}; {context}"),
-    };
-    owner
-        .open(deadline)
+    // Open it the way a direct-play route does: the daemon's state holds this
+    // node's runtime, and `open_local_direct` wraps the lease, starts its
+    // original worker and only then opens the source.
+    let store: Arc<dyn plurx_core::store::Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("direct play store"));
+    let state = crate::state::AppState::new_with_runtime(
+        "test".into(),
+        store,
+        crate::state::Dirs {
+            artwork: root.path().join("artwork"),
+            transcode: root.path().join("transcode"),
+            cache: root.path().join("cache"),
+            subs: root.path().join("subs"),
+            runtime_cache: root.path().join("runtime"),
+            renditions: root.path().join("renditions"),
+        },
+        "test-node".into(),
+        Default::default(),
+        Default::default(),
+        Arc::new(crate::logbuf::LogBuffer::new(64)),
+        Some(Arc::clone(&runtime)),
+    );
+    let manager = &state.transcode;
+    let opened = match manager
+        .open_local_direct(
+            &state,
+            DirectSourceBinding::Local {
+                authenticated_user_id: 7,
+                file_id: file.id,
+            },
+            &file,
+            deadline,
+        )
         .await
-        .unwrap_or_else(|error| panic!("local direct open refused: {error:?}; {context}"));
+    {
+        Ok(opened) => opened,
+        Err(error) => panic!("local direct open refused: {error:?}; {context}"),
+    };
     assert_eq!(
-        owner.length().expect("opened length"),
-        file.size as u64,
+        opened.length, file.size as u64,
         "the opened source is the scanned file"
     );
+    assert_eq!(manager.fixture_local_direct_custody(), (1, 0));
 
-    let mut ticket = owner
-        .prepare_retirement(deadline)
-        .await
-        .expect("the original native source closes");
-    drop(owner);
-    drop(lease);
-    ticket
-        .finish_retirement(deadline)
-        .await
-        .expect("the direct play settles on the node it was charged to");
+    drop(opened);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            manager.fixture_drive_local_direct();
+            if manager.fixture_local_direct_custody() == (0, 0) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the direct play settles on the node it was charged to");
+    assert_eq!(
+        runtime.accounting().expect("ledger accounting").used,
+        ResourceVector::default(),
+        "the settled play leaves no charge behind"
+    );
 }

@@ -909,6 +909,9 @@ struct PlaybackFixture {
     item: String,
     source: String,
     native_item: i64,
+    // The node resource runtime the daemon's state holds; on Linux a direct
+    // play and an encoded start open through it. Dropped after the state.
+    _runtime: Option<crate::test_runtime::RealRuntime>,
 }
 async fn playback_fixture() -> PlaybackFixture {
     use plurx_core::domain::{
@@ -937,7 +940,8 @@ async fn playback_fixture() -> PlaybackFixture {
     ] {
         std::fs::create_dir_all(path).expect("fixture cache root");
     }
-    let state = AppState::new_unhooked(
+    let runtime = crate::test_runtime::for_finite_serving().await;
+    let state = AppState::new_unhooked_with_runtime(
         "playback-contract".into(),
         store,
         dirs,
@@ -945,6 +949,9 @@ async fn playback_fixture() -> PlaybackFixture {
         Default::default(),
         Default::default(),
         std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
+        runtime
+            .as_ref()
+            .map(crate::test_runtime::RealRuntime::handle),
     );
     let app = super::super::router(state.clone());
     setup(&app).await;
@@ -1016,6 +1023,7 @@ async fn playback_fixture() -> PlaybackFixture {
         item,
         source,
         native_item,
+        _runtime: runtime,
     }
 }
 async fn negotiate(f: &PlaybackFixture) -> Value {
