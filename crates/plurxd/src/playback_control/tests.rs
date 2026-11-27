@@ -17618,8 +17618,13 @@ fn finite_control_preflight_refusal_preserves_prior_sequence_and_observation_tok
     let first = web_snapshot_request("incumbent_while_replacement_pending", "finite-control", 1);
     let first_snapshot = PlaybackDemandSnapshot::from(&first);
     let mut state = ControlState::default();
+    // The incumbent's packet came one full control interval before this
+    // follow-up, so the follow-up is judged on budget, not rate-limited.
     let original = state
-        .accept(
+        .accept_at(
+            Instant::now()
+                .checked_sub(MIN_CONTROL_INTERVAL)
+                .expect("one control interval ago"),
             "finite-control",
             1,
             client,

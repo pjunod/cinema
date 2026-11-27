@@ -1304,8 +1304,9 @@ mod allocation_layout_tests {
             owner_epoch: 1,
             client_instance_id: "22222222-2222-4222-8222-222222222222",
             sequence: 1,
+            // A new owner epoch's first packet names its platform (6dbd98ffe).
             acceptance: ControlAcceptance::observed(
-                None,
+                Some(ClientPlatform::Web),
                 &PreparedSuccessorObservation::NotRequested,
                 None,
                 snapshot.request_fingerprint.as_deref(),
@@ -1318,7 +1319,7 @@ mod allocation_layout_tests {
         let original_stage = Arc::clone(&state.observational_stage_live);
         let now = Instant::now();
         let refused = state.prepare_finite_actor_control_at(now, request(), &snapshot);
-        assert!(refused.accepted());
+        assert!(refused.accepted(), "{:?}", refused.result);
         assert!(refused.requested_heap_bytes().is_some());
         drop(refused); // The actual caller refuses a slot before adoption.
         assert_eq!(state.last_sequence, 0);
