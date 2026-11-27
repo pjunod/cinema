@@ -733,6 +733,7 @@ fn projected_driver_future_bytes_for(collected_ordinary: bool) -> usize {
         Recipe,
         SegmentPlan,
         &'static VodSettings,
+        &'static crate::vodencode::FiniteAdmissionRequest,
         Option<usize>,
         Option<plurx_core::cluster::clock::ContinuousDeadline>,
         &'static mut Option<super::shared::PreparedAttemptCleanup>,
