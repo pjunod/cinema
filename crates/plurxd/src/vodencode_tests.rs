@@ -5441,6 +5441,16 @@ async fn controlled_continuous_companion_case(pool_includes_companion: bool) {
             .find(|child| child.candidate_id == Some(companion_id))
             .expect("parked companion");
         assert!(parked.controlled);
+        // The parked intent the parent's session record charges: its key,
+        // boxed request with that request's own heap, and its recipe.
+        let parked_bytes = parked.requested_heap_bytes().expect("measurable parked child");
+        assert!(
+            parked_bytes
+                >= parked.rendition_key.capacity()
+                    + std::mem::size_of::<crate::transcode::SessionRequest>()
+                    + parked.request.requested_heap_bytes().expect("request bytes")
+                    + std::mem::size_of::<crate::vodencode::Encoding>()
+        );
         parked.rendition_key.clone()
     };
     let companion_is_parked = async || {

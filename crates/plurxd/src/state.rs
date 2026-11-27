@@ -3724,6 +3724,25 @@ pub(crate) struct PlaybackViewerDemand {
 }
 
 impl PlaybackViewerDemand {
+    /// Requested heap capacity beyond the inline value. No `..`: adding a
+    /// field forces this inventory to be reviewed.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The finite session record that charges a parked child's viewer is Linux-only; keep this portable projection compiled and tested on every platform."
+        )
+    )]
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let Self {
+            principal,
+            playback_id,
+        } = self;
+        principal
+            .requested_heap_bytes()?
+            .checked_add(playback_id.capacity())
+    }
+
     /// Local demand uses the Local viewer-interest path. Shared Source demand
     /// must retain its typed Source grant and use the separate Source join.
     pub(crate) fn require_local_authority(&self) -> Result<(), &'static str> {

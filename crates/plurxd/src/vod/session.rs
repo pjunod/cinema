@@ -1010,6 +1010,46 @@ pub(super) struct ParkedMediaReader {
     pub(super) admission_priority: crate::admission::Priority,
 }
 
+impl ParkedMediaReader {
+    /// Requested heap capacity beyond the inline value: the key, the boxed
+    /// request and its own heap, the viewer, and the Arc-held recipe. While
+    /// parked no Rendition holds this recipe's charge, so its pointee is
+    /// counted whole, as the session counts its media file. No `..`: adding a
+    /// field forces this inventory to be reviewed.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The finite session record that charges a parked child is Linux-only; keep this portable projection compiled and tested on every platform."
+        )
+    )]
+    pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
+        let Self {
+            versioned_family: _,
+            controlled: _,
+            candidate_id: _,
+            rendition_key,
+            request,
+            encoding,
+            // Inline durations, counts and flags; no owned heap.
+            settings: _,
+            viewer,
+            admission_priority: _,
+        } = self;
+        let mut bytes = rendition_key
+            .capacity()
+            .checked_add(std::mem::size_of::<crate::transcode::SessionRequest>())?
+            .checked_add(request.requested_heap_bytes()?)?
+            // `Encoding::requested_heap_bytes` includes its inline value.
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(encoding.requested_heap_bytes()?)?;
+        if let Some(viewer) = viewer {
+            bytes = bytes.checked_add(viewer.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
 impl ParentMediaReader {
     pub(super) async fn detach(self, pool: &crate::waitpool::WaitPool) {
         self.rendition
@@ -1737,7 +1777,21 @@ impl Session {
                         .checked_mul(std::mem::size_of::<ParentMediaReader>())?,
                 )
             })
+            .and_then(|value| {
+                value.checked_add(
+                    self.parked_children
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<ParkedMediaReader>())?,
+                )
+            })
             .ok_or("finite session size overflow")?;
+        // A parked child's request, recipe and viewer intent until it installs.
+        for parked in &self.parked_children {
+            bytes = parked
+                .requested_heap_bytes()
+                .and_then(|heap| bytes.checked_add(heap))
+                .ok_or("finite parked child size overflow")?;
+        }
         for text in [
             &self.rendition_key,
             &self.playback_id,

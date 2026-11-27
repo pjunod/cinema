@@ -425,7 +425,13 @@ pub(crate) struct QualityCatalogRequest {
 }
 
 impl QualityCatalogRequest {
-    #[cfg(target_os = "linux")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let Self {
             audio_claim,

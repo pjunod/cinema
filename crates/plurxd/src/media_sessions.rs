@@ -1970,12 +1970,10 @@ impl RemoteStartRequest {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn requested_vec_bytes<T>(values: &Vec<T>) -> Option<usize> {
     values.capacity().checked_mul(std::mem::size_of::<T>())
 }
 
-#[cfg(target_os = "linux")]
 fn requested_string_vec_bytes(values: &Vec<String>) -> Option<usize> {
     let mut bytes = requested_vec_bytes(values)?;
     for value in values {
@@ -1984,7 +1982,6 @@ fn requested_string_vec_bytes(values: &Vec<String>) -> Option<usize> {
     Some(bytes)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn selected_finite_device_caps_heap_bytes(
     caps: &plurx_core::playback::DeviceCaps,
 ) -> Option<usize> {

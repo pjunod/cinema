@@ -258,13 +258,6 @@ impl VodServe {
             } else if let Some(sequence) = parent_anchor.and_then(|(sequence, _)| sequence) {
                 reader.accept_control(sequence, entry);
             }
-            {
-                let mut readers = rendition.readers.lock().await;
-                readers
-                    .try_insert(key, reader)
-                    .map_err(|_| "finite reader table has no remaining slot".to_owned())?;
-            }
-            *rendition.dormant_since.lock().expect("dormant lock") = None;
             let parked = session.parked_children.remove(index);
             session.children.push(ParentMediaReader {
                 versioned_family: parked.versioned_family,
@@ -275,6 +268,28 @@ impl VodServe {
                 rendition: Arc::clone(&rendition),
                 _reservation: None,
             });
+            // Re-charge the parent's record for its installed shape before
+            // the reader becomes visible. The prior slot stays held until the
+            // reader is in, so a refusal restores the parked shape exactly.
+            #[cfg(target_os = "linux")]
+            let previous_slot = session.finite_session_slot.clone();
+            #[cfg(target_os = "linux")]
+            if let Err(error) = session.reserve_finite_session_state(session_id) {
+                session.children.pop();
+                session.parked_children.insert(index, parked);
+                return Err(error);
+            }
+            let inserted = rendition.readers.lock().await.try_insert(key, reader);
+            if inserted.is_err() {
+                #[cfg(target_os = "linux")]
+                {
+                    session.finite_session_slot = previous_slot;
+                }
+                session.children.pop();
+                session.parked_children.insert(index, parked);
+                return Err("finite reader table has no remaining slot".to_owned());
+            }
+            *rendition.dormant_since.lock().expect("dormant lock") = None;
             Ok(true)
         }
         .await;

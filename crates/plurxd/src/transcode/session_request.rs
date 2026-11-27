@@ -1440,6 +1440,495 @@ pub struct StartInfo {
     pub control_lease_timeout_ms: u32,
 }
 
+/// Requested-capacity projection of one retained request. Every struct is
+/// destructured without `..`, so adding an owned field fails to compile until
+/// it is measured here. Boxed payloads count the boxed value and its own
+/// heap. An `Arc` pointee is counted whole, inline value plus the two Arc
+/// counters, as the finite session counts its media file and a selected
+/// candidate counts its planning snapshot: the holder may be the pointee's
+/// only owner, so a shared alias is charged conservatively rather than
+/// assumed paid elsewhere.
+///
+/// Pinned Rust 1.97.1 `ArcInner` is two pointer-sized counters followed by
+/// `T`, padded to its alignment, as `playback_control::arc_requested_layout`
+/// computes on Linux; this every-platform copy keeps the projection portable.
+fn requested_arc_bytes<T>() -> Option<usize> {
+    std::alloc::Layout::new::<[std::sync::atomic::AtomicUsize; 2]>()
+        .extend(std::alloc::Layout::new::<T>())
+        .ok()
+        .map(|(layout, _)| layout.pad_to_align().size())
+}
+
+/// The same pinned Rust 1.97.1 BTreeMap (B=6) node bound the planning
+/// snapshot projection uses: entries+1 maximally sized nodes of 11 slots and
+/// 12 child pointers. An empty set has no node allocation.
+fn requested_btree_set_bytes<T>(values: &std::collections::BTreeSet<T>) -> Option<usize> {
+    if values.is_empty() {
+        return Some(0);
+    }
+    let node = std::mem::size_of::<T>()
+        .checked_mul(11)?
+        .checked_add(16 * std::mem::size_of::<usize>())?;
+    values.len().checked_add(1)?.checked_mul(node)
+}
+
+fn requested_vec_capacity_bytes<T>(values: &Vec<T>) -> Option<usize> {
+    values.capacity().checked_mul(std::mem::size_of::<T>())
+}
+
+fn requested_optional_string_bytes(value: &Option<String>) -> usize {
+    value.as_ref().map_or(0, String::capacity)
+}
+
+fn quality_candidate_heap_bytes(
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> usize {
+    let plurx_core::playback::candidate::QualityCandidate {
+        id: _,
+        recipe_digest: _,
+        route: _,
+        planned_codec,
+        processed_dv: _,
+        normalized_geometry: _,
+        width: _,
+        height: _,
+        target_height: _,
+        average_bps: _,
+        peak_bps: _,
+        grade: _,
+        decoder_compatible: _,
+        complete_cache: _,
+        sustainable: _,
+    } = candidate;
+    requested_optional_string_bytes(planned_codec)
+}
+
+fn planning_binding_heap_bytes(binding: &crate::media_pool::PlanningBinding) -> usize {
+    let crate::media_pool::PlanningBinding {
+        generation: _,
+        source_digest,
+    } = binding;
+    source_digest.capacity()
+}
+
+fn pending_fel_qualification_heap_bytes(pending: &super::PendingFelQualification) -> Option<usize> {
+    let super::PendingFelQualification {
+        file_id: _,
+        settings_generation: _,
+        source_object_version,
+        request,
+    } = pending;
+    let plurx_core::transcode::dv_fel_qualification::FelRecipeRequest {
+        identity,
+        backend_identity,
+        source_size: _,
+        source_mtime: _,
+        envelope: _,
+        output: _,
+    } = request;
+    source_object_version
+        .capacity()
+        .checked_add(identity.capacity())?
+        .checked_add(backend_identity.capacity())
+}
+
+fn dv_row_facts_heap_bytes(
+    facts: &plurx_core::playback::dv_provenance::DvRowFacts,
+) -> Option<usize> {
+    let plurx_core::playback::dv_provenance::DvRowFacts {
+        levels,
+        title_peak_nits: _,
+        title_fits_nits: _,
+    } = facts;
+    match levels {
+        Some(plurx_core::scan::dv_levels::DvTitleLevels { levels, cm_v40: _ }) => {
+            requested_btree_set_bytes(levels)
+        }
+        None => Some(0),
+    }
+}
+
+/// `DvDisplayTarget` keeps private fields, so it cannot be destructured
+/// here; it is `Copy` and therefore owns no heap. This fails to compile if it
+/// ever stops being `Copy`.
+const _: fn() = || {
+    fn copy<T: Copy>() {}
+    copy::<plurx_core::transcode::dv_processing::DvDisplayTarget>();
+};
+
+fn continuous_family_heap_bytes(
+    family: &plurx_core::store::ContinuousFamilyDescription,
+) -> Option<usize> {
+    let plurx_core::store::ContinuousFamilyDescription {
+        version: _,
+        family_revision: _,
+        family_id,
+        mode,
+        master,
+        video,
+        audio,
+    } = family;
+    let mut bytes = family_id
+        .capacity()
+        .checked_add(mode.capacity())?
+        .checked_add(master.capacity())?
+        .checked_add(requested_vec_capacity_bytes(video)?)?;
+    for row in video {
+        let plurx_core::store::ContinuousVideoDescription {
+            candidate_id: _,
+            rendition_id,
+            init_id,
+            width: _,
+            height: _,
+            codec,
+            timescale: _,
+            frame_ticks: _,
+            segment_ticks: _,
+            peak_bps: _,
+            playlist,
+        } = row;
+        bytes = bytes
+            .checked_add(rendition_id.capacity())?
+            .checked_add(init_id.capacity())?
+            .checked_add(codec.capacity())?
+            .checked_add(playlist.capacity())?;
+    }
+    if let Some(plurx_core::store::ContinuousAudioDescription {
+        rendition_id,
+        init_id,
+        codec,
+        channels: _,
+        timescale: _,
+        peak_bps: _,
+        playlist,
+    }) = audio
+    {
+        bytes = bytes
+            .checked_add(rendition_id.capacity())?
+            .checked_add(init_id.capacity())?
+            .checked_add(codec.capacity())?
+            .checked_add(playlist.capacity())?;
+    }
+    Some(bytes)
+}
+
+fn quality_catalog_result_heap_bytes(
+    catalog: &crate::media_pool::QualityCatalogResult,
+) -> Option<usize> {
+    let crate::media_pool::QualityCatalogResult {
+        candidates,
+        authority_refused: _,
+        complete: _,
+        causes,
+    } = catalog;
+    let mut bytes = requested_vec_capacity_bytes(candidates)?
+        .checked_add(requested_vec_capacity_bytes(causes)?)?;
+    for row in candidates {
+        let crate::media_pool::WorkerQualityCandidate {
+            node_id,
+            candidate,
+            binding,
+            partial: _,
+            dispatch_supported: _,
+        } = row;
+        bytes = bytes
+            .checked_add(node_id.capacity())?
+            .checked_add(quality_candidate_heap_bytes(candidate))?
+            .checked_add(binding.as_ref().map_or(0, planning_binding_heap_bytes))?;
+    }
+    for cause in causes {
+        if let crate::media_pool::CatalogCause::RequestInvalid(
+            crate::media_pool::CatalogValidationError {
+                clause,
+                observed: _,
+                limit: _,
+            },
+        ) = cause
+        {
+            bytes = bytes.checked_add(clause.capacity())?;
+        }
+    }
+    Some(bytes)
+}
+
+/// The retained planning snapshot's own projection lives in the Linux-only
+/// adaptive attempt module, as do this request projection's only consumers.
+fn planning_snapshot_heap_bytes(
+    snapshot: &std::sync::Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+) -> Option<usize> {
+    let inline = requested_arc_bytes::<plurx_core::store::PlaybackPlanningSnapshot>()?;
+    #[cfg(target_os = "linux")]
+    {
+        inline.checked_add(
+            crate::transcode::TranscodeManager::selected_planning_snapshot_heap_bytes(snapshot)?,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (inline, snapshot);
+        None
+    }
+}
+
+fn audio_heap_bytes(
+    claim: &Option<plurx_core::playback::audio::AudioClaim>,
+    delivery: &Option<plurx_core::playback::audio::AudioDelivery>,
+) -> Option<usize> {
+    let claim = match claim {
+        Some(claim) => claim.requested_heap_bytes()?,
+        None => 0,
+    };
+    let delivery = match delivery {
+        Some(delivery) => delivery.requested_heap_bytes()?,
+        None => 0,
+    };
+    claim.checked_add(delivery)
+}
+
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The finite session record that charges a parked child's request is Linux-only; keep this portable projection compiled and tested on every platform."
+    )
+)]
+impl SessionRequest {
+    /// Requested heap capacity this request owns beyond its inline value:
+    /// strings, vectors, boxed payloads and the Arc-shared catalog, walked
+    /// recursively. `None` is an overflow or an unmeasurable nested value;
+    /// a caller charging it must refuse rather than undercount.
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        // No `..`: adding any field forces this inventory to be reviewed.
+        let SessionRequest {
+            continuous_media,
+            quality_catalog,
+            candidate_context,
+            accepted_processed_ask,
+            retain_output: _,
+            dv_refit_digest,
+            vod_only: _,
+            passive_vod: _,
+            finite_bitrate_limit_bps: _,
+            file_id: _,
+            playback_id,
+            request_id,
+            control_sequence: _,
+            automatic: _,
+            previous_session_id,
+            reopen_reason: _,
+            kind: _,
+            start_seconds: _,
+            audio_index: _,
+            audio_delivery,
+            audio_claim,
+            subtitle_burn: _,
+            audio_offset_ms: _,
+            split_audio: _,
+            hdr10: _,
+            dv_processing_destination: _,
+            presentation: _,
+            block_budget_secs: _,
+            transport,
+            source_telemetry: _,
+        } = self;
+        let mut bytes = playback_id
+            .capacity()
+            .checked_add(requested_optional_string_bytes(dv_refit_digest))?
+            .checked_add(requested_optional_string_bytes(request_id))?
+            .checked_add(requested_optional_string_bytes(previous_session_id))?
+            .checked_add(requested_optional_string_bytes(transport))?
+            .checked_add(audio_heap_bytes(audio_claim, audio_delivery)?)?;
+        if let Some(media) = continuous_media {
+            bytes = bytes
+                .checked_add(std::mem::size_of::<ContinuousMediaRequest>())?
+                .checked_add(media.requested_heap_bytes()?)?;
+        }
+        if let Some(catalog) = quality_catalog {
+            bytes = bytes
+                .checked_add(requested_arc_bytes::<
+                    crate::media_pool::QualityCatalogResult,
+                >()?)?
+                .checked_add(quality_catalog_result_heap_bytes(catalog)?)?;
+        }
+        if let Some(context) = candidate_context {
+            bytes = bytes
+                .checked_add(std::mem::size_of::<CandidateExecutionContext>())?
+                .checked_add(context.requested_heap_bytes()?)?;
+        }
+        if let Some(ask) = accepted_processed_ask {
+            bytes = bytes
+                .checked_add(std::mem::size_of::<super::ProcessedUpgradeAsk>())?
+                .checked_add(ask.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The finite session record that charges a parked child's request is Linux-only; keep this portable projection compiled and tested on every platform."
+    )
+)]
+impl ContinuousMediaRequest {
+    /// Requested heap capacity beyond the inline value; see
+    /// [`SessionRequest::requested_heap_bytes`].
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let ContinuousMediaRequest {
+            version: _,
+            controlled: _,
+            family_generation,
+            role: _,
+            autonomous_companion: _,
+            companion_catalog,
+            family_descriptor,
+            companion_context,
+        } = self;
+        let mut bytes = family_generation.capacity();
+        if let Some(candidate) = companion_catalog {
+            bytes = bytes
+                .checked_add(std::mem::size_of::<
+                    plurx_core::playback::candidate::QualityCandidate,
+                >())?
+                .checked_add(quality_candidate_heap_bytes(candidate))?;
+        }
+        if let Some(family) = family_descriptor {
+            bytes = bytes.checked_add(continuous_family_heap_bytes(family)?)?;
+        }
+        if let Some(companion) = companion_context {
+            let ContinuousCompanionContext {
+                height: _,
+                candidate,
+            } = &**companion;
+            bytes = bytes
+                .checked_add(std::mem::size_of::<ContinuousCompanionContext>())?
+                .checked_add(candidate.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The finite session record that charges a parked child's request is Linux-only; keep this portable projection compiled and tested on every platform."
+    )
+)]
+impl CandidateExecutionContext {
+    /// Requested heap capacity beyond the inline value; see
+    /// [`SessionRequest::requested_heap_bytes`].
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let CandidateExecutionContext {
+            required_fel_qualification,
+            catalog_query,
+            ordinary_request,
+            retained_output,
+            display_target: _,
+            display_target_note,
+            dv_row_facts,
+            canonical_caps,
+            selected_candidate,
+            planning_binding,
+            planning_snapshot,
+            owner_node_id,
+            candidate_id: _,
+            recipe_digest: _,
+            normalized_geometry: _,
+            grade: _,
+            profile: _,
+        } = self;
+        let mut bytes = requested_optional_string_bytes(display_target_note)
+            .checked_add(requested_optional_string_bytes(owner_node_id))?
+            .checked_add(quality_candidate_heap_bytes(selected_candidate))?
+            .checked_add(
+                planning_binding
+                    .as_ref()
+                    .map_or(0, planning_binding_heap_bytes),
+            )?;
+        if let Some(pending) = required_fel_qualification {
+            bytes = bytes.checked_add(pending_fel_qualification_heap_bytes(pending)?)?;
+        }
+        if let Some(query) = catalog_query {
+            bytes = bytes.checked_add(query.requested_heap_bytes()?)?;
+        }
+        if let Some(request) = ordinary_request {
+            bytes = bytes
+                .checked_add(std::mem::size_of::<SessionRequest>())?
+                .checked_add(request.requested_heap_bytes()?)?;
+        }
+        if let Some(super::RetainedOutputFacts {
+            artifact_id,
+            output_identity,
+            average_bps: _,
+            peak_bps: _,
+        }) = retained_output
+        {
+            bytes = bytes
+                .checked_add(artifact_id.capacity())?
+                .checked_add(output_identity.capacity())?;
+        }
+        if let Some(facts) = dv_row_facts {
+            bytes = bytes.checked_add(dv_row_facts_heap_bytes(facts)?)?;
+        }
+        if let Some(caps) = canonical_caps {
+            bytes = bytes.checked_add(
+                crate::media_sessions::selected_finite_device_caps_heap_bytes(caps)?,
+            )?;
+        }
+        if let Some(snapshot) = planning_snapshot {
+            bytes = bytes.checked_add(planning_snapshot_heap_bytes(snapshot)?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The finite session record that charges a parked child's request is Linux-only; keep this portable projection compiled and tested on every platform."
+    )
+)]
+impl super::ProcessedUpgradeAsk {
+    /// Requested heap capacity beyond the inline value; see
+    /// [`SessionRequest::requested_heap_bytes`].
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let super::ProcessedUpgradeAsk {
+            canonical_caps,
+            target_height: _,
+            grade: _,
+            names_processed: _,
+            route: _,
+            average_bps: _,
+            peak_bps: _,
+            recipe_digest: _,
+            required_fel_qualification,
+            catalog_query,
+            display_target: _,
+            display_target_note,
+            dv_row_facts,
+        } = self;
+        let mut bytes = requested_optional_string_bytes(display_target_note);
+        if let Some(caps) = canonical_caps {
+            bytes = bytes.checked_add(
+                crate::media_sessions::selected_finite_device_caps_heap_bytes(caps)?,
+            )?;
+        }
+        if let Some(pending) = required_fel_qualification {
+            bytes = bytes.checked_add(pending_fel_qualification_heap_bytes(pending)?)?;
+        }
+        if let Some(query) = catalog_query {
+            bytes = bytes.checked_add(query.requested_heap_bytes()?)?;
+        }
+        if let Some(facts) = dv_row_facts {
+            bytes = bytes.checked_add(dv_row_facts_heap_bytes(facts)?)?;
+        }
+        Some(bytes)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn continuous_test_candidate_context(
     id: plurx_core::playback::candidate::CandidateId,
@@ -1637,5 +2126,102 @@ mod prepared_candidate_tests {
             "{error}"
         );
         assert!(manager.active_session_ids().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod requested_heap_tests {
+    use super::*;
+
+    fn bare_request() -> SessionRequest {
+        let mut request: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id":1,"playback_id":"parked","automatic":true,
+            "kind":{"kind":"transcode","height":72},"start_seconds":0.0,
+            "audio_offset_ms":0,"hdr10":false,"presentation":"vod"
+        }))
+        .expect("bare request");
+        request.playback_id.shrink_to_fit();
+        request
+    }
+
+    /// A parked child's retained request is charged for every boxed and
+    /// shared payload it owns, not only its own strings.
+    #[test]
+    fn session_request_heap_counts_boxed_and_shared_payloads() {
+        let mut request = bare_request();
+        assert_eq!(
+            request.requested_heap_bytes(),
+            Some(request.playback_id.capacity())
+        );
+        let base = request.requested_heap_bytes().expect("bare bytes");
+
+        let generation = String::with_capacity(64);
+        request.continuous_media = Some(Box::new(ContinuousMediaRequest {
+            version: 2,
+            controlled: true,
+            family_generation: generation,
+            role: ContinuousMediaRole::Video,
+            autonomous_companion: None,
+            companion_catalog: None,
+            companion_context: None,
+            family_descriptor: None,
+        }));
+        let with_media = request.requested_heap_bytes().expect("media bytes");
+        assert_eq!(
+            with_media,
+            base + std::mem::size_of::<ContinuousMediaRequest>() + 64
+        );
+
+        let id = plurx_core::playback::candidate::CandidateId([9; 16]);
+        let mut context = continuous_test_candidate_context(id, [10; 32], 72);
+        context.owner_node_id = Some(String::with_capacity(32));
+        request.candidate_context = Some(Box::new(context));
+        let with_context = request.requested_heap_bytes().expect("context bytes");
+        assert_eq!(
+            with_context,
+            with_media + std::mem::size_of::<CandidateExecutionContext>() + 32
+        );
+
+        // A nested ordinary request is a boxed SessionRequest with its heap.
+        let ordinary = bare_request();
+        let ordinary_heap = ordinary.requested_heap_bytes().expect("ordinary bytes");
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .ordinary_request = Some(Box::new(ordinary));
+        assert_eq!(
+            request.requested_heap_bytes(),
+            Some(with_context + std::mem::size_of::<SessionRequest>() + ordinary_heap)
+        );
+        let with_ordinary = request.requested_heap_bytes().expect("ordinary total");
+
+        // An Arc-shared catalog is charged whole: counters, value and rows.
+        request.quality_catalog = Some(std::sync::Arc::new(
+            crate::media_pool::QualityCatalogResult {
+                candidates: Vec::with_capacity(2),
+                authority_refused: false,
+                complete: true,
+                causes: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            request.requested_heap_bytes(),
+            Some(
+                with_ordinary
+                    + requested_arc_bytes::<crate::media_pool::QualityCatalogResult>()
+                        .expect("arc layout")
+                    + 2 * std::mem::size_of::<crate::media_pool::WorkerQualityCandidate>()
+            )
+        );
+    }
+
+    #[test]
+    fn viewer_demand_heap_counts_its_playback_id() {
+        let viewer = crate::state::PlaybackViewerDemand {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+            playback_id: String::with_capacity(40),
+        };
+        assert_eq!(viewer.requested_heap_bytes(), Some(40));
     }
 }

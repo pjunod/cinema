@@ -2632,7 +2632,9 @@ impl VodServe {
                 .expected_attempt
                 .map(|(_, reader)| Arc::clone(reader)),
             children: Vec::new(),
-            parked_children: Vec::new(),
+            // Parked before the session record is charged, so its finite
+            // slot covers the parked intent. It holds no reader or credit.
+            parked_children: parked_companion.into_iter().collect(),
             #[cfg(target_os = "linux")]
             succession: None,
             requested_audio_index: req.audio_index,
@@ -2957,7 +2959,6 @@ impl VodServe {
             }
         }
         replacement.children = std::mem::take(&mut private_media);
-        replacement.parked_children = parked_companion.take().into_iter().collect();
         let mut authority = prepared_authority.1;
         authority.authority_only = replacement.retained_output.is_some()
             || replacement.children.iter().any(|child| child.controlled);
