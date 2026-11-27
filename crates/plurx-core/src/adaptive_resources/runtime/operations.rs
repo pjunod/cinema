@@ -84,6 +84,8 @@ pub(super) struct Operations {
     closing: BTreeSet<ReservationBinding>,
     inventory_overflow: BTreeSet<ReservationBinding>,
     bundles: BTreeMap<Uuid, Arc<AsyncMutex<Bundle>>>,
+    // Each bundle's role protection records, readable without its lock.
+    protections: BTreeMap<Uuid, Vec<Arc<protection::RoleProtection>>>,
 }
 
 /// Data describing missing roles, in reserve_families' family/role order. The
@@ -183,6 +185,7 @@ struct OwnedRole {
     pending_finite_close: Option<PendingFiniteClose>,
     receipt: Option<PhysicalCloseReceipt>,
     refunded: bool,
+    protection: Arc<protection::RoleProtection>,
 }
 
 /// Whether the original continuous create cutoff has closed fresh arm and
@@ -840,6 +843,7 @@ impl NodeResourceRuntime {
                                 crate::adaptive_resources::owner_inventory::OwnerPhase::Registered,
                             )
                             .map_err(|_| OperationError::State)?;
+                        let protection = protection::RoleProtection::of(typed_members.as_deref());
                         roles.push(OwnedRole {
                             inventory: Some(census_owner),
                             pending_inventory_close: None,
@@ -885,6 +889,7 @@ impl NodeResourceRuntime {
                             pending_finite_close: None,
                             receipt: None,
                             refunded: false,
+                            protection,
                         });
                     }
                     // All fallible local construction precedes the write-ahead binding. No
@@ -986,6 +991,10 @@ impl NodeResourceRuntime {
                             book.inventory_overflow.insert(role.binding);
                         }
                     }
+                    let protections = roles
+                        .iter()
+                        .map(|role| Arc::clone(&role.protection))
+                        .collect();
                     let state = Arc::new(AsyncMutex::new(Bundle {
                         id,
                         typed_obligation_ids,
@@ -1007,6 +1016,7 @@ impl NodeResourceRuntime {
                     }
                     let initialized = initialize(&owner);
                     book.bundles.insert(id, Arc::clone(&state));
+                    book.protections.insert(id, protections);
                     for family in families {
                         book.family_users
                             .entry(family.identity)
@@ -2330,6 +2340,7 @@ fn refund(
     inventory.hold_runtime(role.binding);
     role.pending_inventory_close = pending;
     role.refunded = true;
+    role.protection.refund();
     Ok(())
 }
 

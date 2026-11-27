@@ -599,6 +599,7 @@ impl NodeResourceRuntime {
                         .expect("validated retained native member"),
                 );
                 role.members.clear();
+                role.protection.extend(&retirement.manifest.members);
                 role.typed_members = Some(std::mem::take(&mut retirement.manifest.members));
                 role.armed.clear();
                 role.armed.insert(retirement.target_member);

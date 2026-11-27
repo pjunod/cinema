@@ -85,6 +85,7 @@ impl NodeResourceRuntime {
             usize::try_from(response_memory).map_err(|_| OperationError::State)?,
             metadata_memory,
         )?;
+        let protection = super::protection::RoleProtection::of(Some(&manifest.members));
         let role = OwnedRole {
             // No original create cutoff survives a restart; local deadlines still apply.
             continuous_entry_deadline: None,
@@ -128,6 +129,7 @@ impl NodeResourceRuntime {
             pending_finite_close: None,
             receipt: None,
             refunded: false,
+            protection,
         };
         let bundle = Bundle {
             id,
@@ -183,9 +185,11 @@ impl NodeResourceRuntime {
                         .remove(&id)
                         .ok_or(OperationError::State)?;
                     bundle.roles[0].inventory = Some(inventory);
+                    let protections = vec![Arc::clone(&bundle.roles[0].protection)];
                     let state = Arc::new(AsyncMutex::new(bundle));
                     book.bindings.insert(binding, handle.clone());
                     book.bundles.insert(id, state.clone());
+                    book.protections.insert(id, protections);
                     Ok(state)
                 }
             })
