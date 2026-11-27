@@ -388,6 +388,41 @@ class ReleaseCutCase(unittest.TestCase):
         with self.assertRaisesRegex(module.CutError, "only its MARKETING_VERSION line"):
             module.repin_native_receipts(receipts, before, after, "0.3.0", "0.3.1")
 
+    def test_the_cut_needs_both_the_exact_pin_and_the_shape(self):
+        """A counter-only variant, or a stale shape, is not the reviewed file."""
+
+        module = load_release_cut()
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        shape = digest(APPLE.replace('VERSION: "1"', 'VERSION: "0"'))
+        bump = lambda text: text.replace('"0.3.0"', '"0.3.1"')  # noqa: E731
+        counter = APPLE.replace('VERSION: "1"', 'VERSION: "2"')
+        for label, receipts, before in (
+            ("counter-only variant", NATIVE_RECEIPTS.format(pin=digest(APPLE), shape=shape), counter),
+            ("stale shape", NATIVE_RECEIPTS.format(pin=digest(APPLE), shape="0" * 64), APPLE),
+        ):
+            with self.subTest(label), self.assertRaisesRegex(
+                module.CutError, "no longer matches its reviewed fingerprint"
+            ):
+                module.repin_native_receipts(receipts, before, bump(before), "0.3.0", "0.3.1")
+
+    def test_a_reviewed_note_above_the_pin_gets_the_release_line_added(self):
+        module = load_release_cut()
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        normalize = lambda text: text.replace('VERSION: "1"', 'VERSION: "0"')  # noqa: E731
+        reviewed = NATIVE_RECEIPTS.format(pin=digest(APPLE), shape=digest(normalize(APPLE))).replace(
+            '# release: v0.3.0 changes only MARKETING_VERSION "0.2.9" -> "0.3.0".',
+            "# PR #2000: a reviewed project change.",
+        )
+        after = APPLE.replace('"0.3.0"', '"0.3.1"')
+        self.assertEqual(
+            module.repin_native_receipts(reviewed, APPLE, after, "0.3.0", "0.3.1"),
+            NATIVE_RECEIPTS.format(pin=digest(after), shape=digest(normalize(after))).replace(
+                '    # release: v0.3.0 changes only MARKETING_VERSION "0.2.9" -> "0.3.0".\n',
+                "    # PR #2000: a reviewed project change.\n"
+                '    # release: v0.3.1 changes only MARKETING_VERSION "0.3.0" -> "0.3.1".\n',
+            ),
+        )
+
     def test_a_reworded_claim_refuses_the_cut_before_anything_is_written(self):
         root = self.tree()
         readme = root / release_cut.ANDROID_README

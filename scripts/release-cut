@@ -229,10 +229,7 @@ NATIVE_RECEIPTS = "validation/native_receipts.py"
 _APPLE_PIN = r"^    '" + re.escape(APPLE) + r"': '([0-9a-f]{64})',$"
 _APPLE_SHAPE = r'^APPLE_PROJECT_SHAPE = "([0-9a-f]{64})"$'
 _APPLE_COUNTER = r"^APPLE_BUILD_COUNTER = re\.compile\((rb'[^\n]*')\)$"
-_RELEASE_NOTE = (
-    r'^    (# release: v\S+ changes only MARKETING_VERSION "[^"]*" -> "[^"]*"\.)\n'
-    r"    '" + re.escape(APPLE) + "':"
-)
+_RELEASE_NOTE = r'^    # release: v\S+ changes only MARKETING_VERSION "[^"]*" -> "[^"]*"\.\n\Z'
 
 
 def repin_native_receipts(receipts: str, before: str, after: str, previous: str, version: str) -> str:
@@ -257,7 +254,6 @@ def repin_native_receipts(receipts: str, before: str, after: str, previous: str,
 
     pin = found(_APPLE_PIN, f"BUILD_SPECS pin for {APPLE}")
     shape = found(_APPLE_SHAPE, "APPLE_PROJECT_SHAPE")
-    note = found(_RELEASE_NOTE, f"'# release:' line directly above the {APPLE} pin")
     counter = re.compile(ast.literal_eval(found(_APPLE_COUNTER, "APPLE_BUILD_COUNTER").group(1)))
 
     def shape_of(text: str) -> str:
@@ -279,13 +275,18 @@ def repin_native_receipts(receipts: str, before: str, after: str, previous: str,
     ):
         raise CutError(f"{APPLE}: the cut must change only its MARKETING_VERSION line")
 
+    above = receipts.rfind("\n", 0, pin.start() - 1) + 1
     replacements = sorted(
         (
             (pin.span(1), hashlib.sha256(after.encode("utf-8")).hexdigest()),
             (shape.span(1), shape_of(after)),
+            # The line directly above the pin says what the last cut moved. A
+            # reviewed pull request that re-pins the file may replace it with
+            # its own note; the cut then adds its line rather than refuse.
             (
-                note.span(1),
-                f'# release: v{version} changes only MARKETING_VERSION "{previous}" -> "{version}".',
+                (above, pin.start()) if re.match(_RELEASE_NOTE, receipts[above : pin.start()])
+                else (pin.start(), pin.start()),
+                f'    # release: v{version} changes only MARKETING_VERSION "{previous}" -> "{version}".\n',
             ),
         ),
         reverse=True,
