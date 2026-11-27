@@ -2748,7 +2748,11 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
     // has no such drain and keeps its alias for the checks below.
     let key = rendition.key.clone();
     let _legacy_alias = (!cfg!(target_os = "linux")).then(|| Arc::clone(&rendition));
-    let rendition = Arc::downgrade(&rendition);
+    // Move the strong handle in, so this test holds only the Weak after it.
+    let rendition = {
+        let strong = rendition;
+        Arc::downgrade(&strong)
+    };
     serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
     wait_until(
         "prepared root physically reaped",

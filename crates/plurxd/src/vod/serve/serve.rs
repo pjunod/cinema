@@ -862,15 +862,12 @@ impl VodServe {
                     .find(|child| {
                         child.rendition.key == id
                             && child.rendition.recipe.file.id == session.file.id
-                            && child
-                                .rendition
-                                .source
-                                .as_ref()
-                                .map(|source| source.object_version())
+                            // Finite roots and children carry no fence; each
+                            // still names the exact object it serves.
+                            && child.rendition.source_object_version()
                                 == session
                                     .live_rendition()
-                                    .and_then(|root| root.source.as_ref())
-                                    .map(|source| source.object_version())
+                                    .and_then(|root| root.source_object_version())
                     })
                     .map(|child| {
                         owner.media_child = Some(MediaReaderResponseOwner {
@@ -949,8 +946,8 @@ impl VodServe {
             // the init identity; the init is ready only once both exist, so
             // no reader compares served bytes against an unknown identity.
             #[cfg(unix)]
-            let finite_init_ready = finite_init_len.is_some()
-                && rendition.identity.lock().await.identity.is_some();
+            let finite_init_ready =
+                finite_init_len.is_some() && rendition.identity.lock().await.identity.is_some();
             #[cfg(not(unix))]
             let finite_init_ready = false;
             if finite_init_ready || legacy_init_ready {

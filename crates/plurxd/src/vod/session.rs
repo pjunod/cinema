@@ -332,6 +332,30 @@ impl RenditionHooks for RenditionTestHooks {
 }
 
 impl Rendition {
+    /// The exact source object this incarnation serves. A legacy rendition
+    /// holds a source fence; a finite one leaves its source to core and was
+    /// admitted under its recipe's frozen object version.
+    pub(super) fn source_object_version(&self) -> Option<&str> {
+        if let Some(source) = self.source.as_ref() {
+            return Some(source.object_version());
+        }
+        #[cfg(unix)]
+        if self.dir.is_finite() {
+            return self
+                .recipe
+                .source_object_version
+                .as_deref()
+                .or_else(|| {
+                    self.recipe
+                        .encoding
+                        .as_ref()
+                        .map(|encoding| encoding.source_object_version.as_str())
+                })
+                .filter(|version| !version.is_empty());
+        }
+        None
+    }
+
     pub(super) fn prepare_client_reader(
         &self,
         key: &str,
