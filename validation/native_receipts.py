@@ -108,7 +108,10 @@ BUILD_SPECS = {
     # no native recipe changes.
     # plurx#1953 changes only cluster-transport-recovery-contracts' expected
     # test count from 76 to 79; no native recipe changes.
-    'Makefile': '061c7b4132a0bb1d721adc2c499dbe655ac2a32f70df9e76e5e5751d85766b2f',
+    # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
+    # to the web-unit-check recipe (a Node playback-lab test); no native
+    # recipe changes.
+    'Makefile': '9394e64e6bec4d6291d15a3aed5386f0e7e0a62d8e84ee00e7e1efc1e5ffd34f',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,

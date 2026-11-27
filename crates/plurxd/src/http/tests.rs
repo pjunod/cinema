@@ -1493,6 +1493,58 @@ fn every_registered_literal_route_has_an_explicit_group() {
     }
 }
 
+/// Every registered session, Live TV and offline HLS object route lands in a
+/// `plurx_hls_requests_total` class, so a new playlist or media route cannot
+/// be served uncounted while the split baseline is being compared.
+#[test]
+fn every_registered_hls_object_route_has_a_request_class() {
+    let source = include_str!("mod.rs");
+    let router = source
+        .split_once("pub fn router(state: AppState) -> Router {")
+        .expect("router start")
+        .1
+        .split_once("const LEARNER_ROUTE_INELIGIBLE_JSON")
+        .expect("router end")
+        .0;
+    let mut checked = 0;
+    for route in literal_route_patterns(router) {
+        let covered = [
+            "/hls/{session}/",
+            "/live-tv/sessions/{capability}/",
+            "/offline/media/{token}/",
+        ]
+        .iter()
+        .any(|prefix| route.starts_with(prefix));
+        let object = route.ends_with(".m3u8")
+            || route.ends_with("/{segment}")
+            || route.ends_with("/{object}");
+        if !covered || !object {
+            continue;
+        }
+        let path = route
+            .replace("{session}", "s")
+            .replace("{capability}", "c")
+            .replace("{token}", "t")
+            .replace("{index}", "0")
+            .replace("{role}", "video")
+            .replace("{rendition}", "r")
+            .replace("{kind}", "segment")
+            .replace("{segment}", "seg00001.m4s")
+            .replace("{object}", "00001.m4s");
+        let matched = format!("/api/v1{route}");
+        assert!(
+            hls_request_metrics::classify(&Method::GET, &matched, &format!("/api/v1{path}"))
+                .is_some(),
+            "registered HLS object route has no request class: {matched}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 15,
+        "the router scan found only {checked} HLS object routes"
+    );
+}
+
 #[test]
 fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
     for path in [

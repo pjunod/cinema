@@ -1,0 +1,326 @@
+{
+ "schema": "plurx-split-hls-baseline-v1",
+ "recorded": "2026-11-26",
+ "source": "scripts/playback-lab run --server-metrics (Chrome, headless except shared-video), debug plurxd, macOS arm64 lab host",
+ "scope": "Copy-HLS VOD only. Transcode cases are not in this file: the lab host's ffmpeg is not the pinned media runtime, so transcode sessions are refused before serving (vod_decoder_plan_refused).",
+ "cases": [
+  {
+   "suite": "smoke",
+   "case": "remux-h264-multitrack-1080 :: auto :: steady",
+   "layout": "muxed",
+   "ttff_ms": 1020,
+   "hls_requests": 8,
+   "hls_bytes": 22770156,
+   "requests": {
+    "init/muxed/200": 1,
+    "master/none/200": 1,
+    "media_playlist/muxed/200": 1,
+    "segment/muxed/200": 5
+   },
+   "bytes": {
+    "init/muxed": 1265,
+    "master/none": 326,
+    "media_playlist/muxed": 297,
+    "segment/muxed": 22768268
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.55
+   }
+  },
+  {
+   "suite": "smoke",
+   "case": "hevc-hdr-open-gop-2160 :: original :: steady",
+   "layout": "muxed",
+   "ttff_ms": 1569,
+   "hls_requests": 4,
+   "hls_bytes": 107879877,
+   "requests": {
+    "init/muxed/200": 1,
+    "media_playlist/muxed/200": 1,
+    "segment/muxed/200": 2
+   },
+   "bytes": {
+    "init/muxed": 3795,
+    "media_playlist/muxed": 203,
+    "segment/muxed": 107875879
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.027,
+    "plurx_vod_producer_generations_total{kind=\"copy\"}": 1,
+    "plurx_vod_segment_answers_total{source=\"produced\"}": 1,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 1
+   }
+  },
+  {
+   "suite": "smoke",
+   "case": "remux-h264-multitrack-1080 :: auto :: seek",
+   "layout": "split",
+   "ttff_ms": 987,
+   "hls_requests": 21,
+   "hls_bytes": 22731435,
+   "requests": {
+    "init/audio/200": 1,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 1,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 11,
+    "segment/video/200": 5
+   },
+   "bytes": {
+    "init/audio": 756,
+    "init/video": 778,
+    "master/none": 865,
+    "media_playlist/audio": 557,
+    "media_playlist/video": 364,
+    "segment/audio": 392159,
+    "segment/video": 22335956
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.314,
+    "plurx_vod_producer_generations_total{kind=\"copy\"}": 1,
+    "plurx_vod_producer_generations_total{kind=\"encoded\"}": 2,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 16
+   }
+  },
+  {
+   "suite": "smoke",
+   "case": "remux-h264-multitrack-1080 :: auto :: subtitle-toggle",
+   "layout": "split",
+   "ttff_ms": 732,
+   "hls_requests": 28,
+   "hls_bytes": 22732358,
+   "requests": {
+    "init/audio/200": 1,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 1,
+    "media_playlist/subtitle/200": 1,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 11,
+    "segment/subtitle/200": 6,
+    "segment/video/200": 5
+   },
+   "bytes": {
+    "init/audio": 756,
+    "init/video": 778,
+    "master/none": 865,
+    "media_playlist/audio": 557,
+    "media_playlist/subtitle": 268,
+    "media_playlist/video": 364,
+    "segment/audio": 392159,
+    "segment/subtitle": 655,
+    "segment/video": 22335956
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.402,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 16
+   }
+  },
+  {
+   "suite": "vod",
+   "case": "remux-h264-multitrack-1080 :: auto :: steady",
+   "layout": "split",
+   "ttff_ms": 855,
+   "hls_requests": 21,
+   "hls_bytes": 22731435,
+   "requests": {
+    "init/audio/200": 1,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 1,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 11,
+    "segment/video/200": 5
+   },
+   "bytes": {
+    "init/audio": 756,
+    "init/video": 778,
+    "master/none": 865,
+    "media_playlist/audio": 557,
+    "media_playlist/video": 364,
+    "segment/audio": 392159,
+    "segment/video": 22335956
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.304,
+    "plurx_vod_producer_generations_total{kind=\"copy\"}": 1,
+    "plurx_vod_producer_generations_total{kind=\"encoded\"}": 2,
+    "plurx_vod_segment_answers_total{source=\"produced\"}": 1,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 15
+   }
+  },
+  {
+   "suite": "vod",
+   "case": "remux-h264-multitrack-1080 :: auto :: seek-storm",
+   "layout": "split",
+   "ttff_ms": null,
+   "hls_requests": 21,
+   "hls_bytes": 22731435,
+   "requests": {
+    "init/audio/200": 1,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 1,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 11,
+    "segment/video/200": 5
+   },
+   "bytes": {
+    "init/audio": 756,
+    "init/video": 778,
+    "master/none": 865,
+    "media_playlist/audio": 557,
+    "media_playlist/video": 364,
+    "segment/audio": 392159,
+    "segment/video": 22335956
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.31,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 16
+   }
+  },
+  {
+   "suite": "vod",
+   "case": "remux-h264-multitrack-1080 :: auto :: suspend-resume",
+   "layout": "split",
+   "ttff_ms": 8822,
+   "hls_requests": 21,
+   "hls_bytes": 22731435,
+   "requests": {
+    "init/audio/200": 1,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 1,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 11,
+    "segment/video/200": 5
+   },
+   "bytes": {
+    "init/audio": 756,
+    "init/video": 778,
+    "master/none": 865,
+    "media_playlist/audio": 557,
+    "media_playlist/video": 364,
+    "segment/audio": 392159,
+    "segment/video": 22335956
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.296,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 16
+   }
+  },
+  {
+   "suite": "shared-video",
+   "case": "copy-h264-dual-aac-1080 :: original :: steady",
+   "layout": "split",
+   "ttff_ms": 1272,
+   "hls_requests": 52,
+   "hls_bytes": 75531805,
+   "requests": {
+    "init/audio/200": 1,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 1,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 34,
+    "segment/video/200": 13
+   },
+   "bytes": {
+    "init/audio": 751,
+    "init/video": 778,
+    "master/none": 684,
+    "media_playlist/audio": 2669,
+    "media_playlist/video": 1052,
+    "segment/audio": 1388169,
+    "segment/video": 74137702
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.595,
+    "plurx_vod_producer_generations_total{kind=\"copy\"}": 1,
+    "plurx_vod_producer_generations_total{kind=\"encoded\"}": 2,
+    "plurx_vod_segment_answers_total{source=\"produced\"}": 28,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 19
+   }
+  },
+  {
+   "suite": "shared-video",
+   "case": "copy-h264-aac-dts-1080 :: original :: audio-alternation",
+   "layout": "split",
+   "ttff_ms": 1328,
+   "hls_requests": 157,
+   "hls_bytes": 139442192,
+   "requests": {
+    "init/audio/200": 2,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 2,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 127,
+    "segment/video/200": 23
+   },
+   "bytes": {
+    "init/audio": 1501,
+    "init/video": 778,
+    "master/none": 684,
+    "media_playlist/audio": 5338,
+    "media_playlist/video": 1052,
+    "segment/audio": 5224169,
+    "segment/video": 134208670
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.649,
+    "plurx_vod_producer_generations_total{kind=\"copy\"}": 1,
+    "plurx_vod_producer_generations_total{kind=\"encoded\"}": 2,
+    "plurx_vod_segment_answers_total{source=\"produced\"}": 28,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 122
+   }
+  },
+  {
+   "suite": "shared-video",
+   "case": "copy-h264-dual-aac-1080 :: original :: audio-alternation",
+   "layout": "split",
+   "ttff_ms": 822,
+   "hls_requests": 157,
+   "hls_bytes": 139447365,
+   "requests": {
+    "init/audio/200": 2,
+    "init/video/200": 1,
+    "master/none/200": 1,
+    "media_playlist/audio/200": 2,
+    "media_playlist/video/200": 1,
+    "segment/audio/200": 127,
+    "segment/video/200": 23
+   },
+   "bytes": {
+    "init/audio": 1501,
+    "init/video": 778,
+    "master/none": 684,
+    "media_playlist/audio": 5338,
+    "media_playlist/video": 1052,
+    "segment/audio": 5229342,
+    "segment/video": 134208670
+   },
+   "server": {
+    "plurx_create_seconds_count{code=\"ok\"}": 1,
+    "plurx_create_seconds_sum{code=\"ok\"}": 0.347,
+    "plurx_vod_producer_generations_total{kind=\"copy\"}": 1,
+    "plurx_vod_segment_answers_total{source=\"produced\"}": 1,
+    "plurx_vod_segment_answers_total{source=\"stored\"}": 149
+   }
+  }
+ ],
+ "controls": [
+  "Smoke 'remux-h264-multitrack-1080 :: auto :: audio-switch' also fails on main 8724851ba without this change (media clock 0.860x, want >= 0.90x); on this branch it timed out waiting for alternate audio. Pre-existing, not caused by the metrics.",
+  "Smoke transcode cases fail identically on main 8724851ba (vod_decoder_plan_refused: candidate_geometry_unavailable: no bound FFprobe identity): the lab host's ffmpeg is not the pinned media runtime."
+ ]
+}
