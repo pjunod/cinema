@@ -302,9 +302,14 @@ class PublishFoldCase(FoldTree):
 
     def test_without_the_bot_token_the_fold_fails_closed(self):
         paths = self.fold()
-        with unittest.mock.patch.dict("os.environ", {"FOLD_BOT_TOKEN": "", "GITHUB_SERVER_URL": "x",
-                                                     "GITHUB_REPOSITORY": "noirr/plurx"}):
+        head = lambda: subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,  # noqa: E731
+                                      capture_output=True, text=True).stdout
+        before = head()
+        environment = {"FOLD_BOT_TOKEN": "", "GITHUB_SERVER_URL": "x", "GITHUB_REPOSITORY": "noirr/plurx"}
+        with unittest.mock.patch.dict("os.environ", environment), \
+                unittest.mock.patch.object(FOLD, "_api", side_effect=AssertionError("called the forge")):
             self.assertEqual(FOLD.publish(self.root, paths), 2)
+        self.assertEqual(head(), before, "nothing is committed without the token")
 
     def test_a_fold_that_does_not_verify_is_never_pushed(self):
         paths = self.fold()

@@ -343,7 +343,7 @@ def publish(root: Path, paths: list[str]) -> int:
               "(repository secret); the pages wait for the next fold or release cut", file=sys.stderr)
         return 2
     if not server or not repo:
-        print("fold: --publish needs GITHUB_SERVER_URL and GITHUB_REPOSITORY", file=sys.stderr)
+        print("::error::fold: --publish needs GITHUB_SERVER_URL and GITHUB_REPOSITORY", file=sys.stderr)
         return 2
 
     def git(*args: str) -> None:
