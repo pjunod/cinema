@@ -451,9 +451,10 @@ for the next node.
   Deploy one node first and check it, then roll out to the rest; the rest
   pull. Nodes of another architecture build and share their own copy.
 - **Bound `build-` tags in the registry.** Every shared commit adds one image.
-  Give the `noirr` owner's Forgejo package cleanup rule for `plurxd` a
-  keep-pattern for the newest `build-.*` versions, just as it has for `sha-.*`
-  (Settings → Packages → Cleanup rules).
+  Give the `noirr` owner a Forgejo container cleanup rule (Settings →
+  Packages → Cleanup rules) whose remove pattern is `build-.*`, keeping the
+  five most recent and removing those older than seven days. Check its preview
+  matches no `main` or `sha-` version before saving.
 
 ### Project name
 
