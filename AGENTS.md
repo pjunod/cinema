@@ -1,7 +1,8 @@
 # Contributor workflow
 
-The repository is private because trusted self-hosted runners execute its
-workflows. GitHub branch protection is unavailable on the current account
+The Forgejo repository is private because trusted self-hosted runners execute
+its workflows. The public GitHub mirror has no self-hosted runner registered,
+and every Forgejo job is gated off on github.com. GitHub branch protection is unavailable on the current account
 plan, so every contributor and coding agent must enforce the merge convention
 below.
 

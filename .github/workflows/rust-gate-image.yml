@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.server_url != 'https://github.com'
     name: publish the rust-gate image
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 45
@@ -69,6 +70,7 @@ jobs:
   # image on the lane's own pool and limits before a lane is pointed at it,
   # and warms the same runner-local Cargo cache the lane uses.
   probe:
+    if: github.server_url != 'https://github.com'
     name: fast Rust gate on the published image
     needs: publish
     runs-on: [ci-nonvoter-compile-amd64]

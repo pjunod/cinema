@@ -17,6 +17,7 @@ import io
 
 from validation import main_preflight_adoption as adoption
 from validation import main_unit_receipts
+from validation import mirror_guard
 from validation import python_unit_receipts as receipts
 
 
@@ -63,6 +64,8 @@ def invocation_digests(commit: str, workspace: Path) -> dict:
         receipts.require(raw("cat-file", "-t", ref).strip() == b"blob", "Invocation path is not a blob")
         data = raw("show", ref)
         receipts.require(len(data) == size, "Invocation blob size changed")
+        if mirror_guard.is_ci_workflow(path):
+            data = mirror_guard.strip(data)
         result[path] = hashlib.sha256(data).hexdigest()
     return result
 
