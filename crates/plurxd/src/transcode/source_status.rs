@@ -291,10 +291,7 @@ impl SourceViewerActor {
                 || proof
                     .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
                     .is_err()
-                || guard
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                || guard.source.as_ref().missing_or_changed().await
                 || actor
                     .0
                     .state
@@ -321,10 +318,7 @@ impl SourceViewerActor {
                     .lock()
                     .expect("Source worker state")
                     .retirement_requested
-                || guard
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                || guard.source.as_ref().missing_or_changed().await
                 || !if let Some(publication) = &publication {
                     manager
                         .vod
@@ -363,10 +357,7 @@ impl SourceViewerActor {
                 || proof
                     .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
                     .is_err()
-                || guard
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                || guard.source.as_ref().missing_or_changed().await
                 || actor
                     .0
                     .state

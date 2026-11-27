@@ -522,7 +522,7 @@ fun LiveTvScreen(
     }
     DisposableEffect(remoteClient, remoteOwnerToken) { onDispose { remoteClient?.playback?.detach(remoteOwnerToken) } }
     if (isInPip || showingInfo || showingMore || showingCaptions || searchOpen || recordingsOpen || stopRecordingFor != null || deleteFileFor != null) RemoteRestricted()
-    if (remoteCaptions) RemoteChoiceDialog("Captions", captionOptions().map { option -> RemoteChoice(option.id, option.label, option.selected, option.choose) }) { remoteCaptions = false; lastInteraction += 1 }
+    if (remoteCaptions) RemoteChoiceDialog("Captions", captionOptions().map { option -> RemoteChoice(option.id, option.label, option.selected, activate = option.choose) }) { remoteCaptions = false; lastInteraction += 1 }
     // Each host builds its own PlayerView; see LiveTvPlayerSurface.
     val playerSurface: @Composable () -> Unit = remember(controller) {
         { LiveTvPlayerSurface(controller) }

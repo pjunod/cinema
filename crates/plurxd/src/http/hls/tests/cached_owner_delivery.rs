@@ -4,25 +4,6 @@ mod cached_owner_delivery_tests {
     use super::*;
     use futures_util::FutureExt;
     use plurx_core::cluster::migration::select_daemon_store_observing;
-    use plurx_core::config::Config;
-    fn config(root: &std::path::Path) -> Config {
-        let held: Vec<_> = (0..3)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
-            .collect();
-        let addresses: Vec<_> = held
-            .iter()
-            .map(|socket| socket.local_addr().expect("owned fixture invariant"))
-            .collect();
-        let mut config = Config::default();
-        config.storage.data_dir = root.into();
-        config.server.bind = addresses[0];
-        config.cluster.raft_bind = addresses[1];
-        config.cluster.api_bind = addresses[2];
-        config.cluster.advertise_host = "localhost".into();
-        config.cluster.join_url = format!("http://{}", addresses[0]);
-        config.cluster.artwork_url = config.cluster.join_url.clone();
-        config
-    }
 
     #[test]
     fn cached_caption_revision_reaches_real_remote_owner_without_ingress_cache() {
@@ -44,14 +25,13 @@ mod cached_owner_delivery_tests {
     }
     async fn remote_owner_fixture() {
         let source_root = crate::test_tempdir().expect("owned leader root");
-        let source_config = config(source_root.path());
+        let (source_config, source_http) = crate::owned_loopback_config(source_root.path());
         drop(
             plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
                 .expect("schema"),
         );
-        let startup = Arc::new(crate::StartupObservationHttp::new(
-            source_config.server.bind,
-        ));
+        let startup = Arc::new(crate::StartupObservationHttp::from_std_listener(source_http)
+            .expect("owned HTTP socket"));
         let selected = select_daemon_store_observing(&source_config, Some(&crate::cluster::StartupClockAdapter(startup.as_ref())))
             .await
             .expect("actual singleton activation within production phase");
@@ -99,11 +79,10 @@ mod cached_owner_delivery_tests {
         tokio::fs::write(&token_path, format!("{}\n", token.token))
             .await
             .expect("owned learner token file");
-        let mut learner_config = config(learner_root.path());
+        let (mut learner_config, learner_http) = crate::owned_loopback_config(learner_root.path());
         learner_config.cluster.join_token_file = token_path.clone();
-        let learner_startup = Arc::new(crate::StartupObservationHttp::new(
-            learner_config.server.bind,
-        ));
+        let learner_startup = Arc::new(crate::StartupObservationHttp::from_std_listener(learner_http)
+            .expect("owned HTTP socket"));
         let learner_selected = tokio::time::timeout(
             Duration::from_secs(45),
             Box::pin(select_daemon_store_observing(

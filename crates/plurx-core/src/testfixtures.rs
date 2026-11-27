@@ -279,6 +279,104 @@ pub fn pipe(kind: &str) -> Vec<u8> {
     generated.unwrap_or_else(|| std::fs::read(&out).expect("reading the cached pipe output"))
 }
 
+/// The canonical pipe's shape: the same copy with the video track alone, as
+/// a verified copy's index twin and the index pass read it.
+pub fn video_only_pipe(kind: &str) -> Vec<u8> {
+    let src = source(kind);
+    let mut cmd = Command::new(ffmpeg());
+    cmd.args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&src)
+        .args(["-map_chapters", "-1", "-map", "0:v:0", "-an", "-sn"])
+        .args(["-c:v", "copy"]);
+    if kind != "h264" {
+        cmd.args(["-tag:v", "hvc1"])
+            .args(["-bsf:v", "filter_units=remove_types=32-34"]);
+    }
+    cmd.args(["-avoid_negative_ts", "make_zero"])
+        .args([
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        ])
+        .args(["-use_editlist", "0", "-f", "mp4", "pipe:1"]);
+    run(&mut cmd)
+}
+
+/// `whole` as a verified copy holds its canonical twin: framed from its
+/// `moof` and `mdat` with the slice data dropped, the `mdat` arriving
+/// `chunk` bytes at a time.
+pub fn trimmed(
+    init: &crate::fmp4::Init,
+    whole: &crate::fmp4::Fragment,
+    chunk: usize,
+) -> crate::fmp4::TrimmedFragment {
+    let payload = whole.mdat_payload.start;
+    let moof = u32::from_be_bytes(whole.bytes[..4].try_into().expect("a moof size")) as usize;
+    let mut trimmer = crate::fmp4::FragmentTrimmer::begin(
+        whole.bytes[..moof].to_vec(),
+        &whole.bytes[moof..payload],
+        init,
+    )
+    .expect("a fragment the reader framed begins");
+    for bytes in whole.bytes[payload..].chunks(chunk) {
+        trimmer.push(bytes);
+    }
+    trimmer.finish().expect("a fragment the reader framed ends")
+}
+
+/// The first video sample of `source` as a fragment of `count` copies of it
+/// whose `trun` takes every sample size from the `tfhd`: the compact shape a
+/// muxer writes for a run of equal-sized samples, a single one included.
+/// Built as bytes, so a rewrite that changes a size has real boxes to grow.
+pub fn tfhd_sized_fragment(
+    init: &crate::fmp4::Init,
+    source: &crate::fmp4::Fragment,
+    count: u32,
+) -> crate::fmp4::Fragment {
+    use crate::fmp4::{FragmentReader, Unit};
+    let video = init.video().expect("a video track").id;
+    let run = &source.track(video).expect("a video traf").runs[0];
+    let sample = run.samples[0];
+    let bytes = &source.bytes[run.data_offset..run.data_offset + sample.size as usize];
+    let mut compact = Vec::new();
+    compact.extend_from_slice(&64u32.to_be_bytes());
+    compact.extend_from_slice(b"moof");
+    compact.extend_from_slice(&56u32.to_be_bytes());
+    compact.extend_from_slice(b"traf");
+    compact.extend_from_slice(&28u32.to_be_bytes());
+    compact.extend_from_slice(b"tfhd");
+    compact.extend_from_slice(&0x0002_0038u32.to_be_bytes());
+    compact.extend_from_slice(&video.to_be_bytes());
+    compact.extend_from_slice(&sample.duration.to_be_bytes());
+    compact.extend_from_slice(&sample.size.to_be_bytes());
+    compact.extend_from_slice(&sample.flags.to_be_bytes());
+    compact.extend_from_slice(&20u32.to_be_bytes());
+    compact.extend_from_slice(b"trun");
+    compact.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    compact.extend_from_slice(&count.to_be_bytes());
+    compact.extend_from_slice(&72u32.to_be_bytes()); // moof (64) + mdat header (8)
+    compact.extend_from_slice(&(sample.size * count + 8).to_be_bytes());
+    compact.extend_from_slice(b"mdat");
+    for _ in 0..count {
+        compact.extend_from_slice(bytes);
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(&init.bytes);
+    assert!(matches!(reader.next_unit(), Ok(Some(Unit::Init(_)))));
+    reader.push(&compact);
+    let Ok(Some(Unit::Fragment(fragment))) = reader.next_unit() else {
+        panic!("the tfhd-sized fragment did not parse");
+    };
+    assert!(
+        fragment
+            .track(video)
+            .expect("a video traf")
+            .samples()
+            .all(|sample| sample.size_at.is_none()),
+        "the fixture carries an explicit sample size"
+    );
+    fragment
+}
+
 /// The production pipe with a second, decoder-valid HEVC sample description
 /// in its video `stsd`. The media fragments are unchanged; only the init is
 /// expanded, matching the legal container shape seen in production.

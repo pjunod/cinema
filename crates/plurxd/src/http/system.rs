@@ -6006,7 +6006,8 @@ pub async fn activity_detail(
 /// through the pidfd taken at spawn, so a number that has since been reused
 /// by an unrelated process cannot be hit. The child's owner sees an ordinary
 /// exit: a playback producer's session reports it as it reports a crashed
-/// encoder, a background probe records a failed probe.
+/// encoder; an index pass or probe records an interrupted attempt and
+/// retries it within its retry window (`ffmpeg::killed_externally`).
 pub async fn stop_process(
     _admin: AdminUser,
     axum::extract::Path(pid): axum::extract::Path<u32>,
@@ -6931,6 +6932,9 @@ pub(crate) async fn metrics(
          plurx_notify_received_total {notifications}\n"
     ));
     scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
+    // Reads atomics only. A hung media mount shows here as in-flight calls
+    // pinned while this scrape still answers.
+    scans.push_str(&plurx_core::media_io::prometheus());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\

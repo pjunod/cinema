@@ -212,6 +212,7 @@ pub(crate) fn record_background_source(
 
 /// Monotonic boot-clock time in the kernel's process start-time units
 /// (`/proc/<pid>/stat` field 22), so it orders against child start times.
+#[cfg(unix)]
 pub(crate) fn boot_tick() -> u64 {
     let mut now = libc::timespec {
         tv_sec: 0,
@@ -226,6 +227,17 @@ pub(crate) fn boot_tick() -> u64 {
     // SAFETY: sysconf has no pointer arguments.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
     now.tv_sec as u64 * hz + now.tv_nsec as u64 * hz / 1_000_000_000
+}
+
+/// Off Unix there are no kernel child start times to order against: the
+/// descendant census that compares these ticks is Linux-only, and every other
+/// platform refuses to prove children exited. A monotonic count in the same
+/// 100 Hz units, from this process's first call, keeps the values ordered.
+#[cfg(not(unix))]
+pub(crate) fn boot_tick() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let elapsed = ORIGIN.get_or_init(std::time::Instant::now).elapsed();
+    elapsed.as_secs() * 100 + u64::from(elapsed.subsec_millis()) / 10
 }
 
 /// Every orphaned descendant is reparented to this process, so its own tree
@@ -1789,17 +1801,17 @@ pub(crate) async fn file_body(
             }
             let work_reader = Arc::clone(&reader);
             let read_activity = observer.begin_read().await.map_err(std::io::Error::other)?;
-            let bytes = tokio::task::spawn_blocking(move || {
+            let bytes = plurx_core::media_io::blocking(move || {
                 let read_activity = read_activity;
                 use std::io::{Read, Seek};
                 let mut source = work_reader.source.lock().expect("direct source read");
-                if !source.unchanged() {
+                if !source.unchanged_in_place() {
                     return Err(std::io::Error::other("source range changed"));
                 }
                 source.handle.seek(std::io::SeekFrom::Start(offset))?;
                 let mut bytes = vec![0; size];
                 let n = source.handle.read(&mut bytes)?;
-                if !source.unchanged() {
+                if !source.unchanged_in_place() {
                     return Err(std::io::Error::other("source range changed"));
                 }
                 bytes.truncate(n);

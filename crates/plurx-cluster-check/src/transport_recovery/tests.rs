@@ -1187,33 +1187,215 @@ fn a_leak_that_begins_late_in_the_campaign_is_rejected() {
     });
     assert!(validate_transport_recovery_artifact(&value).is_err());
 
-    // On the signal the lane actually samples — a follower alternating
-    // between 8 and 9 sockets one recovery apart — only the high-side
-    // samples after the leak sit above the opening ceiling, so the
-    // boundary is earlier: one connection leaked by cycle 12 is caught
-    // and one leaked at cycle 15 is the documented miss; a per-cycle
-    // leak from cycle 15 is caught and one from cycle 18 is not.
+    // On a follower alternating between 8 and 9 sockets one recovery
+    // apart, a leak has to rise across the campaign as well as lift the
+    // envelope. A per-cycle leak is caught from any onset up to cycle 13
+    // and missed from 14; a socket every k-th recovery from the start is
+    // caught for k up to six and missed from nine. One connection leaked once is a single
+    // step on a drain that already steps by one, and it is not
+    // distinguishable from the drain changing phase: that is the
+    // documented miss, at any onset.
     let drain = |cycle: u32| if cycle % 2 == 1 { 9 } else { 8 };
+    for onset in 1..=20_u32 {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(
+                12,
+                drain(cycle) + u64::from((cycle + 1).saturating_sub(onset)),
+                10,
+            )
+        });
+        assert_eq!(
+            validate_transport_recovery_artifact(&value).is_err(),
+            onset <= 13,
+            "per-cycle leak from cycle {onset}"
+        );
+    }
+    for every in (1..=6_u32).chain(9..=10) {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, drain(cycle) + u64::from(cycle / every), 10)
+        });
+        assert_eq!(
+            validate_transport_recovery_artifact(&value).is_err(),
+            every <= 6,
+            "one socket every {every} recoveries"
+        );
+    }
+    for onset in [6_u32, 12, 15] {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, drain(cycle) + u64::from(cycle >= onset), 10)
+        });
+        validate_transport_recovery_artifact(&value).expect("the documented miss");
+    }
+}
+
+/// Run 9084's voter campaign, sample for sample. Node 4 — a fresh process
+/// every cycle — sampled 12 sockets and 19 owned tasks once, at cycle 7,
+/// when nodes 1-3 were replacing connections (44/20/20 sockets), and never
+/// below 13 and 22 again; the closing floor of 13/22 therefore "rose" by
+/// one connection over that single opening sample. No node's series rises
+/// across the campaign, so nothing here is a leak; the envelope rise is
+/// printed and not failed.
+#[test]
+fn run_9084_voter_campaign_is_sampling_noise_not_growth() {
+    const SERIES: [[(u64, u64, u64); 4]; 20] = [
+        [(16, 35, 88), (10, 14, 25), (10, 14, 25), (10, 15, 28)],
+        [(17, 25, 58), (10, 10, 13), (10, 10, 13), (11, 13, 22)],
+        [(17, 30, 73), (10, 11, 16), (10, 12, 19), (11, 15, 28)],
+        [(17, 26, 61), (10, 10, 13), (10, 10, 13), (11, 14, 25)],
+        [(17, 28, 67), (10, 11, 16), (10, 11, 16), (11, 14, 25)],
+        [(17, 27, 64), (10, 10, 13), (12, 10, 13), (11, 15, 28)],
+        [(17, 44, 115), (10, 20, 43), (10, 20, 43), (11, 12, 19)],
+        [(17, 27, 64), (10, 10, 13), (11, 10, 13), (10, 15, 28)],
+        [(17, 29, 70), (10, 11, 16), (10, 11, 16), (11, 15, 28)],
+        [(17, 30, 73), (10, 11, 16), (10, 11, 16), (11, 16, 31)],
+        [(17, 27, 64), (11, 11, 16), (10, 10, 13), (10, 14, 25)],
+        [(17, 27, 64), (10, 10, 13), (10, 11, 16), (10, 14, 25)],
+        [(17, 25, 58), (10, 10, 13), (10, 10, 13), (10, 13, 22)],
+        [(15, 26, 61), (9, 11, 16), (9, 9, 10), (12, 14, 25)],
+        [(15, 26, 61), (10, 10, 13), (10, 10, 13), (11, 14, 25)],
+        [(16, 28, 67), (10, 10, 13), (10, 11, 16), (11, 15, 28)],
+        [(16, 44, 115), (10, 19, 40), (10, 19, 40), (11, 14, 25)],
+        [(16, 23, 52), (10, 9, 10), (11, 9, 10), (10, 13, 22)],
+        [(17, 26, 61), (10, 11, 16), (11, 10, 13), (11, 13, 22)],
+        [(17, 25, 58), (10, 9, 10), (10, 9, 10), (10, 15, 28)],
+    ];
     let mut value = artifact();
-    with_node_series(&mut value.voter, 1, |cycle| {
-        counts(12, drain(cycle) + u64::from(cycle >= 12), 10)
-    });
-    assert!(validate_transport_recovery_artifact(&value).is_err());
+    for node in 0..4 {
+        with_node_series(&mut value.voter, node, |cycle| {
+            let (threads, sockets, tasks) = SERIES[cycle as usize - 1]
+                .get(node)
+                .copied()
+                .expect("four nodes per cycle");
+            counts(threads, sockets, tasks)
+        });
+    }
+    let envelopes = &value.voter.resource_envelopes;
+    assert_eq!(envelopes.nodes[3].opening.floor, counts(10, 12, 19));
+    assert_eq!(envelopes.nodes[3].closing.floor, counts(10, 13, 22));
+    let verdict = resource_envelope_verdict(
+        envelopes,
+        &value.voter.cycles,
+        ResourceEnvelopeAllowances {
+            threads: THREAD_ENVELOPE_ALLOWANCE,
+            sockets: SOCKET_ENVELOPE_ALLOWANCE,
+            owned_async_tasks: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
+        },
+    );
+    assert!(verdict.leaks.is_empty(), "{:?}", verdict.leaks);
+    assert!(
+        verdict
+            .rises_within_noise
+            .contains(&"node 4 sockets floor rose 12 -> 13 (allowance 0)".to_owned()),
+        "{:?}",
+        verdict.rises_within_noise
+    );
+    validate_transport_recovery_artifact(&value).expect("run 9084 is not a leak");
+
+    // On the leader, whose noise is the widest (23-44 sockets), the same
+    // values carrying a socket leaked every recovery are a trend, and fifty
+    // sockets leaked at once at cycle 8 are a step the ranks alone miss.
+    for (leak, shape) in [
+        (
+            (|cycle: u32| u64::from(cycle)) as fn(u32) -> u64,
+            "rose across the campaign",
+        ),
+        (
+            |cycle: u32| if cycle >= 8 { 50 } else { 0 },
+            "stepped above every earlier cycle",
+        ),
+    ] {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 0, |cycle| {
+            let (threads, sockets, tasks) = SERIES[cycle as usize - 1][0];
+            counts(threads, sockets + leak(cycle), tasks)
+        });
+        let error = validate_transport_recovery_artifact(&value).expect_err("a leader leak");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("node 1 sockets"), "{rendered}");
+        assert!(rendered.contains(shape), "{rendered}");
+    }
+
+    // The same values with a socket leaked every recovery on node 4 are.
     let mut value = artifact();
-    with_node_series(&mut value.voter, 1, |cycle| {
-        counts(12, drain(cycle) + u64::from(cycle >= 15), 10)
+    with_node_series(&mut value.voter, 3, |cycle| {
+        let (threads, sockets, tasks) = SERIES[cycle as usize - 1][3];
+        counts(threads, sockets + u64::from(cycle), tasks)
     });
-    validate_transport_recovery_artifact(&value).expect("the documented miss");
-    let mut value = artifact();
-    with_node_series(&mut value.voter, 1, |cycle| {
-        counts(12, drain(cycle) + u64::from(cycle.saturating_sub(14)), 10)
-    });
-    assert!(validate_transport_recovery_artifact(&value).is_err());
-    let mut value = artifact();
-    with_node_series(&mut value.voter, 1, |cycle| {
-        counts(12, drain(cycle) + u64::from(cycle.saturating_sub(17)), 10)
-    });
-    validate_transport_recovery_artifact(&value).expect("the documented miss");
+    let error = validate_transport_recovery_artifact(&value).expect_err("a leak on that noise");
+    assert!(
+        format!("{error:#}").contains("node 4 sockets floor rose"),
+        "{error:#}"
+    );
+}
+
+/// The trend test's null distribution is exact: the inversion counts of
+/// every distinct ordering of the multiset. Distinct values give the
+/// Mahonian numbers, ties give the q-binomial, and the counts sum to the
+/// number of distinct orderings.
+#[test]
+fn the_trend_null_distribution_counts_every_ordering_exactly() {
+    assert_eq!(
+        inversion_distribution(&[1, 2, 3, 4]),
+        vec![1, 3, 5, 6, 5, 3, 1]
+    );
+    // Two 8s and two 9s: the six orderings have 0,1,2,2,3,4 inversions.
+    assert_eq!(inversion_distribution(&[8, 9, 8, 9]), vec![1, 1, 2, 1, 1]);
+    assert_eq!(inversion_distribution(&[5; 20]), vec![1]);
+    let twenty = (1..=20_u64).collect::<Vec<_>>();
+    assert_eq!(
+        inversion_distribution(&twenty).iter().sum::<u128>(),
+        (1..=20_u128).product::<u128>()
+    );
+
+    // A constant series is never a trend, whatever the envelope says.
+    assert!(!upward_trend_is_significant(&[9; 20]));
+    // A strictly rising series is the one ordering with no inversions.
+    assert!(upward_trend_is_significant(&twenty));
+    // Each test spends half the family bound, 1/20000. Six late 9s among
+    // fourteen 8s: p = 1 / C(20, 6) = 1/38760, inside; five late 9s:
+    // p = 1 / C(20, 5) = 1/15504, outside.
+    let late = |high: u32| {
+        (1..=20_u32)
+            .map(|cycle| if cycle > 20 - high { 9 } else { 8 })
+            .collect::<Vec<u64>>()
+    };
+    assert!(upward_trend_is_significant(&late(6)));
+    assert!(!upward_trend_is_significant(&late(5)));
+}
+
+/// The step test's bound is the probability that the largest values land
+/// last: one sorted gap at split `s` gives `1 / C(n, s)` exactly, and the
+/// common denominator divides every binomial of the row.
+#[test]
+fn the_step_separation_bound_is_the_chance_the_largest_values_land_last() {
+    assert_eq!(binomial(20, 10), 184_756);
+    for n in 1..=20 {
+        let common = binomial_row_common_multiple(n);
+        for k in 0..=n {
+            assert_eq!(common % binomial(n, k), 0, "C({n}, {k})");
+        }
+    }
+    let step = |at: u32, height: u64| {
+        (1..=20_u32)
+            .map(|cycle| 8 + if cycle >= at { height } else { 0 })
+            .collect::<Vec<u64>>()
+    };
+    // Six cycles above the rest: 1 / C(20, 6) = 1/38760 < 1/20000.
+    assert!(step_separation_is_significant(&step(15, 1)));
+    // Five: 1/15504, not.
+    assert!(!step_separation_is_significant(&step(16, 1)));
+    // A step at cycle 8 leaves thirteen high samples, 1/C(20, 7) = 1/77520;
+    // one at cycle 3 leaves eighteen, 1/C(20, 2) = 1/190.
+    assert!(step_separation_is_significant(&step(8, 50)));
+    assert!(!step_separation_is_significant(&step(3, 50)));
+    // Overlapping halves are no step, whatever their size.
+    let mut overlapping = step(11, 50);
+    overlapping[2] = 100;
+    assert!(!step_separation_is_significant(&overlapping));
+    assert!(!step_separation_is_significant(&[9; 20]));
 }
 
 /// Exactly the measured shape: one connection and one owned task per
@@ -1380,12 +1562,13 @@ fn a_single_high_sample_in_either_window_is_recorded_not_rejected() {
 /// The closing ceiling is the fourth-highest sample: three cycles that
 /// reached a count the opening window never did are spikes — a
 /// replacement connection, a slower drain, a blocking thread that had
-/// not idled out — and four are a trend. The opening ceiling is the
+/// not idled out — and four lift the ceiling, which is a leak only when
+/// they also rise across the campaign. The opening ceiling is the
 /// highest of its cycles, so a spike there raises the bar for the
 /// closing window rather than lowering it, and the warmup baseline,
 /// which nothing recomputes, bounds the floor only.
 #[test]
-fn three_high_closing_samples_are_spikes_and_four_are_a_trend() {
+fn three_high_closing_samples_are_spikes_and_four_are_a_leak_only_as_a_trend() {
     let mut value = artifact();
     with_node_series(&mut value.voter, 0, |cycle| {
         counts(12, if [12, 15, 19].contains(&cycle) { 9 } else { 8 }, 10)
@@ -1399,6 +1582,10 @@ fn three_high_closing_samples_are_spikes_and_four_are_a_trend() {
         8
     );
 
+    // Four scattered high samples lift the closing ceiling, but four of
+    // ten closing samples one higher is not growth until it rises across
+    // the campaign (p = 1/40 here): the rise is printed, not failed. The
+    // same samples held over the last six cycles are a step.
     let mut value = artifact();
     with_node_series(&mut value.voter, 0, |cycle| {
         counts(
@@ -1411,7 +1598,25 @@ fn three_high_closing_samples_are_spikes_and_four_are_a_trend() {
             10,
         )
     });
-    let error = validate_transport_recovery_artifact(&value).expect_err("four samples");
+    let verdict = resource_envelope_verdict(
+        &value.voter.resource_envelopes,
+        &value.voter.cycles,
+        ResourceEnvelopeAllowances {
+            threads: THREAD_ENVELOPE_ALLOWANCE,
+            sockets: SOCKET_ENVELOPE_ALLOWANCE,
+            owned_async_tasks: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
+        },
+    );
+    assert_eq!(
+        verdict.rises_within_noise,
+        vec!["node 1 sockets ceiling rose 8 -> 9 (allowance 0)".to_owned()]
+    );
+    validate_transport_recovery_artifact(&value).expect("four scattered samples");
+    let mut value = artifact();
+    with_node_series(&mut value.voter, 0, |cycle| {
+        counts(12, if cycle > 14 { 9 } else { 8 }, 10)
+    });
+    let error = validate_transport_recovery_artifact(&value).expect_err("six late samples");
     assert!(
         format!("{error:#}").contains("node 1 sockets ceiling rose 8 -> 9"),
         "{error:#}"

@@ -1,5 +1,6 @@
 use super::shared::AttachmentPurpose;
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 /// One request's resolved native recipe, before any rendition is attached.
 struct PreparedVodRecipe {
@@ -169,11 +170,11 @@ impl VodServe {
             .ok_or(PreparationError::Yield("lease_lost"))?;
         let readers = rendition.readers.lock().await;
         let manifest = rendition.manifest.lock().await;
-        if !rendition
-            .source
-            .as_ref()
-            .is_some_and(|source| source.unchanged() && source.object_version() == source_version)
-        {
+        // The readers and manifest locks are held here: check in place, so they are
+        // never held while queued for a media slot.
+        if !rendition.source.as_ref().is_some_and(|source| {
+            source.object_version() == source_version && source.unchanged_in_place()
+        }) {
             return Err(PreparationError::Stop("source_changed"));
         }
         if rendition.recipe.retained_logical.as_ref() != Some(&logical) {
@@ -1486,7 +1487,7 @@ impl VodServe {
                     || child
                         .source
                         .as_ref()
-                        .is_some_and(|source| !source.unchanged())
+                        .is_some_and(|source| !source.unchanged_in_place())
             }) {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_source_rescan_required",
@@ -2096,7 +2097,7 @@ impl SourceCopyReadiness {
         &self,
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
     ) -> bool {
-        self.assignment.same_identity(assignment) && self._source.unchanged()
+        self.assignment.same_identity(assignment) && self._source.unchanged_in_place()
     }
 }
 
@@ -2128,7 +2129,6 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
-                processing_note: None,
                 session_id: session_id.into(),
                 // A split copy's entry point is its family master: the
                 // video-only index alone would play without any soundtrack.
@@ -2204,12 +2204,7 @@ impl ReservedSourceVodRendition {
             if let Some(cause) = self.rendition.failure_cause() {
                 return Err(cause);
             }
-            if self
-                .rendition
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
-            {
+            if self.rendition.source.as_ref().missing_or_changed().await {
                 return Err("Source physical identity changed before readiness".into());
             }
             if let Some(verdict) = demand.expired_verdict().await {
@@ -3455,6 +3450,7 @@ mod principal_demand_tests {
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             control_sequence: None,
             file_id,
             playback_id: "shared-demand".to_owned(),

@@ -39,6 +39,23 @@ fn refused() -> ApiError {
         "Shared decision authority is unavailable",
     )
 }
+/// A wait that outlived the decision's budget is still a wait, but no client
+/// retries a decision on its own: every one retries only its create. So it is
+/// answered with its own code, `sharing_decision_busy` and the Source's
+/// `Retry-After`, which no client reads as a "still starting" preparing
+/// surface: each stops and offers Try again, as it did before, now saying the
+/// host is busy rather than that it could not determine how to play.
+fn decision_upstream_failure(error: crate::sharing_client::PeerError) -> ApiError {
+    match error {
+        crate::sharing_client::PeerError::Busy { retry_after_secs } => ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "sharing_decision_busy",
+            message: "The sharing host is busy. Try again shortly.".into(),
+            retry_after_seconds: retry_after_secs,
+        },
+        _ => refused(),
+    }
+}
 fn invalid() -> ApiError {
     ApiError::typed(
         StatusCode::BAD_REQUEST,
@@ -63,13 +80,16 @@ async fn decision(
     Path((item, file)): Path<(String, String)>,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let _permit = DECISIONS.clone().try_acquire_owned().map_err(|_| {
-        ApiError::typed(
-            StatusCode::TOO_MANY_REQUESTS,
-            "sharing_decision_capacity",
-            "Shared decision capacity is busy",
-        )
-    })?;
+    // Load, not an outage: the receiver waits this out (honour_peer_wait).
+    let _permit = DECISIONS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "sharing_decision_capacity",
+            message: "Shared decision capacity is busy".into(),
+            retry_after_seconds: 1,
+        })?;
     tokio::time::timeout(Duration::from_secs(10), async {
         let bytes = to_bytes(body, 128 * 1024).await.map_err(|_| invalid())?;
         let input: SourceDecisionRequest = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
@@ -326,8 +346,8 @@ async fn viewer_decision(
         .read_file_decision(&state, user.id, &reference, &input)
         .await
         .map_err(|error| {
-            tracing::warn!(phase = "upstream", %import_id, file_id = reference.file_id.as_str(), code = super::sharing::peer_error_code(&error), "shared playback decision failed");
-            refused()
+            tracing::warn!(phase = "upstream", %import_id, file_id = reference.file_id.as_str(), code = super::sharing::peer_error_code(&error), ?error, "shared playback decision failed");
+            decision_upstream_failure(error)
         })?;
     let file = reference
         .file_id
@@ -354,4 +374,57 @@ async fn viewer_decision(
         serde_json::to_value(projected).map_err(|_| refused())?,
     )
     .await
+}
+
+#[cfg(test)]
+mod decision_upstream_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    /// Regression (M4 Air, 2026-11-23 16:06:36Z, 'Avatar'): a busy upstream
+    /// decision reached the viewer as `sharing_decision_unavailable`, "could
+    /// not determine how to play this file". A wait that outlived the read is
+    /// `sharing_decision_busy` with the Source's wait: not the verdict, and not
+    /// `media_session_overloaded`, which every client shows as "still
+    /// starting" with nothing retrying the decision. A real refusal is still
+    /// the verdict.
+    #[tokio::test]
+    async fn a_busy_decision_upstream_is_a_typed_wait_not_a_verdict() {
+        use crate::sharing_client::PeerError;
+        let code = |response: axum::response::Response| async move {
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("typed body");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("typed json")["code"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        let busy = decision_upstream_failure(PeerError::Busy {
+            retry_after_secs: 2,
+        })
+        .into_response();
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            busy.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("2")
+        );
+        assert_eq!(code(busy).await.as_deref(), Some("sharing_decision_busy"));
+        for refusal in [
+            PeerError::Rejected(StatusCode::NOT_FOUND),
+            PeerError::Unavailable,
+            PeerError::InvalidResponse,
+        ] {
+            let response = decision_upstream_failure(refusal).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .is_none(),
+                "{refusal:?}"
+            );
+        }
+    }
 }

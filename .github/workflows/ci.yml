@@ -1,11 +1,11 @@
 name: ci
 
-# Full runtime sweep: manual or an explicit release tag only. Main pull
-# requests use main-fast-lane.yml after their one review; merging allocates no
-# second sweep and deployment remains explicit.
+# Full runtime sweep: manual dispatch only. Main pull requests use
+# main-fast-lane.yml after their one review; merging allocates no second
+# sweep and deployment remains explicit. A release tag does not start it:
+# release-tag.yml publishes a tag from the gate its release commit already
+# passed, without retesting it (Paul, 2026-11-25).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       retained_units_sha256:
@@ -66,7 +66,7 @@ concurrency:
   group: ci-${{ github.ref }}
   # A final promotion candidate must survive a newer event long enough to
   # retain a diagnostic result. Ordinary PRs and main pushes still supersede
-  # their older work; tags remain immutable evidence. Workflow concurrency is
+  # their older work. Workflow concurrency is
   # evaluated before jobs, so this intentionally uses event context only.
   cancel-in-progress: >-
     ${{
@@ -1996,7 +1996,10 @@ jobs:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
-          retention-days: 90
+          # About 300 MB per run. Held 90 days, they reached 29 GB on the forge's
+          # disk and kept growing; 14 is the server default every other evidence
+          # artifact uses. Native receipts adopt journeys from the last 14 days.
+          retention-days: 14
       - name: Delete the run's simulators
         if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: |
@@ -2407,20 +2410,6 @@ jobs:
           BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
         run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
 
-  # CD validates the tag in this workflow, then delegates artifact construction,
-  # per-platform smoke, and alias publication to the manually recoverable release
-  # workflow. A cancelled tag run can therefore be recovered without moving it.
-  publish:
-    name: publish image (local registry)
-    needs: [scope, check, package_smoke]
-    if: >-
-      startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
-      inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
-      needs.scope.outputs.qualification != 'true'
-    uses: ./.github/workflows/publish-release.yml
-    with:
-      release_tag: ${{ github.ref_name }}
-
   # Only an operator's manual dispatch on main may publish a sha- image.
   # Merging allocates no runtime sweep or image build (P-01 option (a)); the
   # dispatch proves that exact main tree before moving the fleet image alias.
@@ -2748,7 +2737,6 @@ jobs:
       - apple
       - android_device
       - package_smoke
-      - publish
       - publish_main
       - pr_gate
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -2779,7 +2767,7 @@ jobs:
             ${{ needs.web_layout.result }} ${{ needs.vod_web.result }}
             ${{ needs.android_jvm.result }} ${{ needs.apple.result }}
             ${{ needs.android_device.result }}
-            ${{ needs.package_smoke.result }} ${{ needs.publish.result }}
+            ${{ needs.package_smoke.result }}
             ${{ needs.publish_main.result }} ${{ needs.pr_gate.result }}
         run: |
           message=passing; fill='#4c1'; color=brightgreen

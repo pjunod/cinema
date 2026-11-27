@@ -309,6 +309,19 @@ struct SourceStartIdentity {
 /// The typed refusal an older Source answers a Dolby Vision delivery it did
 /// not build with. This Source never sends it (every shape local delivers is
 /// planned and built); B keeps decoding it for older peers.
+/// Every typed 422 a Source Start answers, as [`SourceStartFailure::response`]
+/// writes it: what a refusal of the title itself (not of this attempt) is
+/// called. A receiver relays any of these to its viewer as it is, rather
+/// than as its own "unresolved".
+pub(crate) const SOURCE_START_REFUSAL_CODES: &[&str] = &[
+    "copy_target_exceeded",
+    "copy_clock_unknown",
+    "copy_sync_unverified",
+    "copy_range_input_limit",
+    "copy_observation_skew",
+    "hevc_configuration_unsupported",
+    "sharing_start_unsupported",
+];
 pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
     "sharing_start_dolby_vision_unsupported";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,6 +333,9 @@ enum SourceStartFailure {
     CopyInitContractChanged,
     CopyClockUnknown,
     CopySyncUnverified,
+    CopyInputLimit,
+    CopyOutputSkew,
+    HevcConfigurationUnsupported,
     Capacity,
     Conflict,
     Unresolved,
@@ -1260,6 +1276,9 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
             E::CopyInitContractChanged => Self::CopyInitContractChanged,
             E::CopyClockUnknown => Self::CopyClockUnknown,
             E::CopySyncUnverified => Self::CopySyncUnverified,
+            E::CopyInputLimit => Self::CopyInputLimit,
+            E::CopyOutputSkew => Self::CopyOutputSkew,
+            E::HevcConfigurationUnsupported => Self::HevcConfigurationUnsupported,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1277,6 +1296,12 @@ impl SourceStartFailure {
             Self::CopyInitContractChanged => (StatusCode::CONFLICT, "copy_init_contract_changed"),
             Self::CopyClockUnknown => (StatusCode::UNPROCESSABLE_ENTITY, "copy_clock_unknown"),
             Self::CopySyncUnverified => (StatusCode::UNPROCESSABLE_ENTITY, "copy_sync_unverified"),
+            Self::CopyInputLimit => (StatusCode::UNPROCESSABLE_ENTITY, "copy_range_input_limit"),
+            Self::CopyOutputSkew => (StatusCode::UNPROCESSABLE_ENTITY, "copy_observation_skew"),
+            Self::HevcConfigurationUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "hevc_configuration_unsupported",
+            ),
             Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (
@@ -2937,7 +2962,9 @@ async fn build_real_source_start_fixture(
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
-    drop((raft, api));
+    // Keep the bound sockets: the voter serves on them, so no other socket
+    // can take either port before it starts.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     let startup_clock = advertised_http.map(|listener| {
         Arc::new(
             crate::StartupObservationHttp::from_listener(listener)

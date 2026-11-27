@@ -90,14 +90,17 @@ impl EmbeddedSingleton {
     async fn start() -> Self {
         install_contract_crypto_provider();
         let root = tempfile::tempdir().expect("applied-view singleton root");
-        let ports = contract_free_ports(2);
+        // The node serves on sockets this process already holds, so no other
+        // socket can take its ports between choosing them and starting.
+        let sockets = ContractNodeSockets::bind_loopback();
         let client = Box::pin(hiqlite::start_node(NodeConfig {
             node_id: 1,
             nodes: vec![Node {
                 id: 1,
-                addr_raft: format!("127.0.0.1:{}", ports[0]),
-                addr_api: format!("127.0.0.1:{}", ports[1]),
+                addr_raft: sockets.raft_address(),
+                addr_api: sockets.api_address(),
             }],
+            listeners: Some(sockets.node_listeners()),
             listen_addr_api: Cow::Borrowed("127.0.0.1"),
             listen_addr_raft: Cow::Borrowed("127.0.0.1"),
             data_dir: Cow::Owned(root.path().join("node").to_string_lossy().into_owned()),
@@ -950,76 +953,62 @@ struct LaggingLearner {
 #[cfg(feature = "cluster-read-cost-validation")]
 impl LaggingLearner {
     async fn start() -> Self {
-        const ATTEMPTS: usize = 5;
         install_contract_crypto_provider();
-        for attempt in 1..=ATTEMPTS {
-            let (cluster, specs) = match ContractCluster::try_start_sized(2, 1).await {
-                Ok(started) => started,
-                Err(ContractStartError::PortCollision) if attempt < ATTEMPTS => continue,
-                Err(ContractStartError::PortCollision) => {
-                    panic!("lagging-learner voters exhausted {ATTEMPTS} port attempts")
-                }
-                Err(ContractStartError::Failed(error)) => {
-                    panic!("lagging-learner voters failed to start: {error}")
-                }
-            };
-            // The plurx schema goes in through the voters, as production's
-            // voter installs it; the learner then opens the replicated store.
-            drop(open_contract_hiqlite_store(&cluster).await);
-            let learner = specs.last().expect("the learner spec").clone();
-            let data_dir = cluster._root.path().join(format!("node-{}", learner.id));
-            std::fs::create_dir_all(&data_dir).expect("learner data directory");
-            let started = hiqlite::start_node(NodeConfig {
-                node_id: learner.id,
-                learner_only: true,
-                nodes: specs
-                    .iter()
-                    .map(|node| Node {
-                        id: node.id,
-                        addr_raft: node.raft.clone(),
-                        addr_api: node.api.clone(),
-                    })
-                    .collect(),
-                listen_addr_api: Cow::Borrowed("127.0.0.1"),
-                listen_addr_raft: Cow::Borrowed("127.0.0.1"),
-                data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
-                filename_db: Cow::Borrowed("contract.db"),
-                secret_raft: CONTRACT_RAFT_SECRET.to_owned(),
-                secret_api: CONTRACT_API_SECRET.to_owned(),
-                tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
-                tls_api: Some(ServerTlsConfig::TlsAutoCertificates),
-                health_check_delay_secs: 0,
-                wal_size: HIQLITE_WAL_SIZE_BYTES,
-                raft_config: NodeConfig::default_raft_config(10_000),
-                ..plurx_core::cluster::migration::production_hiqlite_defaults_with_read_pool(2)
-            })
-            .await;
-            let client = match started {
-                Ok(client) => client,
-                Err(error)
-                    if attempt < ATTEMPTS
-                        && error.to_string().to_ascii_lowercase().contains("in use") =>
-                {
-                    continue
-                }
-                Err(error) => panic!("start the in-process learner: {error}"),
-            };
-            tokio::time::timeout(Duration::from_secs(60), client.wait_until_healthy_db())
-                .await
-                .expect("the learner joins within a minute");
-            let store = HiqliteAuthStore::open(
-                client.clone(),
-                &cluster._root.path().join("learner-telemetry.db"),
-            )
+        let (cluster, specs, mut spare_sockets) = match ContractCluster::try_start_sized(2, 1).await
+        {
+            Ok(started) => started,
+            Err(ContractStartError::Failed(error)) => {
+                panic!("lagging-learner voters failed to start: {error}")
+            }
+        };
+        // The plurx schema goes in through the voters, as production's
+        // voter installs it; the learner then opens the replicated store.
+        drop(open_contract_hiqlite_store(&cluster).await);
+        let learner = specs.last().expect("the learner spec").clone();
+        let learner_sockets = spare_sockets.pop().expect("the learner's sockets");
+        let data_dir = cluster._root.path().join(format!("node-{}", learner.id));
+        std::fs::create_dir_all(&data_dir).expect("learner data directory");
+        let client = hiqlite::start_node(NodeConfig {
+            node_id: learner.id,
+            learner_only: true,
+            nodes: specs
+                .iter()
+                .map(|node| Node {
+                    id: node.id,
+                    addr_raft: node.raft.clone(),
+                    addr_api: node.api.clone(),
+                })
+                .collect(),
+            listen_addr_api: Cow::Borrowed("127.0.0.1"),
+            listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+            listeners: Some(learner_sockets.node_listeners()),
+            data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
+            filename_db: Cow::Borrowed("contract.db"),
+            secret_raft: CONTRACT_RAFT_SECRET.to_owned(),
+            secret_api: CONTRACT_API_SECRET.to_owned(),
+            tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
+            tls_api: Some(ServerTlsConfig::TlsAutoCertificates),
+            health_check_delay_secs: 0,
+            wal_size: HIQLITE_WAL_SIZE_BYTES,
+            raft_config: NodeConfig::default_raft_config(10_000),
+            ..plurx_core::cluster::migration::production_hiqlite_defaults_with_read_pool(2)
+        })
+        .await
+        .unwrap_or_else(|error| panic!("start the in-process learner: {error}"));
+        tokio::time::timeout(Duration::from_secs(60), client.wait_until_healthy_db())
             .await
-            .expect("open the replicated store on the learner");
-            return Self {
-                client,
-                store: Arc::new(store),
-                _cluster: cluster,
-            };
+            .expect("the learner joins within a minute");
+        let store = HiqliteAuthStore::open(
+            client.clone(),
+            &cluster._root.path().join("learner-telemetry.db"),
+        )
+        .await
+        .expect("open the replicated store on the learner");
+        Self {
+            client,
+            store: Arc::new(store),
+            _cluster: cluster,
         }
-        unreachable!("the start loop returns or panics")
     }
 
     fn mark(&self) -> hiqlite::AppliedMarkHandle {

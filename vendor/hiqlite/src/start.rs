@@ -208,9 +208,19 @@ where
     // Bind both externally advertised sockets before starting either detached
     // server task. A successful `start_node` must mean this exact process owns
     // both listeners; otherwise a late bind failure can be hidden in a spawned
-    // task while callers publish the node as ready.
-    let listener_raft = bind_listener(&rpc_addr, "Raft")?;
-    let listener_api = bind_listener(&api_addr, "API")?;
+    // task while callers publish the node as ready. A caller that already owns
+    // them hands them over instead, so its bind is the socket that serves and
+    // no other socket can take either port between its bind and this one.
+    let (listener_raft, listener_api) = match node_config.listeners.take() {
+        Some(owned) => (
+            adopt_listener(owned.raft, &rpc_addr, "Raft")?,
+            adopt_listener(owned.api, &api_addr, "API")?,
+        ),
+        None => (
+            bind_listener(&rpc_addr, "Raft")?,
+            bind_listener(&api_addr, "API")?,
+        ),
+    };
 
     #[cfg(feature = "sqlite")]
     let (tx_client_stream, rx_client_stream) = flume::bounded(1);
@@ -534,6 +544,34 @@ fn bind_listener(addr: &str, role: &str) -> Result<StdTcpListener, Error> {
     Ok(listener)
 }
 
+/// Serve on a listener the caller bound, but only if it is bound to the very
+/// address this node would otherwise bind; a different socket would serve a
+/// port the roster does not advertise.
+fn adopt_listener(
+    listener: StdTcpListener,
+    addr: &str,
+    role: &str,
+) -> Result<StdTcpListener, Error> {
+    let owned = listener
+        .local_addr()
+        .map_err(|error| Error::Connect(format!("read owned {role} listener address: {error}")))?;
+    let expected = std::net::ToSocketAddrs::to_socket_addrs(addr)
+        .map_err(|error| Error::Connect(format!("resolve {role} listen address {addr}: {error}")))?
+        .any(|address| address == owned);
+    if !expected {
+        return Err(Error::Config(
+            format!(
+                "owned {role} listener {owned} is not bound to the {role} listen address {addr}"
+            )
+            .into(),
+        ));
+    }
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| Error::Connect(format!("configure {role} listener {addr}: {error}")))?;
+    Ok(listener)
+}
+
 /// The port will be split off from the `node_addr`
 fn build_listen_addr(listen_addr: &str, node_addr: &str, tls: bool) -> String {
     let port = if let Some((_, port)) = node_addr.split_once(':') {
@@ -607,5 +645,39 @@ mod nodelay_tests {
             accepted.get_ref().0.nodelay().expect("read TCP_NODELAY"),
             "the TLS acceptor the Raft and API listeners use must disable Nagle"
         );
+    }
+}
+
+#[cfg(test)]
+mod owned_listener_tests {
+    use super::*;
+
+    #[test]
+    fn an_owned_listener_is_served_without_binding_its_address_again() {
+        let owned = StdTcpListener::bind("127.0.0.1:0").expect("caller-owned listener");
+        let address = owned.local_addr().expect("owned address").to_string();
+        let adopted = adopt_listener(owned, &address, "Raft").expect("adopt the owned listener");
+        assert_eq!(
+            adopted.local_addr().expect("adopted address").to_string(),
+            address
+        );
+        assert_eq!(
+            adopted.accept().expect_err("no pending connection").kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the adopted listener is configured like a bound one"
+        );
+        assert!(
+            bind_listener(&address, "Raft").is_err(),
+            "the caller's socket still owns the port; nothing was rebound"
+        );
+    }
+
+    #[test]
+    fn an_owned_listener_on_another_address_is_refused() {
+        let owned = StdTcpListener::bind("127.0.0.1:0").expect("caller-owned listener");
+        let other = StdTcpListener::bind("127.0.0.1:0").expect("another listener");
+        let address = other.local_addr().expect("other address").to_string();
+        let error = adopt_listener(owned, &address, "API").expect_err("wrong address");
+        assert!(matches!(error, Error::Config(_)), "{error}");
     }
 }

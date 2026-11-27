@@ -47,6 +47,9 @@ RUNTIME = runtime_identifier('tvOS', XCODE.split()[1])
 # commands conditional only on affected scope; failure-preserving artifacts.
 CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
 LEGACY_JOB_SHA256 = 'c6b5c40ac94f5505d0afd1f9d724a9fec8ca4f5a077fff01a6e738933bd8a415'
+# The same producer before its TV evidence went from 90 to 14 days' retention
+# (plurx#1932): the job is unchanged, only how long its artifact is kept.
+RETENTION90_JOB_SHA256 = '7edf7a8e71d8096ce3f51b11afcab6184b6d91b51148d1668f055b12b2ade5bf'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 50000
@@ -95,7 +98,20 @@ BUILD_SPECS = {
     # the paperwork help and comment, and make android-release hand the
     # host-derived build number to Gradle as a project property; no native
     # recipe changes.
-    'Makefile': '7d7b9cb5a429c7c185cb7d8cb23c5b42b60bee749c6097a071b469659b163e7a',
+    # C4 pre-vote (#1904) changes only cluster-wal-check: eight exact vendored
+    # hiqlite pre-vote tests, the vendored OpenRaft pre-vote module, and the
+    # OpenRaft snapshot regression run from vendor/openraft instead of the
+    # registry package located through cargo metadata; no native recipe changes.
+    # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
+    # the web-unit-check recipe (a Node web test); no native recipe changes.
+    # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
+    # no native recipe changes.
+    # plurx#1953 changes only cluster-transport-recovery-contracts' expected
+    # test count from 76 to 79; no native recipe changes.
+    # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
+    # to the web-unit-check recipe (a Node playback-lab test); no native
+    # recipe changes.
+    'Makefile': '9394e64e6bec4d6291d15a3aed5386f0e7e0a62d8e84ee00e7e1efc1e5ffd34f',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
@@ -104,7 +120,8 @@ BUILD_SPECS = {
     # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
     # fingerprints and case compatibility. Resource, script, or flag changes
     # require a newly reviewed boundary, not counter normalization.
-    'clients/apple/project.yml': 'a7bc734f070f8001c1b8063ad1dcfac35e3448dec2f0bf24378e59abadb7ca7d',
+    # release: v0.9.2 changes only MARKETING_VERSION "0.9.1" -> "0.9.2".
+    'clients/apple/project.yml': 'f20d8ed75aa34011197a65bd9fa063c53440aee5eed69166b2ac1e914e33e33d',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -134,7 +151,8 @@ def native_block(workflow):
 def producer(commit, current):
     old = native_block(git('show', commit + ':' + WORKFLOW))
     now = native_block(git('show', current + ':' + WORKFLOW))
-    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256) or old == now,
+    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
+                                                         RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
     # The adapter's own adoption records are deliberately never accepted as
     # native origin evidence; producer output must still be an original pass.
@@ -143,7 +161,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "6727fdbb3e7cc765438b8978b8e3268785b9df1ea874b6affcd696e650af30a1"
+APPLE_PROJECT_SHAPE = "9ef3285ec7f9ce17eafad6719c7c53f0de0f6a090b7418f9174f9ff5ec425df0"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 

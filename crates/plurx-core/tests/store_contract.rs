@@ -132,6 +132,8 @@ mod jellyfin_play;
 mod library_schedule;
 #[path = "store_contract/offload.rs"]
 mod offload;
+#[path = "store_contract/playback_device_caps.rs"]
+mod playback_device_caps;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -447,6 +449,9 @@ const USER_METHODS: &[&str] = &[
     "authenticate_token",
     "authenticate_token_for",
     "authenticate_token_proof_for",
+    "put_device_caps",
+    "device_caps_for_user",
+    "device_caps_for_all_users",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -599,6 +604,8 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_hevc_parameter_sets",
     "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
+    "merge_file_probe_dv_levels",
+    "files_missing_dv_levels",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -883,6 +890,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "abort_foreground_source_activation",
     "mark_foreground_source_settled",
     "reap_settled_source_custody",
+    // store_contract/background_jobs.rs `expired_lease_sweep_requeues_with_takeover_bookkeeping`.
+    "requeue_expired_running_jobs",
     "settled_foreground_source_custody",
     "activate_background_source_custody",
     "abort_background_source_activation",
@@ -13107,7 +13116,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,6)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,7)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -13312,11 +13321,11 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
                 .await
                 .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
         );
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(6),
-            "{round}: exact managed v6 view, marker and guards"
+            queue_fixture::managed_fixture_shape(7),
+            "{round}: exact managed v7 view, marker and guards"
         );
         assert_eq!(
             replicated_fixture_shape(&client, custody_shape).await,
@@ -13412,7 +13421,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         custody_before
     );
     require_replicated_fixture_marker(&client, "background_custody_retention_schema", 1).await;
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13723,7 +13732,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 6).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 7).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13760,7 +13769,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=6) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=7) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13792,7 +13801,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 6, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 7, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13871,7 +13880,7 @@ async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)
         .collect::<Vec<_>>();
     rewind_empty_managed_subtitle_extension(client).await;
     let mut rows = client
-        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name IN ('analysis_required_resources','analysis_source_scope_schema') OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
     let statements = rows
         .iter_mut()
@@ -14401,7 +14410,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 6",
+             WHERE singleton = 1 AND version = 7",
             1,
         ),
         (
@@ -14428,11 +14437,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(6),
-            "{round}: exact current managed v6 view, marker and guards",
+            queue_fixture::managed_fixture_shape(7),
+            "{round}: exact current managed v7 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -18689,6 +18698,9 @@ struct ContractNodeLaunch {
     learner_only: bool,
     root: PathBuf,
     nodes: Vec<ContractNodeSpec>,
+    /// The descriptors of this node's own Raft and API sockets, bound by the
+    /// parent and inherited across exec.
+    sockets: ContractInheritedSockets,
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -18708,7 +18720,6 @@ struct ContractCluster {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Debug)]
 enum ContractStartError {
-    PortCollision,
     Failed(String),
 }
 
@@ -18722,75 +18733,64 @@ struct ContractStartupEvent {
 #[cfg(feature = "hiqlite-contract-tests")]
 impl ContractCluster {
     async fn start() -> Self {
-        const ATTEMPTS: usize = 5;
         install_contract_crypto_provider();
-        for attempt in 1..=ATTEMPTS {
-            match Self::try_start().await {
-                Ok(cluster) => return cluster,
-                Err(ContractStartError::PortCollision) if attempt < ATTEMPTS => continue,
-                Err(ContractStartError::PortCollision) => {
-                    panic!("three-voter contract exhausted {ATTEMPTS} port-bind attempts")
-                }
-                Err(ContractStartError::Failed(error)) => {
-                    panic!("three-voter contract startup failed: {error}")
-                }
+        match Self::try_start().await {
+            Ok(cluster) => cluster,
+            Err(ContractStartError::Failed(error)) => {
+                panic!("three-voter contract startup failed: {error}")
             }
         }
-        unreachable!("contract startup loop returns or panics")
     }
 
     async fn try_start() -> Result<Self, ContractStartError> {
         Self::try_start_sized(3, 0)
             .await
-            .map(|(cluster, _)| cluster)
+            .map(|(cluster, _, _)| cluster)
     }
 
-    /// `voters` child voters, and the specs of every node: the voters first,
-    /// then `spares` further nodes whose ports were reserved in the same
-    /// allocation, for a caller that starts them itself (an in-process
-    /// learner with a local client and a mark).
+    /// `voters` child voters, the specs of every node (the voters first, then
+    /// `spares` further nodes), and the sockets of the spare nodes in spec
+    /// order, for a caller that starts them itself (an in-process learner
+    /// with a local client and a mark) on the very sockets whose ports the
+    /// specs name.
     async fn try_start_sized(
         voters: u64,
         spares: u64,
-    ) -> Result<(Self, Vec<ContractNodeSpec>), ContractStartError> {
+    ) -> Result<(Self, Vec<ContractNodeSpec>, Vec<ContractNodeSockets>), ContractStartError> {
         let root = tempfile::tempdir().expect("three-voter contract root");
-        // Select the complete port set while all probe listeners coexist,
-        // so one call cannot contain duplicate port numbers. The listeners
-        // must be released before Hiqlite can bind; try_start reports that
-        // remaining cross-process race and start() reallocates the whole set.
-        let mut ports =
-            contract_free_ports(2 * usize::try_from(voters + spares).expect("node count"))
-                .into_iter();
-        let mut specs = (1..=voters + spares)
-            .map(|id| ContractNodeSpec {
-                id,
-                raft: format!(
-                    "127.0.0.1:{}",
-                    ports.next().expect("reserved contract Raft port")
-                ),
-                api: format!(
-                    "127.0.0.1:{}",
-                    ports.next().expect("reserved contract API port")
-                ),
-            })
+        // Every node's sockets are bound here and stay bound: a voter child
+        // inherits its own pair by descriptor and a spare is handed back to
+        // the caller, so no port is ever released between being chosen and
+        // being served on, and no other socket on the host can take it.
+        let mut sockets = (1..=voters + spares)
+            .map(|_| ContractNodeSockets::bind_loopback())
             .collect::<Vec<_>>();
-        let all_specs = specs.clone();
+        let all_specs = sockets
+            .iter()
+            .zip(1..)
+            .map(|(node, id)| node.spec(id))
+            .collect::<Vec<_>>();
+        let mut specs = all_specs.clone();
         specs.truncate(usize::try_from(voters).expect("voter count"));
         let executable = std::env::current_exe().expect("contract test executable");
         let mut starting = Vec::new();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         for node_id in 1..=voters {
+            let mut command = Command::new(&executable);
+            command
+                .arg("hiqlite_contract_node_process")
+                .arg("--ignored")
+                .arg("--exact")
+                .arg("--nocapture");
             let launch = ContractNodeLaunch {
                 node_id,
                 learner_only: false,
                 root: root.path().to_path_buf(),
                 nodes: specs.clone(),
+                sockets: sockets[usize::try_from(node_id - 1).expect("voter index")]
+                    .inherit(&mut command),
             };
-            let mut child = Command::new(&executable)
-                .arg("hiqlite_contract_node_process")
-                .arg("--ignored")
-                .arg("--exact")
-                .arg("--nocapture")
+            let mut child = command
                 .env(
                     "PLURX_CONTRACT_NODE_LAUNCH",
                     serde_json::to_string(&launch).expect("serialize node launch"),
@@ -18816,9 +18816,6 @@ impl ContractCluster {
                         Ok(_) if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") => {
                             break Ok(());
                         }
-                        Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_PORT_COLLISION ") => {
-                            break Err(ContractStartError::PortCollision);
-                        }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_START_FAILED ") => {
                             break Err(ContractStartError::Failed(line.trim().to_owned()));
                         }
@@ -18838,6 +18835,11 @@ impl ContractCluster {
             });
             starting.push((node_id, child, Some(input)));
         }
+        // Every voter child has been spawned and holds its own descriptors,
+        // so the parent's copies of the voters' sockets are no longer needed;
+        // only the spares' sockets outlive the spawn, for the caller.
+        let spare_sockets = sockets.split_off(specs.len());
+        drop(sockets);
 
         let mut outputs = std::collections::BTreeMap::new();
         while outputs.len() < starting.len() {
@@ -18875,6 +18877,7 @@ impl ContractCluster {
                 _nodes: nodes,
             },
             all_specs,
+            spare_sockets,
         ))
     }
 }
@@ -18917,6 +18920,9 @@ async fn hiqlite_contract_node_process() {
     let _ = ServerTlsConfig::server_config_self_signed("127.0.0.1").await;
     let data_dir = launch.root.join(format!("node-{}", launch.node_id));
     std::fs::create_dir_all(&data_dir).expect("contract node data directory");
+    // Serve on the sockets the parent bound and passed down, rather than
+    // binding the ports again, which any other socket could have taken.
+    let (raft, api) = launch.sockets.take();
     let client = match hiqlite::start_node(NodeConfig {
         node_id: launch.node_id,
         learner_only: launch.learner_only,
@@ -18931,6 +18937,7 @@ async fn hiqlite_contract_node_process() {
             .collect(),
         listen_addr_api: Cow::Borrowed("127.0.0.1"),
         listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+        listeners: Some(hiqlite::NodeListeners { raft, api }),
         data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("contract.db"),
         secret_raft: CONTRACT_RAFT_SECRET.to_owned(),
@@ -18946,21 +18953,11 @@ async fn hiqlite_contract_node_process() {
     {
         Ok(client) => client,
         Err(error) => {
-            let message = error.to_string();
-            let lower = message.to_ascii_lowercase();
-            if lower.contains("address already in use")
-                || lower.contains("addrinuse")
-                || lower.contains("os error 48")
-                || lower.contains("os error 98")
-            {
-                println!("PLURX_CONTRACT_NODE_PORT_COLLISION {}", launch.node_id);
-            } else {
-                println!(
-                    "PLURX_CONTRACT_NODE_START_FAILED {} {}",
-                    launch.node_id,
-                    message.replace(['\r', '\n'], " ")
-                );
-            }
+            println!(
+                "PLURX_CONTRACT_NODE_START_FAILED {} {}",
+                launch.node_id,
+                error.to_string().replace(['\r', '\n'], " ")
+            );
             std::io::stdout().flush().expect("flush contract failure");
             return;
         }
@@ -18986,15 +18983,139 @@ async fn hiqlite_contract_node_process() {
     std::process::exit(0);
 }
 
+/// The Raft and API listeners of one contract node, bound by the process that
+/// will own the node's lifetime.
+///
+/// Reading a port from a bound socket and dropping it before the node binds
+/// the port again lets any other socket on the host take it in between. The
+/// sockets stay bound instead: a child process inherits them by descriptor, an
+/// in-process node serves on duplicates, and the port is never unbound.
 #[cfg(feature = "hiqlite-contract-tests")]
-fn contract_free_ports(count: usize) -> Vec<u16> {
-    let listeners = (0..count)
-        .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind contract port"))
-        .collect::<Vec<_>>();
-    listeners
-        .iter()
-        .map(|listener| listener.local_addr().expect("contract port address").port())
-        .collect()
+struct ContractNodeSockets {
+    raft: TcpListener,
+    api: TcpListener,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl ContractNodeSockets {
+    fn bind_loopback() -> Self {
+        Self {
+            raft: TcpListener::bind("127.0.0.1:0").expect("bind contract Raft socket"),
+            api: TcpListener::bind("127.0.0.1:0").expect("bind contract API socket"),
+        }
+    }
+
+    fn raft_address(&self) -> String {
+        self.raft
+            .local_addr()
+            .expect("contract Raft socket address")
+            .to_string()
+    }
+
+    fn api_address(&self) -> String {
+        self.api
+            .local_addr()
+            .expect("contract API socket address")
+            .to_string()
+    }
+
+    fn spec(&self, id: u64) -> ContractNodeSpec {
+        ContractNodeSpec {
+            id,
+            raft: self.raft_address(),
+            api: self.api_address(),
+        }
+    }
+
+    /// Hand both sockets to the child `command` will spawn, and nobody else.
+    ///
+    /// Rust opens these descriptors close-on-exec and the parent keeps them
+    /// that way, so a child spawned concurrently by another test does not
+    /// inherit them. Only this command's child clears the flag, in its own
+    /// forked process just before exec.
+    fn inherit(&self, command: &mut Command) -> ContractInheritedSockets {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let raft_fd = self.raft.as_raw_fd();
+        let api_fd = self.api.as_raw_fd();
+        // SAFETY: the closure runs in the forked child before exec and only
+        // calls fcntl, which is async-signal-safe. It clears FD_CLOEXEC in the
+        // child's own descriptor table, which does not touch the parent's
+        // flags. The descriptors must still be open when `command` spawns:
+        // every caller keeps these sockets alive until `spawn` returns, and a
+        // caller that dropped them first would hand the child closed or
+        // reused descriptor numbers.
+        unsafe {
+            command.pre_exec(move || {
+                for fd in [raft_fd, api_fd] {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        ContractInheritedSockets { raft_fd, api_fd }
+    }
+
+    /// Duplicates for a node started in this process; the originals stay
+    /// bound for the lifetime of `self`.
+    fn node_listeners(&self) -> hiqlite::NodeListeners {
+        hiqlite::NodeListeners {
+            raft: self.raft.try_clone().expect("clone contract Raft socket"),
+            api: self.api.try_clone().expect("clone contract API socket"),
+        }
+    }
+
+    /// Duplicates for a parent-side [`Config`] that starts the voter in this
+    /// process, so it serves on the same sockets a child served on before.
+    fn cluster_listeners(&self) -> plurx_core::config::ClusterListeners {
+        let listeners = self.node_listeners();
+        plurx_core::config::ClusterListeners::owned(listeners.raft, listeners.api)
+    }
+}
+
+/// Descriptor numbers of the sockets a child inherited from its parent's
+/// [`ContractNodeSockets`], carried in the child's launch description.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct ContractInheritedSockets {
+    raft_fd: i32,
+    api_fd: i32,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl ContractInheritedSockets {
+    /// Placeholder in a launch the spawning code has not yet filled in: only
+    /// `inherit` knows the descriptors, and it runs when the command is built.
+    const UNSET: Self = Self {
+        raft_fd: -1,
+        api_fd: -1,
+    };
+
+    /// Take ownership of the inherited Raft and API listeners.
+    ///
+    /// Call this once per child process, in the child that inherited the
+    /// descriptors: a second call would wrap descriptors that are already
+    /// owned, and a call in any other process names unrelated descriptors.
+    fn take(self) -> (TcpListener, TcpListener) {
+        use std::os::fd::FromRawFd;
+
+        assert!(
+            self.raft_fd >= 0 && self.api_fd >= 0,
+            "launch was not given inherited sockets"
+        );
+        // SAFETY: the parent cleared close-on-exec on exactly these
+        // descriptors for this child, they are listening TCP sockets nothing
+        // else in this process owns, and this is the only call that wraps them.
+        unsafe {
+            (
+                TcpListener::from_raw_fd(self.raft_fd),
+                TcpListener::from_raw_fd(self.api_fd),
+            )
+        }
+    }
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -20848,24 +20969,22 @@ async fn a_cleartext_trakt_row_is_refused_before_any_row_reaches_raft() {
     );
 }
 
+/// A one-voter configuration whose cluster ports are bound sockets the config
+/// owns, so the voter serves on them and no port is ever released between
+/// being chosen and being served on.
+///
+/// The sockets are on loopback because fresh activation's staging voter is
+/// forced there: a held wildcard socket would refuse its bind.
 #[cfg(feature = "hiqlite-contract-tests")]
 fn one_voter_config(data_dir: &std::path::Path) -> Config {
     let mut config = Config::default();
-    let mut ports = contract_free_ports(2).into_iter();
+    let raft = TcpListener::bind("127.0.0.1:0").expect("bind one-voter Raft socket");
+    let api = TcpListener::bind("127.0.0.1:0").expect("bind one-voter API socket");
     config.storage.data_dir = data_dir.to_owned();
-    config.cluster.raft_bind = format!(
-        "0.0.0.0:{}",
-        ports.next().expect("reserved one-voter Raft port")
-    )
-    .parse()
-    .expect("raft bind");
-    config.cluster.api_bind = format!(
-        "0.0.0.0:{}",
-        ports.next().expect("reserved one-voter API port")
-    )
-    .parse()
-    .expect("api bind");
+    config.cluster.raft_bind = raft.local_addr().expect("one-voter Raft address");
+    config.cluster.api_bind = api.local_addr().expect("one-voter API address");
     config.cluster.advertise_host = "127.0.0.1".to_owned();
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     config
 }
 
@@ -20877,10 +20996,32 @@ struct ActivationNodeLaunch {
     api_bind: String,
     source_version: i64,
     first_boot: bool,
+    /// Filled in by whatever spawns the child, once it has inherited the
+    /// node's sockets into that command.
+    sockets: ContractInheritedSockets,
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
 impl ActivationNodeLaunch {
+    /// A launch on the addresses `sockets` are bound to.
+    fn new(
+        data_dir: &std::path::Path,
+        sockets: &ContractNodeSockets,
+        source_version: i64,
+        first_boot: bool,
+    ) -> Self {
+        Self {
+            data_dir: data_dir.to_owned(),
+            raft_bind: sockets.raft_address(),
+            api_bind: sockets.api_address(),
+            source_version,
+            first_boot,
+            sockets: ContractInheritedSockets::UNSET,
+        }
+    }
+
+    /// The configuration without listeners: the child gets its sockets from
+    /// the descriptors it inherited.
     fn config(&self) -> Config {
         let mut config = Config::default();
         config.storage.data_dir = self.data_dir.clone();
@@ -20888,6 +21029,23 @@ impl ActivationNodeLaunch {
         config.cluster.api_bind = self.api_bind.parse().expect("api bind");
         config.cluster.advertise_host = "127.0.0.1".to_owned();
         config
+    }
+
+    /// The configuration for the parent process, which reads the node's
+    /// addresses as a client and starts it in-process after a child has
+    /// stopped: it serves on duplicates of the same sockets the children used.
+    fn parent_config(&self, sockets: &ContractNodeSockets) -> Config {
+        let mut config = self.config();
+        config.cluster.listeners = sockets.cluster_listeners();
+        config
+    }
+
+    /// This launch with the descriptors `command` will pass to its child.
+    fn inheriting(&self, sockets: &ContractNodeSockets, command: &mut Command) -> Self {
+        Self {
+            sockets: sockets.inherit(command),
+            ..self.clone()
+        }
     }
 }
 
@@ -20900,16 +21058,19 @@ struct ActivationNodeProcess {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 impl ActivationNodeProcess {
-    fn start(launch: &ActivationNodeLaunch) -> Self {
+    fn start(launch: &ActivationNodeLaunch, sockets: &ContractNodeSockets) -> Self {
         let executable = std::env::current_exe().expect("activation test executable");
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .arg("hiqlite_activation_node_process")
             .arg("--ignored")
             .arg("--exact")
-            .arg("--nocapture")
+            .arg("--nocapture");
+        let launch = launch.inheriting(sockets, &mut command);
+        let mut child = command
             .env(
                 "PLURX_ACTIVATION_NODE_LAUNCH",
-                serde_json::to_string(launch).expect("serialize activation launch"),
+                serde_json::to_string(&launch).expect("serialize activation launch"),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -20951,16 +21112,23 @@ impl ActivationNodeProcess {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-fn run_injected_activation(launch: &ActivationNodeLaunch, failpoint: &str) {
+fn run_injected_activation(
+    launch: &ActivationNodeLaunch,
+    sockets: &ContractNodeSockets,
+    failpoint: &str,
+) {
     let executable = std::env::current_exe().expect("activation test executable");
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("hiqlite_activation_node_process")
         .arg("--ignored")
         .arg("--exact")
-        .arg("--nocapture")
+        .arg("--nocapture");
+    let launch = launch.inheriting(sockets, &mut command);
+    let output = command
         .env(
             "PLURX_ACTIVATION_NODE_LAUNCH",
-            serde_json::to_string(launch).expect("serialize activation launch"),
+            serde_json::to_string(&launch).expect("serialize activation launch"),
         )
         .env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", failpoint)
         .output()
@@ -20980,15 +21148,12 @@ async fn assert_one_voter_activation(data_dir: &std::path::Path, source_version:
     // so put this source back in that shape and require the coordinator to run
     // the ordinary one-time sealing upgrade before it publishes the backup.
     make_trakt_fixture_row_cleartext(&data_dir.join("plurx.db"));
-    let config = one_voter_config(data_dir);
-    let launch = ActivationNodeLaunch {
-        data_dir: data_dir.to_owned(),
-        raft_bind: config.cluster.raft_bind.to_string(),
-        api_bind: config.cluster.api_bind.to_string(),
-        source_version,
-        first_boot: true,
-    };
-    let first = ActivationNodeProcess::start(&launch);
+    // One pair of sockets for the whole test: both children serve on it, so
+    // the port stays bound while the first stops and the second starts.
+    let sockets = ContractNodeSockets::bind_loopback();
+    let launch = ActivationNodeLaunch::new(data_dir, &sockets, source_version, true);
+    let config = launch.parent_config(&sockets);
+    let first = ActivationNodeProcess::start(&launch, &sockets);
 
     let active = data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     let marker: ActivationMarker = serde_json::from_slice(
@@ -21038,10 +21203,13 @@ async fn assert_one_voter_activation(data_dir: &std::path::Path, source_version:
     drop(second);
     first.stop();
 
-    let reopened = ActivationNodeProcess::start(&ActivationNodeLaunch {
-        first_boot: false,
-        ..launch
-    });
+    let reopened = ActivationNodeProcess::start(
+        &ActivationNodeLaunch {
+            first_boot: false,
+            ..launch
+        },
+        &sockets,
+    );
     let second = connect_activated_store(&config)
         .await
         .expect("second reader after subsequent run");
@@ -21187,15 +21355,15 @@ async fn killed_activation_boundaries_recover_sqlite_or_completed_target() {
         let fixture = tempfile::tempdir().expect("interrupted activation fixture");
         let source = populated_current_import_fixture(fixture.path());
         make_trakt_fixture_row_cleartext(&source);
-        let config = one_voter_config(fixture.path());
-        let launch = ActivationNodeLaunch {
-            data_dir: fixture.path().to_owned(),
-            raft_bind: config.cluster.raft_bind.to_string(),
-            api_bind: config.cluster.api_bind.to_string(),
-            source_version: plurx_core::store::SQLITE_SCHEMA_VERSION,
-            first_boot: true,
-        };
-        run_injected_activation(&launch, failpoint);
+        let sockets = ContractNodeSockets::bind_loopback();
+        let launch = ActivationNodeLaunch::new(
+            fixture.path(),
+            &sockets,
+            plurx_core::store::SQLITE_SCHEMA_VERSION,
+            true,
+        );
+        let config = launch.parent_config(&sockets);
+        run_injected_activation(&launch, &sockets, failpoint);
 
         let recovered = select_daemon_store(&config)
             .await
@@ -21218,19 +21386,19 @@ async fn killed_activation_boundaries_recover_sqlite_or_completed_target() {
     let fixture = tempfile::tempdir().expect("post-rename activation fixture");
     let source = populated_current_import_fixture(fixture.path());
     make_trakt_fixture_row_cleartext(&source);
-    let config = one_voter_config(fixture.path());
-    let launch = ActivationNodeLaunch {
-        data_dir: fixture.path().to_owned(),
-        raft_bind: config.cluster.raft_bind.to_string(),
-        api_bind: config.cluster.api_bind.to_string(),
-        source_version: plurx_core::store::SQLITE_SCHEMA_VERSION,
-        first_boot: true,
-    };
-    run_injected_activation(&launch, "after-rename");
+    let sockets = ContractNodeSockets::bind_loopback();
+    let launch = ActivationNodeLaunch::new(
+        fixture.path(),
+        &sockets,
+        plurx_core::store::SQLITE_SCHEMA_VERSION,
+        true,
+    );
+    let config = launch.parent_config(&sockets);
+    run_injected_activation(&launch, &sockets, "after-rename");
     assert!(fixture.path().join(HIQLITE_ACTIVE_DIRNAME).is_dir());
     assert!(!fixture.path().join("hiqlite.incoming").exists());
 
-    let resumed = ActivationNodeProcess::start(&launch);
+    let resumed = ActivationNodeProcess::start(&launch, &sockets);
     let second = connect_activated_store(&config)
         .await
         .expect("read completed target after rename crash");
@@ -21346,15 +21514,15 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
     let fixture = tempfile::tempdir().expect("activated source fixture");
     let source = populated_current_import_fixture(fixture.path());
     make_trakt_fixture_row_cleartext(&source);
-    let config = one_voter_config(fixture.path());
-    let launch = ActivationNodeLaunch {
-        data_dir: fixture.path().to_owned(),
-        raft_bind: config.cluster.raft_bind.to_string(),
-        api_bind: config.cluster.api_bind.to_string(),
-        source_version: plurx_core::store::SQLITE_SCHEMA_VERSION,
-        first_boot: true,
-    };
-    ActivationNodeProcess::start(&launch).stop();
+    let sockets = ContractNodeSockets::bind_loopback();
+    let launch = ActivationNodeLaunch::new(
+        fixture.path(),
+        &sockets,
+        plurx_core::store::SQLITE_SCHEMA_VERSION,
+        true,
+    );
+    let config = launch.parent_config(&sockets);
+    ActivationNodeProcess::start(&launch, &sockets).stop();
 
     let breadcrumb = fixture.path().join(ACTIVATED_SOURCE_FILENAME);
     assert!(
@@ -21397,7 +21565,7 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
     // directory activates again rather than staying permanently wedged. The
     // failpoint stops that attempt as soon as it proves the guard is passed.
     std::fs::remove_file(&breadcrumb).expect("accept the rollback");
-    run_injected_activation(&launch, "after-quiescence");
+    run_injected_activation(&launch, &sockets, "after-quiescence");
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -21417,7 +21585,12 @@ async fn activation_node_observation_fixture() {
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),
     )
     .expect("decode activation launch");
-    let selected = startup_observer::select_applied_singleton(&launch.config())
+    // The only place the inherited descriptors are taken, so the staging and
+    // active generations of fresh activation share the one pair of sockets.
+    let (raft, api) = launch.sockets.take();
+    let mut config = launch.config();
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    let selected = startup_observer::select_applied_singleton(&config)
         .await
         .expect("select one-voter store");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -21850,7 +22023,24 @@ fn contract_inventory_matches_every_store_method() {
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 638, "review the Store method count");
+    // 638 -> 641 for per-device playback capabilities (PR #1907): `UserStore`'s
+    // `put_device_caps`, `device_caps_for_user` and `device_caps_for_all_users`
+    // keep each sign-in's capability document in the additive
+    // `playback_device_caps_r1` extension, removed with its token. Named in
+    // USER_METHODS and exercised on both backends by
+    // playback_device_caps::a_device_capability_record_lives_and_dies_with_its_sign_in.
+    // 641 -> 643: `merge_file_probe_dv_levels` grafts the Dolby Vision levels
+    // record onto the measured probe revision and `files_missing_dv_levels`
+    // pages the DV sources still lacking it. Both are named in `MEDIA_METHODS`
+    // and covered on both backends by
+    // store_contract/dv_title_probe_provenance.rs (dv_levels_*).
+    // No new trait or supertrait of `Store`.
+    // 643 -> 644: `BackgroundJobStore`'s `requeue_expired_running_jobs`
+    // returns expired-lease running jobs to the queue with the takeover's
+    // bookkeeping. Named in BACKGROUND_JOB_METHODS and exercised on both
+    // backends by background_jobs::expired_lease_sweep_requeues_with_takeover_bookkeeping.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 644, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -35472,6 +35662,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: other.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35491,6 +35682,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35517,6 +35709,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: Some(&only),
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35532,6 +35725,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35557,6 +35751,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &only_unwatched,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35578,6 +35773,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &first,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35599,6 +35795,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35613,6 +35810,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35789,6 +35987,80 @@ async fn curation_contract_runs_through_dyn_store() {
             before,
             "{backend}: seasons and episodes are not taggable"
         );
+
+        let home = store
+            .create_library(&NewLibrary {
+                name: "Curation Videos".into(),
+                kind: LibraryKind::Home,
+                paths: vec![PathBuf::from("/curation/videos")],
+                anime: false,
+            })
+            .await
+            .expect("video library");
+        let home_item = |kind, parent_id, title: &str| NewItem {
+            library_id: home.id,
+            kind,
+            parent_id,
+            title: title.into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        };
+        let folder = store
+            .insert_item(&home_item(ItemKind::Folder, None, "Trips"))
+            .await
+            .expect("folder");
+        let video = store
+            .insert_item(&home_item(ItemKind::Video, Some(folder), "Beach day"))
+            .await
+            .expect("nested video");
+        store
+            .set_tag_members(
+                household.id,
+                &[video],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                255,
+            )
+            .await
+            .expect("tag nested video");
+        let video_rule = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            libraries: vec![home.id],
+            ..Default::default()
+        };
+        let mut query = RuleQuery {
+            viewer: owner.id,
+            spec: &video_rule,
+            only_items: None,
+            top_level_only: false,
+            day: 0,
+            presence: plurx_core::domain::ItemPresence::OnDisk,
+        };
+        let result = store.rule_items(&query, 0, 20).await.expect("Home row");
+        assert_eq!(
+            (result.item_ids, result.total),
+            (vec![video], 1),
+            "{backend}"
+        );
+        query.top_level_only = true;
+        let result = store
+            .rule_items(&query, 0, 20)
+            .await
+            .expect("root library grid");
+        assert_eq!((result.item_ids, result.total), (vec![], 0), "{backend}");
+        store
+            .set_tag_members(
+                household.id,
+                &[],
+                &[video],
+                owner.id,
+                TagSource::Manual,
+                256,
+            )
+            .await
+            .expect("remove nested-video tag before the merge count assertions");
 
         // Ids are never reused: a stored layout or a client holding row:N or
         // tag N must not silently point at something new.

@@ -65,6 +65,9 @@ pub(crate) enum ReceiverStartError {
     Deadline,
     Unsupported,
     DolbyVisionUnsupported,
+    /// The Source refused the title itself with this typed 422 code, which
+    /// the viewer is answered with as it is.
+    SourceRefused(&'static str),
     /// Not published yet, with the typed retry a local create gives: the
     /// Source's own answer passed through, or the viewer's clock running out
     /// at B. The attempt lives on, and the same `request_id` rejoins it.
@@ -183,6 +186,7 @@ fn log_source_peer_failure(
         PeerError::Rejected(status) => ("rejected", Some(status.as_u16())),
         PeerError::Busy { .. } => ("busy", Some(429)),
         PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
+        PeerError::SourceRefused { code } => (code, Some(422)),
         PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
         PeerError::StartNotPrepared { .. } => ("source_not_prepared", Some(503)),
     };
@@ -2107,6 +2111,10 @@ async fn run_owner(
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
                 crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
+                crate::sharing_client::PeerError::SourceRefused { code } => {
+                    log_source_peer_failure("start", "start_exchange", error);
+                    ReceiverStartError::SourceRefused(code)
+                }
                 error @ (crate::sharing_client::PeerError::StartNotPrepared { .. }
                     | crate::sharing_client::PeerError::StartNotYet { .. }
                     | crate::sharing_client::PeerError::Busy { .. }) if processed_successor => {

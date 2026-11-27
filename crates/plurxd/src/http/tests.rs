@@ -15,6 +15,7 @@ use super::*;
 
 mod activity_routes;
 mod delegation;
+mod playback_devices;
 mod playback_handoffs;
 mod public_copy_wire;
 mod storage_domains;
@@ -1490,6 +1491,58 @@ fn every_registered_literal_route_has_an_explicit_group() {
             );
         }
     }
+}
+
+/// Every registered session, Live TV and offline HLS object route lands in a
+/// `plurx_hls_requests_total` class, so a new playlist or media route cannot
+/// be served uncounted while the split baseline is being compared.
+#[test]
+fn every_registered_hls_object_route_has_a_request_class() {
+    let source = include_str!("mod.rs");
+    let router = source
+        .split_once("pub fn router(state: AppState) -> Router {")
+        .expect("router start")
+        .1
+        .split_once("const LEARNER_ROUTE_INELIGIBLE_JSON")
+        .expect("router end")
+        .0;
+    let mut checked = 0;
+    for route in literal_route_patterns(router) {
+        let covered = [
+            "/hls/{session}/",
+            "/live-tv/sessions/{capability}/",
+            "/offline/media/{token}/",
+        ]
+        .iter()
+        .any(|prefix| route.starts_with(prefix));
+        let object = route.ends_with(".m3u8")
+            || route.ends_with("/{segment}")
+            || route.ends_with("/{object}");
+        if !covered || !object {
+            continue;
+        }
+        let path = route
+            .replace("{session}", "s")
+            .replace("{capability}", "c")
+            .replace("{token}", "t")
+            .replace("{index}", "0")
+            .replace("{role}", "video")
+            .replace("{rendition}", "r")
+            .replace("{kind}", "segment")
+            .replace("{segment}", "seg00001.m4s")
+            .replace("{object}", "00001.m4s");
+        let matched = format!("/api/v1{route}");
+        assert!(
+            hls_request_metrics::classify(&Method::GET, &matched, &format!("/api/v1{path}"))
+                .is_some(),
+            "registered HLS object route has no request class: {matched}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 15,
+        "the router scan found only {checked} HLS object routes"
+    );
 }
 
 #[test]
@@ -24545,6 +24598,84 @@ async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
     assert_eq!(rows["rows"].as_array().expect("rows").len(), 1, "{rows}");
     let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
     assert!(home["rows"].get(row_id.to_string()).is_none(), "{home}");
+}
+
+#[tokio::test]
+async fn tagged_video_inside_a_folder_appears_in_its_reordered_home_row() {
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_home(&state).await;
+    let admin = setup_admin(&app).await;
+    let (status, tag) = call(
+        &app,
+        post("/api/v1/tags", Some(&admin), json!({"name": "Trips"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{tag}");
+    let tag = tag["id"].as_i64().expect("tag id");
+
+    let path = format!("/api/v1/items/{}/tags", seed.video);
+    let (status, tags) = call(&app, put(&path, Some(&admin), json!({"tag_ids": [tag]}))).await;
+    assert_eq!(status, StatusCode::OK, "{tags}");
+    assert_eq!(tags["tags"][0]["id"], tag, "{tags}");
+
+    let (status, grid) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items?tags={tag}", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{grid}");
+    assert_eq!(grid["total"], 0, "{grid}");
+
+    let spec = json!({
+        "all_of": [{"tag": tag}],
+        "sort": "recently_tagged",
+        "unwatched": "first",
+    });
+    let (status, preview) = call(
+        &app,
+        post("/api/v1/rows/preview", Some(&admin), json!({"spec": spec})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["total"], 1, "{preview}");
+
+    let (status, row) = call(
+        &app,
+        post(
+            "/api/v1/rows",
+            Some(&admin),
+            json!({"title": "Trips", "spec": spec}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let id = row["id"].as_i64().expect("row id");
+    let key = format!("row:{id}");
+    let (status, _) = call(
+        &app,
+        put(
+            "/api/v1/home/layout",
+            Some(&admin),
+            json!({"entries": [{"key": key}, {"key": "next_up", "hidden": true}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{home}");
+    assert_eq!(home["layout"][0]["key"], key, "{home}");
+    let layout = home["layout"].as_array().expect("layout");
+    assert_eq!(layout.iter().filter(|entry| entry["key"] == key).count(), 1);
+    assert!(layout.iter().all(|entry| entry["key"] != "next_up"));
+    assert_eq!(
+        home["rows"][id.to_string()]["items"][0]["id"],
+        seed.video,
+        "{home}"
+    );
 }
 
 /// §2.3: nothing outside the native API reads curation, so a tag cannot

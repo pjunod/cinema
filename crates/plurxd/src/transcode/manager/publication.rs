@@ -1795,7 +1795,7 @@ impl TranscodeManager {
             .ok_or("native splice has no FEL renderer")?;
         if !encoding.preserves_processed_dv()
             || encoding.processed_fel() != Some(true)
-            || !runtime.source.unchanged()
+            || !runtime.source.unchanged().await
         {
             return Ok(false);
         }
@@ -1870,7 +1870,7 @@ impl TranscodeManager {
                 || session.control.is_retired()
                 || session.failed.load(Relaxed)
                 || session.control.current_producer_attempt() != attempt
-                || !runtime.source.unchanged()
+                || !runtime.source.unchanged().await
             {
                 return Ok(had_commit);
             }
@@ -2016,7 +2016,7 @@ impl TranscodeManager {
                 && !session.replacing_child.load(Acquire)
                 && session.control.current_producer_attempt() == attempt
                 && !session.control.is_retired()
-                && runtime.source.unchanged()
+                && runtime.source.unchanged_in_place()
                 && clock.served.as_ref().is_some_and(|snapshot| {
                     snapshot.producer_attempt == attempt
                         && u64::try_from(snapshot.last_segment).is_ok_and(|last| last < index)
@@ -2068,10 +2068,26 @@ impl TranscodeManager {
             }
             return None;
         };
-        if session.publication.lock().await.served.is_none() {
-            self.playlist_with_owner_before(session_id, deadline)
+        if session.publication.lock().await.served.is_none()
+            && self
+                .playlist_with_owner_before(session_id, deadline)
                 .await
-                .ok()?;
+                .is_err()
+        {
+            // The handler now serves the muxed master. Record that as the
+            // layout, so a prepared or resumed start stops owning FEL
+            // processing and its upgrade can use the successor instead of a
+            // splice that can no longer be selected.
+            let _ = split.choose(None);
+            tracing::info!(
+                target: "plurxd::http::hls",
+                session = %session_log_id(session_id),
+                file_id = session.file_id,
+                layout = "muxed",
+                reason = split.decline_reason().unwrap_or("-"),
+                "selected native HLS layout before the first publication"
+            );
+            return None;
         }
         let published = session.publication.lock().await;
         let range = published

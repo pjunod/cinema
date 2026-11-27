@@ -595,4 +595,26 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         with self.assertRaises(ReceiptError):
             adoption.bind_event(run("synchronizing"), scope)
 
+    def test_requested_lane_label_event_binds_like_a_push_and_stays_ready_only(self):
+        # docs/ci/REQUESTED-LANE.md: the full lane is a pull_request label event.
+        import json
+        repo = {"id": 1, "full_name": "owner/repository"}
+        pull = {"number": 845, "draft": False, "state": "open", "labels": [{"name": "lane"}],
+                "head": {"repo": repo, "sha": "a" * 40},
+                "base": {"repo": repo, "ref": "main"}}
+        def run(action, changed_pull=None):
+            return {"repository": repo, "commit_sha": "a" * 40, "workflow_id": "main-fast-lane.yml",
+                    "event": "pull_request", "event_payload": json.dumps({"number": 845,
+                        "repository": repo, "pull_request": changed_pull or pull, "action": action})}
+        scope = {"repository": 1, "pr": 845}
+        for action in ("label_updated", "labeled"):
+            self.assertEqual(adoption.bind_event(run(action), scope)["action"], action)
+            for changed in ({**pull, "draft": True}, {**pull, "head": {"repo": repo, "sha": "b" * 40}}):
+                with self.assertRaises(ReceiptError):
+                    adoption.bind_event(run(action, changed), scope)
+        # The workflow does not run on these, so no run can carry them.
+        for action in ("label_cleared", "unlabeled"):
+            with self.assertRaises(ReceiptError):
+                adoption.bind_event(run(action), scope)
+
 

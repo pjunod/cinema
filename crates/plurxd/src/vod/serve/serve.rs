@@ -1,4 +1,5 @@
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 
 impl plurx_core::playback::continuous_quality::QualityReservationPublisher for VodServe {
     /// Publish reservations only while their verified bytes cannot be evicted
@@ -126,10 +127,7 @@ impl VodServe {
                     .ok_or("reserved rendition is not locally attached")?;
                 if rendition.closed.load(Relaxed)
                     || rendition.failure().is_some()
-                    || rendition
-                        .source
-                        .as_ref()
-                        .is_none_or(|source| !source.unchanged())
+                    || rendition.source.as_ref().missing_or_changed().await
                     || rendition.recipe.encoding.as_ref().is_none_or(|encoding| {
                         encoding.shared_audio.is_some()
                             || encoding.source_object_version != rung.source_object_version()
@@ -173,11 +171,7 @@ impl VodServe {
                 )
                 .await?;
                 verify_cached_quality_interval(&init, &media, rung, interval)?;
-                if rendition
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
-                {
+                if rendition.source.as_ref().missing_or_changed().await {
                     return Err("reservation source changed during artifact verification".into());
                 }
                 if let Some(audio) = family.audio() {
@@ -191,10 +185,7 @@ impl VodServe {
                         .ok_or("shared AAC rendition is not locally attached")?;
                     if soundtrack.closed.load(Relaxed)
                         || soundtrack.failure().is_some()
-                        || soundtrack
-                            .source
-                            .as_ref()
-                            .is_none_or(|source| !source.unchanged())
+                        || soundtrack.source.as_ref().missing_or_changed().await
                         || soundtrack.recipe.encoding.as_ref().is_none_or(|encoding| {
                             encoding.source_object_version != audio.source_object_version()
                                 || encoding
@@ -257,11 +248,7 @@ impl VodServe {
                             derived_audio.push(dependency);
                         }
                     }
-                    if soundtrack
-                        .source
-                        .as_ref()
-                        .is_none_or(|source| !source.unchanged())
-                    {
+                    if soundtrack.source.as_ref().missing_or_changed().await {
                         return Err("shared AAC source changed during artifact verification".into());
                     }
                 }
@@ -372,6 +359,21 @@ impl VodServe {
         session_id: &str,
         incarnation_id: &str,
     ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        self.dv_effective_report_with_display(session_id, incarnation_id)
+            .await
+            .map(|(report, _)| report)
+    }
+
+    /// The current report with the session's display-target facts, read from
+    /// the same runtime under the same fences, for the Playback info rows.
+    pub(crate) async fn dv_effective_report_with_display(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<(
+        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+        crate::vodserve::DvReportDisplay,
+    )> {
         #[cfg(target_os = "linux")]
         {
             let publication = self.session_rendition(session_id).await?;
@@ -379,10 +381,7 @@ impl VodServe {
             let (rendition, _, _) = publication.result.ok()?;
             if rendition.closed.load(Relaxed)
                 || rendition.failure().is_some()
-                || rendition
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| !source.unchanged())
+                || rendition.source.as_ref().missing_or_changed().await
             {
                 return None;
             }
@@ -401,7 +400,15 @@ impl VodServe {
             }
             // No await follows this final allowance check: a seek processed
             // during the owner lookup cannot return a previously cloned report.
-            runtime.effective_report(plan, incarnation_id, &owner.incarnation)
+            let report = runtime.effective_report(plan, incarnation_id, &owner.incarnation)?;
+            Some((
+                report,
+                crate::vodserve::DvReportDisplay {
+                    display: runtime.display.clone(),
+                    note: runtime.display_target_note.clone(),
+                    facts: runtime.dv_row_facts.clone(),
+                },
+            ))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1045,6 +1052,10 @@ impl VodServe {
             .open_materialized_select(rendition, index, &delivery, custody)
             .await?
         {
+            self.shared
+                .pool
+                .metrics_handle()
+                .count_segment_answer(crate::waitpool::VodSegmentAnswer::Stored);
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure_cause() {
@@ -1127,6 +1138,12 @@ impl VodServe {
             .open_materialized_select(rendition, index, &delivery, custody)
             .await?
         {
+            // Published between the first look and registration: a producer
+            // made it for this demand, not a stored hit.
+            self.shared
+                .pool
+                .metrics_handle()
+                .count_segment_answer(crate::waitpool::VodSegmentAnswer::Produced);
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure_cause() {
@@ -1161,7 +1178,13 @@ impl VodServe {
                     .open_materialized_select(rendition, index, &delivery, custody)
                     .await?
                 {
-                    Some(ready) => Ok(ready),
+                    Some(ready) => {
+                        self.shared
+                            .pool
+                            .metrics_handle()
+                            .count_segment_answer(crate::waitpool::VodSegmentAnswer::Produced);
+                        Ok(ready)
+                    }
                     // An eviction already committed before registration, or an
                     // external unlink, can still remove the file. Publication
                     // during this admitted wait is protected by its narrow pin.
@@ -1288,7 +1311,7 @@ impl VodServe {
             .source
             .as_ref()
             .ok_or_else(|| Changed("Source held input is absent".to_owned()))?;
-        if !held.unchanged() {
+        if !held.unchanged().await {
             return Err(Changed("Source held input changed".into()));
         }
         let current = crate::fragment_index_cluster::open_source_playback_fence_classified(
@@ -1296,7 +1319,7 @@ impl VodServe {
             Some(held.object_version()),
         )
         .await?;
-        if !held.unchanged() {
+        if !held.unchanged().await {
             return Err(Changed(
                 "Source held input changed during response admission".into(),
             ));
@@ -1308,7 +1331,7 @@ impl VodServe {
         rendition
             .source
             .as_ref()
-            .is_some_and(|source| !source.unchanged())
+            .is_some_and(|source| !source.unchanged_in_place())
     }
 }
 

@@ -593,7 +593,7 @@ async fn s10_control(
         "cold owner upgraded after completion",
     )?;
     s10_require(
-        source_fence.unchanged()
+        source_fence.unchanged().await
             && s10_hash(&s10_read_bounded(&path, 2_592_240)?) == S10_SOURCE_SHA,
         "source drift",
     )?;

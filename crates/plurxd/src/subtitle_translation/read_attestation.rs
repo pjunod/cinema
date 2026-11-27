@@ -131,7 +131,7 @@ impl ReadAttestations {
             // compared its complete held identity and object version.
             match &entries[index].status {
                 Status::Ready(fence)
-                    if fence.unchanged()
+                    if fence.unchanged_in_place()
                         && std_file_identity(&fence.handle).ok() == Some(key.identity) =>
                 {
                     if let Some(entry) = entries.remove(index) {
@@ -208,7 +208,7 @@ impl ReadAttestations {
         .map_err(|_| pending())?
         .map_err(|_| changed())?;
         let identity = std_file_identity(&opened.handle).map_err(|_| changed())?;
-        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged() {
+        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged_in_place() {
             return Err(changed());
         }
         let key = Key {
@@ -372,7 +372,7 @@ impl ReadAttestations {
                     Ok(_) if pause => break Status::Paused(work),
                     Ok(Some(digest)) => {
                         let valid = digest == key.sha256
-                            && work.fence.unchanged()
+                            && work.fence.unchanged().await
                             && final_source(&*store, &key).await;
                         break if valid {
                             Status::Ready(work.fence)
@@ -438,7 +438,7 @@ async fn final_source(store: &dyn plurx_core::store::Store, key: &Key) -> bool {
     else {
         return false;
     };
-    fence.unchanged() && std_file_identity(&fence.handle).ok() == Some(key.identity)
+    fence.unchanged().await && std_file_identity(&fence.handle).ok() == Some(key.identity)
 }
 
 #[cfg(test)]

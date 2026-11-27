@@ -293,6 +293,14 @@ scripts/playback-lab run --suite stall-recovery \
   --network-profile 8mbps-to-1.5mbps --json out/stall-recovery.json
 ```
 
+To measure what a case costs the server, add `--server-metrics`. Each result
+then carries `server_metrics.delta`: how much each HLS request, response-byte,
+VOD segment-answer, producer-generation and create-time series moved during
+that case. The series are listed in
+[SPLIT-HLS-DEFAULT-INVENTORY.md §5](streaming/SPLIT-HLS-DEFAULT-INVENTORY.md#5-how-the-baseline-is-measured).
+Only series that moved are kept. The delta is diagnostic and never scored, and
+a failed `/metrics` read is recorded as `read_error`.
+
 For a failed prepared handoff, add `--frame-diagnostics` to the same
 `playback-lab run` command. The result's `frame_diagnostics` retains callback,
 presentation and expected-display timestamps, media time, presented-frame

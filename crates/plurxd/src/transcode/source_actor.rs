@@ -1,5 +1,6 @@
 //! Owned Source producer admission and lifetime. HTTP callers only wait.
 use super::*;
+use crate::fragment_index_cluster::HeldSource as _;
 #[cfg(unix)]
 #[path = "source_actor/growing.rs"]
 mod growing;
@@ -7,6 +8,20 @@ mod growing;
 pub(crate) use growing::{
     SourceGrowingBacking, SourceGrowingPreparation, GROWING_LEASE_TIMEOUT_MS,
 };
+
+/// A selected-caption window's own answer: still preparing (`Deadline`) or
+/// over its concurrent-work bound (`Capacity`) passes; anything else is this
+/// track's final answer for this request. Frozen and growing sources share it.
+fn subtitle_refusal(error: SourceWorkerError) -> LiveRefusal {
+    if matches!(
+        error,
+        SourceWorkerError::Deadline | SourceWorkerError::Capacity
+    ) {
+        LiveRefusal::transient(error)
+    } else {
+        LiveRefusal::terminal(error)
+    }
+}
 
 #[derive(Clone)]
 enum SourceBacking {
@@ -155,6 +170,13 @@ impl SourceProducerAuthority {
     /// Private first-range bootstrap only: the exact retained preparing
     /// assignment and its existing index-preparation guard authorize physical
     /// input before a measured timeline origin exists. No media is servable.
+    ///
+    /// The retained permissions say which ingress was admitted, not that it
+    /// still is: each was observed when its actor was created, before the
+    /// probe and census that precede this spawn. As in
+    /// [`Self::authorize_generation`], the authority carries the permission
+    /// refreshed now, so the spawn checks a current observation rather than
+    /// failing once that preparation took longer than an observation lives.
     pub(crate) async fn authorize_preparing_generation(
         &self,
         permissions: &[plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission],
@@ -172,8 +194,8 @@ impl SourceProducerAuthority {
             {
                 continue;
             }
-            let proof = self
-                .current_preparation(permission.assignment())
+            let (proof, refreshed) = self
+                .current_preparation_and_ingress(permission.assignment())
                 .await
                 .map_err(|_| "Source preparing authority unavailable".to_owned())?;
             if !self
@@ -185,7 +207,7 @@ impl SourceProducerAuthority {
                 continue;
             }
             preparing.push(*proof);
-            ingress.push(permission.clone());
+            ingress.push(*refreshed);
         }
         if preparing.is_empty() {
             return Err("Source bootstrap has no current preparing owner".into());
@@ -323,6 +345,14 @@ pub(crate) enum SourceWorkerError {
     CopyInitContractChanged,
     CopyClockUnknown,
     CopySyncUnverified,
+    /// The copy's output outgrew the in-memory hold that pairs its whole
+    /// canonical and AV fragments: a source whose keyframe spans are too
+    /// large to copy here.
+    CopyInputLimit,
+    /// The copy's child wrote one output pipe far ahead of the other: a
+    /// fault of its output protocol, the same on every repeat.
+    CopyOutputSkew,
+    HevcConfigurationUnsupported,
     Capacity,
     Conflict,
     Deadline,
@@ -402,6 +432,18 @@ mod live_refusal_tests {
     use super::*;
     use SourceWorkerError as E;
 
+    /// A copy refused because its output outgrew the mux's pairing hold is
+    /// its own failure, not a start that was merely unavailable.
+    #[test]
+    fn a_copy_input_limit_is_its_own_failure() {
+        assert_eq!(E::copy_failure("copy_range_input_limit"), E::CopyInputLimit);
+        assert_eq!(E::copy_failure("copy_observation_skew"), E::CopyOutputSkew);
+        assert_eq!(
+            E::copy_failure("hevc_configuration_unsupported"),
+            E::HevcConfigurationUnsupported
+        );
+    }
+
     /// Every renewal tick (VOD, growing and direct) decides by this after
     /// re-proving its source: an object proven renews; one that could not be
     /// read just now skips the renewal while the confirmed lease holds and
@@ -460,6 +502,9 @@ impl SourceWorkerError {
         match code {
             "copy_target_exceeded" => Self::CopyTargetExceeded,
             "copy_sync_unverified" => Self::CopySyncUnverified,
+            "copy_range_input_limit" => Self::CopyInputLimit,
+            "copy_observation_skew" => Self::CopyOutputSkew,
+            "hevc_configuration_unsupported" => Self::HevcConfigurationUnsupported,
             "copy_init_contract_changed" | "copy_head_init_changed" => {
                 Self::CopyInitContractChanged
             }
@@ -683,7 +728,7 @@ impl SourceResponseGuard {
         if self
             .source
             .as_ref()
-            .is_some_and(|source| !source.unchanged())
+            .is_some_and(|source| !source.unchanged_in_place())
         {
             crate::sharing_connection_custody::DriverCloseMode::Revoke
         } else {
@@ -703,11 +748,7 @@ impl SourceResponseGuard {
     }
     pub(crate) async fn cancelled(&self) {
         loop {
-            if self
-                .source
-                .as_ref()
-                .is_some_and(|source| !source.unchanged())
-            {
+            if self.source.as_ref().held_and_changed().await {
                 return;
             }
             let notification = self.owner.changed.notified();
@@ -1054,11 +1095,7 @@ impl SourceViewerActor {
                 Some("retirement_requested")
             } else if !backing.is_live() {
                 Some("growing_copy_not_live")
-            } else if guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
-            {
+            } else if guard.source.as_ref().missing_or_changed().await {
                 Some("source_changed")
             } else {
                 None
@@ -1116,11 +1153,7 @@ impl SourceViewerActor {
             .await
         {
             Some("vod_owner_not_live")
-        } else if guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        } else if guard.source.as_ref().missing_or_changed().await {
             Some("source_changed")
         } else {
             None
@@ -1183,8 +1216,13 @@ impl SourceViewerActor {
             None => None,
         };
         // A frozen VOD's segment wait has no progress signal here; its
-        // deadline ends the request as it always has.
-        let vod_segment = segment && self.0.direct.is_none() && self.growing_backing().is_none();
+        // deadline ends the request as it always has. Only Unix has growing
+        // backings, so every other platform's Source is frozen.
+        #[cfg(unix)]
+        let frozen = self.growing_backing().is_none();
+        #[cfg(not(unix))]
+        let frozen = true;
+        let vod_segment = segment && self.0.direct.is_none() && frozen;
         let actor = self.clone();
         let resource = resource.clone();
         let job = tokio::spawn(Box::pin(async move {
@@ -1404,7 +1442,7 @@ impl SourceViewerActor {
                             let cached = tracks
                                 .cached(index, revision, &custody)
                                 .await
-                                .map_err(growing::subtitle_refusal)?;
+                                .map_err(subtitle_refusal)?;
                             let absent = cached.is_none();
                             let (bytes, complete) = cached.unwrap_or_default();
                             SourceResourcePayload::CachedSubtitle {
@@ -1429,7 +1467,7 @@ impl SourceViewerActor {
                                     deadline,
                                 )
                                 .await
-                                .map_err(growing::subtitle_refusal)?
+                                .map_err(subtitle_refusal)?
                                 .ok_or(pending)?;
                             if bytes.len() > 2 * 1024 * 1024 {
                                 return Err(unsupported);
@@ -1481,11 +1519,7 @@ impl SourceViewerActor {
         {
             return Err(ended);
         }
-        if guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        if guard.source.as_ref().missing_or_changed().await {
             return Err(ended);
         }
         if Instant::now() >= deadline
@@ -1506,11 +1540,7 @@ impl SourceViewerActor {
         {
             return Err(ended);
         }
-        if guard
-            .source
-            .as_ref()
-            .is_none_or(|source| !source.unchanged())
-        {
+        if guard.source.as_ref().missing_or_changed().await {
             return Err(ended);
         }
         drop(custody);
@@ -1525,6 +1555,25 @@ impl SourceProducerAuthority {
         assignment: &SourceDispatchAssignment,
     ) -> Result<
         Box<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
+        SourceWorkerError,
+    > {
+        self.current_preparation_and_ingress(assignment)
+            .await
+            .map(|(proof, _)| proof)
+    }
+
+    /// [`Self::current_preparation`] together with the ingress permission it
+    /// refreshed under the same member observation. The retained permission
+    /// only names the admitted ingress; its observation is as old as the
+    /// actor, so a check of freshness needs this one.
+    async fn current_preparation_and_ingress(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> Result<
+        (
+            Box<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
+            Box<plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission>,
+        ),
         SourceWorkerError,
     > {
         let members = self
@@ -1563,7 +1612,7 @@ impl SourceProducerAuthority {
         {
             tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
         }
-        Ok(proof)
+        Ok((proof, permission))
     }
 
     /// A fence failure as a live refusal: an object proven changed or gone is
@@ -2027,7 +2076,7 @@ impl TranscodeManager {
             .put_fragment_index(file.id, &index)
             .await
             .map_err(|_| SourceWorkerError::Unresolved)?;
-        if !fence.unchanged() {
+        if !fence.unchanged().await {
             return Err(SourceWorkerError::Unavailable);
         }
         owner.gate.current_preparation(&owner.assignment).await?;

@@ -1864,14 +1864,19 @@ impl CatalogueAdmission {
     ) -> Result<CataloguePermit, crate::sharing_client::PeerError> {
         // Reserve the import first; cancellation and every early refusal drop it.
         let mut imports = self.imports.lock().expect("catalogue admission");
+        // A read already in flight for this import (or a full global pool)
+        // is a short local wait, typed as one, never a refusal.
+        let busy = || crate::sharing_client::PeerError::Busy {
+            retry_after_secs: 1,
+        };
         if imports.contains(&import) {
-            return Err(crate::sharing_client::PeerError::Rejected(
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-            ));
+            return Err(busy());
         }
-        let global = self.global.clone().try_acquire_owned().map_err(|_| {
-            crate::sharing_client::PeerError::Rejected(axum::http::StatusCode::TOO_MANY_REQUESTS)
-        })?;
+        let global = self
+            .global
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| busy())?;
         imports.insert(import);
         drop(imports);
         Ok(CataloguePermit {
@@ -2103,16 +2108,18 @@ impl SharingManager {
         crate::sharing_client::PeerError,
     > {
         use crate::sharing_client::PeerError;
-        tokio::time::timeout(Duration::from_secs(15), async {
+        // The decision's 15 s budget, owned by the wait so a late cut-off
+        // after a typed wait still answers "busy", not "unavailable".
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        honour_peer_wait(deadline, || async {
             let _permit = self.catalogue_admission.acquire(reference.item.import_id)?;
             let (summary, credentials, mut peer) =
                 self.assigned_file_peer(state, user, reference).await?;
             let reply = peer.file_decision(&credentials.credential, request).await?;
             self.ensure_current(state, &summary).await?;
-            Ok((summary, reply))
+            Ok::<_, PeerError>((summary, reply))
         })
         .await
-        .map_err(|_| PeerError::Unavailable)?
     }
 
     /// A fresh pinned read of one closed pre-session file asset (subtitle
@@ -2712,6 +2719,178 @@ mod catalogue_admission_tests {
                 .acquire(ids[0])
                 .expect("synthetic catalogue fixture"),
         );
+    }
+}
+
+#[cfg(test)]
+mod peer_wait_tests {
+    use super::*;
+    use crate::sharing_client::PeerError;
+
+    /// Regression (M4 Air, 2026-11-23 16:06:36Z, 'Avatar'): a shared decision
+    /// read met a typed busy answer and the viewer was told the host "could
+    /// not determine how to play this file". A wait that fits the read's
+    /// budget is waited out and the same read asked again.
+    #[tokio::test(start_paused = true)]
+    async fn a_typed_wait_inside_the_budget_is_waited_out_and_asked_again() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let start = tokio::time::Instant::now();
+        let answer = honour_peer_wait(start + Duration::from_secs(15), || async {
+            match attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 | 1 => Err(PeerError::Busy {
+                    retry_after_secs: 2,
+                }),
+                _ => Ok("decision"),
+            }
+        })
+        .await;
+        assert!(matches!(answer, Ok("decision")), "{answer:?}");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // The Source's 2 s, then doubled, each with under half a second of
+        // jitter: 6 s and less than 7 s in all.
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(6) && elapsed < Duration::from_secs(7),
+            "{elapsed:?}"
+        );
+    }
+
+    /// Review follow-up: a host that stays busy is asked three times at most,
+    /// never every second until the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_host_that_stays_busy_is_asked_three_times_at_most() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let start = tokio::time::Instant::now();
+        let answer = honour_peer_wait(start + Duration::from_secs(60), || async {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(PeerError::Busy {
+                retry_after_secs: 1,
+            })
+        })
+        .await;
+        assert!(matches!(
+            answer,
+            Err(PeerError::Busy {
+                retry_after_secs: 1
+            })
+        ));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// Review follow-up: the decision read is the one that waits. Removing the
+    /// wait from it must fail a test, not leave every test green.
+    #[test]
+    fn the_shared_decision_read_waits_out_a_busy_host() {
+        let source = include_str!("sharing.rs");
+        let start = source
+            .find("pub async fn read_file_decision(")
+            .expect("decision read");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("decision read end")];
+        let wait = body
+            .find("honour_peer_wait(deadline,")
+            .expect("the decision read waits");
+        let admission = body
+            .find("self.catalogue_admission.acquire(")
+            .expect("admission is taken");
+        let decision = body.find(".file_decision(").expect("the Source is asked");
+        assert!(
+            wait < admission && admission < decision,
+            "each attempt takes its own admission and asks the Source inside the wait"
+        );
+        assert!(
+            !body.contains("tokio::time::timeout("),
+            "the wait owns the deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_past_the_budget_and_every_refusal_come_back_as_they_came() {
+        let start = tokio::time::Instant::now();
+        let busy = honour_peer_wait(start + Duration::from_secs(3), || async {
+            Err::<(), _>(PeerError::Busy {
+                retry_after_secs: 5,
+            })
+        })
+        .await;
+        assert!(matches!(
+            busy,
+            Err(PeerError::Busy {
+                retry_after_secs: 5
+            })
+        ));
+        assert_eq!(
+            start.elapsed(),
+            Duration::ZERO,
+            "a wait that cannot fit is not slept"
+        );
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let refused = honour_peer_wait(start + Duration::from_secs(15), || async {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(PeerError::Rejected(axum::http::StatusCode::NOT_FOUND))
+        })
+        .await;
+        assert!(matches!(
+            refused,
+            Err(PeerError::Rejected(axum::http::StatusCode::NOT_FOUND))
+        ));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Review follow-up: a read the deadline cuts off after a typed wait is
+    /// that wait, so the viewer is still told "retry shortly".
+    #[tokio::test(start_paused = true)]
+    async fn a_read_cut_off_after_a_wait_reports_the_wait_not_a_timeout() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let start = tokio::time::Instant::now();
+        let answer = honour_peer_wait(start + Duration::from_secs(15), || async {
+            match attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => {
+                    tokio::time::sleep(Duration::from_secs(12)).await;
+                    Err::<(), _>(PeerError::Busy {
+                        retry_after_secs: 1,
+                    })
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(
+                answer,
+                Err(PeerError::Busy {
+                    retry_after_secs: 1
+                })
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(15));
+        let never = honour_peer_wait(start + Duration::from_secs(20), || async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok::<(), PeerError>(())
+        })
+        .await;
+        assert!(
+            matches!(never, Err(PeerError::Unavailable)),
+            "a plain timeout stays one"
+        );
+    }
+
+    /// The receiver's own one-read-per-import admission is a typed wait too.
+    #[test]
+    fn a_busy_catalogue_admission_is_a_typed_wait() {
+        let admission = Arc::new(CatalogueAdmission::default());
+        let import = uuid::Uuid::new_v4();
+        let _held = admission.acquire(import).expect("first read");
+        assert!(matches!(
+            admission.acquire(import),
+            Err(PeerError::Busy {
+                retry_after_secs: 1
+            })
+        ));
     }
 }
 
@@ -3422,4 +3601,55 @@ mod loop_pacing_tests {
         assert!(!manager.listener_idle(&shutdown).await);
         assert!(!manager.claims_idle(None, &shutdown).await);
     }
+}
+
+/// Honour a typed peer wait inside a read's own deadline, which this owns: a
+/// `Busy` answer (the Source's or ingress's 429 with Retry-After, or this
+/// receiver's own catalogue admission) is waited out and the same read asked
+/// again while the wake still fits before `deadline`; each attempt is bounded
+/// by the same deadline. A read the deadline cuts off after a wait reports
+/// that wait, never a bare timeout, so the caller can still answer the viewer
+/// "retry shortly". Every other answer comes back as it came.
+pub(crate) async fn honour_peer_wait<T, Read, Reading>(
+    deadline: tokio::time::Instant,
+    mut read: Read,
+) -> Result<T, crate::sharing_client::PeerError>
+where
+    Read: FnMut() -> Reading,
+    Reading: std::future::Future<Output = Result<T, crate::sharing_client::PeerError>>,
+{
+    use crate::sharing_client::PeerError;
+    let mut waited = None;
+    for attempt in 0..PEER_WAIT_ATTEMPTS {
+        let answer = match tokio::time::timeout_at(deadline, read()).await {
+            Ok(answer) => answer,
+            // A hung read after a wait is reported as that wait: busy is
+            // still the honest advice ("try again shortly").
+            Err(_) => return Err(waited.unwrap_or(PeerError::Unavailable)),
+        };
+        match answer {
+            Err(PeerError::Busy { retry_after_secs }) if attempt + 1 < PEER_WAIT_ATTEMPTS => {
+                let busy = PeerError::Busy { retry_after_secs };
+                // The Source's wait, doubled per attempt, plus jitter so
+                // viewers that met the same busy answer do not return in step.
+                let wait =
+                    Duration::from_secs(retry_after_secs.max(1) << attempt) + peer_wait_jitter();
+                let wake = tokio::time::Instant::now() + wait;
+                if wake >= deadline {
+                    return Err(busy);
+                }
+                waited = Some(busy);
+                tokio::time::sleep_until(wake).await;
+            }
+            answer => return answer,
+        }
+    }
+    Err(waited.unwrap_or(PeerError::Unavailable))
+}
+
+/// A busy read is asked at most this many times in all, inside its deadline.
+const PEER_WAIT_ATTEMPTS: u32 = 3;
+/// Up to half a second, so viewers that met one busy answer spread out.
+fn peer_wait_jitter() -> Duration {
+    Duration::from_millis((uuid::Uuid::new_v4().as_u128() % 500) as u64)
 }

@@ -354,14 +354,14 @@ async fn hiqlite_case(
     omission: bool,
     active: &Arc<Mutex<Option<Client>>>,
 ) {
-    let listeners: Vec<_> = (0..2)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned ephemeral port"))
-        .collect();
-    let addresses: Vec<_> = listeners
-        .iter()
-        .map(|listener| listener.local_addr().expect("address"))
-        .collect();
-    drop(listeners);
+    // The voter serves on these sockets rather than binding the ports again,
+    // so no other socket can take either port between choosing and serving it.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned ephemeral port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned ephemeral port");
+    let addresses = [
+        raft.local_addr().expect("address"),
+        api.local_addr().expect("address"),
+    ];
     let client = Box::pin(hiqlite::start_node(NodeConfig {
         node_id: 1,
         nodes: vec![Node {
@@ -371,6 +371,7 @@ async fn hiqlite_case(
         }],
         listen_addr_api: Cow::Borrowed("127.0.0.1"),
         listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+        listeners: Some(hiqlite::NodeListeners { raft, api }),
         data_dir: Cow::Owned(root.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("lineage.db"),
         secret_api: "synthetic-lineage-api".into(),

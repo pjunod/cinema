@@ -2314,6 +2314,9 @@ test("the disabled Auto controller leaves every manual ladder rung available", (
     "PlaybackPolicy",
     [
       shippedBinding("const", "QUALITY_MODES"),
+      shippedSource("sourceDynamicRange"),
+      shippedSource("qualitySourceIsHdr"),
+      shippedSource("qualityCapLabel"),
       shippedSource("qualityOptions"),
       "return qualityOptions();",
     ].join("\n"),
@@ -4037,6 +4040,14 @@ test("attachment and retirement are what the presenter is told about identity", 
   attach(reattached);
   assert.equal(reattached.effectiveProcessing, null,
     "a new attachment cannot inherit the previous one's processing report");
+  // A sessionless attachment carries the source video, so its range is the
+  // server's answer for that; a session attachment waits for its session.
+  const direct = { attemptId: "b1", sourceVideoRange: "hdr10", source: { hdr: "dolby_vision" } };
+  assert.equal(attach(direct, { sourceVideo: true }).token.qualityRange, "hdr10",
+    "a stripped Dolby Vision direct play is the HDR10 the server said, not the source's DV");
+  assert.equal(attach(direct).token.qualityRange, null, "a session attachment starts ungraded");
+  assert.equal(attach({ attemptId: "b2", sourceVideoRange: null }, { sourceVideo: true }).token.qualityRange, null,
+    "after a transcode decision the source video's range is unknown, not guessed");
 
   fed.length = 0;
   const retire = new PlaybackContextFunction(
@@ -4795,6 +4806,7 @@ function detailHarness({ decisions = {}, admin = false } = {}) {
       shippedSource("trackChip"),
       shippedSource("trackFactRow"),
       shippedSource("preferredLanguageNote"),
+      shippedSource("playsOnRow"),
       shippedSource("analysisFileControl"),
       shippedSource("specBlock"),
       shippedBinding("let", "PREPLAY"),
@@ -5983,7 +5995,7 @@ test("a session that lands on a different range repaints the badge", () => {
       shippedSource("playbackEnhancementFromWire"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
-  const player = { deliveredRange: "hdr10" };
+  const player = { deliveredRange: "hdr10", mediaAttachment: {} };
   const { attachSession } = build(
     player, () => { repaints += 1; }, () => {}, () => {}, () => {},
   );
@@ -5994,6 +6006,7 @@ test("a session that lands on a different range repaints the badge", () => {
     delivered_dynamic_range: "sdr",
   }, 0);
   assert.equal(player.deliveredRange, "sdr", "the session is the source of truth");
+  assert.equal(player.mediaAttachment.qualityRange, "sdr");
   assert.equal(repaints, 1, "the chip must be repainted, not left at the decision's guess");
 
   // The Dolby Vision profile follows the same rule and needs the stricter
@@ -6028,6 +6041,7 @@ test("a session that lands on a different range repaints the badge", () => {
   const before = repaints;
   attachSession({}, player, { start_seconds: 0, playlist_url: "/x.m3u8" }, 0);
   assert.equal(player.deliveredRange, "sdr");
+  assert.equal(player.mediaAttachment.qualityRange, null, "an ungraded attach clears the quality-control evidence");
   assert.ok(repaints > before, "every attach repaints");
 
   // Caption projection follows the actual attachment origin, including VOD

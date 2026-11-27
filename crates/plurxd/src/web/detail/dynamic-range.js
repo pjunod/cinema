@@ -147,7 +147,12 @@ function playbackEnhancementFromWire(raw){
   // text; only the pills are limited to the badges `known` lists.
   const details=raw.details.filter(d=>d&&typeof d.badge==='string'&&typeof d.text==='string'
     &&d.text.length>0&&d.text.length<=240).map(d=>({badge:d.badge,active:d.active===true,text:d.text}));
-  return {active,details,requires_effective_processing:raw.requires_effective_processing===true};
+  // The Dolby Vision metadata row of an unprocessed delivery rides along
+  // unread; playerDvRows checks it when it is shown.
+  const dv_metadata=raw.dv_metadata&&typeof raw.dv_metadata==='object'?raw.dv_metadata:null;
+  // Full or minimal, as the server's complete-title scan classified the layer.
+  const el_kind=['fel','mel'].includes(raw.el_kind)?raw.el_kind:null;
+  return {active,details,requires_effective_processing:raw.requires_effective_processing===true,dv_metadata,el_kind};
 }
 // A late optional-upgrade refusal belongs only to the session generation
 // that attempted it; it changes explanation text, never enhancement badges.
@@ -179,10 +184,24 @@ function playerEnhancement(p){
   if(!enhancement) return null;
   const report=playerEffectiveProcessing(p);
   if(report?.profile81_reconstructed===true){
-    return {...enhancement,active:['FEL'],details:[
+    // A Profile 8.1 reconstruction keeps the RPU in the delivered picture, so
+    // the server's DYN still holds. The current report decides FEL (always
+    // contributed in an accepted Profile 8.1 report) and RPU, the two things
+    // the server itself applied; nothing the picture carries is dropped.
+    // RPU means the server applied the RPU's polynomial/MMR reshaping, as the
+    // server defines the badge; a line is shown only if one applies or was claimed.
+    const reshaped=report.applied_operations.some(op=>op==='PolynomialReshape'||op==='MmrReshape');
+    const claimedRpu=enhancement.details.some(d=>d.badge==='RPU');
+    const details=[
       {badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the Dolby Vision Profile 8.1 picture'},
-      ...enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge))
-    ]};
+      ...(reshaped||claimedRpu?[{badge:'RPU',active:reshaped,text:reshaped
+        ?'RPU: reshaping applied by the server; the Profile 8.1 RPU travels with the picture'
+        :'RPU: no reshaping applied in this window'}]:[]),
+      ...enhancement.details.filter(d=>!['FEL','RPU'].includes(d.badge))];
+    const order=['FEL','RPU','DYN'];
+    details.sort((a,b)=>{const i=order.indexOf(a.badge),j=order.indexOf(b.badge);
+      return (i<0?order.length:i)-(j<0?order.length:j);});
+    return {...enhancement,active:details.filter(d=>d.active&&order.includes(d.badge)).map(d=>d.badge),details};
   }
   if(!enhancement.requires_effective_processing) return enhancement;
   if(!report) return null;
@@ -195,15 +214,20 @@ function playerEnhancement(p){
   const target=operations.find(op=>op?.DisplayTargetMapping)?.DisplayTargetMapping.nits;
   const trims=operations.includes('CreativeTrimApplication')?"with the colourist's creative trims"
     :report.creative_trims_partial===true?"with the colourist's creative trims on some shots":"L1 only; creative trims are not applied";
+  // A minimal layer (MEL), as the server's title scan classified it, has no
+  // detail to miss; the row is built from that fact, not from the snapshot
+  // (enhancement.rs's processed-route MEL row).
+  const mel=enhancement.el_kind==='mel';
   const current=[
-    {badge:'FEL',active:report.fel_contributed,text:report.fel_contributed
-      ?`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`
-      :'FEL: no enhancement-layer detail in this window'},
+    report.fel_contributed
+      ?{badge:'FEL',active:true,text:`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`}
+      :mel?{badge:'FEL',active:false,text:'MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU'}
+      :{badge:'FEL',active:false,text:'FEL: no enhancement-layer detail in this window'},
     {badge:'RPU',active:rpu.length>0,text:rpu.length?`RPU: ${rpu.join(', ')} applied by the server`:'RPU: no reshaping or colour conversion applied in this window'},
     {badge:'DYN',active:!!target,text:target?`DYN: per-shot Dolby display mapping for a ${target}-nit display by the server (${trims})`
       :'DYN: no per-shot Dolby display mapping applied in this window'}
   ];
-  const details=current.filter(d=>d.badge!=='FEL'||d.active||enhancement.details.some(old=>old.badge==='FEL'))
+  const details=current.filter(d=>d.badge!=='FEL'||d.active||mel||enhancement.details.some(old=>old.badge==='FEL'))
     .concat(enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge)));
   return {...enhancement,active:current.filter(d=>d.active).map(d=>d.badge),details};
 }
@@ -215,6 +239,35 @@ function playerEnhancementRow(p){
   const p81=playerEffectiveProcessing(p)?.profile81_reconstructed===true;
   return {value:p81?'Profile 8.1 FEL':enhancement.active.length?enhancement.active.join(' · '):'None active',
     note:enhancement.details.length?enhancement.details.map(d=>d.text).join('\n'):null};
+}
+// The Playback info `Dolby Vision metadata` and `Display target` rows. The
+// server writes every sub-row's text (docs/API.md); this pairs it with the
+// contract's sub-row labels and refuses what it cannot show, deriving nothing.
+// A processed delivery's rows belong to its current, generation-matching
+// report and clear with it; any other delivery's come with the enhancement.
+function dvRowText(text){
+  return typeof text==='string'&&text.trim().length>0&&text.length<=512
+    &&!/[\u0000-\u001f\u007f-\u009f]/.test(text)?text:null;
+}
+function dvSubRows(id,texts){
+  const field=typeof PLAYBACK_INFO_FIELDS!=='undefined'?PLAYBACK_INFO_FIELDS.find(f=>f.id===id):null;
+  const labels=field?.sub_rows;
+  if(!Array.isArray(labels)||labels.length!==texts.length||!texts.every(dvRowText)) return null;
+  return labels.map((label,i)=>`${label}: ${texts[i]}`).join('\n');
+}
+function playerDvRows(p){
+  const enhancement=p?.enhancement;
+  if(!enhancement) return {metadata:null,target:null};
+  const report=enhancement.requires_effective_processing?playerEffectiveProcessing(p):null;
+  const metadata=enhancement.requires_effective_processing?report?.dv_metadata:enhancement.dv_metadata;
+  const target=report?.display_target;
+  const row=(value,note)=>value&&note?{value,note}:null;
+  return {
+    metadata:metadata&&typeof metadata==='object'?row(dvRowText(metadata.applied?.text),
+      dvSubRows('dv_metadata',[metadata.in_file?.text,metadata.applied?.text,metadata.left_for_display?.text])):null,
+    target:target&&typeof target==='object'?row(dvRowText(target.mapped_for_text),
+      dvSubRows('display_target',[target.reported_peak_text,target.mapped_for_text,target.title_peak_text])):null
+  };
 }
 function enhancementPills(enhancement){
   if(!enhancement||!enhancement.active.length) return '';
@@ -278,6 +331,9 @@ function playerToneMapping(p){
   if(p.sessionId&&h?.id===p.sessionId&&Number.isFinite(h.tone_map_peak_nits)
     &&h.tone_map_peak_nits>0&&['cll','mdcv','default'].includes(h.tone_map_peak_source)) return true;
   const report=playerEffectiveProcessing(p);
+  // A Dolby Vision carrier is never display targeted: every report names the
+  // reconstruction's own TargetMapping, and the display maps the picture.
+  if(report?.profile81_reconstructed===true) return false;
   return !!report?.applied_operations.some(op=>op==='TargetMapping'||
     (typeof op==='object'&&op?.DisplayTargetMapping));
 }

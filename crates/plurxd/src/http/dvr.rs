@@ -660,7 +660,7 @@ pub(crate) async fn status(
     Ok(Json(DvrStatus {
         enabled: dvr.enabled,
         owner_node_id: live_tv.owner_node_id.clone(),
-        free_bytes: crate::live_tv::free_space_bytes(&dvr.root),
+        free_bytes: crate::live_tv::free_space_bytes(&dvr.root).await,
         floor_bytes: (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000),
         slots: DvrSlots {
             max: live_tv.max_sessions,

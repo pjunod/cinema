@@ -520,38 +520,46 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertIn("github.event_name == 'schedule'", condition)
         self.assertIn("needs.release-check.result == 'success'", condition)
         self.assertIn("needs.release-check.outputs.pending == 'true'", condition)
-        # The gate for a pending release is the whole of `make release-check`.
+        # The gate for a pending release is the green promotion gate its
+        # landing already carries, read, never rerun.
         self.assertIn(
-            "        if: steps.release.outputs.pending == 'true'\n        run: python3 \"$RUNNER_TEMP/release-readiness\" make release-check",
+            "        if: steps.release.outputs.pending == 'true'\n"
+            "        env:\n"
+            "          GITHUB_TOKEN: ${{ github.token }}\n"
+            "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
+            '        run: python3 -m validation.release_evidence --sha "$RELEASE_SHA"',
             self.check,
         )
 
     def test_the_gate_runs_on_the_release_commit_not_the_tip(self):
-        """The commit gated is the commit tagged: the release commit.
+        """The commit whose evidence is read is the commit tagged: the release commit.
 
         `--pending`'s `sha` is the release commit (see
-        `test_pending_names_the_release_commit_never_main_s_tip`); the gate has
-        to check it out before `make release-check`, or it tests the tip and
-        tags a commit it never ran.
+        `test_pending_names_the_release_commit_never_main_s_tip`); the evidence
+        check is handed that sha, never HEAD, or it would vouch for the tip
+        and tag a commit it never looked at.
         """
 
-        checkout = self.check.index(
-            "      - name: Check out the release commit\n"
-            "        if: steps.release.outputs.pending == 'true'\n"
-            "        env:\n"
-            "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
-            '        run: git checkout -q --detach "$RELEASE_SHA"\n'
-        )
-        self.assertLess(
-            checkout,
-            self.check.index('run: python3 "$RUNNER_TEMP/release-readiness" make release-check'),
-        )
+        self.assertIn('RELEASE_SHA: ${{ steps.release.outputs.sha }}', self.check)
+        self.assertIn('--sha "$RELEASE_SHA"', self.check)
         self.assertIn("sha: ${{ steps.release.outputs.sha }}", self.check)
         # A refusal from `--pending` fails the step instead of vanishing into a pipe.
         find = self.check.split("id: release\n", 1)[1].split("      - name:", 1)[0]
         self.assertNotIn("| tee", find)
         self.assertIn('scripts/release-cut --pending > "$found"', find)
         self.assertIn('grep -qx "sha=$TESTED_SHA"', self.tag)
+
+    def test_it_reruns_no_test_suite(self):
+        """Release code passed its gate once, when it merged; tagging it reruns nothing.
+
+        Paul, 2026-11-25: run 9184 spent three hours rerunning the Rust suite
+        on v0.9.1's already-gated landing until the runner killed it.
+        """
+
+        for command in ("make ", "cargo", "release-readiness\"", "scripts/validate", "rust-toolchain",
+                        "cargo-cache", "nonvoter"):
+            self.assertNotIn(command, self.check, command)
+        self.assertIn("    timeout-minutes: 10\n", self.check)
 
     def test_the_tag_goes_on_the_commit_the_gate_passed_and_is_annotated(self):
         self.assertIn("ref: ${{ needs.release-check.outputs.sha }}", self.tag)
@@ -563,6 +571,30 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertEqual(self.workflow.count("secrets.RELEASE_TAG_TOKEN"), 1)
         self.assertNotIn("git config", self.tag)
         self.assertIn('http.extraheader="AUTHORIZATION: basic $auth"', self.tag)
+
+
+class ReleaseTagPublicationCase(unittest.TestCase):
+    """A pushed tag publishes from its commit's existing gate; nothing is retested (Paul, 2026-11-25)."""
+
+    def setUp(self):
+        self.workflow = (ROOT / ".github/workflows/release-tag.yml").read_text(encoding="utf-8")
+
+    def test_a_tag_publishes_only_after_its_commit_s_existing_gate(self):
+        self.assertIn('on:\n  push:\n    tags: ["v*"]\n\n', self.workflow)
+        evidence = self.workflow.split("\n  evidence:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        publish = self.workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn('sha=$(git rev-parse --verify "refs/tags/$TAG^{commit}")', evidence)
+        self.assertIn('python3 -m validation.release_evidence --sha "$sha"', evidence)
+        self.assertIn("    needs: evidence\n", publish)
+        self.assertIn("    uses: ./.github/workflows/publish-release.yml\n", publish)
+        self.assertIn("      release_tag: ${{ github.ref_name }}\n", publish)
+
+    def test_a_tag_starts_no_test_sweep(self):
+        for command in ("make ", "cargo", "scripts/validate", "rust-toolchain", "nonvoter"):
+            self.assertNotIn(command, self.workflow, command)
+        for name in ("ci", "lint"):
+            triggers = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8").split("\njobs:", 1)[0]
+            self.assertNotIn("tags:", triggers, name)
 
 
 if __name__ == "__main__":

@@ -506,7 +506,7 @@ impl TitleTask {
         }
         probe_preempts(
             state,
-            &self.job_id,
+            Some(&self.job_id),
             &self.probe_pipeline,
             &mut self.probe_after,
         )
@@ -523,9 +523,12 @@ impl TitleTask {
 /// `job_id` (a title scan or an F+ fit). Scheduler checks only locally
 /// readable, compatible, live ordinary work; durable SQL excludes stale
 /// coordinators and other resource blockers.
+/// Whether a locally runnable ordinary probe should take the lane. `job_id`
+/// is the running title or F+ job, whose priority the store compares; work
+/// without a job row (the DV levels pass) yields to any runnable probe.
 pub(super) async fn probe_preempts(
     state: &AppState,
-    job_id: &str,
+    job_id: Option<&str>,
     probe_pipeline: &str,
     probe_after: &mut Option<CandidateCursor>,
 ) -> Result<bool, StoreError> {
@@ -575,6 +578,9 @@ pub(super) async fn probe_preempts(
         {
             continue;
         }
+        let Some(job_id) = job_id else {
+            return Ok(true);
+        };
         if state
             .store
             .probe_can_preempt_title(&job.id, job_id, &state.node_id, now)
@@ -1049,9 +1055,13 @@ enum TitleAcquisition {
 /// permanently fail a readable title. A storage read failure is charged like
 /// any other transient read failure (the probe and subtitle paths do the
 /// same), so a bad sector stays bounded by the attempt limit, but under its own
-/// code. A scanner refusal of readable input stays `title_scan_failed`. Every
-/// case keeps the retry backoff, so a whole-title read never restarts in a
-/// tight loop.
+/// code. A content refusal of cleanly read, unchanged input is a verdict on
+/// those bytes under this scanner: rereading them reaches the same refusal, so
+/// the job fails once as `title_scan_refused`, which settles the title's
+/// demand for that probe revision and scanner digest. A changed file (a new
+/// probe revision) or a new scanner re-opens it. Any other scanner failure
+/// stays a charged `title_scan_failed`. Every retry keeps the backoff, so a
+/// whole-title read never restarts in a tight loop.
 fn scan_failure_settlement(
     error: &TitleScanError,
     job_id: &str,
@@ -1075,6 +1085,12 @@ fn scan_failure_settlement(
             JobSettlement::Retry {
                 error_code: "title_source_read_failed".into(),
                 not_before_ms,
+            }
+        }
+        TitleScanError::Refused(_) => {
+            tracing::warn!(%error, job = job_id, "complete-title scan refused the title");
+            JobSettlement::Fail {
+                error_code: "title_scan_refused".into(),
             }
         }
         TitleScanError::Failed(_) => {

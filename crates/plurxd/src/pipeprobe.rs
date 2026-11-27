@@ -3005,6 +3005,37 @@ mod tests {
         assert!(joined.contains("h264_vaapi"), "{joined}");
     }
 
+    #[test]
+    fn vulkan_probe_returns_frames_to_the_qsv_encoder() {
+        let args = probe_args(
+            Path::new("/f.mkv"),
+            Path::new("/o.mp4"),
+            Pipeline::Libplacebo,
+            Encoder::Qsv,
+        );
+        let joined = args.join(" ");
+        assert_eq!(
+            args.iter().filter(|a| *a == "-filter_hw_device").count(),
+            1,
+            "{joined}"
+        );
+        assert!(joined.contains("-init_hw_device vaapi=va:"), "{joined}");
+        assert!(joined.contains("-init_hw_device qsv=hw@va"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@va"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter graph")
+            + 1];
+        assert!(vf.contains("hwupload,libplacebo="), "{vf}");
+        assert!(
+            vf.ends_with("hwupload=derive_device=qsv:extra_hw_frames=64,format=qsv"),
+            "{vf}"
+        );
+        assert!(joined.contains("h264_qsv"), "{joined}");
+    }
+
     /// The fixture is the foundation: without PQ/BT.2020 signalling in the
     /// stream a hardware decoder has nothing to carry through, and the probe
     /// would pass every candidate — worse than having no probe at all.

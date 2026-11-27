@@ -246,7 +246,7 @@ impl TranscodeManager {
             return Err("encoded intent unavailable".to_owned());
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
-        if !source.unchanged() || source.object_version() != encoding.source_object_version {
+        if !source.unchanged().await || source.object_version() != encoding.source_object_version {
             return Err("encoded source changed before queue publication".to_owned());
         }
         // Allocation budget, never measured wire cost. Actual writes remain
@@ -392,6 +392,7 @@ impl TranscodeManager {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id,
             playback_id: String::new(),
             request_id: None,
@@ -624,7 +625,7 @@ impl TranscodeManager {
         }) {
             return Ok(None);
         }
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Ok(None);
         }
         let cap = u64::try_from(file.size)
@@ -795,7 +796,7 @@ impl TranscodeManager {
             return Err(PreparationError::Yield("owner_busy"));
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
-        if !source.unchanged() || source.object_version() != source_object_version {
+        if !source.unchanged().await || source.object_version() != source_object_version {
             if !manual {
                 return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
@@ -877,6 +878,7 @@ impl TranscodeManager {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: String::new(),
             request_id: None,
@@ -987,7 +989,7 @@ impl TranscodeManager {
                 || self.fragment_worker_idle(admission),
             )
             .await?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err(PreparationError::Stop("source_changed"));
         }
         if !self.fragment_worker_idle(admission) {

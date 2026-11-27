@@ -268,6 +268,40 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::pre_vote_variants_follow_every_deployed_raft_stream_ordinal \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::only_the_exact_header_value_advertises_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_older_server_never_receives_a_pre_vote_and_keeps_its_stream \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_advertising_server_answers_the_pre_vote_itself \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::both_raft_stream_handlers_advertise_and_answer_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_local_only_answer_read_from_a_socket_is_refused \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_unreachable_peer_gives_no_pre_vote_answer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_reconnect_renegotiates_pre_vote \
+	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=14 $(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml \
+	  --features serde engine::tests::pre_vote_test:: --lib
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::frame_io::tests::real_tls_tail_backpressure_completes_for_every_payload_direction \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1092,11 +1126,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::startup_wait_logging_tests::immediate_watermark_errors_cannot_starve_due_startup_log \
 	  --lib -- --exact
-	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
-	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
-	  | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["manifest_path"] for p in data["packages"] if p["name"] == "openraft" and p["version"] == "0.9.25"))' )"; \
-	  CARGO_TARGET_DIR="$(CURDIR)/target/openraft-regression" $(CARGO) test --locked \
-	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
+	$(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
 	PLURX_EXPECT_TEST_COUNT=17 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1207,7 +1237,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=76 \
+	PLURX_EXPECT_TEST_COUNT=79 \
 	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
 	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
@@ -1584,6 +1614,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/offload.test.js
+	@node --test tests/web/dv-version-facts.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
 	@node --test tests/web/cinema-remote-receiver.test.js
@@ -1630,6 +1661,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/dv-provenance-rows.test.js
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
@@ -1650,6 +1682,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/error-reporter.test.js
 	@node --test tests/playback/current-main-effort-quality.test.js
 	@node --test tests/playback/frame-diagnostics.test.js
+	@node --test tests/playback/server-metrics.test.js
 	@node tests/playback/network-shaping.test.js
 	@node --test tests/playback/cq-native-shipping-evidence.test.js
 	@node --test tests/playback/preparation-measurement.test.js

@@ -103,6 +103,12 @@ pub(crate) enum PeerError {
     },
     /// An authenticated Start refusal, never a physical cleanup receipt.
     DolbyVisionUnsupported,
+    /// A Source's typed 422 refusal of the title itself, one of
+    /// [`crate::http::shared_source_playback::SOURCE_START_REFUSAL_CODES`],
+    /// carried as its code so the viewer is told the cause.
+    SourceRefused {
+        code: &'static str,
+    },
     /// A Source's typed 503 `startup_timeout` to a Start that carried the
     /// viewer's start clock: its owned work goes on, and the same request
     /// rejoins it. Distinct from `Busy` (429: no capacity right now), which
@@ -536,6 +542,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             // Limit the stream even when Content-Length is absent or false.
             let bytes = axum::body::to_bytes(
                 Body::new(
@@ -560,7 +567,8 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if !status.is_success() {
-                return Err(PeerError::Rejected(status));
+                // A typed wait (429 or 503 with Retry-After) stays a wait.
+                return Err(peer_status_refusal(status, retry_after.as_ref()));
             }
             serde_json::from_slice(&bytes).map_err(|_| PeerError::InvalidResponse)
         })
@@ -607,12 +615,8 @@ impl PeerConnection {
                     .map_err(|_| PeerError::InvalidResponse)?;
                 return Err(if status == StatusCode::UNAUTHORIZED {
                     PeerError::Authentication
-                } else if status == StatusCode::TOO_MANY_REQUESTS {
-                    PeerError::Busy {
-                        retry_after_secs: peer_retry_after_secs(retry_after.as_ref()),
-                    }
                 } else {
-                    PeerError::Rejected(status)
+                    peer_status_refusal(status, retry_after.as_ref())
                 });
             }
             let headers = response.headers();
@@ -1638,6 +1642,10 @@ mod driver_lifetime_tests {
 /// `Retry-After`); see `shared_source_playback::live_refusal_retry`.
 pub(crate) const SOURCE_LIVE_RETRY_CODE: &str = "sharing_source_retry";
 
+/// Not `peer_status_refusal`: a Start's refusal carries typed bodies
+/// (`startup_timeout`, `sharing_source_not_prepared`, the live-retry code) that
+/// a status alone cannot classify, and only a budgeted Start, whose viewer
+/// sent its clock, may be told to come back.
 fn source_start_refusal(
     status: StatusCode,
     bytes: &[u8],
@@ -1682,6 +1690,14 @@ fn source_start_refusal(
             {
                 return PeerError::DolbyVisionUnsupported;
             }
+            if refusal.message.len() <= 4096 {
+                if let Some(code) = crate::http::shared_source_playback::SOURCE_START_REFUSAL_CODES
+                    .iter()
+                    .find(|code| **code == refusal.code)
+                {
+                    return PeerError::SourceRefused { code };
+                }
+            }
         }
     }
     // The receiver's viewer is told only "unresolved" for this answer. Keep
@@ -1700,19 +1716,22 @@ fn source_start_refusal(
     PeerError::Rejected(status)
 }
 
-/// A Source that cannot read its own authority answers 503 with
-/// `Retry-After`: unavailable for now, never a refusal that retires the
-/// receiver's session. A full ingress credit pool answers 429 with
-/// `Retry-After` (load, not an outage): busy, retried after its wait. Every
-/// other non-success answer is a refusal.
+/// The one classification of a peer's non-success answer for every receiver
+/// read and session operation (Start alone reads its typed bodies first, see
+/// `source_start_refusal`). Any 429 is load, not an outage: busy, retried
+/// after its `Retry-After` or the bounded default. A Source that cannot read
+/// its own authority (fenced, in maintenance, renewing its store) answers 503
+/// with `Retry-After`: unavailable for now, a session kept but no read waited
+/// on, never a refusal that retires the receiver's session. Every other
+/// non-success answer is a refusal.
 pub(crate) fn peer_status_refusal(
     status: StatusCode,
     retry_after: Option<&HeaderValue>,
 ) -> PeerError {
     match (status, retry_after) {
         (StatusCode::SERVICE_UNAVAILABLE, Some(_)) => PeerError::Unavailable,
-        (StatusCode::TOO_MANY_REQUESTS, Some(value)) => PeerError::Busy {
-            retry_after_secs: peer_retry_after_secs(Some(value)),
+        (StatusCode::TOO_MANY_REQUESTS, retry_after) => PeerError::Busy {
+            retry_after_secs: peer_retry_after_secs(retry_after),
         },
         _ => PeerError::Rejected(status),
     }
@@ -1760,10 +1779,12 @@ mod peer_status_refusal_tests {
             )),
             crate::http::shared_receiver_playback::ReceiverStartError::PeerUnavailable
         ));
-        // An untyped 429 is still a refusal.
+        // An untyped 429 is busy too, after the bounded default wait.
         assert!(matches!(
             peer_status_refusal(StatusCode::TOO_MANY_REQUESTS, None),
-            PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            PeerError::Busy {
+                retry_after_secs: PEER_BUSY_DEFAULT_RETRY_AFTER_SECS
+            }
         ));
     }
 }
@@ -1838,6 +1859,29 @@ mod source_start_refusal_tests {
                 Some(Some(&oversized_wait)),
             ),
             PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+    }
+
+    /// Avatar 6751 (2026-11-23): a Source refused the title with a typed 422
+    /// and the receiver told its viewer "unresolved". A listed code is carried
+    /// as itself; an unlisted one, or the same code on another status, is not.
+    #[test]
+    fn a_typed_source_refusal_of_the_title_is_carried_as_its_code() {
+        let body = br#"{"code":"copy_range_input_limit","message":"Shared start is unavailable"}"#;
+        assert!(matches!(
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body, None),
+            PeerError::SourceRefused {
+                code: "copy_range_input_limit"
+            }
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body, None),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+        let unknown = br#"{"code":"some_future_code","message":"x"}"#;
+        assert!(matches!(
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, unknown, None),
+            PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
         ));
     }
 

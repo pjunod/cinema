@@ -6,6 +6,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [Split HLS as the default](SPLIT-HLS-DEFAULT-INVENTORY.md) | What split layouts ship, what a split default must change on each surface and client, and how its baseline is measured. | open |
 | [One video for two VOD soundtracks](SHARED-VIDEO-MULTILINGUAL-VOD.md) | How to share indexed copy video across language tracks and prove continuous pictures and a single stored video. | open |
 | [MPV startup](MPV-LIVE-STARTUP.md) | MPV admission. | open |
 | [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour runs and attribution. | done |
@@ -31,6 +32,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL splice](FEL-SERVER-SPLICE-BUILD.md) | Native HLS cutover and rollout. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
+| [FEL-REFERENCE-COMPOSITION-PLAN.md](FEL-REFERENCE-COMPOSITION-PLAN.md) | Independent FEL composer reference, measured deviation, matching composition. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | built |
 | [F+ acceptance](FEL-RPU-REFIT-GRADUATION-AND-M7.md) | Physical playback and NP1 trials. | open |
 | [M7 trial](FEL-RPU-REFIT-M7-2026-11-19.json) | Frozen NP1 rejection against served F+. | done |
