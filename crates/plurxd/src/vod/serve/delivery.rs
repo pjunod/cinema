@@ -1170,6 +1170,10 @@ impl VodServe {
                     .as_ref()
                     .map(|identity| identity.served_init.clone());
                 let Some(expected) = expected else {
+                    // An optional companion not yet observed joins later.
+                    if optional {
+                        continue;
+                    }
                     return Ok(None);
                 };
                 let Some(bytes) = read_child_init(&mut ready, &expected, deadline).await? else {
@@ -1381,6 +1385,15 @@ impl VodServe {
             if (role == "audio") != encoding.shared_audio.is_some() {
                 return Ok(None);
             }
+            // Wait for the init first: a finite init is ready only once its
+            // identity is recorded, so a not-yet-observed child waits here
+            // (or answers Pending) and is never dropped.
+            let budget = found
+                .block_budget
+                .min(deadline.saturating_duration_since(Instant::now()));
+            let mut ready = self
+                .serve_init(&found.rendition, budget, found.delivery)
+                .await?;
             let expected = found
                 .rendition
                 .identity
@@ -1390,14 +1403,10 @@ impl VodServe {
                 .as_ref()
                 .map(|identity| identity.served_init.clone());
             let Some(expected) = expected else {
-                return Ok(None);
+                return Err(VodError::Pending {
+                    retry_after: PENDING_RETRY_AFTER,
+                });
             };
-            let budget = found
-                .block_budget
-                .min(deadline.saturating_duration_since(Instant::now()));
-            let mut ready = self
-                .serve_init(&found.rendition, budget, found.delivery)
-                .await?;
             let Some(bytes) = read_child_init(&mut ready, &expected, deadline).await? else {
                 return Ok(None);
             };

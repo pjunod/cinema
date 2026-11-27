@@ -5626,10 +5626,14 @@ async fn controlled_continuous_companion_case(pool_includes_companion: bool) {
         }
         Arc::clone(&child.rendition)
     };
+    // Verified means published and observed: the init and its identity.
     wait_until(
         "companion verified init",
         Duration::from_secs(15),
-        async || optional_rendition.dir.has_init().await,
+        async || {
+            optional_rendition.dir.has_init().await
+                && optional_rendition.identity.lock().await.identity.is_some()
+        },
     )
     .await;
     let second = serve

@@ -945,8 +945,12 @@ impl VodServe {
             let legacy_init_ready = finite_output.is_none() && rendition.dir.has_init().await;
             #[cfg(not(unix))]
             let legacy_init_ready = rendition.dir.has_init().await;
+            // A finite producer publishes init.mp4 before its observer records
+            // the init identity; the init is ready only once both exist, so
+            // no reader compares served bytes against an unknown identity.
             #[cfg(unix)]
-            let finite_init_ready = finite_init_len.is_some();
+            let finite_init_ready = finite_init_len.is_some()
+                && rendition.identity.lock().await.identity.is_some();
             #[cfg(not(unix))]
             let finite_init_ready = false;
             if finite_init_ready || legacy_init_ready {
