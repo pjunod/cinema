@@ -328,16 +328,19 @@ def publish(root: Path, paths: list[str]) -> int:
     lane (AGENTS.md, "Landing on main"). The merge is pinned to the verified
     head, so nothing else can land under the fold's name. The pull request
     keeps the landing in the forge's history, with its `Changelog:` field.
-    `FOLD_TOKEN` is the job's own token: nothing needs the fold's pushes to
-    start workflows, because nothing waits for them.
+    `FOLD_BOT_TOKEN` belongs to the `plurx-fold-bot` account, a write
+    collaborator on this repository only. The job's own token cannot open a
+    pull request here (the Actions user is not a collaborator), and a merge
+    made with the bot is a push like any other, so `landing-check` judges it.
+    Without the token the fold fails rather than land some other way.
     """
 
-    token = os.environ.get("FOLD_TOKEN", "")
+    token = os.environ.get("FOLD_BOT_TOKEN", "")
     server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not token:
-        print("fold: --publish needs FOLD_TOKEN (the fold workflow passes the job's own token)",
-              file=sys.stderr)
+        print("::error::fold: --publish needs FOLD_BOT_TOKEN, the plurx-fold-bot token "
+              "(repository secret); the pages wait for the next fold or release cut", file=sys.stderr)
         return 2
     if not server or not repo:
         print("fold: --publish needs GITHUB_SERVER_URL and GITHUB_REPOSITORY", file=sys.stderr)

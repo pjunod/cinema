@@ -279,7 +279,7 @@ class PublishFoldCase(FoldTree):
                 raise FOLD.ForgeStatus(404, "no pull request")
             return {"number": 7} if path.endswith("/pulls") else None
 
-        environment = {"FOLD_TOKEN": "test-token", "GITHUB_REPOSITORY": "noirr/plurx",
+        environment = {"FOLD_BOT_TOKEN": "test-token", "GITHUB_REPOSITORY": "noirr/plurx",
                        "GITHUB_SERVER_URL": remote.parent.parent.as_uri()}
         original = FOLD._api
         FOLD._api = api
@@ -299,6 +299,12 @@ class PublishFoldCase(FoldTree):
         self.assertEqual(merge[2]["head_commit_id"], head)
         self.assertNotIn("merge_when_checks_succeed", merge[2])
         self.assertIn("Changelog: none", merge[2]["MergeMessageField"])
+
+    def test_without_the_bot_token_the_fold_fails_closed(self):
+        paths = self.fold()
+        with unittest.mock.patch.dict("os.environ", {"FOLD_BOT_TOKEN": "", "GITHUB_SERVER_URL": "x",
+                                                     "GITHUB_REPOSITORY": "noirr/plurx"}):
+            self.assertEqual(FOLD.publish(self.root, paths), 2)
 
     def test_a_fold_that_does_not_verify_is_never_pushed(self):
         paths = self.fold()
