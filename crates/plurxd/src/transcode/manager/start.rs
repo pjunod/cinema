@@ -1815,12 +1815,12 @@ impl TranscodeManager {
         }
         let startup_bytes = rolling_startup_bytes(copy_bitrate(&planning.file), 1.0);
         let limits = self.ahead_limits_for_start(&planning.settings);
+        // Without a prepared head, the split stages beside the ordinary copy
+        // within the session's ceiling, which the writer measures as it goes;
+        // the 2S figure is only the reservation, clamped to that ceiling.
         let sizing = if head.is_some() {
             prepared_native_fel_sizing(startup_bytes, limits)?
         } else {
-            if native_split_startup_budget(startup_bytes, limits) == 0 {
-                return None;
-            }
             RollingScratchSizing::Startup(startup_bytes.saturating_mul(2))
         };
         let scratch = self.reserve_rolling_scratch_with(sizing, limits).ok()?;
@@ -2024,18 +2024,23 @@ impl TranscodeManager {
         let copy_bitrate = copy_bitrate(&file);
         let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
         // Keep the original mux and both role objects alive through their
-        // ordinary grace. Reserve startup for both copies before exposing the
-        // alternate layout so it cannot spend the incumbent's startup grant.
+        // ordinary grace. The reservation asks for startup for both copies,
+        // clamped to the session's ceiling; when the estimate alone reaches
+        // that ceiling nothing extra is reserved, and the writer measures
+        // whether both copies of the served window fit beside what the
+        // ordinary copy still needs.
         let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
         let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
-        let split_startup_budget = native_split_startup_budget(startup_bytes, limits);
-        let split_eligible = native_split_requested && segmenting && split_startup_budget > 0;
+        let split_eligible = native_split_requested && segmenting;
         #[cfg(target_os = "linux")]
         let split_reservation = prepared_scratch.filter(|_| split_eligible).or_else(|| {
-            warm_head.as_ref().filter(|_| split_eligible).and_then(|_| {
-                let sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(3));
-                self.reserve_rolling_scratch_with(sizing, limits).ok()
-            })
+            // A warm head is staged whole beside both copies: it needs the
+            // full 3S grant, not one clamped to the ceiling.
+            warm_head
+                .as_ref()
+                .filter(|_| split_eligible)
+                .and_then(|_| prepared_native_fel_sizing(startup_bytes, limits))
+                .and_then(|sizing| self.reserve_rolling_scratch_with(sizing, limits).ok())
         });
         #[cfg(target_os = "linux")]
         let warm_head = warm_head.filter(|_| split_reservation.is_some());
@@ -2058,8 +2063,6 @@ impl TranscodeManager {
                 "takeover"
             } else if !segmenting {
                 "not_segmenting"
-            } else if split_startup_budget <= 0 {
-                "no_split_startup_budget"
             } else {
                 "split_scratch_reservation_refused"
             };
@@ -2430,7 +2433,8 @@ impl TranscodeManager {
                 let split = crate::copyseg::NativeSplitInventory::with_budget(
                     u64::try_from(ordinary_sizing.grant_bytes(limits)).unwrap_or(0),
                     u64::try_from(RollingScratchSizing::session_ceiling(limits)).unwrap_or(0),
-                );
+                )
+                .with_startup_secs(rolling_startup_media_ms(1.0) as f64 / 1_000.0);
                 #[cfg(target_os = "linux")]
                 let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
                 #[cfg(target_os = "linux")]
@@ -2825,6 +2829,7 @@ fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
         .map(|rate| rate as f64)
 }
 
+#[cfg(target_os = "linux")]
 fn native_split_startup_budget(startup_bytes: i64, limits: AheadLimits) -> i64 {
     RollingScratchSizing::Startup(startup_bytes.saturating_mul(2))
         .grant_bytes(limits)

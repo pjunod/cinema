@@ -3020,6 +3020,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # tasks in the same module. The helper's stage task and its launch moved into
 # the single/run split without changing count.
 # Media I/O isolation (E-08DAF9B91B): spawn_blocking sites that touch media storage moved to plurx_core::media_io::blocking (bounded, reviewed in docs/server/MEDIA-IO-ISOLATION-PLAN.md).
+# Native split measured need (#1973): +1 joined test task in copyseg.rs that
+# stands in for the session's periodic scratch walk. No production task.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 6
 "crates/plurx-core/src/process/bounded/pause.rs" = 2
@@ -3040,7 +3042,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/copyrange/observed.rs" = 2
 "crates/plurxd/src/copyrange/pipes.rs" = 2
 "crates/plurxd/src/copyrange/production.rs" = 3
-"crates/plurxd/src/copyseg.rs" = 6
+"crates/plurxd/src/copyseg.rs" = 7
 "crates/plurxd/src/decode_facts.rs" = 7
 "crates/plurxd/src/decode_facts/tests.rs" = 10
 "crates/plurxd/src/decoder_health.rs" = 11
@@ -4827,6 +4829,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # copy's production loop (a tokio::time::sleep bounding the one stall report in
 # copyrange::meter::await_reporting_stall, and the observation Instants). They
 # only time and report; no wait, deadline or retry changes. No new task.
+# Native split measured need (#1973): +3 in copyseg.rs tests only: two
+# tokio::time::timeout bounds on the yield and selected-split tests, and the
+# sleep of the joined task that stands in for the session's periodic walk.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 17
 "crates/plurx-core/src/process/bounded/pause.rs" = 18
@@ -4853,7 +4858,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/copyrange/meter.rs" = 5
 "crates/plurxd/src/copyrange/observed.rs" = 5
 "crates/plurxd/src/copyrange/production.rs" = 4
-"crates/plurxd/src/copyseg.rs" = 6
+"crates/plurxd/src/copyseg.rs" = 9
 "crates/plurxd/src/decode_facts.rs" = 22
 "crates/plurxd/src/decode_facts/source_session.rs" = 5
 "crates/plurxd/src/decode_facts/tests.rs" = 42
