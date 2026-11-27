@@ -57,3 +57,7 @@ jobs:
     uses: ./.github/workflows/publish-release.yml
     with:
       release_tag: ${{ github.ref_name }}
+    # A called workflow gets no secrets unless they are passed; without this
+    # its registry logins ran with an empty LOCAL_REGISTRY_TOKEN and failed
+    # "Password required" (v0.9.2 run 9689, v0.9.3 run 9910).
+    secrets: inherit

@@ -366,28 +366,53 @@ jobs:
           ARCH: ${{ matrix.arch }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          # The ABI check reads ELF headers with the pinned CI image's binutils,
+          # never the runner's: heavy hosts are not uniformly provisioned (one
+          # had no `file`), and the check must not depend on where it lands.
+          # readelf reads either architecture's ELF, so both legs use the
+          # image's amd64 build (arm64 runs it under the QEMU set up above).
+          ABI_TOOLS_IMAGE: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+          # The CI image is private and is pulled as noirr with its own
+          # read-package token, like every other job that uses it.
+          CI_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
         run: |
           set -euo pipefail
           trusted-packaging/scripts/release-package-candidate \
             release-source trusted-packaging \
             release-source/binary-export release-source/release-bin \
             "$TARGET" "$RELEASE_TAG" "$SOURCE_SHA"
-          while IFS= read -r name; do
-            binary="release-source/release-bin/$name"
-            test "$(file -b "$binary")" != ""
-            max_glibc=$(readelf --version-info "$binary" \
-              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-              | sort -V | tail -1)
-            test -n "$max_glibc"
-            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
-              echo "::error::$ARCH $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
-              exit 1
-            }
-          done < <(
+          names=$(
             PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
               python3 -m validation.release_dockerfile --list-binaries \
               release-source/Dockerfile
           )
+          test -n "$names"
+          # A separate client config keeps this pull login from replacing the
+          # job's fleet login for the same registry, which later steps push with.
+          pull_config=$(mktemp -d)
+          trap 'rm -rf "$pull_config"' EXIT
+          test -n "$CI_REGISTRY_PULL_TOKEN"
+          printf '%s' "$CI_REGISTRY_PULL_TOKEN" | DOCKER_CONFIG="$pull_config" \
+            docker login --username noirr --password-stdin "$CI_REGISTRY" >/dev/null
+          DOCKER_CONFIG="$pull_config" docker pull --platform linux/amd64 "$ABI_TOOLS_IMAGE"
+          # readelf fails on anything that is not an ELF object, and an empty
+          # GLIBC version list fails the -n test, so a wrong file cannot pass.
+          docker run --rm --platform linux/amd64 --network none \
+            --volume "$PWD/release-source/release-bin:/release-bin:ro" \
+            --env ARCH --env NAMES="$names" --entrypoint bash "$ABI_TOOLS_IMAGE" -euo pipefail -c '
+              while IFS= read -r name; do
+                binary="/release-bin/$name"
+                max_glibc=$(readelf --version-info "$binary" \
+                  | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" \
+                  | sort -V | tail -1)
+                test -n "$max_glibc"
+                test "$(printf "%s\n" "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
+                  echo "::error::$ARCH $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
+                  exit 1
+                }
+              done <<< "$NAMES"
+            '
       - name: Retain the exact tagged binary receipt for one day
         continue-on-error: true
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4

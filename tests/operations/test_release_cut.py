@@ -713,6 +713,29 @@ class ReleaseTagPublicationCase(unittest.TestCase):
         self.assertIn("    uses: ./.github/workflows/publish-release.yml\n", publish)
         self.assertIn("      release_tag: ${{ github.ref_name }}\n", publish)
 
+    def test_the_called_publish_workflow_receives_the_registry_secrets(self):
+        # A reusable workflow sees no secrets unless they are passed, so its
+        # registry logins failed "Password required" (runs 9689 and 9910).
+        publish = self.workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn("\n    secrets: inherit\n", publish)
+        called = (ROOT / ".github/workflows/publish-release.yml").read_text(encoding="utf-8")
+        self.assertIn("password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}", called)
+
+    def test_the_release_abi_check_uses_the_pinned_ci_image_not_host_tools(self):
+        # A heavy host without `file` failed v0.9.3's amd64 leg (run 9911);
+        # the check must run the same pinned binutils wherever it lands.
+        called = (ROOT / ".github/workflows/publish-release.yml").read_text(encoding="utf-8")
+        step = called.split("- name: Bind the binary set to the tagged tree and verify its ABI\n", 1)[1]
+        step = step.split("\n      - name: ", 1)[0]
+        self.assertRegex(step, r"ABI_TOOLS_IMAGE: .*/noirr/plurx-ci@sha256:[0-9a-f]{64}\n")
+        host, container = step.split('--entrypoint bash "$ABI_TOOLS_IMAGE"', 1)
+        self.assertNotIn("readelf --", host)
+        self.assertNotIn("file -b", step)
+        self.assertIn("release-bin:/release-bin:ro", host)
+        self.assertIn("--network none", host)
+        self.assertIn('readelf --version-info "$binary"', container)
+        self.assertIn('test -n "$max_glibc"', container)
+
     def test_a_tag_starts_no_test_sweep(self):
         for command in ("make ", "cargo", "scripts/validate", "rust-toolchain", "nonvoter"):
             self.assertNotIn(command, self.workflow, command)
