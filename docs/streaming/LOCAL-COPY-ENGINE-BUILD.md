@@ -68,7 +68,7 @@ structural; P5–P9 are behaviour a local owner must supply itself.
 | P2 | Generation ownership | `copyrange/pipes.rs::spawn_source_generation`, `CopyGenerationOwner` | Variants are `Source { owners, dispatch, authority }` and `Analysis { phase }` |
 | P3 | Input admission | `growing.rs` via `foreground_source_request` and `SourceInput::open_foreground_held` | The request is keyed by the Source incarnation |
 | P4 | Serving | `growing.rs::SourceGrowingBacking`, `CopyRangeFiles::playlist` | The range is served by the Source viewer actor's own playlist, not a VOD session's plan |
-| P5 | Recipe and probe derivation | `growing.rs` against `vod/generation.rs::copy_video_pipeline` | The two paths once passed a different `have_dovi_bsf`, so one Dolby Vision HEVC file copied with DV stripped got two source keys. Main fixed the Source side in df5fb09f5 (the Source takes the node's boot-measured `dovi_rpu`). Phase2's step 4 fixed it another way; step 4 records the open choice |
+| P5 | Recipe and probe derivation | `growing.rs` against `vod/generation.rs::copy_video_pipeline` | The two paths once passed a different `have_dovi_bsf`, so one Dolby Vision HEVC file copied with DV stripped got two source keys. Closed on main by df5fb09f5 (the Source takes the node's boot-measured `dovi_rpu`); step 4 records the decision and the census split it leaves |
 | P6 | Range liveness and the owner loop | `growing.rs`, the loop after `complete_source_media_session_publication` | The Source lease heartbeat renews the gate, refreshes the read bank and ends the range on expiry or revocation |
 | P7 | Seek and control state | `CopyRangeProduction::observe_demand`, `rolling_source_watermarks` | Demand snapshots and watermarks come from the Source viewer's control state |
 | P8 | Crash-orphan reaping | Source session recovery over `source-copy-ranges/<incarnation>` | A range a dead process left is reaped through its Source incarnation |
@@ -222,32 +222,24 @@ playback; main has since fixed the same split another way (below).
   Source viewer is attached to, before any child and again at
   registration, where `registered_local` decides under the ledger lock
   and a refused child is retired and reaped before the refusal returns.
-- **P5, one derivation (open choice for the re-land):** two fixes exist
-  for one file having two source keys. Do not keep both.
-  - Main: df5fb09f5 makes the Source take the node's boot-measured
-    `dovi_rpu` wherever it builds a copy identity
-    (`TranscodeManager::source_copy_video_options`, the Source VOD
-    rendition through `dv_strippable`, the shared decision in
-    `http/stream.rs`). It leaves the census read's local/Source split.
-  - Phase2 (eb069a9d6, 54820ca3d): one `node_copy_video_pipeline` in
-    `vod/generation.rs` takes the recipe, the node's `dv_strippable()`
-    capability and the kind of start, and reads the one stored probe
-    (`files.probe_json`) itself. The Source range, a Source rendition, a
-    local rendition and the `vod_indexed` hint all call it. A local start
-    records a missing HEVC census first; shared starts and planning reads
-    never measure one.
-  - The re-land reconciles the two so a file has one source key, then
-    picks one mechanism: either extend df5fb09f5's boot-measured value to
-    the local paths, or land `node_copy_video_pipeline` and remove the
-    Source-side plumbing df5fb09f5 added. Record the choice and why in
-    this step's log row. Whichever is chosen, the acceptance is the same:
-    one argv fingerprint, fragment-index identity and copy-index source key
-    per file, recipe and node, from the Source range, the Source and local
-    renditions and the planning hint.
-  - A fix on main already changed the Source key of stripped DV copies, so
-    the re-land need not repeat the key churn phase2 recorded. Check which
-    heads and cached Source renditions the chosen mechanism moves, and say
-    so in the PR.
+- **P5, decided 2026-11-27: closed on main by df5fb09f5; phase2's P5
+  commits (eb069a9d6, 54820ca3d) are not re-landed.** The Source takes
+  the node's boot-measured `dovi_rpu` (`dv_strippable()`) wherever it
+  builds a copy identity, so for one file, recipe, node and stored probe
+  the Source range, both renditions and the planning hint derive one key.
+  Porting `node_copy_video_pipeline` would rewrite `vod/serve/create.rs`
+  against moved code and drop main's authority-bound, 1 MiB-bounded Source
+  probe read, for no remaining keying case.
+  - **Known non-unification, by decision:** the HEVC parameter-set census.
+    A local copy start records a missing census first; a Source start
+    reads the stored probe as it stands. Keys differ only for an HEVC
+    file with no census, started from Source first, whose later census
+    is `Varying`. Then the argvs really differ, so separate keys are
+    correct. Phase2 kept the same split.
+  - **When a local range goes live (step 5 or 7):** build its video
+    options through the manager function the Source range uses
+    (`source_copy_video_options`, generalised, reading `dv_strippable()`),
+    so ranges share one derivation by structure.
 - **Manifests:** no binary reads a checkpoint manifest back, so
   compatibility is by construction and pinned by
   `copyrange/source_manifest_4b125e6.json`, a populated Source manifest
@@ -260,8 +252,8 @@ playback; main has since fixed the same split another way (below).
   the local rendition's whole preparations and the range's derivation,
   capability injected both ways; the golden manifest through a real
   binding; a stripped Dolby Vision file's key per capability; on main,
-  the same case beside df5fb09f5's tests in
-  `transcode/tests/source_actor.rs`);
+  df5fb09f5's tests cover the key, and the re-land adds the local owner's
+  cases beside them);
   `copyrange/storage_tests.rs`; `source_generation.rs`.
 - **Not covered by a test:** `prepare_source_growing` as a whole; the
   retire-and-reap of a local child refused at registration; a recorded
@@ -552,8 +544,8 @@ Three design changes on `main` since phase2 are why a copy is not enough:
 
 - **Memory admission.** Copies hold a `CopyMemoryPermit` against the node's
   memory (e6835217a, 4d7fc8d3e, 64a8ebdc2; open PR #1915). Step 5 changes.
-- **Source copy identity.** df5fb09f5 fixed P5 on the Source side. Step 4
-  must choose one mechanism.
+- **Source copy identity.** df5fb09f5 closed P5 on main, so step 4
+  re-lands only P1 and P2.
 - **Split copy.** `vod/serve/split.rs` (3047e1083) is a new local indexed
   producer. Section 2 and step 8 cover it.
 
@@ -562,7 +554,7 @@ Source on phase2, per step:
 | Step | Commits and PRs on phase2 |
 |---|---|
 | 3 | #1543: b55bae714, fda526245, 839fad128, a002719d1, 75eaa9785, 663988f32, 4aebd160d |
-| 4 | #1548: 967eb2357, eb069a9d6, 54820ca3d, 4585b1bfa, 73e68f964 |
+| 4 | #1548: 967eb2357, 4585b1bfa (P1, P2), 73e68f964; not eb069a9d6, 54820ca3d (P5, closed by df5fb09f5) |
 | 5 | #1555: a429d9c79, dfbf220fe, 72df26fdf, 32c713b26 |
 | 6a | #1557, branch `claude/a1b1-range-serving` |
 
