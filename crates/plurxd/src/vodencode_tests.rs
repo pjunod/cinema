@@ -1737,10 +1737,18 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             )
             .await;
         assert!(rendition.readers.lock().await.is_empty());
+        // A finite member (Linux: the family's own video rendition) is
+        // retired by the dormant purge, which waits for every client-state
+        // reader it lent, the video role's included, before its claim
+        // returns. A leaked child reader would hold the credit below.
+        serve
+            .shared
+            .purge_if_dormant(&rendition.key, Duration::ZERO)
+            .await;
     }
     wait_until(
         "autonomous family physically releases its credits",
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         async || encoding.admissions.software_in_use() == 0,
     )
     .await;
@@ -1968,7 +1976,11 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let rendition = serve
         .shared
         .build_rendition(
-            "candidate-cache",
+            // Linux builds an ordinary encoded key as a finite producer that
+            // admits at build and owns its output directory; this exercises
+            // the lazily admitted legacy rendition that Source playback
+            // renditions still take in production.
+            "source-candidate-cache",
             None,
             Recipe {
                 audio_excluded: false,
@@ -3104,7 +3116,11 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
     let rendition = serve
         .shared
         .build_rendition(
-            "held-admission",
+            // Linux builds an ordinary encoded key as a finite producer that
+            // admits at build and owns its output directory; this exercises
+            // the lazily admitted legacy rendition that Source playback
+            // renditions still take in production.
+            "source-held-admission",
             None,
             Recipe {
                 audio_excluded: false,
@@ -5209,3 +5225,4 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
     assert_eq!(second["audio"], first["audio"]);
     assert!(serve.end(&parent, Terminal::Deleted).await);
 }
+

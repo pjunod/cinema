@@ -16600,7 +16600,7 @@ async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_p
 #[tokio::test]
 async fn the_ladder_is_advertised_and_stray_heights_snap() {
     crate::transcode::require_ffmpeg();
-    let (app, state, _runtime) = test_state_with_runtime().await;
+    let (app, state, runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     // Encoded VOD must satisfy both requests without the retained engine.
@@ -16683,6 +16683,18 @@ async fn the_ladder_is_advertised_and_stray_heights_snap() {
     assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");
     assert_eq!(body["ladder"][0]["peak_kbps"], 6_160, "{body}");
 
+    let runtime = runtime
+        .as_ref()
+        .map(crate::test_runtime::RealRuntime::handle);
+    let cpu_in_use = || {
+        runtime.as_ref().map(|runtime| {
+            runtime
+                .accounting()
+                .map(|accounting| accounting.used.cpu_ns_per_second)
+                .ok()
+        })
+    };
+    let idle_cpu = cpu_in_use();
     for (playback_id, height, expected_height) in [("pb-snap", 850, 720), ("pb-promise", 900, 900)]
     {
         let (status, body) = call(
@@ -16697,10 +16709,26 @@ async fn the_ladder_is_advertised_and_stray_heights_snap() {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["vod"], true, "{body}");
         assert_eq!(body["height"], expected_height, "{body}");
-        state
-            .transcode
-            .stop_session(body["session_id"].as_str().expect("session id"), "test")
-            .await;
+        // An encoded rendition outlives an ordinary session end as a dormant
+        // owner of its admitted work. The operator stop retires it, as the
+        // Activity page does, so the next start is not refused for it.
+        let session = body["session_id"].as_str().expect("session id");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!("/api/v1/activity/sessions/{session}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while cpu_in_use() != idle_cpu {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the stopped encode returns its CPU claim");
     }
 }
 
@@ -19746,7 +19774,7 @@ async fn vod_switched_off_is_served_by_the_retained_engine_unless_recovery_is_of
 #[tokio::test]
 async fn every_delivery_method_is_listed_under_its_own_name() {
     crate::transcode::require_ffmpeg();
-    let (app, state, _runtime) = test_state_with_runtime().await;
+    let (app, state, runtime) = test_state_with_runtime().await;
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     // Every HLS row must come from immutable VOD, never live recovery.
@@ -19797,6 +19825,45 @@ async fn every_delivery_method_is_listed_under_its_own_name() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{copy}");
+    // This fixture runtime has no delegated native root, so each finite
+    // producer's peak is unknown and producers run one at a time (the
+    // intended policy). Read the copy through to its end, as a player that
+    // buffered it would, so its producer completes before the encoded start;
+    // the copy session itself stays live.
+    let copy_session = copy["session_id"].as_str().expect("copy session");
+    let (status, playlist) = body_of(
+        &app,
+        get_q(&format!("/api/v1/hls/{copy_session}/index.m3u8")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let playlist = String::from_utf8(playlist).expect("copy playlist utf8");
+    for segment in playlist
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let (status, _) = body_of(
+            &app,
+            get_q(&format!("/api/v1/hls/{copy_session}/{segment}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{segment}");
+    }
+    if let Some(runtime) = runtime
+        .as_ref()
+        .map(crate::test_runtime::RealRuntime::handle)
+    {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while runtime
+                .accounting()
+                .is_ok_and(|accounting| accounting.unknown_peak_producers != 0)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the completed copy producer leaves the node");
+    }
 
     // 4. Immutable encoded VOD.
     let (st, tx) = call(
