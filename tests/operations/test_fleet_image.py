@@ -28,6 +28,9 @@ DOCKER_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG"
 case "$*" in
   pull*) [ "$STUB_PULL_EXIT" = 0 ] || { echo "$STUB_PULL_ERROR" >&2; exit 1; } ;;
+  *"compose config --images plurxd plurx-discovery"*)
+    if [ "$STUB_PINNED" = 1 ]; then echo plurx-pi:local; echo plurx-pi:local;
+    else echo "$PLURX_IMAGE"; echo "$PLURX_IMAGE"; fi ;;
   *"compose config --images plurxd"*) echo plurx/plurxd:latest ;;
   *"{{.Id}}"*) echo "$STUB_IMAGE_ID" ;;
   *org.opencontainers.image.revision*) echo "$STUB_REVISION" ;;
@@ -40,7 +43,7 @@ esac
 
 
 class FleetImageCase(unittest.TestCase):
-    def run_script(self, action: str, **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    def run_script(self, action: str, *extra: str, **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for name, body in (("git", GIT_STUB), ("docker", DOCKER_STUB)):
@@ -62,10 +65,11 @@ class FleetImageCase(unittest.TestCase):
                 STUB_REVISION=SHA,
                 STUB_PLATFORM="linux/amd64",
                 STUB_PUSH_EXIT="0",
+                STUB_PINNED="0",
             )
             environment.update(overrides)
             result = subprocess.run(
-                ["python3", str(SCRIPT), action],
+                ["python3", str(SCRIPT), action, *extra],
                 cwd=ROOT,
                 env=environment,
                 text=True,
@@ -78,45 +82,65 @@ class FleetImageCase(unittest.TestCase):
     def test_pull_returns_the_verified_shared_image(self):
         result, calls = self.run_script("pull")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), IMAGE_ID)
+        self.assertEqual(result.stdout.strip(), f"use {IMAGE_ID}")
         self.assertIn(f"pull --platform linux/amd64 {REF}", calls)
+        # The tag Compose resolves moves too, so later commands run this image.
+        self.assertIn(f"tag {IMAGE_ID} plurx/plurxd:latest", calls)
 
     def test_pull_declines_an_image_that_is_not_this_commit_or_architecture(self):
         for overrides in ({"STUB_REVISION": "b" * 40}, {"STUB_PLATFORM": "linux/arm64"}):
             with self.subTest(**overrides):
                 result, _ = self.run_script("pull", **overrides)
                 self.assertEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stdout.strip(), f"share {SHA}")
 
     def test_pull_builds_locally_when_nothing_is_shared_or_the_registry_is_down(self):
         for error in ("manifest unknown", "dial tcp: connection refused"):
             with self.subTest(error=error):
                 result, _ = self.run_script("pull", STUB_PULL_EXIT="1", STUB_PULL_ERROR=error)
                 self.assertEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stdout.strip(), f"share {SHA}")
 
     def test_unconfigured_or_dirty_checkouts_never_touch_the_registry(self):
         for overrides in ({"PLURX_REGISTRY": ""}, {"STUB_DIRTY": "1"}):
             with self.subTest(**overrides):
-                for action in ("pull", "push"):
-                    result, calls = self.run_script(action, **overrides)
+                for action in (("pull",), ("push", "--expect", SHA)):
+                    result, calls = self.run_script(*action, **overrides)
                     self.assertEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, "")
                     self.assertEqual(calls, [])
 
     def test_push_shares_the_built_image_under_its_commit(self):
-        result, calls = self.run_script("push")
+        result, calls = self.run_script("push", "--expect", SHA)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"tag {IMAGE_ID} {REF}", calls)
         self.assertIn(f"push {REF}", calls)
 
     def test_push_never_fails_the_deploy(self):
-        result, calls = self.run_script("push", STUB_PUSH_EXIT="1")
+        result, calls = self.run_script("push", "--expect", SHA, STUB_PUSH_EXIT="1")
         self.assertEqual(result.returncode, 0)
         self.assertIn("other nodes will build it themselves", result.stderr)
-        result, calls = self.run_script("push", STUB_REVISION="")
+        for extra, overrides in (
+            (("--expect", SHA), {"STUB_REVISION": ""}),
+            # The checkout moved during the build: not the commit pull vouched for.
+            (("--expect", "c" * 40), {}),
+            (("--expect", "nonsense"), {}),
+        ):
+            with self.subTest(extra=extra, **overrides):
+                result, calls = self.run_script("push", *extra, **overrides)
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse(any(call.startswith("push") for call in calls))
+
+    def test_a_host_that_pins_its_own_image_neither_pulls_nor_publishes(self):
+        # The Pi runtime overlay replaces both services' image with a Pi-only
+        # build; it must not be replaced by, or published as, the shared image.
+        result, calls = self.run_script("pull", STUB_PINNED="1")
         self.assertEqual(result.returncode, 0)
-        self.assertFalse(any(call.startswith("push") for call in calls))
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(any(call.startswith("pull") for call in calls))
+        result, calls = self.run_script("push", "--expect", SHA, STUB_PINNED="1")
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith(("tag", "push")) for call in calls))
 
     def test_registry_is_read_from_the_host_env_file(self):
         loader = importlib.machinery.SourceFileLoader("fleet_image", str(SCRIPT))

@@ -9,26 +9,38 @@ commit-addressed copy in the fleet registry (the same LAN Forgejo registry
 
     <registry>/noirr/plurxd:build-<40-character commit>-<arch>
 
-`pull` runs first. If another node already built this exact clean commit for
-this architecture, it pulls that image, checks its revision label and
-architecture against this checkout, and prints its immutable image ID; the
-caller then starts it without building. Otherwise it prints nothing and the
-caller builds as before.
+`pull` runs after the hardware overlay is resolved (COMPOSE_FILE exported)
+and prints one verdict on stdout:
 
-`push` runs after a local build. It tags the image Compose just built with the
-shared name and pushes it, so the next node pulls instead of compiling.
+    use <image id>   another node built this commit; it was pulled, its
+                     revision label and platform match, and the local Compose
+                     tag now points at it. Start it with --no-build.
+    share <sha>      this node should build, then `push --expect <sha>`.
+    (nothing)        build locally and push nothing.
+
+`push --expect <sha>` runs after a local build. It tags the image Compose just
+built with the shared name and pushes it, so the next node pulls instead of
+compiling.
+
+Sharing applies only when it is safe to name the image by its commit:
+
+- the checkout is fully clean (no tracked or untracked changes) before the
+  build and still at the same commit afterwards;
+- both `plurxd` and `plurx-discovery` resolve through `PLURX_IMAGE`. An overlay
+  that pins its own image (the Raspberry Pi runtime from `--prepare-pi`, or a
+  host override's `image:`) is a different image from the shared one, so it is
+  neither replaced by a pulled image nor published as one.
 
 The `build-` tags are deliberately separate from the `sha-`/`main` tags that
 `scripts/registry-push` publishes after the full post-merge validation: a
-node-built image is the same commit, not a qualified one. Only a fully clean
-checkout (no tracked or untracked changes) is shared, because only then does
-the commit name the build context. Neither subcommand can fail a deploy: a
-missing registry setting, a registry outage or a refused push is reported on
-stderr and the deploy carries on with the local build.
+node-built image is the same commit, not a qualified one. Neither subcommand
+can fail a deploy: a missing registry setting, a registry outage, a refused
+push or any unexpected error is reported on stderr and the deploy carries on
+with the local build.
 
 The registry host comes from `PLURX_REGISTRY` in the environment or in
-`deploy/.env` (the gitignored per-host settings file). Without it both
-subcommands do nothing and `make docker-up` behaves exactly as it always has.
+`deploy/.env` (the gitignored per-host settings file). Without it `make
+docker-up` behaves exactly as it always has.
 """
 
 from __future__ import annotations
@@ -41,12 +53,17 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEPLOY_ENV = ROOT / "deploy" / ".env"
+DEPLOY = ROOT / "deploy"
+DEPLOY_ENV = DEPLOY / ".env"
 REPOSITORY = "noirr/plurxd"
 REVISION_LABEL = "org.opencontainers.image.revision"
+SERVICES = ("plurxd", "plurx-discovery")
+PROBE_IMAGE = "fleet-image-probe.invalid/plurxd:probe"
 ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 REGISTRY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$")
+SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 MISSING_PATTERN = re.compile(r"manifest unknown|name unknown|not found", re.IGNORECASE)
+TRANSFER_TIMEOUT = 900
 
 
 class Skip(Exception):
@@ -57,8 +74,10 @@ def note(message: str) -> None:
     print(f"fleet-image: {message}", file=sys.stderr)
 
 
-def run(*args: str, cwd: Path = ROOT, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def run(*args: str, cwd: Path = ROOT, timeout: int = 60,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                          errors="replace", timeout=timeout, env=env)
 
 
 def env_file_value(name: str, path: Path = DEPLOY_ENV) -> str:
@@ -95,7 +114,7 @@ def clean_head() -> str:
         raise Skip("checkout has local changes, so the commit does not name this build; "
                    "building locally without sharing")
     sha = head.stdout.strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+    if not SHA_PATTERN.match(sha):
         raise Skip(f"unexpected HEAD {sha!r}; building locally without sharing")
     return sha
 
@@ -109,11 +128,25 @@ def architecture() -> str:
     return arch
 
 
-def shared_ref() -> tuple[str, str, str]:
-    host = registry()
-    sha = clean_head()
-    arch = architecture()
-    return f"{host}/{REPOSITORY}:build-{sha}-{arch}", sha, arch
+def compose_images(*services: str, image: str | None = None) -> list[str]:
+    env = dict(os.environ)
+    if image is not None:
+        env["PLURX_IMAGE"] = image
+    result = run("docker", "compose", "config", "--images", *services, cwd=DEPLOY, env=env)
+    if result.returncode != 0:
+        raise Skip(f"cannot resolve the Compose images: {result.stderr.strip()}")
+    return result.stdout.split()
+
+
+def require_standard_image() -> None:
+    """Both services must take their image from PLURX_IMAGE, or this is not the shared image."""
+    if compose_images(*SERVICES, image=PROBE_IMAGE) != [PROBE_IMAGE] * len(SERVICES):
+        raise Skip("this host's Compose files pin their own plurxd image (Pi runtime or an "
+                   "override); building locally without sharing")
+
+
+def shared_ref(sha: str, arch: str) -> str:
+    return f"{registry()}/{REPOSITORY}:build-{sha}-{arch}"
 
 
 def inspect(ref: str, template: str) -> str:
@@ -134,61 +167,69 @@ def verify(ref: str, sha: str, arch: str) -> str:
     return image_id
 
 
-def pull() -> int:
+def pull() -> str:
+    ref = shared_ref(sha := clean_head(), arch := architecture())
+    require_standard_image()
+    share = f"share {sha}"
+    note(f"looking for {ref}")
+    result = run("docker", "pull", "--platform", f"linux/{arch}", ref, timeout=TRANSFER_TIMEOUT)
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        if MISSING_PATTERN.search(detail):
+            note("no node has shared this commit yet; building it here and sharing it")
+        else:
+            note(f"registry pull failed ({detail}); building locally")
+        return share
     try:
-        ref, sha, arch = shared_ref()
-        note(f"looking for {ref}")
-        result = run("docker", "pull", "--platform", f"linux/{arch}", ref, timeout=3600)
-        if result.returncode != 0:
-            detail = result.stderr.strip()
-            if MISSING_PATTERN.search(detail):
-                raise Skip("no node has shared this commit yet; building it here and sharing it")
-            raise Skip(f"registry pull failed ({detail}); building locally")
         image_id = verify(ref, sha, arch)
     except Skip as skip:
-        note(str(skip))
-        return 0
-    except (OSError, subprocess.TimeoutExpired) as error:
-        note(f"{error}; building locally")
-        return 0
+        note(f"{skip}; building locally and replacing it")
+        return share
+    # Move the tag Compose would otherwise use, so a later plain `compose up`,
+    # smoke or packaging step that names it gets this image, not the last build.
+    (local,) = compose_images("plurxd")
+    tagged = run("docker", "tag", image_id, local)
+    if tagged.returncode != 0:
+        note(f"cannot tag {local}: {tagged.stderr.strip()}")
     note(f"using shared image {ref} ({image_id}); skipping the local build")
-    print(image_id)
-    return 0
+    return f"use {image_id}"
 
 
-def compose_image() -> str:
-    result = run("docker", "compose", "config", "--images", "plurxd", cwd=ROOT / "deploy")
-    images = result.stdout.split()
-    if result.returncode != 0 or len(images) != 1:
-        raise Skip(f"cannot resolve the built plurxd image: {result.stderr.strip()}")
-    return images[0]
-
-
-def push() -> int:
-    try:
-        ref, sha, arch = shared_ref()
-        image_id = verify(compose_image(), sha, arch)
-        tagged = run("docker", "tag", image_id, ref)
-        if tagged.returncode != 0:
-            raise Skip(f"cannot tag {ref}: {tagged.stderr.strip()}")
-        result = run("docker", "push", ref, timeout=3600)
-        if result.returncode != 0:
-            raise Skip(f"push of {ref} failed ({result.stderr.strip()}); other nodes will build it themselves")
-    except Skip as skip:
-        note(str(skip))
-        return 0
-    except (OSError, subprocess.TimeoutExpired) as error:
-        note(f"{error}; other nodes will build it themselves")
-        return 0
+def push(expected: str) -> None:
+    if not SHA_PATTERN.match(expected):
+        raise Skip(f"--expect {expected!r} is not a full commit")
+    sha = clean_head()
+    if sha != expected:
+        raise Skip(f"checkout moved from {expected} to {sha} during the build; not sharing it")
+    arch = architecture()
+    ref = shared_ref(sha, arch)
+    require_standard_image()
+    (local,) = compose_images("plurxd")
+    image_id = verify(local, sha, arch)
+    tagged = run("docker", "tag", image_id, ref)
+    if tagged.returncode != 0:
+        raise Skip(f"cannot tag {ref}: {tagged.stderr.strip()}")
+    result = run("docker", "push", ref, timeout=TRANSFER_TIMEOUT)
+    if result.returncode != 0:
+        raise Skip(f"push of {ref} failed ({result.stderr.strip()})")
     note(f"shared {ref}; other {arch} nodes deploying {sha[:12]} will pull it")
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("action", choices=("pull", "push"))
+    parser.add_argument("--expect", default="", help="push: the commit pull reported as shareable")
     args = parser.parse_args(argv)
-    return pull() if args.action == "pull" else push()
+    try:
+        if args.action == "pull":
+            print(pull())
+        else:
+            push(args.expect)
+    except Skip as skip:
+        note(str(skip) if args.action == "pull" else f"{skip}; other nodes will build it themselves")
+    except Exception as error:  # noqa: BLE001 - sharing is an optimisation and never fails a deploy
+        note(f"unexpected {type(error).__name__}: {error}; continuing with the local build")
+    return 0
 
 
 if __name__ == "__main__":

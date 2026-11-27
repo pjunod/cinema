@@ -944,7 +944,18 @@ assert.equal(context.ACT_TIMER, null);
         self.assertTrue(up_marker.exists())
         # The period that was proved is the period that gets applied.
         self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
-        # No node had shared this commit, so the local build is shared.
+        # Nothing to share (no registry, dirty tree or pinned image): no push.
+        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+
+        # No node had shared this clean commit: build, then share it.
+        code, _, _, _, up_marker, _ = self._run_rollout_recipe(
+            "docker-up",
+            "docker compose up -d --build",
+            proof_exit=0,
+            shared_image="share " + "a" * 40,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(up_marker.exists())
         self.assertTrue((up_marker.parent / "fleet-image-push-ran").exists())
 
     def test_docker_up_starts_a_shared_commit_image_without_building(self):
@@ -957,7 +968,10 @@ assert.equal(context.ACT_TIMER, null);
             if "docker compose up -d --build" in line
         ][0]
         pull = rollout.index("fleet-image pull")
-        self.assertLess(pull, rollout.index("--emit-start-period"))
+        # After the hardware overlay, so a Pi or override image is seen; before
+        # the proof, so the shared image is what gets proved.
+        self.assertGreater(pull, rollout.index("docker-hardware"))
+        self.assertLess(pull, rollout.rindex("python3 ../scripts/validate-docker-startup-budget"))
         self.assertLess(
             rollout.index("docker compose up -d --no-build --pull never"),
             rollout.index("docker compose up -d --build"),
@@ -972,7 +986,7 @@ assert.equal(context.ACT_TIMER, null);
                 "docker-up",
                 "docker compose up -d --build",
                 proof_exit=0,
-                shared_image=shared,
+                shared_image="use " + shared,
             )
         )
         self.assertEqual(code, 0)
@@ -987,7 +1001,7 @@ assert.equal(context.ACT_TIMER, null);
             "docker-up",
             "docker compose up -d --build",
             proof_exit=2,
-            shared_image=shared,
+            shared_image="use " + shared,
         )
         self.assertNotEqual(code, 0)
         self.assertFalse(up_marker.exists())

@@ -426,7 +426,8 @@ commit shares it with the rest:
 PLURX_REGISTRY=forge.lan:3000
 ```
 
-`make docker-up` then runs `scripts/fleet-image pull` first. It looks for
+`make docker-up` then runs `scripts/fleet-image pull` once the hardware
+overlay is resolved. It looks for
 `forge.lan:3000/noirr/plurxd:build-<40-character commit>-<arch>`. If another
 node already built this commit, the target pulls the image and checks its
 revision label against `HEAD` and its platform against the host. It proves
@@ -438,6 +439,10 @@ for the next node.
 - **Only a fully clean checkout is shared.** The checkout must have no tracked
   or untracked changes, so that the commit names the build context. A dirty
   tree builds locally and pushes nothing.
+- **Only the standard image is shared.** Some hosts' Compose files pin their
+  own image: the Raspberry Pi runtime overlay from `--prepare-pi`, or an
+  `image:` line in a host override. Those hosts build locally and never pull
+  or publish a shared image.
 - **A share can never fail a deploy.** A missing `PLURX_REGISTRY`, a registry
   outage or a refused push is printed and the local build carries on.
 - **`build-` is not `sha-`.** The `sha-<12hex>` and `main` tags remain the
