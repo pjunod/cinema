@@ -213,6 +213,30 @@ rows is a real user choice and nothing lives in Developer.
   pickers, the confirmation checkbox, Android's typed language code, and the
   names "progressive", "offline", "text translation" and "captions".
 
+### 3.7 API contract (T5; the clients are built against it)
+
+All routes are under `/api/v1`. All take a signed-in user, and `who` decides whether a non-admin may start work.
+
+- **`GET /files/{id}/ai-subtitles?target=en`** describes what AI subtitles would do for this file:
+  `{target, allowed, blocked: null | {code, message}, existing_index: n|null,
+  route: "text"|"audio"|null, label, estimate, source: {kind: "subtitle"|"audio",
+  index, language, detected}, alternatives: [{route, label}], operation: null | Operation}`.
+  - `label` is the small line in the player, such as "Translate from the Japanese subtitles" or "Create from the audio". `estimate` reads like "about a minute" or "starts in a few seconds".
+  - `blocked.code` is one of `disabled`, `admins_only`, `no_capable_node`, `no_audio`, `quota`.
+  - When `blocked` is set, clients leave the entry out.
+- **`POST /files/{id}/ai-subtitles`** with `{request_id, target: "en", route: "auto"|"text"|"audio", spoken_language?, position_ms?}` starts or joins the work and returns an `Operation`. Repeating the same `request_id` returns the same operation.
+- **`Operation`** is `{id, route, state: "queued"|"working"|"complete"|"failed"|"stopped",
+  ready_to_ms, duration_ms, progress, reason, track_index: n|null, spoken_language}`.
+  - `ready_to_ms` is how far ahead the cues are ready. It draws the green mark on the timeline.
+  - `track_index` is set once the stored track exists. Clients then select that index as an ordinary subtitle track and stop reading cues.
+- **`PUT /ai-subtitles/operations/{id}/viewer`** with `{position_ms, playback_rate}` is the viewer heartbeat (the demand), sent every 10 s while the entry is selected. A seek past `ready_to_ms` moves the work to the new position. `DELETE` on the same route releases it.
+- **`GET /ai-subtitles/operations/{id}/cues?from_ms&to_ms`** returns `{cues: [{start_ms, end_ms, text}], ready_to_ms, state}`. It is the one in-progress reader for both routes. For the audio route the server reads the asset segments behind it, under the existing lease and attestation rules. For the text route it reads the partial text cues.
+- **`POST /ai-subtitles/operations/{id}/stop`** stops the work. **`DELETE /files/{id}/subtitles/{index}`** deletes a stored AI track; that is the ⋯ Delete. "Redo at Best" is a `POST` with `quality: "best"` and `route: "audio"`.
+- **Stored tracks.** A stored AI track carries `ai: true` in the file's `subtitle_streams`. Clients show the AI badge from that field, and the title is the language name, such as "English".
+- **Settings.** `GET /ai-subtitles/settings` returns the document, its `revision` and `readiness`:
+  `{nodes: [{label, cores, gpu, state: "ready"|"downloading"|"failed"|"unsupported", reason, tested_at_ms}], summary}`.
+  `PUT /ai-subtitles/settings` (admin) writes it, with `expected_revision` as the compare-and-set check.
+
 ## 4. Tasks and pull requests
 
 Each task is one pull request into `effort/ai-subtitles`, with its focused
