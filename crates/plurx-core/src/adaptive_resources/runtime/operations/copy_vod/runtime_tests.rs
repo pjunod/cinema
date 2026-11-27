@@ -4680,23 +4680,30 @@ int main(void) { alarm(20); for (;;) pause(); }
                     result.expect("actual retirement native-result watchdog"),
             };
             drop(cleanup);
-            let (child_synced, parent_synced) = {
+            let (phase, files_left, parent_synced) = {
                 let bundle = preparation.state.lock().await;
-                let state = bundle.roles[0].bootstrap[&member].fold().unwrap().state();
+                let fold = bundle.roles[0].bootstrap[&member].fold().unwrap();
+                let state = fold.state();
                 (
-                    state.asset.directory_synced,
+                    state.bootstrap.phase.clone(),
+                    fold.files().len(),
                     state.bootstrap.retained_parent_synced,
                 )
             };
             match kind {
                 Kind::CleanupRemoveFile => {}
+                // Arming the child removal requires the completed child sync
+                // and then consumes its quiescent marker, so the armed phase
+                // itself is the proof that removing the owned set synced it.
                 Kind::CleanupRemoveChild => assert!(
-                    child_synced && !parent_synced,
-                    "removing the owned set synced the child before its removal"
+                    files_left == 0
+                        && phase == v2::scratch::bootstrap::BootstrapPhase::RemovingRetainedChild
+                        && !parent_synced,
+                    "removing the owned set synced the child before its removal: {phase:?}"
                 ),
                 _ => assert!(
-                    child_synced && parent_synced,
-                    "removing the child synced the parent before handles close"
+                    parent_synced,
+                    "removing the child synced the parent before handles close: {phase:?}"
                 ),
             }
             let identity = pending_native_io(&preparation, member, kind).await;
