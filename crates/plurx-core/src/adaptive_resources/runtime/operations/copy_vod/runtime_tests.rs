@@ -4662,11 +4662,12 @@ int main(void) { alarm(20); for (;;) pause(); }
         let application = owner
             .take_application_lease(1024)
             .expect("original app alias");
+        // Retirement takes a fixed number of durable steps: removing the whole
+        // owned set also syncs the child, and removing the child also syncs
+        // the parent. Those syncs have no native actions of their own.
         let gates = [
             Kind::CleanupRemoveFile,
-            Kind::CleanupSyncChild,
             Kind::CleanupRemoveChild,
-            Kind::CleanupSyncParent,
             Kind::CleanupCloseHandles,
         ]
         .map(|kind| (kind, Gate::install_next(kind, member)));
@@ -4679,6 +4680,25 @@ int main(void) { alarm(20); for (;;) pause(); }
                     result.expect("actual retirement native-result watchdog"),
             };
             drop(cleanup);
+            let (child_synced, parent_synced) = {
+                let bundle = preparation.state.lock().await;
+                let state = bundle.roles[0].bootstrap[&member].fold().unwrap().state();
+                (
+                    state.asset.directory_synced,
+                    state.bootstrap.retained_parent_synced,
+                )
+            };
+            match kind {
+                Kind::CleanupRemoveFile => {}
+                Kind::CleanupRemoveChild => assert!(
+                    child_synced && !parent_synced,
+                    "removing the owned set synced the child before its removal"
+                ),
+                _ => assert!(
+                    child_synced && parent_synced,
+                    "removing the child synced the parent before handles close"
+                ),
+            }
             let identity = pending_native_io(&preparation, member, kind).await;
             assert_eq!((identity.0, identity.3), (gate.identity().0, Some(job)));
             assert!(
@@ -4696,7 +4716,7 @@ int main(void) { alarm(20); for (;;) pause(); }
             );
             seen.push(identity);
         }
-        assert_eq!(seen.len(), 5);
+        assert_eq!(seen.len(), 3);
         let ticket = owner
             .prepare_retirement(true, deadline())
             .await
