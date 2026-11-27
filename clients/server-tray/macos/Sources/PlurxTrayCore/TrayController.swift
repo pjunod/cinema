@@ -19,6 +19,9 @@ public protocol TrayEnvironment: AnyObject {
     /// Persisted per user: whether the one default login registration has been
     /// decided (made, or overtaken by an explicit choice). Never cleared.
     var defaultTrayLoginDecided: Bool { get set }
+    /// Whether this process is the installed app at its stable login-item
+    /// location; only that copy may take the one default registration.
+    var isInstalledTrayApp: Bool { get }
     func snapshotDidChange(_ snapshot: TraySnapshot)
     func showLogs(lines: [String], truncated: Bool)
     func showUpgrade(_ update: UpdateResult?)
@@ -223,10 +226,12 @@ public final class TrayController {
     /// The tray is on at login by default, like the server's LaunchAgent: the
     /// first launch that can register the app does so once, and records that
     /// the default is decided. Later launches never register again, so a user
-    /// who turns it off stays off. An app outside its registrable location
-    /// (`notFound`) leaves the default undecided for the installed copy.
+    /// who turns it off stays off. A copy other than the installed app (a
+    /// build directory, a download) or one macOS cannot register leaves the
+    /// default undecided for the installed copy.
     public func applyDefaultTrayLogin() {
-        guard let environment, !environment.defaultTrayLoginDecided else { return }
+        guard let environment, environment.isInstalledTrayApp,
+              !environment.defaultTrayLoginDecided else { return }
         switch environment.trayLoginStatus() {
         case .notFound, .unavailable:
             return
@@ -250,13 +255,14 @@ public final class TrayController {
     /// explicit action, which also settles the default.
     private func toggleTrayLogin() {
         guard let environment else { return }
-        environment.defaultTrayLoginDecided = true
         let current = environment.trayLoginStatus()
         switch current {
         case .requiresApproval:
+            environment.defaultTrayLoginDecided = true
             environment.openLoginItemsSettings()
             snapshot.trayLogin = environment.trayLoginStatus()
         case .enabled, .notRegistered:
+            environment.defaultTrayLoginDecided = true
             switch environment.setTrayLogin(current != .enabled) {
             case let .success(status):
                 snapshot.trayLogin = status

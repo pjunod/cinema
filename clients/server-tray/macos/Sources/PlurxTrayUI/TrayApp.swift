@@ -142,6 +142,7 @@ public final class TrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, Tra
         get { LoginItem.defaultDecided }
         set { LoginItem.defaultDecided = newValue }
     }
+    public var isInstalledTrayApp: Bool { LoginItem.isInstalledCopy(Bundle.main.bundleURL) }
 
     public func showLogs(lines: [String], truncated: Bool) { logs.show(lines: lines, truncated: truncated) }
 

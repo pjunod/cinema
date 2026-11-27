@@ -65,6 +65,7 @@ final class RecordingEnvironment: TrayEnvironment {
     }
     func openLoginItemsSettings() { settingsOpened += 1 }
     var defaultTrayLoginDecided = false
+    var isInstalledTrayApp = true
     func snapshotDidChange(_ snapshot: TraySnapshot) { snapshots.append(snapshot) }
     func showLogs(lines: [String], truncated: Bool) { logs.append(lines) }
     func showUpgrade(_ update: UpdateResult?) { upgrades.append(update) }
@@ -470,6 +471,15 @@ final class DefaultTrayLoginTests: XCTestCase {
         environment.login = .notRegistered
         controller.applyDefaultTrayLogin()
         XCTAssertEqual(environment.loginSets, [true])
+    }
+
+    func testOnlyTheInstalledCopyTakesTheDefault() {
+        let environment = RecordingEnvironment()
+        environment.isInstalledTrayApp = false
+        let controller = TrayController(control: FakeControl(), environment: environment, appVersion: "0.7.0", appBuild: "b")
+        controller.applyDefaultTrayLogin()
+        XCTAssertEqual(environment.loginSets, [])
+        XCTAssertFalse(environment.defaultTrayLoginDecided)
     }
 
     func testExplicitToggleSettlesTheDefault() async {

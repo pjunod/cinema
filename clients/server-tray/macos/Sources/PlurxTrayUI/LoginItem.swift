@@ -44,6 +44,15 @@ public enum LoginItem {
         set { UserDefaults.standard.set(newValue, forKey: defaultDecidedKey) }
     }
 
+    /// The stable login-item location the installer owns
+    /// (DESKTOP-TRAY-IMPLEMENTATION.md, macOS managed layout).
+    public static func isInstalledCopy(_ bundle: URL,
+                                       home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        let stable = home.appendingPathComponent("Applications/Plurx Server.app", isDirectory: true)
+        return bundle.resolvingSymlinksInPath().standardizedFileURL.path
+            == stable.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     public static func openSettings() {
         SMAppService.openSystemSettingsLoginItems()
     }

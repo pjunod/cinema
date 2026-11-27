@@ -143,3 +143,15 @@ final class AppKitTests: XCTestCase {
 }
 
 let txnUI = "00000000-0000-4000-8000-000000000002"
+
+@MainActor
+final class InstalledCopyTests: XCTestCase {
+    func testOnlyTheStableApplicationsBundleIsTheInstalledCopy() {
+        let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
+        XCTAssertTrue(LoginItem.isInstalledCopy(URL(fileURLWithPath: "/Users/example/Applications/Plurx Server.app"), home: home))
+        XCTAssertTrue(LoginItem.isInstalledCopy(URL(fileURLWithPath: "/Users/example/Applications/./Plurx Server.app/"), home: home))
+        XCTAssertFalse(LoginItem.isInstalledCopy(URL(fileURLWithPath: "/Users/example/code/plurx/target/desktop-macos/arm64/Plurx Server.app"), home: home))
+        XCTAssertFalse(LoginItem.isInstalledCopy(URL(fileURLWithPath: "/Applications/Plurx Server.app"), home: home))
+        XCTAssertFalse(LoginItem.isInstalledCopy(URL(fileURLWithPath: "/Users/example/Downloads/Plurx Server.app"), home: home))
+    }
+}
