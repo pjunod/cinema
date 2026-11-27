@@ -112,40 +112,24 @@ manifest/segment reader the progressive feature already has.
 
 ### 3.2 Models install, verify and repair themselves
 
-- A verification record means: *this node ran the pinned self-test with this
-  model file and this engine, and it passed.* It is keyed by
-  `(node_id, model_id, model sha256, engine sha256, adapter contract, host
-  fingerprint)` and carries the file identity (size, mtime, inode). The host
-  fingerprint is CPU model and flags, kernel release and, for a GPU variant,
-  the device and driver version. The record is **not** bound to `boot_id`.
-  `boot_id` did four jobs, and each one is kept another way:
-  - It proved the self-test ran on this host and engine. The host fingerprint
-    in the key does that now.
-  - It retired stale automatic verify jobs. Their dedupe now binds to the
-    record key.
-  - It refused a cancelled install's cache. Only a durable successful record
-    that matches the exact file identity counts; anything else is still
-    `unverified_cache`.
-  - It covered identity reuse when ctime coalesces. Any identity change
-    triggers a re-hash, and a fingerprint change triggers a full re-verify.
-  At boot and on each pass the node re-checks the file identity and the
-  engine manifest instead of running inference again. `boot_id` stays where it
-  fences ownership: `owner_boot_id`, source bindings and publication tokens.
-- Before replacing it, T2 finds why the existing automatic re-verify after
-  boot leaves nodes unverified, because the same stall would also stop
-  self-install.
-- One record covers every purpose. A multilingual model's self-test is the
-  German clip translated to English, which runs the decoder, the language
-  path and the translate task. An English-only model's self-test is the
-  English fixture. Transcription and translation both accept the same record.
-- Capable nodes are found through `state.cluster`, never through membership
-  directly.
-- Enabling the audio route makes every capable node install the current
-  tier's model. A capable node has the qualified engine and platform, and
-  free memory and disk for that model. Enabling the text route installs the
-  text model. A missing or changed file triggers reinstall and re-verify, and
-  the status line reports it. No admin action is needed. The "Download and
-  test" / "Test model" buttons and the worker checkboxes are removed.
+The live model state on 2026-11-27 was:
+
+| Node | `base.en` | `tiny.en` | `small` |
+|---|---|---|---|
+| 1 | verified | missing | missing |
+| 2 | verified | verified | `unverified_cache` |
+| 3 | verified | missing | missing |
+| 4 | missing | missing | missing |
+
+The text model was missing on every node.
+
+The automatic re-verify after boot works: `refresh_local` → `requalify_accepted_model` re-runs the self-test once per boot for any model with an accepted receipt, and that is why `base.en` reads verified after restarts. **The root cause is that nothing installs a model by itself.** Install is a per-node, per-purpose admin button. A cancelled install leaves `unverified_cache`, which by design only an explicit install may qualify.
+
+`boot_id` binding is therefore kept. Re-running a seconds-long self-test per boot is a sound proof that this host and engine still work, and Fable's review lists what it protects.
+
+- **One record covers every purpose.** The progressive pipeline's per-profile capability rows (`subtitle_translation_capabilities`) are replaced by the model receipt (`subtitle_model_receipts`). A multilingual model's self-test is the German clip translated to English, which runs the decoder, the language path and the translate task; it also produces the receipt that transcription accepts. An English-only model keeps the English fixture.
+- **Self-install.** When the audio route is on, every capable node installs the current tier's model and the VAD model. A capable node has the qualified engine and platform, free memory and disk for the model, and is found through `state.cluster`. When the text route is on, the node installs the text model. These installs are server-owned *install* jobs, the same fenced job an admin's Install runs. So `unverified_cache` and missing files repair themselves, and only a durable successful receipt counts as ready.
+- **Repair.** A missing or changed file triggers a reinstall on the next pass, and the status line reports it. The "Download and test" / "Test model" buttons and the worker checkboxes are removed.
 
 ### 3.3 Route and language
 
@@ -238,7 +222,7 @@ through the requested lane and `scripts/land`.
 | # | Task | Area | State |
 |---|---|---|---|
 | T1 | This plan and the corrected queue finding | docs | in review |
-| T2 | Verification without `boot_id`, one record per model, self-install and repair on enable; find the re-verify stall first | `subtitle_models`, `subtitle_translation`, `subtitle_text_translation`, store | pending |
+| T2 | One verification record per model for every purpose; self-install and repair on enable (`boot_id` kept, see §3.2) | `subtitle_models`, `subtitle_translation`, `subtitle_text_translation`, store | pending |
 | T3 | `subtitles.ai.v1` with its migration; admission reads it; `who` replaces `is_admin`; per-user bounds | store admission SQL, settings | pending |
 | T4 | One pipeline: finish demand, completion publishes a stored track (cap-safe), remove whole-file and Advanced generation | `subtitle_translation`, `subtitle_transcription.rs`, store | pending |
 | T5 | `/ai-subtitles` API, automatic route and spoken-language detection | server | pending |
@@ -251,8 +235,9 @@ through the requested lane and `scripts/land`.
 The settings and authorization task (T3) comes before the pipeline merge (T4),
 because T4 removes `SubtitleTranscribeManaged`, whose admission reads the
 managed key. A fresh-context Fable review of this plan (2026-11-27) supplied
-the authorization gap, the finish demand, the cap rule, the `boot_id`
-replacements and this order.
+the authorization gap, the finish demand, the cap rule and this order. Its
+`boot_id` concern (find the re-verify stall first) led to §3.2's finding that
+there is no stall, so `boot_id` stays.
 
 Deploying to the fleet is the owner's step. T8 and T9 run after the owner
 deploys the effort's landing.
