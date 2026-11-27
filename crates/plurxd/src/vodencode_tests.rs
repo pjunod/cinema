@@ -2356,6 +2356,17 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let _ = fetched_bytes(&old, "old", "seg00000.m4s").await;
     let old_rendition = rendition_of(&old, "old").await;
     let old_key = old_rendition.key.clone();
+    // Both serves share this recipe's admissions. On Linux the old finite
+    // producer holds its admitted claim until it retains its whole output;
+    // let it finish, so the old cache is complete and intact on disk and the
+    // new attempt meets the identity check rather than an occupied pool.
+    #[cfg(target_os = "linux")]
+    wait_until(
+        "the old finite producer retains its output and returns its claim",
+        Duration::from_secs(30),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
     old.end("old", Terminal::Deleted).await;
     old_rendition.closed.store(true, Relaxed);
     old_rendition.kick();
@@ -2701,23 +2712,29 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
             || {},
         )
         .await;
+    assert!(rendition.readers.lock().await.is_empty());
     // A finite root stays a dormant owner of its claim after its last
-    // session ends; the daemon's dormant purge retires it.
-    serve
-        .shared
-        .purge_if_dormant(&rendition.key, Duration::ZERO)
-        .await;
+    // session ends; the daemon's dormant purge retires it. That close drains
+    // the rendition's own client allocations, which every rich alias keeps,
+    // so hold only a weak view while it retires. A legacy root (not Linux)
+    // has no such drain and keeps its alias for the checks below.
+    let key = rendition.key.clone();
+    let _legacy_alias = (!cfg!(target_os = "linux")).then(|| Arc::clone(&rendition));
+    let rendition = Arc::downgrade(&rendition);
+    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
     wait_until(
         "prepared root physically reaped",
         Duration::from_secs(5),
         async || encoding.admissions.software_in_use() == 0,
     )
     .await;
-    assert!(rendition.readers.lock().await.is_empty());
-    assert!(
-        rendition.retained_admission.current().is_none(),
-        "cache owns no credit"
-    );
+    if let Some(rendition) = rendition.upgrade() {
+        assert!(rendition.readers.lock().await.is_empty());
+        assert!(
+            rendition.retained_admission.current().is_none(),
+            "cache owns no credit"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3780,6 +3797,14 @@ async fn encoded_pair(
         )
         .await
         .expect("pair session");
+    // A finite producer (Linux) encodes one pass from seg00000; it has no
+    // restart at a later entry. Follow its frontier up to the pair, so each
+    // GET's own producer deadline covers one segment of progress rather
+    // than every segment before the entry at once.
+    #[cfg(target_os = "linux")]
+    for earlier in 0..entry {
+        let _ = fetched_bytes(serve, &session, &segment_name(u64::from(earlier))).await;
+    }
     let first = fetched_bytes(serve, &session, &segment_name(u64::from(entry))).await;
     let next = fetched_bytes(serve, &session, &segment_name(u64::from(entry + 1))).await;
     let init = fetched_bytes(serve, &session, "init.mp4").await;

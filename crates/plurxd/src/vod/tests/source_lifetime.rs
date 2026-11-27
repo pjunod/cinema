@@ -313,17 +313,22 @@ async fn source_deferred_rendition_preparation_creates_no_visible_demand_or_chil
     drop(attachment);
     assert!(serve.shared.sessions.lock().await.is_empty());
     assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
-    serve
-        .shared
-        .purge_if_dormant(&rendition.key, Duration::ZERO)
-        .await;
+    // A finite close drains the rendition's own client allocations, which
+    // every rich alias keeps; hold only a weak view while it retires. A
+    // legacy rendition (not Linux) has no such drain and keeps its alias.
+    let key = rendition.key.clone();
+    let _legacy_alias = (!cfg!(target_os = "linux")).then(|| Arc::clone(&rendition));
+    let rendition = Arc::downgrade(&rendition);
+    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
     wait_until(
         "the unattached prepared rendition returns its claim",
         Duration::from_secs(30),
         async || encoding.admissions.software_in_use() == 0,
     )
     .await;
-    assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+    if let Some(rendition) = rendition.upgrade() {
+        assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+    }
 }
 
 /// Source-only build/spawn enforce actual scanner facts and no-follow opening.
