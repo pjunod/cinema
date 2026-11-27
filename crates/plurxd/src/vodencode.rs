@@ -1054,6 +1054,14 @@ impl Drop for FiniteSoftwareCompatibility {
     }
 }
 
+/// What one attachment brings to the finite build it may cause: the
+/// admission priority of that attachment's own demand.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct FiniteAdmissionRequest {
+    pub(crate) priority: Priority,
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) enum FiniteCompatibilityRefusal {
@@ -1087,11 +1095,16 @@ impl Encoding {
     /// compiler caps encoder creation itself; zero/undersized policies retain
     /// the pool's original one-saturating-job exception. The pipeline estimate
     /// remains whole, independently of the encoder's thread creation cap.
+    ///
+    /// `admission` is the demand of the attachment whose build this is: its
+    /// own priority decides whether it may wait for background work to
+    /// yield. The recipe's trial and speculative markers describe possible
+    /// Auto trials of this recipe, not the purpose of this attachment.
     pub(crate) async fn admit_finite_compatibility(
         &self,
         software_pool_threads: u64,
         finalized_encoder_threads: u32,
-        background: bool,
+        admission: &FiniteAdmissionRequest,
         deadline: Instant,
         continuous: Option<&plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<FiniteSoftwareCompatibility, FiniteCompatibilityRefusal> {
@@ -1114,13 +1127,7 @@ impl Encoding {
         resources.cpu_threads = resources
             .cpu_threads
             .max(usize::try_from(finalized_encoder_threads).map_err(|_| Refusal::Capacity)?);
-        let priority = if background {
-            Priority::Background
-        } else if self.nonpreemptive_trial || self.is_speculative() {
-            Priority::Speculative
-        } else {
-            Priority::Live
-        };
+        let priority = admission.priority;
         let expired = || {
             Instant::now() >= deadline || continuous.is_some_and(|d| d.entry_remaining().is_err())
         };

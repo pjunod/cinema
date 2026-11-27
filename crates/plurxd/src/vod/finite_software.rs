@@ -793,6 +793,7 @@ pub(super) async fn build(
     recipe: Recipe,
     plan: SegmentPlan,
     settings: &VodSettings,
+    admission: &crate::vodencode::FiniteAdmissionRequest,
 ) -> Result<Arc<Rendition>, String> {
     let mut ignored = None;
     let mut ignored_trial_refusal = None;
@@ -803,6 +804,7 @@ pub(super) async fn build(
         recipe,
         plan,
         settings,
+        admission,
         None,
         None,
         &mut ignored,
@@ -825,6 +827,7 @@ pub(super) async fn build_attempt(
     recipe: Recipe,
     plan: SegmentPlan,
     settings: &VodSettings,
+    admission: &crate::vodencode::FiniteAdmissionRequest,
     application_owner_bytes: usize,
     continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
 ) -> Result<(Arc<Rendition>, FiniteApplicationLease), super::shared::AdaptiveBuildFailure> {
@@ -837,6 +840,7 @@ pub(super) async fn build_attempt(
         recipe,
         plan,
         settings,
+        admission,
         Some(application_owner_bytes),
         continuous_entry_deadline,
         &mut cleanup,
@@ -865,6 +869,7 @@ async fn build_inner(
     recipe: Recipe,
     plan: SegmentPlan,
     settings: &VodSettings,
+    admission: &crate::vodencode::FiniteAdmissionRequest,
     application_owner_bytes: Option<usize>,
     continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     failed_attempt_cleanup: &mut Option<super::shared::PreparedAttemptCleanup>,
@@ -1037,7 +1042,7 @@ async fn build_inner(
         .admit_finite_compatibility(
             software_pool_threads,
             finalized_encoder_threads,
-            false,
+            admission,
             admission_deadline,
             request.continuous_entry_deadline.as_ref(),
         )

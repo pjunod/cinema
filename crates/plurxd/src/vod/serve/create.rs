@@ -45,6 +45,8 @@ pub(crate) struct PreparedAdaptiveRecipe {
     index: Option<FragmentIndex>,
     recipe: Recipe,
     duration_ms: i64,
+    /// The attempt request's own admission priority, kept for its build.
+    admission_priority: crate::admission::Priority,
 }
 
 #[cfg(target_os = "linux")]
@@ -812,6 +814,9 @@ impl VodServe {
                     None
                 },
                 purpose,
+                crate::vodencode::FiniteAdmissionRequest {
+                    priority: prepared.admission_priority,
+                },
             )
             .await?
             .ok_or_else(|| {
@@ -860,6 +865,7 @@ impl VodServe {
             index,
             recipe,
             duration_ms,
+            admission_priority: prepared.admission_priority,
         })
     }
 
@@ -880,6 +886,7 @@ impl VodServe {
             index,
             recipe,
             duration_ms,
+            admission_priority,
         } = prepared;
         self.shared
             .prepare_adaptive_attempt(
@@ -889,6 +896,9 @@ impl VodServe {
                 recipe,
                 duration_ms,
                 settings,
+                crate::vodencode::FiniteAdmissionRequest {
+                    priority: admission_priority,
+                },
                 application_owner_bytes,
                 continuous_entry_deadline,
             )
@@ -907,12 +917,15 @@ impl VodServe {
         planning_handoff_limit_bytes: usize,
         deadline: Instant,
     ) -> Result<super::background_artifact::StaticArtifactAdmission, String> {
+        // A static artifact is background work whatever its request said;
+        // its own admission below is Background.
         let PreparedAdaptiveRecipe {
             key,
             identity,
             index,
             recipe,
             duration_ms,
+            admission_priority: _,
         } = prepared;
         if !finite_software::selected_recipe(&recipe, false, false) {
             return Err("static artifact requires the selected software AVC recipe".into());
@@ -1026,7 +1039,9 @@ impl VodServe {
             .admit_finite_compatibility(
                 software_pool_threads,
                 finalized_encoder_threads,
-                true,
+                &crate::vodencode::FiniteAdmissionRequest {
+                    priority: crate::admission::Priority::Background,
+                },
                 deadline,
                 None,
             )
@@ -4222,6 +4237,9 @@ impl VodServe {
                 }),
                 None,
                 AttachmentPurpose::Playback,
+                crate::vodencode::FiniteAdmissionRequest {
+                    priority: prepared.admission_priority,
+                },
             )
             .await?
             .ok_or_else(|| {

@@ -1523,6 +1523,9 @@ impl Shared {
             None,
             None,
             AttachmentPurpose::Playback,
+            crate::vodencode::FiniteAdmissionRequest {
+                priority: crate::admission::Priority::Live,
+            },
         )
         .await
     }
@@ -1541,6 +1544,7 @@ impl Shared {
         recipe: Recipe,
         duration_ms: i64,
         settings: &VodSettings,
+        admission: crate::vodencode::FiniteAdmissionRequest,
         application_owner_bytes: usize,
         continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<PreparedAttemptRendition, AdaptiveBuildFailure> {
@@ -1577,6 +1581,7 @@ impl Shared {
             recipe,
             plan,
             settings,
+            &admission,
             application_owner_bytes,
             continuous_entry_deadline,
         )
@@ -1611,6 +1616,7 @@ impl Shared {
         canonical_processing_key: Option<(&str, Option<Arc<ProcessedInstanceAllowance>>)>,
         initial_hardware_start: Option<InitialHardwareStart>,
         purpose: AttachmentPurpose,
+        admission: crate::vodencode::FiniteAdmissionRequest,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
@@ -1648,6 +1654,7 @@ impl Shared {
                     canonical_processing_key,
                     initial_hardware_start,
                     purpose,
+                    admission,
                 )
                 .await
         });
@@ -1670,6 +1677,7 @@ impl Shared {
         canonical_processing_key: Option<(String, Option<Arc<ProcessedInstanceAllowance>>)>,
         initial_hardware_start: Option<InitialHardwareStart>,
         purpose: AttachmentPurpose,
+        admission: crate::vodencode::FiniteAdmissionRequest,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         #[cfg(target_os = "linux")]
@@ -1864,6 +1872,7 @@ impl Shared {
                     .as_ref()
                     .and_then(|(_, allowance)| allowance.clone()),
                 purpose,
+                &admission,
             )
             .await?;
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
@@ -2032,6 +2041,9 @@ impl Shared {
             false,
             None,
             AttachmentPurpose::Playback,
+            &crate::vodencode::FiniteAdmissionRequest {
+                priority: crate::admission::Priority::Live,
+            },
         )
         .await
     }
@@ -2048,6 +2060,7 @@ impl Shared {
         ephemeral_processing: bool,
         processed_instance_allowance: Option<Arc<ProcessedInstanceAllowance>>,
         purpose: AttachmentPurpose,
+        admission: &crate::vodencode::FiniteAdmissionRequest,
     ) -> Result<Arc<Rendition>, String> {
         #[cfg(target_os = "linux")]
         if finite_software::selected(
@@ -2056,8 +2069,11 @@ impl Shared {
             private_storage.is_some(),
             ephemeral_processing,
         ) {
-            return finite_software::build(self, key, index, recipe, plan, settings).await;
+            return finite_software::build(self, key, index, recipe, plan, settings, admission)
+                .await;
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = admission;
         let output_path = self.base.join(key);
         if self
             .resource_runtime
