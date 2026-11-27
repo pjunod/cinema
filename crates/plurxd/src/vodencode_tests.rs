@@ -3909,7 +3909,7 @@ async fn encoded_vod_cold_resume_starts_its_finite_producer_at_the_resume_entry(
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("suffix start fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
-    let (serve, serve_runtime) = bare_serve_with_runtime(&base.join("suffix-renditions")).await;
+    let (serve, serve_runtime) = bare_serve_with_runtime(&base.path().join("suffix-renditions")).await;
     let runtime = serve_runtime
         .as_ref()
         .map(crate::test_runtime::RealRuntime::handle)
