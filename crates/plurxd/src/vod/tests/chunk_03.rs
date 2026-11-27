@@ -3001,18 +3001,9 @@ async fn rendition_shipped_shape() {
         .await
         .expect("one-encoder software budget");
     let permit = encoding.try_permit().await.expect("encoder permit");
-    let index = synthetic_index(240);
-    let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
-    let ms = index_video_ms(&index);
-    let plan = plurx_core::segplan::plan_copy(
-        &index,
-        &policy,
-        &TrackDurations {
-            video_ms: ms,
-            audio_ms: ms,
-            audio_bits_per_second: 256_000,
-        },
-    );
+    // An encoded rendition is planned on its recipe's frame grid, as
+    // production plans it; a copy index's timescale is not its clock.
+    let plan = encoding.media_plan(file.duration_ms.expect("fixture duration"));
     let rendition = serve
         .shared
         .build_rendition(

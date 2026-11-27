@@ -686,10 +686,20 @@ async fn fresh_shared_audio_publication_reports_service_for_its_original_generat
     let audio = Arc::get_mut(&mut encoding).expect("fresh soundtrack recipe");
     audio.shared_audio = plurx_core::transcode::VodSharedAudioRecipe::from_plan(&audio.plan);
     assert!(audio.shared_audio.is_some());
-    let serve = local_serve(
+    // The pool, not this host's core count, decides whether the recipe fits.
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &encoding.resources().cpu_threads.max(1).to_string(),
+        )
+        .await
+        .expect("one recipe exactly fills the pool");
+    let (serve, _serve_runtime) = local_serve_with_runtime(
         base.path().to_path_buf(),
         Arc::new(SqliteStore::open_in_memory().expect("schedule store")),
-    );
+    )
+    .await;
     let (_, first, next) = encoded_pair(&serve, &file, &encoding, 0).await;
     let encoding = encoding
         .clone_with_admissions_for_test(encoding.admissions.clone())
@@ -3724,7 +3734,7 @@ async fn assert_encoded_neighbor_continuity(
     file: &MediaFile,
     encoding: &Arc<crate::vodencode::Encoding>,
 ) {
-    let serve = bare_serve(&base.join("neighbor-renditions"));
+    let (serve, _serve_runtime) = bare_serve_with_runtime(&base.join("neighbor-renditions")).await;
     for entry in [0, 44] {
         let (init, old_first, old_next) = encoded_pair(&serve, file, encoding, entry).await;
         let (new_init, new_next, following) = encoded_pair(&serve, file, encoding, entry + 1).await;

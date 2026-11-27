@@ -613,8 +613,10 @@ fn local_serve(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
 }
 
 /// [`local_serve`] owning the node resource runtime a production `VodServe`
-/// is built with. Finite VOD on Linux builds every rendition through it; keep
-/// the returned fixture alive for as long as the serve is used.
+/// is built with, and the global playback budget the daemon registers over
+/// its renditions. Finite VOD on Linux builds every rendition through the
+/// runtime and reserves its quota from the budget; keep the returned fixture
+/// alive for as long as the serve is used.
 async fn local_serve_with_runtime(
     base: PathBuf,
     store: Arc<dyn Store>,
@@ -623,15 +625,18 @@ async fn local_serve_with_runtime(
     let cache = base.join("cluster-index");
     let runtime_cache = cache.parent().unwrap_or(cache.as_path()).to_owned();
     let serve = VodServe::new_cluster_with_runtime(
-        base,
+        base.clone(),
         runtime_cache,
-        store,
+        Arc::clone(&store),
         "test-local".into(),
         cache,
         None,
         None,
         runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
     );
+    if let Some(runtime) = &runtime {
+        serve.register_playback_cache(&runtime.playback_budget(store, vec![base]));
+    }
     (serve, runtime)
 }
 

@@ -1582,9 +1582,16 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     )
     .with_copy_test_vod(crate::vodserve::VodServe::new_with_runtime(
         base.path().join("manager").join("renditions"),
-        store,
+        Arc::clone(&store),
         runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
     ));
+    // The daemon's global playback budget over the renditions it serves.
+    if let Some(runtime) = &runtime {
+        manager.vod.register_playback_cache(&runtime.playback_budget(
+            store,
+            vec![base.path().join("manager").join("renditions")],
+        ));
+    }
     let req = SessionRequest {
         dv_processing_destination: None,
         retain_output: None,
@@ -1822,9 +1829,15 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
         )
         .with_copy_test_vod(crate::vodserve::VodServe::new_with_runtime(
             work.join("renditions"),
-            store,
+            Arc::clone(&store),
             runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
         ));
+        // The daemon's global playback budget over the renditions it serves.
+        if let Some(runtime) = &runtime {
+            manager.vod.register_playback_cache(
+                &runtime.playback_budget(store, vec![work.join("renditions")]),
+            );
+        }
         let request = SessionRequest {
             dv_processing_destination: None,
             retain_output: None,
@@ -2768,7 +2781,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let runtime = crate::test_runtime::for_finite_serving().await;
     // `with_cache`'s layout, holding the runtime the daemon's manager holds.
     let manager = TranscodeManager::new(
-        store,
+        Arc::clone(&store),
         base.path().join("manager"),
         EncoderCaps::default(),
         Pipeline::Cpu,
@@ -2785,6 +2798,16 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
     )
     .with_decode_probe(Some(decode_probe));
+    // The global playback budget `AppState` registers over these namespaces.
+    if let Some(runtime) = &runtime {
+        manager.vod.register_playback_cache(&runtime.playback_budget(
+            store,
+            ["cache", "runtime", "subs", "renditions", "manager"]
+                .into_iter()
+                .map(|namespace| base.path().join(namespace))
+                .collect(),
+        ));
+    }
     let mut request = SessionRequest {
         dv_processing_destination: None,
         retain_output: None,
