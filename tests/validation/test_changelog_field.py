@@ -132,7 +132,6 @@ class CollectCase(unittest.TestCase):
         entries, lacking = collect(self.root, first)
         self.assertEqual(entries, [])
 
-
     def squash(self, number: int, message: str) -> str:
         """Land a pull request the way a squash merge does: one non-merge commit on main."""
 
