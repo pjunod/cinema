@@ -150,7 +150,8 @@ ENV CARGO_HOME=/usr/local/cargo \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
     PATH=/usr/local/cargo/bin:/opt/playwright-venv/bin:${PATH} \
     PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
-    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe
+    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe
 # Copy the pinned rustup launcher, not the source image's default compiler;
 # only the repository-pinned 1.97.1 toolchain belongs in this CI layer.
 COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
