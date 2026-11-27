@@ -607,12 +607,13 @@ impl VodServe {
     /// for unknown/tombstoned.
     ///
     /// A family session (split copy, continuous media) serves its primary
-    /// picture through a private child reader on that same rendition, never
-    /// under the public session id. Reading only the session id would report
-    /// 0 forever, and a lost owner would then send the viewer back to the
-    /// start of the film.
+    /// picture through a private child reader on that same rendition. Reading
+    /// only the session id would report 0 for the whole session, and a lost
+    /// owner would then send the viewer back to the start of the film. The
+    /// public reader still answers when a client fetched the primary through
+    /// the session's own segment route and the child has served nothing.
     pub async fn frontier_ms(&self, session_id: &str) -> Option<i64> {
-        let (rendition, reader_id) = {
+        let (rendition, child_reader) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -622,18 +623,20 @@ impl VodServe {
                 return grant.frontier();
             }
             let rendition = session.live_rendition().map(Arc::clone)?;
-            let reader_id = session
+            let child_reader = session
                 .children
                 .iter()
                 .find(|child| Arc::ptr_eq(&child.rendition, &rendition))
-                .map_or_else(|| session_id.to_owned(), |child| child.reader_id.clone());
-            (rendition, reader_id)
+                .map(|child| child.reader_id.clone());
+            (rendition, child_reader)
         };
         let last_served = {
             let readers = rendition.readers.lock().await;
-            readers
-                .get(&reader_id)
-                .and_then(|reader| reader.last_served)
+            let served = |id: &str| readers.get(id).and_then(|reader| reader.last_served);
+            child_reader
+                .as_deref()
+                .and_then(served)
+                .or_else(|| served(session_id))
         };
         Some(match last_served {
             None => 0,
