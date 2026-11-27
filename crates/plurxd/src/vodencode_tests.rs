@@ -3775,11 +3775,15 @@ async fn encoded_pair(
     // Force a fresh generation the way the daemon does: retire the dormant
     // rendition (on Linux, its finite producer and output) so the next pair
     // builds a new owner from its own entry rather than reusing this one.
-    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+    // A dormant purge yields to a briefly held build gate; like the
+    // maintenance tick, ask again until the rendition is gone.
     wait_until(
         "the pair's rendition is retired",
         Duration::from_secs(30),
-        async || !serve.shared.renditions.lock().await.contains_key(&key),
+        async || {
+            serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+            !serve.shared.renditions.lock().await.contains_key(&key)
+        },
     )
     .await;
     (init, first, next)
