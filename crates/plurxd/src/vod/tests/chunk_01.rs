@@ -2822,6 +2822,7 @@ async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader(
             super::shared::AttachmentPurpose::Playback,
             crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
+                prepared: None,
             },
         )
     };

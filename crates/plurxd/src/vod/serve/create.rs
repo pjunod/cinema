@@ -38,6 +38,22 @@ struct PreparedVodRecipe {
     incoming_logical: Option<crate::vodserve::retained_manifest::LogicalOutput>,
 }
 
+/// The prepared root credit an attachment transfers to the build of this
+/// exact recipe. Only a root admitted for this same frozen encoding counts;
+/// any other recipe is refused later as a changed preparation and never
+/// spends the root's reservation.
+fn transferred_root_credit(
+    root: Option<&crate::vodserve::PreparedRootAdmission>,
+    recipe: &Recipe,
+) -> Option<crate::vodencode::EncodePermit> {
+    let root = root?;
+    recipe
+        .encoding
+        .as_ref()
+        .is_some_and(|encoding| Arc::ptr_eq(encoding, &root.encoding))
+        .then(|| root.permit.clone())
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparedAdaptiveRecipe {
     key: String,
@@ -789,6 +805,10 @@ impl VodServe {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = capture_before_build;
+        let finite_admission = crate::vodencode::FiniteAdmissionRequest {
+            priority: prepared.admission_priority,
+            prepared: transferred_root_credit(prepared.root_admission.as_ref(), &recipe),
+        };
         let attachment = self
             .shared
             .attach_rendition_with_storage(
@@ -814,9 +834,7 @@ impl VodServe {
                     None
                 },
                 purpose,
-                crate::vodencode::FiniteAdmissionRequest {
-                    priority: prepared.admission_priority,
-                },
+                finite_admission,
             )
             .await?
             .ok_or_else(|| {
@@ -898,6 +916,7 @@ impl VodServe {
                 settings,
                 crate::vodencode::FiniteAdmissionRequest {
                     priority: admission_priority,
+                    prepared: None,
                 },
                 application_owner_bytes,
                 continuous_entry_deadline,
@@ -1041,6 +1060,7 @@ impl VodServe {
                 finalized_encoder_threads,
                 &crate::vodencode::FiniteAdmissionRequest {
                     priority: crate::admission::Priority::Background,
+                    prepared: None,
                 },
                 deadline,
                 None,
@@ -4216,6 +4236,10 @@ impl VodServe {
         } else {
             canonical_key.clone()
         };
+        let finite_admission = crate::vodencode::FiniteAdmissionRequest {
+            priority: prepared.admission_priority,
+            prepared: transferred_root_credit(prepared.root_admission.as_ref(), &recipe),
+        };
         let attachment = self
             .shared
             .attach_rendition_with_storage(
@@ -4237,9 +4261,7 @@ impl VodServe {
                 }),
                 None,
                 AttachmentPurpose::Playback,
-                crate::vodencode::FiniteAdmissionRequest {
-                    priority: prepared.admission_priority,
-                },
+                finite_admission,
             )
             .await?
             .ok_or_else(|| {

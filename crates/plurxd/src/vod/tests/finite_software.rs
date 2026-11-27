@@ -1989,6 +1989,7 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
                 &settings,
                 crate::vodencode::FiniteAdmissionRequest {
                     priority: crate::admission::Priority::Live,
+                    prepared: None,
                 },
                 application_bytes,
                 None,
@@ -2128,6 +2129,7 @@ async fn original_driver_pending(
             &fixture.settings,
             crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
+                prepared: None,
             },
             application_bytes,
             None,

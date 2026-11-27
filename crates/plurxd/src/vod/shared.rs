@@ -1525,6 +1525,7 @@ impl Shared {
             AttachmentPurpose::Playback,
             crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
+                prepared: None,
             },
         )
         .await
@@ -2043,6 +2044,7 @@ impl Shared {
             AttachmentPurpose::Playback,
             &crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
+                prepared: None,
             },
         )
         .await

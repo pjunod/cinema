@@ -819,6 +819,17 @@ impl EncodePermit {
             crate::vodserve::ProcessedOwner::Admission,
         )
     }
+
+    /// Whether this exact reservation is a software-only claim of at least
+    /// `threads`, the entitlement a finite build must hold.
+    fn covers_software_threads(&self, threads: usize) -> bool {
+        self._reservation._hardware.is_none()
+            && self
+                ._reservation
+                ._software
+                .as_ref()
+                .is_some_and(|software| software.threads() >= threads)
+    }
 }
 
 #[derive(Debug)]
@@ -1055,11 +1066,16 @@ impl Drop for FiniteSoftwareCompatibility {
 }
 
 /// What one attachment brings to the finite build it may cause: the
-/// admission priority of that attachment's own demand.
+/// admission priority of that attachment's own demand, and the prepared root
+/// credit it transfers, if any.
 #[derive(Clone, Debug)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct FiniteAdmissionRequest {
     pub(crate) priority: Priority,
+    /// A prepared root's exact reservation, admitted for this same recipe
+    /// before the attachment. The build claims its one worker instead of
+    /// asking the pool for a second bundle.
+    pub(crate) prepared: Option<EncodePermit>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1131,6 +1147,26 @@ impl Encoding {
         let expired = || {
             Instant::now() >= deadline || continuous.is_some_and(|d| d.entry_remaining().is_err())
         };
+        if let Some(prepared) = &admission.prepared {
+            // The transferred credit is this build's whole entitlement. It
+            // must already cover the finalized command; it is never topped up
+            // from the pool, and a claimed worker is never shared.
+            if expired() {
+                return Err(Refusal::Deadline);
+            }
+            if !prepared.covers_software_threads(resources.cpu_threads) {
+                return Err(Refusal::Capacity);
+            }
+            let original = prepared
+                .clone()
+                .try_claim_worker()
+                .ok_or(Refusal::Capacity)?;
+            return Ok(FiniteSoftwareCompatibility {
+                original: Some(original),
+                possible_entry: false,
+                trial_lane: None,
+            });
+        }
         let mut waiting = (priority == Priority::Live).then(|| self.admissions.queue_for_slot());
         let mut requested_yield = false;
         loop {
