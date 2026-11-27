@@ -605,8 +605,14 @@ impl VodServe {
     /// What a lease renewal reports for one live session: the film-time end,
     /// in ms, of the last segment it was served (0 before the first). `None`
     /// for unknown/tombstoned.
+    ///
+    /// A family session (split copy, continuous media) serves its primary
+    /// picture through a private child reader on that same rendition, never
+    /// under the public session id. Reading only the session id would report
+    /// 0 forever, and a lost owner would then send the viewer back to the
+    /// start of the film.
     pub async fn frontier_ms(&self, session_id: &str) -> Option<i64> {
-        let rendition = {
+        let (rendition, reader_id) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -615,12 +621,18 @@ impl VodServe {
             if let Some(grant) = session.passive_grant.as_ref() {
                 return grant.frontier();
             }
-            session.live_rendition().map(Arc::clone)?
+            let rendition = session.live_rendition().map(Arc::clone)?;
+            let reader_id = session
+                .children
+                .iter()
+                .find(|child| Arc::ptr_eq(&child.rendition, &rendition))
+                .map_or_else(|| session_id.to_owned(), |child| child.reader_id.clone());
+            (rendition, reader_id)
         };
         let last_served = {
             let readers = rendition.readers.lock().await;
             readers
-                .get(session_id)
+                .get(&reader_id)
                 .and_then(|reader| reader.last_served)
         };
         Some(match last_served {
