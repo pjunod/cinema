@@ -284,6 +284,12 @@ jobs:
       # Exits nonzero only when the shard could not run its tests. Test
       # failures are recorded in the receipt and judged by the verdict.
       - name: Run this shard's partition of the plan
+        # The pinned image already carries the static FFprobe that the fixed
+        # planning collector admits; the Dockerfile `ci` stage now sets this
+        # too, and it leaves the step at that image's re-pin, which ci.yml's
+        # reviewed source-gate continuation (run 8816) holds back for now.
+        env:
+          PLURX_BOUND_FFPROBE: /usr/local/lib/plurx/ffprobe
         run: >-
           python3 -m validation.rust_units shard
           --archive target/rust-units/archive.tar.zst
@@ -550,6 +556,12 @@ jobs:
       # directory first on the path, and the merge-base's validation package
       # need not contain this module.
       - name: Run the failing tests at the merge-base and classify them
+        # The pinned image already carries the static FFprobe that the fixed
+        # planning collector admits; the Dockerfile `ci` stage now sets this
+        # too, and it leaves the step at that image's re-pin, which ci.yml's
+        # reviewed source-gate continuation (run 8816) holds back for now.
+        env:
+          PLURX_BOUND_FFPROBE: /usr/local/lib/plurx/ffprobe
         run: |
           mapfile -t filters < <(cd "$RUST_UNITS_TOOLS" && python3 -m validation.rust_units \
             baseline-filter --failures "$RUST_UNITS_TOOLS/failures.json")

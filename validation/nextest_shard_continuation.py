@@ -118,7 +118,9 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 # command, image and resource bound of the pinned recipes is unchanged.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
  '.github/workflows/main-fast-lane.yml': '1d145bca0a46ba2d1173ccb4f274fdb7cfcf6e55fa322ecbb4c0251e84020b3f',
- '.github/workflows/rust-units.yml': '9bac3e8aebfe7fc16025588bef9283799f3c396a68c318f4efcf559422488548',
+# rust-units.yml re-reviewed for PLURX_BOUND_FFPROBE on the shard and merge-base
+# test steps: the same pinned image, container and commands; step env only.
+ '.github/workflows/rust-units.yml': '3454f285e82cccc4d4da65176be5e64a126069465d4e3da199bb98e4d570f94f',
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
  'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
  'validation/rust_units.py': '3f057e214dcb97ce231c02f3e14b5d8b69b93865d60074e80d3598281b68ce94'}
