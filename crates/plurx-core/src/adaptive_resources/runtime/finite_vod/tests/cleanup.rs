@@ -740,6 +740,79 @@ async fn accepted_finite_cleanup_ignores_new_admission_epoch_but_waits_for_origi
     finish_same_ticket(runtime, owner, ticket).await;
 }
 
+/// A predecessor's close hands its exact charge to its successor in the
+/// same locked refund: one entry, never two and never none. The successor
+/// is not journaled until its own preparation, so a restart in between (the
+/// unadopted grant is gone with the process) recovers no charge at all.
+#[tokio::test]
+async fn a_successor_close_rebinds_the_charge_and_a_restart_before_its_prepare_refunds_whole() {
+    let root = tempfile::tempdir().expect("durable finite fixture");
+    let (runtime, owner) = original_owner(root.path(), false);
+    assert!(runtime
+        .acknowledge_finite_preparation_for_cleanup(&owner.preparation)
+        .await
+        .expect("original accepted preparation"));
+    runtime
+        .arm_scratch_bootstrap(&owner.preparation, 0, owner.scratch_member, deadline())
+        .await
+        .expect("original committed bootstrap arm, no root entry");
+    let charge = runtime.accounting().expect("held original charge").used;
+    assert_ne!(charge, ResourceVector::default());
+    let demand = owner
+        .successor_demand()
+        .expect("the predecessor's own demand");
+    let mut ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("same accepted original cleanup");
+    drop(owner);
+    let grant = ticket
+        .finish_retirement_into_successor(demand, deadline())
+        .await
+        .expect("the predecessor closes")
+        .expect("its charge is rebound to the successor");
+    let accounting = runtime.accounting().expect("one rebound entry");
+    assert_eq!(
+        accounting.used, charge,
+        "the same charge, now the successor's"
+    );
+    assert_eq!(accounting.held, 1, "exactly one entry across the handover");
+    // The process ends before the successor's journaled preparation: its
+    // ordinary reservation leaves with it.
+    drop(grant);
+    assert_eq!(
+        runtime.accounting().expect("clean refund").used,
+        ResourceVector::default()
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original selector remains")
+        .drain()
+        .expect("join original journal");
+    let reopened = NodeResourceRuntime::open_with_rendition_root(
+        super::super::tests::options(
+            root.path(),
+            super::super::daemon_owner(
+                "finite-cleanup-node".into(),
+                "finite-cleanup-cluster".into(),
+            ),
+            InstallationContext::Existing,
+        ),
+        root.path().join("renditions"),
+    )
+    .expect("reopened runtime");
+    assert!(
+        !reopened.has_recovered_obligations(),
+        "neither the predecessor nor an unjournaled successor is recovered"
+    );
+    assert_eq!(
+        reopened.accounting().expect("restored ledger").used,
+        ResourceVector::default()
+    );
+    reopened.drain().expect("join reopened journal");
+}
+
 /// Before the producer arms its output, the role's own planned output has
 /// published nothing: a lookup is `None`, so a first init request starts the
 /// producer and waits. A member this role does not plan is still a state
