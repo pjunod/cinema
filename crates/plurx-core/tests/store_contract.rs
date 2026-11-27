@@ -408,6 +408,10 @@ const SETTINGS_METHODS: &[&str] = &[
     // expected generation uses it.
     "put_settings_if_generation",
     "instance_id",
+    // The typed operator capacity intent and its consistent read; both run on
+    // each backend in store_contract/resource_settings.rs.
+    "resource_capacity_snapshot",
+    "put_resource_capacity",
 ];
 const DV_CONVERSION_METHODS: &[&str] = &[
     "dv_conversion",
@@ -512,6 +516,10 @@ const DVR_METHODS: &[&str] = &[
     "delete_dvr_reminder",
     "transition_dvr_reminders",
     "set_dvr_reminder_state",
+    // The singleton trial's capture census: SQLite in
+    // sqlite/dvr.rs dormant_recordings_and_enabled_rules_block_sqlite_trial_authority,
+    // Hiqlite in membership/directory/invalidation_tests.rs.
+    "local_dvr_trial_exclusion",
 ];
 
 const LIBRARY_CHANNEL_METHODS: &[&str] = &[
@@ -811,11 +819,19 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_transcription_job",
     "publish_copy_output_job",
     "publish_encoded_output_job",
+    // The retained original publication command a lost await reconciles
+    // from; read back after publish and reconcile in background_jobs_copy_output.rs
+    // encoded_output_closed_intent_and_exact_settlement_preserve_copy_history (SQLite).
+    "encoded_output_publication",
     "media_preparation_history",
     "join_analysis_viewer",
     "join_artifact_viewer",
     "analysis_preparation_observation",
     "source_io_holders",
+    // Placement's common source pressure, one QueueSql statement both backends
+    // run; background_jobs_resources.rs
+    // placement_source_pressure_requires_a_matching_stamp_and_distinct_common_holders.
+    "placement_source_pressure",
     "sync_predictions",
     "embedding_for",
     "publish_embedding_job",
@@ -22047,7 +22063,14 @@ fn contract_inventory_matches_every_store_method() {
     // bookkeeping. Named in BACKGROUND_JOB_METHODS and exercised on both
     // backends by background_jobs::expired_lease_sweep_requeues_with_takeover_bookkeeping.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 644, "review the Store method count");
+    // 644 -> 649: five adaptive-playback methods that landed without an
+    // inventory entry, now listed with what covers them:
+    // `resource_capacity_snapshot` and `put_resource_capacity` (cb7bc7588) in
+    // SETTINGS_METHODS, `local_dvr_trial_exclusion` (34eecfab4) in
+    // DVR_METHODS, and `encoded_output_publication` (fd2d5578c, b87f323e6)
+    // and `placement_source_pressure` (93e4e2922) in BACKGROUND_JOB_METHODS.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 649, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -43259,6 +43282,9 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         .expect("count read indexes")
     };
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    // The post-migration extensions guard the queue tables this rewind
+    // rewrites; drop them while empty and the reopen reinstalls them.
+    queue_fixture::remove_empty_post_migration_extensions(&conn);
     queue_fixture::remove_common_queue_schema(&conn);
     assert_eq!(
         count_indexes(&conn),
@@ -43487,6 +43513,9 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    // The post-migration extensions guard the queue tables this rewind
+    // rewrites; drop them while empty and the reopen reinstalls them.
+    queue_fixture::remove_empty_post_migration_extensions(&conn);
     queue_fixture::remove_common_queue_schema(&conn);
     let current_table: String = conn
         .query_row(

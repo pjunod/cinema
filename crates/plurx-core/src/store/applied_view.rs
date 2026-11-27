@@ -1726,13 +1726,22 @@ mod tests {
         );
         #[cfg(feature = "hiqlite-store")]
         {
-            assert_eq!(tables.len(), 20);
+            // 20 shared slots; on Linux the finite DVR trial's two capture
+            // census watches (34eecfab4) follow every one of them.
+            let linux_trial_slots = if cfg!(target_os = "linux") { 2 } else { 0 };
+            assert_eq!(tables.len(), 20 + linux_trial_slots);
             assert_eq!(
                 &tables[17..19],
                 &["offline_source_probes", "offline_packages"]
             );
             assert_eq!(tables[19], "cluster_node_activity_keys");
         }
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            &tables[tables.len() - 2..],
+            &super::DVR_TRIAL_WATCH_TABLES,
+            "the DVR trial watches follow every shared slot"
+        );
         assert!(tables.len() <= 32, "fork applied mark slot capacity");
         assert!(
             !super::TableWatch::Interval.unchanged(),
