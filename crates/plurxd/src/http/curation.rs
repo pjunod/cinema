@@ -1126,7 +1126,7 @@ pub async fn create_row(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Json(mut body): Json<NewRowBody>,
-) -> Result<(StatusCode, Json<RowDto>), ApiError> {
+) -> Result<(StatusCode, Json<LayoutRowDto>), ApiError> {
     let curate = can_curate(&state, &user).await?;
     let scope = body.scope.unwrap_or(Scope::Private);
     if scope == Scope::Household && !curate {
@@ -1139,7 +1139,11 @@ pub async fn create_row(
         .store
         .create_row(owner, &title, &body.spec, user.id, now_ms())
         .await?;
-    Ok((StatusCode::CREATED, Json(row_dto(row, &user, curate))))
+    let tags = state.store.visible_tags(user.id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(layout_row(&state, &user, row, &tags, curate).await?),
+    ))
 }
 
 async fn editable_row(state: &AppState, user: &User, id: i64) -> Result<SavedRow, ApiError> {
@@ -1167,7 +1171,7 @@ pub async fn update_row(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(patch): Json<RowPatch>,
-) -> Result<Json<RowDto>, ApiError> {
+) -> Result<Json<LayoutRowDto>, ApiError> {
     let row = editable_row(&state, &user, id).await?;
     let scope = if row.owner_user_id.is_some() {
         Scope::Private
@@ -1186,7 +1190,9 @@ pub async fn update_row(
         .curation_row(id)
         .await?
         .ok_or(ApiError::NotFound("row"))?;
-    Ok(Json(row_dto(row, &user, can_curate(&state, &user).await?)))
+    let tags = state.store.visible_tags(user.id).await?;
+    let curate = can_curate(&state, &user).await?;
+    Ok(Json(layout_row(&state, &user, row, &tags, curate).await?))
 }
 
 /// DELETE /api/v1/rows/{id}

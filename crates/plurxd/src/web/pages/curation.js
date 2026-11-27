@@ -115,18 +115,13 @@ function homeEntryLabel(key){
 }
 // Home leaves out a custom row that matches nothing, so this panel is where
 // it says so, and why: the tags its rule needs that no title carries yet.
-function homeRowEmptyNote(row){
+function homeRowEmptyNote(row,hidden){
   if(row.matching!==0)return "";
   const tags=row.empty_tags||[];
   const link=t=>`<a href="#/tag/${t.id}${t.editable?"/suggested":""}" onclick="this.closest('dialog').close()">${esc(t.name)}</a>`;
   const why=tags.length?`no titles are tagged ${tags.map(link).join(", ")} yet`
     :"no playable titles match its rule";
-  return `<span class="home-entry-empty">Empty, not on Home: ${why}.</span>`;
-}
-// The row editor returns a bare row; the panel's copy needs its match count.
-async function refreshHomeEditRows(home){
-  const r=await api("/home/layout");
-  home.rows=r.rows||[];
+  return `<span class="home-entry-empty">${hidden?"Empty":"Empty, so not on Home"}: ${why}.</span>`;
 }
 function paintCustomizeHome(){
   const d=dialogById("customize-home");if(!d||!HOME_EDIT)return;
@@ -134,7 +129,7 @@ function paintCustomizeHome(){
   const rows=HOME_EDIT.entries.map((e,i)=>{
     const [label,kind,row]=homeEntryLabel(e.key);
     return `<li class="home-entry${e.hidden?" hidden-entry":""}">
-      <span class="home-entry-name">${esc(label)} <span class="muted">${esc(kind)}</span>${row?homeRowEmptyNote(row):""}</span>
+      <span class="home-entry-name">${esc(label)} <span class="muted">${esc(kind)}</span>${row?homeRowEmptyNote(row,e.hidden):""}</span>
       <span class="row" style="gap:4px">
         <button class="ghost sm" aria-label="Move ${esc(label)} up" ${i===0?"disabled":""} onclick="moveHomeEntry(${i},-1)">↑</button>
         <button class="ghost sm" aria-label="Move ${esc(label)} down" ${i===n-1?"disabled":""} onclick="moveHomeEntry(${i},1)">↓</button>
@@ -260,7 +255,6 @@ async function saveRow(){
       home.rows=home.rows.filter(r=>r.id!==row.id).concat([row]);
       if(!home.entries.some(e=>e.key===`row:${row.id}`)) home.entries.push({key:`row:${row.id}`,hidden:false});
       paintCustomizeHome();
-      refreshHomeEditRows(home).then(()=>{if(HOME_EDIT===home)paintCustomizeHome();},()=>{/* the bare row stays listed */});
       render();
     }
     toast(edit.id?"Row saved":"Row added. Save in Customize Home to keep any changes to the order.");

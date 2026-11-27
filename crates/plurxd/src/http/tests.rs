@@ -24570,6 +24570,9 @@ async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{empty_row}");
+    // The save answers with the same count, so the panel needs no re-read.
+    assert_eq!(empty_row["matching"], 0, "{empty_row}");
+    assert_eq!(empty_row["empty_tags"][0]["id"], empty_tag, "{empty_row}");
     let empty_row = empty_row["id"].as_i64().expect("id");
     let (_, layout) = call(&app, get("/api/v1/home/layout", Some(&admin))).await;
     let listed = |id: i64| {
