@@ -369,8 +369,11 @@ pub(super) async fn carry_forward<T: QueueSql>(
     struct Count {
         count: u64,
     }
-    // The maintenance pass asks every turn, so ask the local replica: a lagging
-    // answer only defers the carry to a later turn, and the write re-decides.
+    // Every maintenance turn asks, so ask the local replica, and the write
+    // re-decides. A replica that has not yet applied a predecessor's fresh
+    // aggregate answers no, and this turn may then rotate that title; only a
+    // node still running the predecessor publishes one, which happens only
+    // during a mixed-version rollout, when those nodes rotate titles anyway.
     let count = format!("SELECT json_object('count',count(*)) AS result_json {CARRY_FORWARD_FROM}");
     let pending = match store.local_replica_sql(count.clone(), body.clone()).await? {
         Some(rows) => rows,

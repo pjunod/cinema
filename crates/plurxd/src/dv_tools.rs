@@ -78,11 +78,13 @@ pub(crate) const TITLE_SCANNER_PREDECESSORS: &[&str] = &[
     // only the selected video, exactly as before.
     "5e4c9012fec9fd3087d0cf62ac7819fda7b86f57cb4d21de9f3045c153306953",
 ];
-/// sha256 of `scan_title.c`, `movie_source_io.h` and `title_constants.h`
-/// concatenated, as [`TITLE_SCANNER_PREDECESSORS`] was last reviewed against.
+/// sha256 of `scan_title.c`, `movie_source_io.h`, `title_constants.h`,
+/// `build.sh` (its flags) and `build-dependencies.sh` (the FFmpeg and libdovi
+/// it links statically) concatenated, as [`TITLE_SCANNER_PREDECESSORS`] was
+/// last reviewed against.
 #[cfg(test)]
 pub(crate) const TITLE_SCANNER_SOURCES: &str =
-    "ecbcc9c0d73ba1ca42ddd28173ba8b7d41d28c5304e534e7f60a3c6a43433329";
+    "f0ac3422c74a4ef433719d88a046c36d8a71856890afb33085684a66cd2f34fa";
 
 #[cfg(test)]
 impl ToolSet {
@@ -609,6 +611,10 @@ mod title_scanner_identity_tests {
         ));
         sources.update(include_bytes!(
             "../../../tools/dv_processing/title_constants.h"
+        ));
+        sources.update(include_bytes!("../../../tools/dv_processing/build.sh"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/build-dependencies.sh"
         ));
         assert_eq!(
             hex::encode(sources.finalize()),

@@ -1,16 +1,20 @@
 """Untagged Matroska completeness controls for `scan_title`; no decode or GPU.
 
-`segment-av.mkv` is the 18-picture `bl.mkv` video with 0.75 s of PCM audio, in
-four clusters, written by ffmpeg (which tags each track with DURATION). The
+`segment-av.mkv` is the 18-picture `bl.mkv` video (0.75 s) with 1.5 s of PCM
+audio, in ten clusters: six carry both tracks, the last four audio alone, as a
+WEB-DL title's audio outlasts its video. ffmpeg wrote it, tagging each track
+with DURATION. The
 controls derive every other case from it in memory:
 
 - untagged, as MakeMKV and older mkvmerge write titles, by turning the Tags
   element into an EBML Void of the same length;
 - byte damage the Segment's declared span must refuse: one byte cut from the
   end, one byte appended, the Segment's size made unknown;
-- tail damage with every byte present: the last Cluster's ID made unknown,
-  which matroskadec skips without an error, so the title's tail is lost
-  silently;
+- tail damage with every byte present: a Cluster's ID made unknown, which
+  matroskadec skips without an error, so its blocks are lost silently. Losing
+  the last cluster shortens the audio; losing the last cluster that carries
+  video loses the video's tail behind intact audio-only clusters, and the gap
+  it leaves in the audio is what refuses it;
 - the declared Segment duration voided, one tick late (allowed), or two ticks
   late (refused).
 
@@ -40,7 +44,7 @@ EXPECTED = {
     "el_kind": {"state": "unknown"},
 }
 SEGMENT, INFO, TAGS, CLUSTER, DURATION = 0x18538067, 0x1549A966, 0x1254C367, 0x1F43B675, 0x4489
-VOID = 0xEC
+VOID, SIMPLE_BLOCK, VIDEO_TRACK = 0xEC, 0xA3, 1
 
 
 def number(data, at, is_id=False):
@@ -92,6 +96,19 @@ def untagged(data):
     return void(data, element, end)
 
 
+def tracks(data, cluster):
+    """The track numbers of a cluster's SimpleBlocks."""
+    _, _, payload, end = cluster
+    return {number(data, start)[0] for ident, _, start, _ in children(data, payload, end)
+            if ident == SIMPLE_BLOCK}
+
+
+def lose(data, cluster):
+    """The bytes with this cluster's ID made one matroskadec skips silently."""
+    element = cluster[1]
+    return data[:element] + b"\x1f\x43\xb6\x76" + data[element + 4:]
+
+
 def info_duration(data):
     (_, _, payload, end), = level1(data, INFO)
     (found,) = [child for child in children(data, payload, end) if child[0] == DURATION]
@@ -127,15 +144,17 @@ def expect(result, name, reason=None):
 
 def test_untagged_matroska_segment_endpoint(scanner, baseline=None):
     tagged = FIXTURE.read_bytes()
-    assert len(level1(tagged, CLUSTER)) == 4 and level1(tagged, TAGS)
+    clusters = level1(tagged, CLUSTER)
+    assert len(clusters) == 10 and level1(tagged, TAGS)
     plain = untagged(tagged)
     assert b"DURATION" not in plain
+    clusters = level1(plain, CLUSTER)
+    carrying_video = [c for c in clusters if VIDEO_TRACK in tracks(plain, c)]
+    assert len(carrying_video) == 6 and VIDEO_TRACK not in tracks(plain, clusters[-1])
     declared = struct.unpack(">d", plain[info_duration(plain)[2]:info_duration(plain)[3]])[0]
-    assert declared == 750.0, declared
+    assert declared == 1500.0, declared
     size_at, _, _ = segment(plain)
     assert plain[size_at] == 0x01, "eight-byte Segment size"
-    (_, last, _, _), = level1(plain, CLUSTER)[-1:]
-    lost_tail = plain[:last] + b"\x1f\x43\xb6\x76" + plain[last + 4:]
     _, _, duration_payload, duration_end = info_duration(plain)
     cases = [
         ("tagged", tagged, None),
@@ -144,11 +163,13 @@ def test_untagged_matroska_segment_endpoint(scanner, baseline=None):
         ("untagged-extra-byte", plain + b"\0", "complete declared Matroska segment"),
         ("untagged-unknown-size", plain[:size_at] + b"\x01" + b"\xff" * 7 + plain[size_at + 8:],
          "complete declared Matroska segment"),
-        ("untagged-lost-tail", lost_tail, "Matroska segment tail reached"),
+        ("untagged-lost-last-cluster", lose(plain, clusters[-1]), "Matroska segment tail reached"),
+        ("untagged-lost-video-tail", lose(plain, carrying_video[-1]),
+         "Matroska segment tail reached"),
         ("untagged-no-duration", void(plain, duration_payload - 3, duration_end),
          "declared Matroska segment duration"),
-        ("untagged-one-tick-late", with_duration(plain, 751.0), None),
-        ("untagged-two-ticks-late", with_duration(plain, 752.0), "Matroska segment tail reached"),
+        ("untagged-one-tick-late", with_duration(plain, 1501.0), None),
+        ("untagged-two-ticks-late", with_duration(plain, 1502.0), "Matroska segment tail reached"),
     ]
     with tempfile.TemporaryDirectory() as workdir:
         for name, data, reason in cases:

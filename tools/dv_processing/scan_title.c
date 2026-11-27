@@ -497,9 +497,12 @@ int main(int argc, char **argv) {
     if (i != (unsigned long)index &&
         !(segment_endpoint && input->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO))
       input->streams[i]->discard = AVDISCARD_ALL;
-  // The latest audio packet end, in its stream's time base.
-  int64_t audio_end = AV_NOPTS_VALUE;
-  AVRational audio_time_base = {0, 1};
+  // Each audio stream's timing, for the Segment endpoint: a stream counts
+  // toward the title's tail only while its packets join one another.
+  static struct audio_timing {
+    int64_t first, end, longest, before_last, last;
+    bool seen, joined;
+  } audio[256];
   int length_size = configuration(stream->codecpar);
   if (argc == 5) {
     rpu_timeline = fopen(argv[4], "wx");
@@ -514,14 +517,25 @@ int main(int argc, char **argv) {
     if (packet->stream_index == index) {
       need(!(packet->flags & AV_PKT_FLAG_CORRUPT), "corrupt demux packet");
       observe_unit(packet, length_size);
-    } else if (segment_endpoint && packet->pts != AV_NOPTS_VALUE && packet->duration >= 0 &&
-               packet->pts <= INT64_MAX - packet->duration) {
-      AVRational time_base = input->streams[packet->stream_index]->time_base;
-      int64_t end = packet->pts + packet->duration;
-      if (audio_end == AV_NOPTS_VALUE ||
-          av_compare_ts(end, time_base, audio_end, audio_time_base) > 0) {
-        audio_end = end;
-        audio_time_base = time_base;
+    } else if (segment_endpoint) {
+      // A lost cluster takes every track's blocks with it, so it leaves a
+      // gap here even where the video has already ended. A gap of up to one
+      // frame is timestamp rounding (DTS frames are not whole milliseconds).
+      struct audio_timing *a = &audio[packet->stream_index];
+      bool timed = packet->pts != AV_NOPTS_VALUE && packet->duration > 0 &&
+                   packet->pts <= INT64_MAX - packet->duration;
+      if (!a->seen) {
+        *a = (struct audio_timing){.first = packet->pts, .end = 0, .seen = true,
+                                   .joined = timed};
+      } else if (a->joined) {
+        a->joined = timed && packet->pts >= a->end - 1 &&
+                    packet->pts - a->end <= a->longest;
+      }
+      if (a->joined) {
+        a->before_last = a->longest;
+        if (packet->duration > a->longest) a->longest = packet->duration;
+        a->last = packet->duration;
+        a->end = packet->pts + packet->duration;
       }
     }
     av_packet_unref(packet);
@@ -568,11 +582,11 @@ int main(int argc, char **argv) {
   }
   if (segment_endpoint) {
     // The Segment's declared byte span must be the whole source, so no byte
-    // of it is missing, and the latest audio or video end must reach its
-    // declared duration, so the demuxer did not stop or resynchronise past a
-    // lost tail (matroskadec drops some damaged blocks without an error).
-    // The video itself may end earlier, as authored. Subtitle durations are
-    // display times, so they are not counted. The Segment Info duration is
+    // of it is missing, and the video or an unbroken audio stream must reach
+    // its declared duration, so the demuxer did not stop or resynchronise
+    // past a lost tail (matroskadec drops a damaged cluster without an
+    // error). The video itself may end earlier, as authored. Subtitle
+    // durations are display times, so they are not counted. The Segment Info duration is
     // a timestamp endpoint like the DURATION tag, and comes from the header
     // alone, since no stream analysis pass runs. Every track shares the
     // Segment's TimestampScale time base, the rounding allowed here.
@@ -581,12 +595,22 @@ int main(int argc, char **argv) {
          "complete declared Matroska segment");
     need(input->duration > 0 && input->duration != AV_NOPTS_VALUE,
          "declared Matroska segment duration");
+    // An audio stream carries the tail only if it joined the video (began
+    // before the video ended), every packet joined the one before, and its
+    // last packet is no longer than the ones before it: one damaged block
+    // duration cannot stand in for the lost tail.
     int64_t tail = last_end;
     AVRational tail_time_base = stream->time_base;
-    if (audio_end != AV_NOPTS_VALUE &&
-        av_compare_ts(audio_end, audio_time_base, tail, tail_time_base) > 0) {
-      tail = audio_end;
-      tail_time_base = audio_time_base;
+    for (unsigned i = 0; i < input->nb_streams; i++) {
+      const struct audio_timing *a = &audio[i];
+      AVRational time_base = input->streams[i]->time_base;
+      if (!a->seen || !a->joined || a->before_last <= 0 || a->last > a->before_last ||
+          av_compare_ts(a->first, time_base, last_end, stream->time_base) > 0)
+        continue;
+      if (av_compare_ts(a->end, time_base, tail, tail_time_base) > 0) {
+        tail = a->end;
+        tail_time_base = time_base;
+      }
     }
     need(tail < INT64_MAX &&
          av_compare_ts(tail + 1, tail_time_base, input->duration, AV_TIME_BASE_Q) >= 0,
