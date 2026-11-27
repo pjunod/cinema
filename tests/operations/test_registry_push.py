@@ -53,6 +53,8 @@ class RegistryPushCase(unittest.TestCase):
             (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.0"\n')
             (root / "scripts/validate-docker-startup-budget").write_text('print("1500s")\n')
             (root / "scripts/docker-hardware").write_text('print("docker-compose.yml")\n')
+            # Unconfigured image sharing: no verdict, so docker-up builds.
+            (root / "scripts/fleet-image").write_text("pass\n")
             docker = root / "docker"
             docker.write_text('#!/bin/sh\nprintf "%s\\n" "$PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT" "$*"\n')
             docker.chmod(0o755)
