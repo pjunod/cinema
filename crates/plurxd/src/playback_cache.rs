@@ -1249,7 +1249,7 @@ fn inventory(roots: &[PathBuf]) -> io::Result<Sample> {
                 Err(error) => return Err(error),
             }
         };
-        let identity = plurx_core::fs_secure::std_file_identity(&directory)?;
+        let identity = plurx_core::fs_secure::local_file_identity(&directory)?;
         sample.root_devices.push(identity.device);
         sample
             .disks
@@ -1487,7 +1487,7 @@ fn walk(
             "playback cache inventory exceeded depth bound",
         ));
     }
-    let identity = plurx_core::fs_secure::std_file_identity(directory)?;
+    let identity = plurx_core::fs_secure::local_file_identity(directory)?;
     if !seen.insert((identity.device, identity.inode)) {
         return Ok(0);
     }
@@ -1506,7 +1506,7 @@ fn walk(
         if held.metadata()?.is_dir() {
             bytes = bytes.saturating_add(walk(&held, &entry.path(), seen, depth + 1)?);
         } else {
-            let identity = plurx_core::fs_secure::std_file_identity(&held)?;
+            let identity = plurx_core::fs_secure::local_file_identity(&held)?;
             if seen.insert((identity.device, identity.inode)) {
                 bytes = bytes.saturating_add(allocated_bytes(&held)?);
             }

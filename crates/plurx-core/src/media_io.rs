@@ -153,6 +153,47 @@ pub fn fstat(file: &std::fs::File) -> std::io::Result<std::fs::Metadata> {
     in_place(|| file.metadata())
 }
 
+/// The [`crate::fs_secure::FileIdentity`] of a held media descriptor, read on
+/// the bounded media pool.
+///
+/// Identity is an `fstat`, and on NFS an `fstat` revalidates with the server
+/// once the attribute cache has expired, so it is media I/O like any read.
+/// The slot is taken first; then the descriptor is duplicated (`dup` stays in
+/// the local kernel), so a queued call holds no extra descriptor and the
+/// caller keeps its own.
+///
+/// Media code reads identity through this or [`identity_in_place`], never
+/// through `fs_secure::std_file_identity` directly; a source guard in plurxd
+/// fails on new direct calls.
+pub async fn identity(file: &std::fs::File) -> std::io::Result<crate::fs_secure::FileIdentity> {
+    let slot = slot().await;
+    let handle = file.try_clone()?;
+    slot.run(move || crate::fs_secure::std_file_identity(&handle))
+        .await?
+}
+
+/// [`identity`] for code that cannot await: synchronous decision code, and
+/// code already on the blocking pool (where it runs directly). Unbounded, like
+/// [`in_place`]. Prefer [`identity`] wherever the caller can await, and never
+/// call this while holding a lock that async code takes.
+pub fn identity_in_place(file: &std::fs::File) -> std::io::Result<crate::fs_secure::FileIdentity> {
+    in_place(|| crate::fs_secure::std_file_identity(file))
+}
+
+/// Every media slot at once, the state a hung mount leaves the pool in, for
+/// tests that need awaited media calls to queue.
+///
+/// The slots are taken in one acquisition. Taken one at a time, two such
+/// tests running as threads of one test binary could each hold part of the
+/// pool and wait for the rest forever.
+#[cfg(any(test, feature = "fixtures"))]
+pub async fn hold_every_slot() -> tokio::sync::OwnedSemaphorePermit {
+    Arc::clone(&PERMITS)
+        .acquire_many_owned(MEDIA_IO_CONCURRENCY as u32)
+        .await
+        .expect("the media I/O semaphore is never closed")
+}
+
 struct InPlace;
 
 impl InPlace {
@@ -379,6 +420,39 @@ mod tests {
     async fn a_panic_in_media_work_reaches_the_caller() {
         let caught = tokio::spawn(blocking(|| panic!("media work panicked"))).await;
         assert!(caught.expect_err("panic").is_panic());
+    }
+
+    /// Holding every slot is the state a hung mount leaves the pool in. An
+    /// awaited identity read must then wait for a slot, not run beside the
+    /// bound; the in-place read at the same moment shows the test can tell
+    /// the two apart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_awaited_identity_read_queues_on_the_media_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.mkv");
+        std::fs::write(&path, b"source bytes").expect("source");
+        let file = std::sync::Arc::new(std::fs::File::open(&path).expect("open"));
+        let expected = crate::fs_secure::std_file_identity(&file).expect("identity");
+
+        let held = hold_every_slot().await;
+        let awaited = tokio::spawn({
+            let file = std::sync::Arc::clone(&file);
+            async move { identity(&file).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !awaited.is_finished(),
+            "the awaited identity read ran without a media slot"
+        );
+        assert_eq!(identity_in_place(&file).expect("in place"), expected);
+
+        drop(held);
+        let read = tokio::time::timeout(Duration::from_secs(5), awaited)
+            .await
+            .expect("the read runs once a slot is free")
+            .expect("task")
+            .expect("identity");
+        assert_eq!(read, expected);
     }
 
     #[tokio::test]
