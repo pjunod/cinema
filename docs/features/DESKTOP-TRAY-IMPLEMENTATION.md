@@ -307,11 +307,8 @@ without losing custom keys. A changed/conflicting registration requires an
 explicit migration, not deletion of an unrelated file.
 
 The menu app's separate **Show tray app at login** uses `SMAppService.mainApp`
-in its `.app` bundle. It is on by default: the first launch of the installed
-app at its stable location registers it once and records that the default is
-decided; an explicit toggle also decides it. Report OS approval/disabled
-status accurately; never re-enable it every launch or restart the server just
-to register the UI.
+in its `.app` bundle. Report OS approval/disabled status accurately; enable
+it once at first launch, never again, nor restart the server for the UI.
 
 ### 4.2 Linux startup — system boot and desktop login are independent
 
