@@ -12,6 +12,35 @@ use tokio::task::JoinHandle;
 
 const VERIFIED_EXECUTABLE_CACHE_CAPACITY: usize = 8;
 
+/// How long before hashing began a file's last change must lie before its
+/// verified digest may be cached. The kernel stamps mtime/ctime from a coarse
+/// clock, so a same-size rewrite within one tick leaves the whole identity
+/// unchanged; only a file that was already settled when hashing began can be
+/// trusted to keep the bytes that were hashed under that identity.
+const VERIFIED_EXECUTABLE_SETTLED_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a file with this identity had settled before `hash_started`, by at
+/// least [`VERIFIED_EXECUTABLE_SETTLED_MARGIN`]. An unrepresentable ctime is
+/// never settled.
+fn settled_for_cache(identity: SourceIdentity, hash_started: std::time::SystemTime) -> bool {
+    let (Ok(seconds), Ok(nanos)) = (
+        u64::try_from(identity.ctime),
+        u32::try_from(identity.ctime_nsec),
+    ) else {
+        return false;
+    };
+    if nanos >= 1_000_000_000 {
+        return false;
+    }
+    let Some(changed) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanos))
+    else {
+        return false;
+    };
+    hash_started
+        .checked_sub(VERIFIED_EXECUTABLE_SETTLED_MARGIN)
+        .is_some_and(|cutoff| changed <= cutoff)
+}
+
 #[derive(Clone, Copy)]
 struct VerifiedExecutable {
     identity: SourceIdentity,
@@ -741,6 +770,7 @@ fn open_source_with_cache(
                 result.verified_sha256_cached = true;
             }
         } else {
+            let hash_started = std::time::SystemTime::now();
             let mut hasher = Sha256::new();
             let mut buffer = [0u8; 64 * 1024];
             let mut offset = 0u64;
@@ -763,8 +793,13 @@ fn open_source_with_cache(
             if before != after || digest != expected {
                 return result;
             }
-            if let Ok(mut cache) = cache.lock() {
-                cache.insert(before, digest);
+            // A file changed within the margin may still be rewritten in
+            // the same coarse tick: verify it, but do not let a later open
+            // reuse the digest by identity alone.
+            if settled_for_cache(before, hash_started) {
+                if let Ok(mut cache) = cache.lock() {
+                    cache.insert(before, digest);
+                }
             }
             result.verified_sha256 = Some(digest);
             result.verified_elf = true;

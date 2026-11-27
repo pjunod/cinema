@@ -244,6 +244,8 @@ fn repeated_held_source_uses_bounded_identity_cache_after_descriptor_stat_checks
     std::fs::write(&path, &contents).expect("fixture source");
     let digest = Sha256::digest(&contents).into();
     let cache = Mutex::new(VerifiedExecutableCache::new());
+    // Only a file already settled when hashing begins is cached.
+    std::thread::sleep(VERIFIED_EXECUTABLE_SETTLED_MARGIN + std::time::Duration::from_millis(100));
 
     let mut first = source_cell(&path, filesystem_domain(namespace()));
     bind_expected_executable(&mut first, digest);
@@ -257,6 +259,69 @@ fn repeated_held_source_uses_bounded_identity_cache_after_descriptor_stat_checks
     assert_eq!(second_result.verified_sha256, Some(digest));
     assert!(second_result.verified_elf);
     assert!(second_result.verified_sha256_cached);
+}
+
+#[test]
+fn a_file_changed_within_the_settled_margin_is_never_cacheable() {
+    let started = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+    let identity = |seconds: i64, nanos: i64| {
+        SourceIdentity::from_fields(1, 2, 32, seconds, nanos, seconds, nanos)
+    };
+    // Same coarse tick as the hash start: a same-size rewrite could keep it.
+    assert!(!settled_for_cache(identity(1_800_000_000, 0), started));
+    assert!(!settled_for_cache(
+        identity(1_799_999_999, 500_000_000),
+        started
+    ));
+    assert!(settled_for_cache(identity(1_799_999_999, 0), started));
+    assert!(settled_for_cache(identity(1_700_000_000, 0), started));
+    // Changed after hashing began, or not representable: never settled.
+    assert!(!settled_for_cache(identity(1_800_000_001, 0), started));
+    assert!(!settled_for_cache(identity(-1, 0), started));
+    assert!(!settled_for_cache(
+        identity(1_700_000_000, 1_000_000_000),
+        started
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fresh_same_size_rewrite_is_rehashed_not_reused_from_the_cache() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-digest-cache-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    let original = fixture_elf();
+    std::fs::write(&path, &original).expect("fixture source");
+    let original_digest = Sha256::digest(&original).into();
+    let cache = Mutex::new(VerifiedExecutableCache::new());
+    let mut first = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut first, original_digest);
+    let first_result = open_with_cache(&mut first, &cache);
+    assert_eq!(first_result.verified_sha256, Some(original_digest));
+    assert!(!first_result.verified_sha256_cached);
+    let identity = SourceIdentity::from_metadata(&std::fs::metadata(&path).expect("metadata"));
+    assert!(
+        !cache
+            .lock()
+            .expect("cache lock")
+            .contains(identity, &original_digest),
+        "a file changed within the margin is verified but never cached"
+    );
+
+    // Rewrite the same length at once, as fast as the kernel's timestamp
+    // tick allows; whether or not the identity moved, the bytes are hashed.
+    let mut changed = original.clone();
+    *changed.last_mut().expect("fixture has bytes") ^= 1;
+    std::fs::write(&path, &changed).expect("same-size rewrite");
+    let mut second = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut second, original_digest);
+    let result = open_with_cache(&mut second, &cache);
+    assert!(result.file.is_some(), "actual descriptor remains retained");
+    assert!(result.observed.is_none());
+    assert_eq!(result.verified_sha256, None);
+    assert!(!result.verified_sha256_cached);
 }
 
 #[cfg(target_os = "linux")]
