@@ -13,7 +13,7 @@ use crate::{
     domain::MediaFile,
     transcode::{
         vod_pipe_args_with_source_clock, Encoder, FrameDomain, LinuxDolbyExecutionBinding,
-        ResolvedTranscode, TranscodeExecution, VodFrameGrid, VodSourceClock,
+        ResolvedTranscode, TranscodeExecution, VideoSampleEnvelope, VodFrameGrid, VodSourceClock,
     },
 };
 
@@ -247,8 +247,17 @@ impl SoftwareAvcCommand {
             ));
         }
 
-        let has_audio = !source.audio_streams.is_empty();
-        if plan.options().input_has_audio != has_audio {
+        // The held inputs follow the plan. A plan that decodes audio needs a
+        // source with audio. A source with audio may be planned without it
+        // only as the video-only role of a continuous family, whose
+        // soundtrack is its own shared-audio rendition; every other plan
+        // that drops a present audio stream is a mismatch.
+        let has_audio = plan.options().input_has_audio;
+        let source_has_audio = !source.audio_streams.is_empty();
+        let video_only_role =
+            plan.options().video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50;
+        if (has_audio && !source_has_audio) || (!has_audio && source_has_audio && !video_only_role)
+        {
             return Err(invalid(
                 "plan audio inputs do not match the held source facts",
             ));

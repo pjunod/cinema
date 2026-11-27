@@ -292,10 +292,12 @@ pub(super) fn compile(
     let known_memory = SoftwareVodRequest::known_memory_component(&command, &pump, &output, 0)
         .map_err(|error| format!("sizing the finite software memory component: {error}"))?;
 
-    let source_count = if recipe.file.audio_streams.is_empty() {
-        1
-    } else {
+    // One held source for the video and one for an audio input the plan
+    // decodes; a continuous family's video-only role holds no audio input.
+    let source_count = if encoding.plan.options().input_has_audio {
         2
+    } else {
+        1
     };
     let mut sources = Vec::new();
     sources
