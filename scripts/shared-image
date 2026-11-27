@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""Build the plurxd image once per commit and let every other node pull it.
+"""Build the plurxd image once per commit and let your other hosts pull it.
 
-`make docker-up` compiles the image from the node's own checkout. Deploying
-one commit to a fleet therefore compiled the same image once per node, each
-taking the better part of an hour. This helper gives that path a shared,
-commit-addressed copy in the fleet registry (the same LAN Forgejo registry
-`make docker-image-up` pulls from):
+`make docker-up` compiles the image from the host's own checkout, so an
+operator who deploys one commit to several hosts compiles the same image on
+each of them. When `PLURX_IMAGE_REPOSITORY` names an image repository in any OCI
+registry the hosts can reach (a self-hosted `registry:2`, Harbor, Gitea or
+Forgejo, GHCR, Docker Hub), the first host to deploy a commit pushes its build
+there and the rest pull it:
 
-    <registry>/noirr/plurxd:build-<40-character commit>-<arch>
+    PLURX_IMAGE_REPOSITORY=registry.example:5000/you/plurxd
+    -> registry.example:5000/you/plurxd:build-<40-character commit>-<arch>
+
+Logging in to that registry (`docker login`) is the operator's job. With the
+setting absent this helper prints nothing and `make docker-up` is exactly the
+plain source build.
 
 `pull` runs after the hardware overlay is resolved (COMPOSE_FILE exported)
 and prints one verdict on stdout:
 
-    use <image id>   another node built this commit; it was pulled, its
+    use <image id>   another host built this commit; it was pulled, its
                      revision label and platform match, and the local Compose
                      tag now points at it. Start it with --no-build.
-    share <sha>      this node should build, then `push --expect <sha>`.
+    share <sha>      this host should build, then `push --expect <sha>`.
     (nothing)        build locally and push nothing.
 
 `push --expect <sha>` runs after a local build. It tags the image Compose just
-built with the shared name and pushes it, so the next node pulls instead of
+built with the shared name and pushes it, so the next host pulls instead of
 compiling.
 
 Sharing applies only when it is safe to name the image by its commit:
@@ -31,16 +37,13 @@ Sharing applies only when it is safe to name the image by its commit:
   host override's `image:`) is a different image from the shared one, so it is
   neither replaced by a pulled image nor published as one.
 
-The `build-` tags are deliberately separate from the `sha-`/`main` tags that
-`scripts/registry-push` publishes after the full post-merge validation: a
-node-built image is the same commit, not a qualified one. Neither subcommand
-can fail a deploy: a missing registry setting, a registry outage, a refused
-push or any unexpected error is reported on stderr and the deploy carries on
+`build-` tags are a host's own build of a commit. Neither subcommand can fail
+a deploy: an unreachable or unauthenticated registry, a refused push or any
+unexpected error is reported in one line on stderr and the deploy carries on
 with the local build.
 
-The registry host comes from `PLURX_REGISTRY` in the environment or in
-`deploy/.env` (the gitignored per-host settings file). Without it `make
-docker-up` behaves exactly as it always has.
+The setting comes from the environment or from `deploy/.env` (the gitignored
+per-host settings file).
 """
 
 from __future__ import annotations
@@ -55,12 +58,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "deploy"
 DEPLOY_ENV = DEPLOY / ".env"
-REPOSITORY = "noirr/plurxd"
 REVISION_LABEL = "org.opencontainers.image.revision"
 SERVICES = ("plurxd", "plurx-discovery")
-PROBE_IMAGE = "fleet-image-probe.invalid/plurxd:probe"
+PROBE_IMAGE = "shared-image-probe.invalid/plurxd:probe"
 ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
-REGISTRY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$")
+REPOSITORY_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)+$")
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 MISSING_PATTERN = re.compile(r"manifest unknown|name unknown|not found", re.IGNORECASE)
 TRANSFER_TIMEOUT = 900
@@ -71,7 +74,7 @@ class Skip(Exception):
 
 
 def note(message: str) -> None:
-    print(f"fleet-image: {message}", file=sys.stderr)
+    print(f"shared-image: {message}", file=sys.stderr)
 
 
 def run(*args: str, cwd: Path = ROOT, timeout: int = 60,
@@ -96,13 +99,18 @@ def env_file_value(name: str, path: Path = DEPLOY_ENV) -> str:
     return value
 
 
-def registry() -> str:
-    host = os.environ.get("PLURX_REGISTRY", "").strip() or env_file_value("PLURX_REGISTRY")
-    if not host:
-        raise Skip("PLURX_REGISTRY is not set; building locally without sharing")
-    if not REGISTRY_PATTERN.match(host):
-        raise Skip(f"PLURX_REGISTRY {host!r} is not a host[:port]; building locally without sharing")
-    return host
+class Unconfigured(Exception):
+    """No shared repository is set: stay silent and build locally."""
+
+
+def repository() -> str:
+    name = os.environ.get("PLURX_IMAGE_REPOSITORY", "").strip() or env_file_value("PLURX_IMAGE_REPOSITORY")
+    if not name:
+        raise Unconfigured
+    if not REPOSITORY_PATTERN.match(name):
+        raise Skip(f"PLURX_IMAGE_REPOSITORY {name!r} is not an image repository such as "
+                   "registry.example:5000/you/plurxd (no tag or digest); building locally")
+    return name
 
 
 def clean_head() -> str:
@@ -145,8 +153,8 @@ def require_standard_image() -> None:
                    "override); building locally without sharing")
 
 
-def shared_ref(sha: str, arch: str) -> str:
-    return f"{registry()}/{REPOSITORY}:build-{sha}-{arch}"
+def shared_ref(name: str, sha: str, arch: str) -> str:
+    return f"{name}:build-{sha}-{arch}"
 
 
 def inspect(ref: str, template: str) -> str:
@@ -168,7 +176,8 @@ def verify(ref: str, sha: str, arch: str) -> str:
 
 
 def pull() -> str:
-    ref = shared_ref(sha := clean_head(), arch := architecture())
+    name = repository()
+    ref = shared_ref(name, sha := clean_head(), arch := architecture())
     require_standard_image()
     share = f"share {sha}"
     note(f"looking for {ref}")
@@ -176,12 +185,14 @@ def pull() -> str:
     if result.returncode != 0:
         detail = result.stderr.strip()
         if MISSING_PATTERN.search(detail):
-            note("no node has shared this commit yet; building it here and sharing it")
+            note("no host has shared this commit yet; building it here and sharing it")
         else:
             note(f"registry pull failed ({detail}); building locally")
         return share
     try:
         image_id = verify(ref, sha, arch)
+    except Unconfigured:
+        pass
     except Skip as skip:
         note(f"{skip}; building locally and replacing it")
         return share
@@ -196,13 +207,14 @@ def pull() -> str:
 
 
 def push(expected: str) -> None:
+    name = repository()
     if not SHA_PATTERN.match(expected):
         raise Skip(f"--expect {expected!r} is not a full commit")
     sha = clean_head()
     if sha != expected:
         raise Skip(f"checkout moved from {expected} to {sha} during the build; not sharing it")
     arch = architecture()
-    ref = shared_ref(sha, arch)
+    ref = shared_ref(name, sha, arch)
     require_standard_image()
     (local,) = compose_images("plurxd")
     image_id = verify(local, sha, arch)
@@ -212,7 +224,7 @@ def push(expected: str) -> None:
     result = run("docker", "push", ref, timeout=TRANSFER_TIMEOUT)
     if result.returncode != 0:
         raise Skip(f"push of {ref} failed ({result.stderr.strip()})")
-    note(f"shared {ref}; other {arch} nodes deploying {sha[:12]} will pull it")
+    note(f"shared {ref}; other {arch} hosts deploying {sha[:12]} will pull it")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -225,8 +237,10 @@ def main(argv: list[str] | None = None) -> int:
             print(pull())
         else:
             push(args.expect)
+    except Unconfigured:
+        pass
     except Skip as skip:
-        note(str(skip) if args.action == "pull" else f"{skip}; other nodes will build it themselves")
+        note(str(skip) if args.action == "pull" else f"{skip}; other hosts will build it themselves")
     except Exception as error:  # noqa: BLE001 - sharing is an optimisation and never fails a deploy
         note(f"unexpected {type(error).__name__}: {error}; continuing with the local build")
     return 0

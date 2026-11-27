@@ -53,6 +53,8 @@ class RegistryPushCase(unittest.TestCase):
             (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.0"\n')
             (root / "scripts/validate-docker-startup-budget").write_text('print("1500s")\n')
             (root / "scripts/docker-hardware").write_text('print("docker-compose.yml")\n')
+            # Unconfigured image sharing: no verdict, so docker-up builds.
+            (root / "scripts/shared-image").write_text("pass\n")
             docker = root / "docker"
             docker.write_text('#!/bin/sh\nprintf "%s\\n" "$PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT" "$*"\n')
             docker.chmod(0o755)
@@ -100,9 +102,11 @@ class RegistryPushCase(unittest.TestCase):
             smoke = root / "scripts/container-smoke"
             smoke.write_text('#!/bin/sh\necho "smoke $1" >> "$TRANSCRIPT"\n')
             smoke.chmod(0o755)
-            for override in (None, "mirror.invalid:5000/custom/media-runtime"):
-                with self.subTest(media_registry=override):
-                    suffix = "default" if override is None else "mirror"
+            for override, repository in ((None, None),
+                                         ("mirror.invalid:5000/custom/media-runtime", None),
+                                         (None, "registry.example:5000/you/plurxd")):
+                with self.subTest(media_registry=override, repository=repository):
+                    suffix = "repository" if repository else ("default" if override is None else "mirror")
                     transcript = root / (suffix + ".log")
                     env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
                                PLURX_REGISTRY="registry.invalid:3000", PLURX_BUILD_SHA=sha,
@@ -113,6 +117,10 @@ class RegistryPushCase(unittest.TestCase):
                                PULLED=str(root / (suffix + ".pulled")), TRANSCRIPT=str(transcript))
                     env.pop("PLURX_EXPECTED_IMAGE_ID", None)
                     env.pop("PLURX_MEDIA_RUNTIME_REPOSITORY", None)
+                    env.pop("PLURX_IMAGE_REPOSITORY", None)
+                    if repository is not None:
+                        # Any operator's own repository replaces this project's path.
+                        env["PLURX_IMAGE_REPOSITORY"] = repository
                     if override is not None:
                         env["PLURX_MEDIA_RUNTIME_REPOSITORY"] = override
                     result = subprocess.run([str(SCRIPT)], cwd=root, env=env,
@@ -127,8 +135,9 @@ class RegistryPushCase(unittest.TestCase):
                     self.assertNotIn("PLURX_MEDIA_RUNTIME_DIGEST=", builds[0])
                     self.assertFalse(any("Dockerfile.media-runtime" in call for call in calls))
                     self.assertFalse(any("linux-dolby-package" in call for call in calls))
-                    smoke_index = calls.index("smoke registry.invalid:3000/noirr/plurxd:sha-" + sha[:12])
-                    self.assertGreater(calls.index("tag registry.invalid:3000/noirr/plurxd:sha-" + sha[:12] + " registry.invalid:3000/noirr/plurxd:main"), smoke_index)
+                    image = repository or "registry.invalid:3000/noirr/plurxd"
+                    smoke_index = calls.index("smoke " + image + ":sha-" + sha[:12])
+                    self.assertGreater(calls.index("tag " + image + ":sha-" + sha[:12] + " " + image + ":main"), smoke_index)
 
     def test_verified_publication_requires_the_reviewed_manifest_and_configuration(self):
         with tempfile.TemporaryDirectory() as temp:

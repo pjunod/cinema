@@ -414,47 +414,56 @@ the build stamp and does not require the registry to answer. The noirr fleet's
 registry operations and recovery runbook live in
 [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#the-fleet-registry--build-once-pull-everywhere).
 
-### Source deploys build once per commit
+### Build once, deploy to several hosts
 
-A commit that has no qualified fleet image yet (a branch under test, or a
-`main` merge before the manual post-merge sweep publishes) goes out with
-`make docker-up`. Without help, every node compiled that same image for itself.
-Add the registry to each node's `deploy/.env` and the first node to deploy a
-commit shares it with the rest:
+`make docker-up` compiles the image on the host it runs on, so deploying one
+commit to several hosts compiles it on each of them. Point every host at an
+image repository they can all reach, in any OCI registry (a self-hosted
+`registry:2`, Harbor, Gitea or Forgejo, GHCR, Docker Hub), and only the first
+host compiles:
 
 ```bash
-PLURX_REGISTRY=forge.lan:3000
+# deploy/.env on every host
+PLURX_IMAGE_REPOSITORY=registry.example:5000/you/plurxd
 ```
 
-`make docker-up` then runs `scripts/fleet-image pull` once the hardware
-overlay is resolved. It looks for
-`forge.lan:3000/noirr/plurxd:build-<40-character commit>-<arch>`. If another
-node already built this commit, the target pulls the image and checks its
-revision label against `HEAD` and its platform against the host. It proves
-the startup budget against that image ID and starts it with `--no-build`, so
-nothing is compiled. If no node has built the commit, Compose builds it as
-before, and `scripts/fleet-image push` publishes the result under that name
-for the next node.
+Log each host in once (`docker login registry.example:5000`). For a plain-HTTP
+registry, also list it under `insecure-registries` in `/etc/docker/daemon.json`.
 
-- **Only a fully clean checkout is shared.** The checkout must have no tracked
-  or untracked changes, so that the commit names the build context. A dirty
-  tree builds locally and pushes nothing.
-- **Only the standard image is shared.** Some hosts' Compose files pin their
-  own image: the Raspberry Pi runtime overlay from `--prepare-pi`, or an
-  `image:` line in a host override. Those hosts build locally and never pull
-  or publish a shared image.
-- **A share can never fail a deploy.** A missing `PLURX_REGISTRY`, a registry
-  outage or a refused push is printed and the local build carries on.
-- **`build-` is not `sha-`.** The `sha-<12hex>` and `main` tags remain the
-  images `scripts/registry-push` publishes after the full validation sweep.
-  A `build-` tag is the same commit built on a node, not a qualified image.
-  Deploy one node first and check it, then roll out to the rest; the rest
-  pull. Nodes of another architecture build and share their own copy.
-- **Bound `build-` tags in the registry.** Every shared commit adds one image.
-  Give the `noirr` owner a Forgejo container cleanup rule (Settings →
-  Packages → Cleanup rules) whose remove pattern is `build-.*`, keeping the
-  five most recent and removing those older than seven days. Check its preview
-  matches no `main` or `sha-` version before saving.
+Then deploy the first host as usual, check it, and run `make docker-up` on the
+others at the same commit:
+
+1. **The first host** finds nothing for this commit. It builds as before, then
+   pushes `registry.example:5000/you/plurxd:build-<commit>-<arch>`.
+2. **Every other host** checks for that tag after it resolves its hardware
+   overlay. It pulls the image and confirms the commit label matches its own
+   `HEAD` and the platform matches its own. Then it proves the startup budget
+   against that image and starts it without compiling. The log line names the
+   image ID it used.
+
+Things to know:
+
+- **Same commit, clean checkout.** Hosts find each other's builds by commit,
+  so check out the same commit everywhere. A checkout with any tracked or
+  untracked change builds locally and shares nothing.
+- **Same architecture.** An arm64 host does not use an amd64 build. The first
+  host of each architecture builds and shares its own copy.
+- **Only the standard image.** Some hosts' Compose files pin their own image:
+  the Raspberry Pi runtime overlay from `--prepare-pi`, or an `image:` line in
+  a host override. Those hosts always build locally and never pull or push.
+- **Sharing never fails a deploy.** An unreachable registry, a missing login,
+  a malformed setting or a refused push prints one line, and the host builds
+  for itself. Without the setting nothing is printed and nothing changes.
+- **One build runs everywhere.** Every host then runs the image the first host
+  built, so check that host before deploying the rest.
+- **Retention is yours.** Each shared commit adds one image per architecture.
+  Use your registry's retention or cleanup policy to remove old `build-*` tags,
+  for example keeping the last five.
+
+`PLURX_IMAGE_REPOSITORY` is also the repository `scripts/registry-push`
+publishes versioned `sha-<12hex>` and `main` images to (see "Pull a prebuilt
+fleet image" above). `build-` tags are separate: a host's own build of a
+commit, not a published image.
 
 ### Project name
 

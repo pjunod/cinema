@@ -817,8 +817,8 @@ assert.equal(context.ACT_TIMER, null);
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
-            '  *"fleet-image pull"*) printf "%s" "${STUB_SHARED_IMAGE:-}" ;;\n'
-            f'  *"fleet-image push"*) printf "%s" "$PLURX_IMAGE" > "{directory / "fleet-image-push-ran"}" ;;\n'
+            '  *"shared-image pull"*) printf "%s" "${STUB_SHARED_IMAGE:-}" ;;\n'
+            f'  *"shared-image push"*) printf "%s" "$PLURX_IMAGE" > "{directory / "shared-image-push-ran"}" ;;\n'
             f'  *docker-hardware*) printf "%s" "$3" > "{directory / 'hardware-output-path'}"; '
             f'echo docker-compose.yml; exit {hardware_exit} ;;\n'
             f'  *--emit-start-period*) printf derived > "{derive_marker}"; echo 2535s ;;\n'
@@ -945,7 +945,7 @@ assert.equal(context.ACT_TIMER, null);
         # The period that was proved is the period that gets applied.
         self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
         # Nothing to share (no registry, dirty tree or pinned image): no push.
-        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+        self.assertFalse((up_marker.parent / "shared-image-push-ran").exists())
 
         # No node had shared this clean commit: build, then share it.
         code, _, _, _, up_marker, _ = self._run_rollout_recipe(
@@ -956,7 +956,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertEqual(code, 0)
         self.assertTrue(up_marker.exists())
-        self.assertTrue((up_marker.parent / "fleet-image-push-ran").exists())
+        self.assertTrue((up_marker.parent / "shared-image-push-ran").exists())
 
     def test_docker_up_starts_a_shared_commit_image_without_building(self):
         # Another node already built this commit: the source deploy must not
@@ -967,7 +967,7 @@ assert.equal(context.ACT_TIMER, null);
             for line in make_dry_run_commands("docker-up")
             if "docker compose up -d --build" in line
         ][0]
-        pull = rollout.index("fleet-image pull")
+        pull = rollout.index("shared-image pull")
         # After the hardware overlay, so a Pi or override image is seen; before
         # the proof, so the shared image is what gets proved.
         self.assertGreater(pull, rollout.index("docker-hardware"))
@@ -978,7 +978,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertLess(
             rollout.index("docker compose up -d --build"),
-            rollout.index("fleet-image push"),
+            rollout.index("shared-image push"),
         )
 
         code, _, derive_marker, proof_marker, up_marker, image_marker = (
@@ -994,7 +994,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
         self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
         self.assertEqual(image_marker.read_text(encoding="utf-8"), shared)
-        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+        self.assertFalse((up_marker.parent / "shared-image-push-ran").exists())
 
         # A refused proof still leaves the running container alone.
         code, _, _, _, up_marker, _ = self._run_rollout_recipe(

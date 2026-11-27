@@ -1,4 +1,4 @@
-"""scripts/fleet-image: build the plurxd image once per commit, pull it elsewhere."""
+"""scripts/shared-image: build the plurxd image once per commit, pull it elsewhere."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "fleet-image"
+SCRIPT = ROOT / "scripts" / "shared-image"
 SHA = "a" * 40
 IMAGE_ID = "sha256:" + "3" * 64
-REF = f"forge.lan:3000/noirr/plurxd:build-{SHA}-amd64"
+REPOSITORY = "registry.example:5000/you/plurxd"
+REF = f"{REPOSITORY}:build-{SHA}-amd64"
 
 GIT_STUB = """#!/bin/sh
 case "$*" in
@@ -42,7 +43,7 @@ esac
 """
 
 
-class FleetImageCase(unittest.TestCase):
+class SharedImageCase(unittest.TestCase):
     def run_script(self, action: str, *extra: str, **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -54,7 +55,7 @@ class FleetImageCase(unittest.TestCase):
             environment = dict(
                 os.environ,
                 PATH=f"{directory}:{os.environ['PATH']}",
-                PLURX_REGISTRY="forge.lan:3000",
+                PLURX_IMAGE_REPOSITORY=REPOSITORY,
                 DOCKER_DEFAULT_PLATFORM="linux/amd64",
                 STUB_LOG=str(log),
                 STUB_HEAD=SHA,
@@ -102,13 +103,16 @@ class FleetImageCase(unittest.TestCase):
                 self.assertEqual(result.stdout.strip(), f"share {SHA}")
 
     def test_unconfigured_or_dirty_checkouts_never_touch_the_registry(self):
-        for overrides in ({"PLURX_REGISTRY": ""}, {"STUB_DIRTY": "1"}):
+        for overrides in ({"PLURX_IMAGE_REPOSITORY": ""}, {"STUB_DIRTY": "1"}):
             with self.subTest(**overrides):
                 for action in (("pull",), ("push", "--expect", SHA)):
                     result, calls = self.run_script(*action, **overrides)
                     self.assertEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, "")
                     self.assertEqual(calls, [])
+                    if "PLURX_IMAGE_REPOSITORY" in overrides:
+                        # Operators who never set it see nothing at all.
+                        self.assertEqual(result.stderr, "")
 
     def test_push_shares_the_built_image_under_its_commit(self):
         result, calls = self.run_script("push", "--expect", SHA)
@@ -119,7 +123,7 @@ class FleetImageCase(unittest.TestCase):
     def test_push_never_fails_the_deploy(self):
         result, calls = self.run_script("push", "--expect", SHA, STUB_PUSH_EXIT="1")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("other nodes will build it themselves", result.stderr)
+        self.assertIn("other hosts will build it themselves", result.stderr)
         for extra, overrides in (
             (("--expect", SHA), {"STUB_REVISION": ""}),
             # The checkout moved during the build: not the commit pull vouched for.
@@ -142,18 +146,27 @@ class FleetImageCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertFalse(any(call.startswith(("tag", "push")) for call in calls))
 
+    def test_a_malformed_repository_builds_locally_with_one_line(self):
+        for name in ("registry.example:5000/you/plurxd:latest", "registry.example:5000"):
+            with self.subTest(name=name):
+                result, calls = self.run_script("pull", PLURX_IMAGE_REPOSITORY=name)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(calls, [])
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+
     def test_registry_is_read_from_the_host_env_file(self):
-        loader = importlib.machinery.SourceFileLoader("fleet_image", str(SCRIPT))
-        spec = importlib.util.spec_from_loader("fleet_image", loader)
+        loader = importlib.machinery.SourceFileLoader("shared_image", str(SCRIPT))
+        spec = importlib.util.spec_from_loader("shared_image", loader)
         module = importlib.util.module_from_spec(spec)
         loader.exec_module(module)
         with tempfile.TemporaryDirectory() as temporary:
             env_file = Path(temporary) / ".env"
             env_file.write_text(
-                "# fleet\nPLURX_IMAGE=x\nexport PLURX_REGISTRY='forge.lan:3000'\n",
+                "# hosts\nPLURX_IMAGE=x\nexport PLURX_IMAGE_REPOSITORY='registry.example:5000/you/plurxd'\n",
                 encoding="utf-8",
             )
-            self.assertEqual(module.env_file_value("PLURX_REGISTRY", env_file), "forge.lan:3000")
+            self.assertEqual(module.env_file_value("PLURX_IMAGE_REPOSITORY", env_file), REPOSITORY)
             self.assertEqual(module.env_file_value("MISSING", env_file), "")
 
 

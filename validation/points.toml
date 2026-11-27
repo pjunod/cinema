@@ -1719,7 +1719,7 @@ paths = [
   "scripts/voter-isolation-check",
   "scripts/docker-https-ports.py",
   "scripts/registry-push",
-  "scripts/fleet-image",
+  "scripts/shared-image",
   "scripts/release-cut",
   "scripts/release-readiness",
   "scripts/nightly-mutation",

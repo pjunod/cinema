@@ -1818,15 +1818,16 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # mutation, rather than depending on `docker-startup-budget-check` and letting
 # each recipe derive its own. A preflight that proves one number while
 # `compose up` applies another is not a preflight.
-# Build once per commit, not once per node. `scripts/fleet-image pull` asks
-# the fleet registry (PLURX_REGISTRY in deploy/.env) for this exact clean
-# commit's `build-<sha>-<arch>` image once the hardware overlay is resolved.
-# It prints `use <image id>` when another node already built it (verified, and
-# both services resolve through PLURX_IMAGE), and that ID is proved and started
-# with --no-build instead of compiling. It prints `share <sha>` when this node
-# should build and then `fleet-image push --expect <sha>` the result for the
-# next node. It prints nothing (plain source build, nothing pushed) with no
-# registry configured, a dirty checkout, or an overlay that pins its own image
+# Build once per commit, not once per host. With PLURX_IMAGE_REPOSITORY set (an
+# image repository in any registry the hosts can log in to, e.g. in
+# deploy/.env), `scripts/shared-image pull` looks for this exact clean commit's
+# `build-<sha>-<arch>` image once the hardware overlay is resolved. It prints
+# `use <image id>` when another host already built it (verified, and both
+# services resolve through PLURX_IMAGE): that ID is proved and started with
+# --no-build instead of compiling. It prints `share <sha>` when this host
+# should build and then `shared-image push --expect <sha>` the result for the
+# next host. It prints nothing (plain source build, nothing pushed) when the
+# setting is absent, the checkout is dirty, or an overlay pins its own image
 # (the Pi runtime). Neither step can fail the deploy.
 .PHONY: docker-up
 docker-up: ## Build + (re)start Compose after its startup budget passes
@@ -1835,7 +1836,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
-	  && shared="$$(python3 ../scripts/fleet-image pull)" \
+	  && shared="$$(python3 ../scripts/shared-image pull)" \
 	  && case "$$shared" in "use "*) export PLURX_IMAGE="$${shared#use }" ;; esac \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
 	  && case "$$shared" in \
@@ -1843,7 +1844,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	       PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never ;; \
 	     *) \
 	       PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build \
-	         && case "$$shared" in "share "*) python3 ../scripts/fleet-image push --expect "$${shared#share }" ;; esac ;; \
+	         && case "$$shared" in "share "*) python3 ../scripts/shared-image push --expect "$${shared#share }" ;; esac ;; \
 	     esac
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 

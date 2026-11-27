@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REGISTRY="${PLURX_REGISTRY:?set PLURX_REGISTRY to the fleet registry host:port (the FLEET_REGISTRY repository variable)}"
-IMAGE="$REGISTRY/noirr/plurxd"
+# PLURX_IMAGE_REPOSITORY names the whole image repository (any registry), the
+# same setting `make docker-up` shares builds through. Without it, this
+# project's own CI passes only the registry host and keeps its noirr/plurxd path.
+if [[ -n "${PLURX_IMAGE_REPOSITORY:-}" ]]; then
+  IMAGE="$PLURX_IMAGE_REPOSITORY"
+else
+  IMAGE="${PLURX_REGISTRY:?set PLURX_IMAGE_REPOSITORY (e.g. registry.example:5000/you/plurxd), or PLURX_REGISTRY to the registry host:port}/noirr/plurxd"
+fi
 SOURCE_URL="${PLURX_SOURCE_URL:?set PLURX_SOURCE_URL to the repository URL, e.g. http://forge.lan:3000/noirr/plurx}"
 FULL_SHA="${PLURX_BUILD_SHA:-$(git rev-parse HEAD)}"
 REF="${PLURX_BUILD_REF:-$(git describe --tags --always --dirty)}"
