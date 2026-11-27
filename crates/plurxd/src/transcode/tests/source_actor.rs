@@ -1096,6 +1096,25 @@ async fn source_copy_preadmission_fixture_with_video(
         manager
     };
     let manager = Arc::new(manager);
+    // The global playback budget the daemon's state registers over the
+    // configured regenerable namespaces, with this manager as an owner;
+    // finite encoded output reserves its operator quota from it.
+    #[cfg(target_os = "linux")]
+    let _playback_budget = manager.resource_runtime.as_ref().map(|_| {
+        let dirs = crate::configured_dirs(&config.storage);
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&state.store),
+            vec![
+                dirs.cache,
+                dirs.subs,
+                dirs.runtime_cache,
+                dirs.renditions,
+                dirs.transcode,
+            ],
+        );
+        manager.register_playback_cache(&budget);
+        budget
+    });
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store
@@ -1540,7 +1559,8 @@ async fn source_actual_actor(
     if mode == 19 {
         manager.source_workers.probe_hooks.arm_fixed_cpu_denial();
     }
-    if matches!(mode, 3 | 28) || (mode == 19 && !cfg!(target_os = "linux")) {
+    // Mode 28 drops its budget only after publication (main's ab1c67f63).
+    if mode == 3 || (mode == 19 && !cfg!(target_os = "linux")) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -2500,10 +2520,6 @@ async fn source_actual_actor(
                 .probe_hooks
                 .assert_closed_parent_settlements();
         }
-        21 => manager
-            .source_workers
-            .native_hooks
-            .assert_closed_parent_settlements(),
         _ => {}
     }
 

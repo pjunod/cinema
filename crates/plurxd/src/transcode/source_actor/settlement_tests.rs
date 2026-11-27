@@ -158,6 +158,16 @@ pub(super) async fn exercise(
     .await
     .expect("FAILURE watchdog: actual native Source startup did not finish")
     .expect("actual Source copy/native-caption producer ready");
+    // Start publishes native subtitle facts without extraction; a requested
+    // caption window is what runs the native child under Source custody.
+    let caption = actor
+        .open_resource(
+            &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("native caption window"),
+            Instant::now() + Duration::from_secs(15),
+        )
+        .await
+        .expect("actual requested native caption window");
+    drop(caption);
     assert!(manager.source_workers.index_hooks.spawned_pid() > 0);
     assert!(manager.source_workers.native_hooks.spawned_pid() > 0);
     actor

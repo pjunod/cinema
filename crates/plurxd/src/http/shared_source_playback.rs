@@ -2972,6 +2972,24 @@ pub(crate) enum SourceFixtureMode {
     RangeWebNativeAudioCopy,
 }
 
+#[cfg(test)]
+impl SourceFixtureMode {
+    /// The modes whose Start resolves an encoded recipe.
+    fn encoded(self) -> bool {
+        matches!(
+            self,
+            Self::Encoded
+                | Self::NativeEncoded
+                | Self::BurnText
+                | Self::BurnBitmap
+                | Self::Hdr10Sdr
+                | Self::Hdr10
+                | Self::DolbyVisionProfile5Encoded
+                | Self::DolbyVisionCompatibleEncoded
+        )
+    }
+}
+
 /// A Dolby Vision HEVC Main10 MP4 built from the fixture's generated PQ
 /// source: the real Profile 7 RPU from `plurx_core::testfixtures` appended to
 /// every sample (rewritten to Profile 8.1 for `profile == 8`) under a
@@ -3231,8 +3249,10 @@ async fn build_real_source_start_fixture(
         .await
         .expect("actual startup factory"));
     eprintln!("real Source HTTP fixture: original Source schema factory returned");
+    // The daemon opens custody before it serves; on Linux a direct play and
+    // an encoded Source recipe both run through it.
     #[cfg(target_os = "linux")]
-    let direct_runtime = if matches!(mode, SourceFixtureMode::Direct) {
+    let direct_runtime = if matches!(mode, SourceFixtureMode::Direct) || mode.encoded() {
         eprintln!("real Source HTTP fixture: before original custody startup");
         Some(
             crate::resource_runtime::open_before_cleanup(&mut selected, &config)
@@ -3379,17 +3399,7 @@ async fn build_real_source_start_fixture(
         mode,
         SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::Hdr10 | SourceFixtureMode::NativeHdr10Copy
     ) || dolby_vision.is_some();
-    let encoded = matches!(
-        mode,
-        SourceFixtureMode::Encoded
-            | SourceFixtureMode::NativeEncoded
-            | SourceFixtureMode::BurnText
-            | SourceFixtureMode::BurnBitmap
-            | SourceFixtureMode::Hdr10Sdr
-            | SourceFixtureMode::Hdr10
-            | SourceFixtureMode::DolbyVisionProfile5Encoded
-            | SourceFixtureMode::DolbyVisionCompatibleEncoded
-    );
+    let encoded = mode.encoded();
     let (width, height) = if matches!(mode, SourceFixtureMode::Hdr10) {
         (1920, 1080)
     } else {
@@ -3936,6 +3946,23 @@ async fn build_real_source_start_fixture(
             .copy_observation_dir = Some(directory.path().join("copy-ranges").join("observations"));
     }
     let manager = manager.with_dv_strippable(strips);
+    // An encoded recipe runs through the node runtime the daemon's manager
+    // holds, with the regenerable layout the daemon configures.
+    #[cfg(target_os = "linux")]
+    let manager = match state.resource_runtime.as_ref().filter(|_| encoded) {
+        Some(runtime) => manager.with_cache_layout(
+            directory.path().join("cache"),
+            directory.path().join("runtime"),
+            directory.path().join("subs"),
+            directory.path().join("renditions"),
+            "fixture".into(),
+            state.node_id.clone(),
+            Some(state.cluster.calls()),
+            Some(state.cluster.directory()),
+            Some(Arc::clone(runtime)),
+        ),
+        None => manager,
+    };
     let manager =
         if matches!(mode, SourceFixtureMode::NativeHdr10Copy) || dolby_vision_copy || range_copy {
             manager.with_cache(
@@ -3965,6 +3992,23 @@ async fn build_real_source_start_fixture(
                 SourceFixtureMode::DolbyVisionProfile5Encoded
             )),
     );
+    // The global playback budget the daemon's state registers over every
+    // regenerable namespace, with this manager as an owner; finite encoded
+    // output reserves its operator quota from it.
+    #[cfg(target_os = "linux")]
+    if encoded && state.resource_runtime.is_some() {
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&state.store),
+            ["cache", "runtime", "subs", "renditions", "workers"]
+                .into_iter()
+                .map(|namespace| directory.path().join(namespace))
+                .collect(),
+        );
+        state.transcode.register_playback_cache(&budget);
+        Arc::get_mut(&mut state)
+            .expect("sole State before listeners")
+            .playback_cache = budget;
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
