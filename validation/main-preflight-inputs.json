@@ -146,7 +146,9 @@
         "validation/history.py",
         "validation/runner.py",
         "validation/test_markers.py",
-        ".forgejo/default_merge_message/MERGE_TEMPLATE.md"
+        ".forgejo/default_merge_message/MERGE_TEMPLATE.md",
+        ".forgejo/default_merge_message/SQUASH_TEMPLATE.md",
+        "validation/changelog_field.py"
       ],
       "reason": "Audited actual template and helper inputs."
     },
@@ -4233,7 +4235,10 @@
         "scripts/release-cut",
         "validation/__init__.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4244,7 +4249,10 @@
         "scripts/release-cut",
         "validation/__init__.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4265,7 +4273,10 @@
         "validation/apple_build.py",
         "validation/doc_versions.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Copies exactly real changelog/Cargo/mobile manifests/four claim documents and entire apple-build notes into scratch root; imported sweeps exercise apple_build/doc_versions/mobile_versions. All Git/cut reads use scratch history. No checkout history nor unrelated docs/client sources are read.",
       "pathsets": [
@@ -4279,7 +4290,10 @@
         "scripts/release-cut",
         "validation/__init__.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4287,7 +4301,11 @@
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_an_empty_unreleased_section_is_refused_and_nothing_is_written",
       "inputs": [
         "scripts/release-cut",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Loads release-cut and operates on literal-built scratch root/Git history; refusals/pending stop before set_build_claims imports apple_build, so no actual repository document/version data read."
     },
@@ -4295,7 +4313,11 @@
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_an_existing_tag_or_section_is_refused",
       "inputs": [
         "scripts/release-cut",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Loads release-cut and operates on literal-built scratch root/Git history; refusals/pending stop before set_build_claims imports apple_build, so no actual repository document/version data read."
     },
@@ -4306,7 +4328,10 @@
         "scripts/release-cut",
         "validation/__init__.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4317,7 +4342,10 @@
         "scripts/release-cut",
         "validation/__init__.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
@@ -4325,7 +4353,11 @@
       "id_prefix": "operations:test_release_cut.ReleaseCutCase.test_a_dated_section_no_release_commit_explains_is_refused",
       "inputs": [
         "scripts/release-cut",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Loads release-cut and operates on literal-built scratch root/Git history; refusals/pending stop before set_build_claims imports apple_build, so no actual repository document/version data read."
     },
@@ -4336,7 +4368,10 @@
         "scripts/release-cut",
         "validation/__init__.py",
         "validation/mobile_versions.py",
-        "validation/changelog_field.py"
+        "validation/changelog_field.py",
+        "validation/history.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
       ],
       "reason": "Runs release-cut against literal-built scratch root. Successful cut or reworded-claim attempt invokes set_build_claims, which imports actual apple_build/mobile_versions; apple_build initializes SURFACES from actual repository Cargo.toml even when release-cut --root is scratch. Scratch data/history are not source witnesses."
     },
