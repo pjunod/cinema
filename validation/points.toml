@@ -541,6 +541,8 @@ paths = [
   "crates/plurx-core/src/adaptive_resources/owner_inventory/**",
   "crates/plurx-core/src/adaptive_resources/retained.rs",
   "crates/plurx-core/src/adaptive_resources/retained/**",
+  "crates/plurx-core/src/adaptive_resources/successor.rs",
+  "crates/plurx-core/src/adaptive_resources/successor/**",
   "crates/plurx-core/src/adaptive_resources/physical_graph.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/child.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/finite_native.rs",

@@ -218,7 +218,7 @@ impl ResourceLedger {
     }
 }
 
-fn componentwise_le(left: ResourceVector, right: ResourceVector) -> bool {
+pub(super) fn componentwise_le(left: ResourceVector, right: ResourceVector) -> bool {
     left.cpu_ns_per_second <= right.cpu_ns_per_second
         && left.peak_memory_bytes <= right.peak_memory_bytes
         && left.handles <= right.handles

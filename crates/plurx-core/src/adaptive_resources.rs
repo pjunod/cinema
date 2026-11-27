@@ -36,6 +36,7 @@ pub mod owner_inventory;
 pub mod physical_graph;
 mod retained;
 pub mod runtime;
+mod successor;
 
 static NEXT_LEDGER: AtomicU64 = AtomicU64::new(1);
 const MAX_RESERVATIONS: usize = 1024;
@@ -912,6 +913,24 @@ impl ResourceLedger {
             .inner
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
+        self.reserve_roles_locked(&mut state, roles, claims, contained_trial, contained)
+    }
+
+    /// The whole admission transaction under an already held ledger lock.
+    /// Every fallible check precedes the one accounting commit.
+    #[allow(clippy::type_complexity)]
+    fn reserve_roles_locked(
+        &self,
+        state: &mut State,
+        roles: &[(
+            Option<(FamilyIdentity, FamilyRole)>,
+            WorkloadDemand,
+            Option<RetainedRole<'_>>,
+        )],
+        claims: Option<&[MemoryClaim]>,
+        contained_trial: bool,
+        contained: Option<ContainedProducerBound>,
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         let mut missing = Vec::new();
         if state.invalid {
             return Err(AdmissionRefusal::Unavailable);
