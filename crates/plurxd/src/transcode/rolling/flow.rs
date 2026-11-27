@@ -134,13 +134,7 @@ pub(super) fn rolling_startup_bytes(
     bitrate_bits_per_second: Option<f64>,
     playback_rate: f64,
 ) -> i64 {
-    let gate_ms = rolling_initial_runway_ms(playback_rate)
-        .max(i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS).saturating_mul(1_000));
-    // One complete segment beyond the gate: the gate is measured in published
-    // media, and the segment that crosses it is written in full first.
-    let startup_ms = gate_ms.saturating_add(
-        i64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS).saturating_mul(1_000),
-    );
+    let startup_ms = rolling_startup_media_ms(playback_rate);
     let Some(bitrate) = bitrate_bits_per_second.filter(|rate| rate.is_finite() && *rate > 0.0)
     else {
         return ROLLING_SCRATCH_UNKNOWN_RATE_BYTES;
@@ -161,6 +155,18 @@ pub(super) fn rolling_startup_bytes(
     } else {
         ROLLING_SCRATCH_UNKNOWN_RATE_BYTES
     }
+}
+
+/// The media a copy session writes before its first served snapshot: the
+/// larger of the writer's publish gate and the publication runway, plus one
+/// complete segment, because the gate is measured in published media and the
+/// segment that crosses it is written in full first.
+pub(super) fn rolling_startup_media_ms(playback_rate: f64) -> i64 {
+    let gate_ms = rolling_initial_runway_ms(playback_rate)
+        .max(i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS).saturating_mul(1_000));
+    gate_ms.saturating_add(
+        i64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS).saturating_mul(1_000),
+    )
 }
 
 /// How far a producer may run past its measured bytes before the next

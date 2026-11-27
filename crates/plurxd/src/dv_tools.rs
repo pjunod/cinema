@@ -161,6 +161,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/dm_cm29_gamut_tables.h"),
         ),
         (
+            "dm_pq_tables.h",
+            include_bytes!("../../../tools/dv_processing/dm_pq_tables.h"),
+        ),
+        (
             "dv_dm.h",
             include_bytes!("../../../tools/dv_processing/dv_dm.h"),
         ),
