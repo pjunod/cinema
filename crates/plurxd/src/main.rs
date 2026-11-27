@@ -5327,4 +5327,6 @@ fn healthcheck(config: &Config) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+mod media_io_guard_tests;
+#[cfg(test)]
 mod startup_tests;

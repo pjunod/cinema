@@ -111,7 +111,10 @@ BUILD_SPECS = {
     # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
     # to the web-unit-check recipe (a Node playback-lab test); no native
     # recipe changes.
-    'Makefile': '9394e64e6bec4d6291d15a3aed5386f0e7e0a62d8e84ee00e7e1efc1e5ffd34f',
+    # plurx#1979 changes only the docker-up deploy recipe (fleet-image
+    # pull/push around `docker compose up`) and its comment; no native recipe
+    # changes.
+    'Makefile': '1d14c5e0154a310699dfad422cc04f1d3c0070df9237ec59cda47b3855b43ec1',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
