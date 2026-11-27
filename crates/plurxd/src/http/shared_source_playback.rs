@@ -1095,7 +1095,7 @@ async fn status(
         Ok(entry) => Ok(entry),
         // Cleanup-only observation of a superseded boot's incarnation: the
         // durable terminal fact only, never live content or readiness.
-        Err(missing) if current.is_err() => {
+        Err(missing) if current.is_err() || headers.cleanup_only() => {
             if let Some(facts) =
                 Box::pin(superseded::status(&state, &hash, &viewer, &input.start)).await
             {
@@ -1255,6 +1255,7 @@ async fn end(
                 &hash,
                 &viewer,
                 &input.start,
+                input.known.as_ref(),
                 missing,
             ))
             .await

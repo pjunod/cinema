@@ -286,17 +286,29 @@ struct SupersededRow {
     binding: BindingRow,
     routing_boot: String,
     initial_credential_hash: String,
+    grant_token_hash: Option<String>,
     owner_identity: String,
+}
+/// The session and control epoch the dead process published for this
+/// incarnation, read from its durable Start response.
+fn published_lineage(response: Option<&str>) -> Option<(Uuid, i64)> {
+    let value: serde_json::Value = serde_json::from_str(response?).ok()?;
+    let session = Uuid::parse_str(value.get("session_id")?.as_str()?).ok()?;
+    let epoch = value.get("control")?.get("control_epoch")?.as_i64()?;
+    (epoch > 0).then_some((session, epoch))
 }
 /// Dispatched Source incarnations whose custody routes to `owner` under a
 /// registry boot other than `current_boot`, read only while `owner`'s live
 /// membership publishes `current_boot`. Held and released bindings are both
-/// returned: a released one answers an exact End or ACK replay.
+/// returned: a released one answers an exact End or ACK replay. Without
+/// `incarnation`, held ones after `after` in incarnation order, so a caller
+/// pages past incarnations that cannot settle yet.
 async fn superseded_incarnations<T: Backend>(
     backend: &T,
     owner: &str,
     current_boot: Uuid,
     incarnation: Option<Uuid>,
+    after: Option<Uuid>,
     members: &SourceAdmissionMembers,
     limit: usize,
 ) -> Result<Vec<SupersededSourceIncarnation>, StoreError> {
@@ -311,12 +323,15 @@ async fn superseded_incarnations<T: Backend>(
     }
     let only = match incarnation {
         Some(incarnation) => format!("b.incarnation_id='{incarnation}'"),
-        None => "b.reservation_state='held'".to_owned(),
+        None => match after {
+            Some(after) => format!("b.reservation_state='held' AND b.incarnation_id>'{after}'"),
+            None => "b.reservation_state='held'".to_owned(),
+        },
     };
     let rows = backend
         .sharing_read(
             &format!(
-                "SELECT json_object('binding',json({BINDING_JSON}),'routing_boot',json_extract(c.custody_json,'$.source_routing.registry_boot_id'),'initial_credential_hash',json_extract(c.custody_json,'$.source_routing.initial_credential_hash'),'owner_identity',c.owner_identity) AS payload
+                "SELECT json_object('binding',json({BINDING_JSON}),'routing_boot',json_extract(c.custody_json,'$.source_routing.registry_boot_id'),'initial_credential_hash',json_extract(c.custody_json,'$.source_routing.initial_credential_hash'),'grant_token_hash',(SELECT e.token_hash FROM sharing_exports e WHERE e.id=b.share_grant_id),'owner_identity',c.owner_identity) AS payload
          FROM sharing_source_session_bindings b
          JOIN media_session_requests r ON r.owner_key=b.owner_key
            AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id
@@ -351,10 +366,13 @@ async fn superseded_incarnations<T: Backend>(
         if assignment.custody_identity() != row.owner_identity {
             continue;
         }
+        let lineage = published_lineage(row.binding.response.as_deref());
         found.push(SupersededSourceIncarnation {
             assignment,
             dead_boot,
             initial_credential_hash: row.initial_credential_hash,
+            grant_token_hash: row.grant_token_hash.filter(|hash| is_hash(hash)),
+            published: lineage,
         });
     }
     Ok(found)
@@ -1537,6 +1555,7 @@ pub trait SharingSourceSessionStore: Send + Sync {
         owner: &str,
         current_boot: Uuid,
         incarnation: Option<Uuid>,
+        after: Option<Uuid>,
         members: &SourceAdmissionMembers,
         limit: usize,
     ) -> Result<Vec<SupersededSourceIncarnation>, StoreError>;
@@ -1561,10 +1580,20 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         owner: &str,
         current_boot: Uuid,
         incarnation: Option<Uuid>,
+        after: Option<Uuid>,
         members: &SourceAdmissionMembers,
         limit: usize,
     ) -> Result<Vec<SupersededSourceIncarnation>, StoreError> {
-        superseded_incarnations(self, owner, current_boot, incarnation, members, limit).await
+        superseded_incarnations(
+            self,
+            owner,
+            current_boot,
+            incarnation,
+            after,
+            members,
+            limit,
+        )
+        .await
     }
     async fn settle_source_assigned_without_activation(
         &self,

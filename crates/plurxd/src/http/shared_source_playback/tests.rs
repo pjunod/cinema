@@ -4396,7 +4396,7 @@ async fn actual_source_genuine_invitation() {
 /// The owner process restarts under a live Source playback. The new process
 /// has no entry for it and a new driver registry boot, so the receiver's End
 /// was refused as retryable forever and the binding stayed held against the
-/// grant (nynuc, 2026-11-27). It now settles from the durable rows: the
+/// grant (a Source owner, 2026-11-27). It now settles from the durable rows: the
 /// binding releases, the session ends, and a replay gets the same receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_end_after_owner_restart_settles_the_superseded_incarnation() {
@@ -4452,7 +4452,7 @@ async fn actual_source_end_after_owner_restart() {
     assert_eq!(restarted.transcode.source_http_starts.live_entries(), 0);
     // The forwarded gate: only the exact signed authority for this node's
     // superseded boot passes; any other field keeps it fail-closed.
-    let found = super::superseded::lookup(&restarted, None, 4)
+    let found = super::superseded::lookup(&restarted, None, None, 4)
         .await
         .expect("durable lookup");
     assert_eq!(found.len(), 1, "the dead boot's held incarnation");
@@ -4500,6 +4500,30 @@ async fn actual_source_end_after_owner_restart() {
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     let request = recipe["session"]["request_id"].as_str().expect("request");
     let end = format!("{}/{request}/end", sessions(address));
+    // A receiver that received the Start names its lineage on End and
+    // accepts only a receipt that echoes it.
+    let control_epoch = decoded
+        .response()
+        .control
+        .as_ref()
+        .expect("actual control")
+        .control_epoch;
+    let mut known = recipe.clone();
+    known["incarnation_id"] = json!(decoded.incarnation_id());
+    known["session_id"] = json!(decoded.response().session_id);
+    known["control_epoch"] = json!(control_epoch);
+    let mut other = known.clone();
+    other["session_id"] = json!(Uuid::new_v4());
+    let conflict = Box::pin(actual_resource_request(
+        address,
+        true,
+        &end,
+        fixture.headers.clone(),
+        serde_json::to_vec(&other).expect("other lineage"),
+    ))
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let known = serde_json::to_vec(&known).expect("known lineage");
     let mut receipts = Vec::new();
     // The receiver keeps retrying End. Before the fix every attempt was 503.
     for _ in 0..20 {
@@ -4508,7 +4532,7 @@ async fn actual_source_end_after_owner_restart() {
             true,
             &end,
             fixture.headers.clone(),
-            fixture.request.clone(),
+            known.clone(),
         ))
         .await;
         let status = response.status();
@@ -4545,13 +4569,15 @@ async fn actual_source_end_after_owner_restart() {
     assert_eq!(receipt["incarnation_id"], json!(decoded.incarnation_id()));
     assert_eq!(receipt["reference"], json!(fixture.reference));
     assert_eq!(receipt["request_id"], json!(request));
+    assert_eq!(receipt["session_id"], json!(decoded.response().session_id));
+    assert_eq!(receipt["control_epoch"], json!(control_epoch));
     assert_eq!(
         fixture.held_source_bindings().await,
         0,
         "the grant's occupancy is released"
     );
     assert_eq!(fixture.active_source_sessions().await, 0);
-    assert!(super::superseded::lookup(&restarted, None, 4)
+    assert!(super::superseded::lookup(&restarted, None, None, 4)
         .await
         .expect("durable lookup")
         .is_empty());

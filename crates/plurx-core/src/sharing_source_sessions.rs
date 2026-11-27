@@ -339,6 +339,8 @@ pub struct SupersededSourceIncarnation {
     pub(crate) assignment: SourceDispatchAssignment,
     pub(crate) dead_boot: Uuid,
     pub(crate) initial_credential_hash: String,
+    pub(crate) grant_token_hash: Option<String>,
+    pub(crate) published: Option<(Uuid, i64)>,
 }
 impl SupersededSourceIncarnation {
     pub fn assignment(&self) -> &SourceDispatchAssignment {
@@ -354,6 +356,18 @@ impl SupersededSourceIncarnation {
     }
     pub fn initial_credential_hash(&self) -> &str {
         &self.initial_credential_hash
+    }
+    /// The same credential test the ingress route lookup applies: the
+    /// invocation's initial credential, or the grant's current one.
+    pub fn credential_matches(&self, hash: &str) -> bool {
+        is_hash(hash)
+            && (self.initial_credential_hash == hash
+                || self.grant_token_hash.as_deref() == Some(hash))
+    }
+    /// The session id and control epoch the dead process published, when
+    /// its Start resolved.
+    pub fn published(&self) -> Option<(Uuid, i64)> {
+        self.published
     }
 }
 

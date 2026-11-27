@@ -1894,6 +1894,7 @@ paths = [
   "crates/plurxd/src/http/shared_source_forwarding.rs",
   "crates/plurxd/src/http/shared_source_forwarding_tests.rs",
   "crates/plurxd/src/http/shared_source_ingress.rs",
+  "crates/plurxd/src/http/shared_source_superseded.rs",
   "crates/plurxd/src/http/shared_receiver_control.rs",
   "crates/plurxd/src/http/shared_artwork.rs",
   "crates/plurxd/src/http/sharing_playback_wire.rs",

@@ -33,6 +33,7 @@ const RECONCILE_BATCH: usize = 16;
 pub(super) async fn lookup(
     state: &crate::state::AppState,
     incarnation: Option<Uuid>,
+    after: Option<Uuid>,
     limit: usize,
 ) -> Result<Vec<SupersededSourceIncarnation>, ApiError> {
     let members = state
@@ -48,6 +49,7 @@ pub(super) async fn lookup(
             &state.node_id,
             state.sharing.accepted_drivers.boot_id(),
             incarnation,
+            after,
             &members,
             limit,
         )
@@ -68,7 +70,9 @@ pub(super) async fn forwarded(
     {
         return None;
     }
-    let found = lookup(state, Some(wire.incarnation_id), 1).await.ok()?;
+    let found = lookup(state, Some(wire.incarnation_id), None, 1)
+        .await
+        .ok()?;
     let [found] = found.as_slice() else {
         return None;
     };
@@ -76,6 +80,7 @@ pub(super) async fn forwarded(
     let binding = assignment.binding();
     let target = &wire.reference;
     (found.dead_boot() == wire.expected_registry_boot
+        && found.credential_matches(&wire.credential_hash)
         && assignment.custody_identity() == wire.owner_identity
         && binding.principal() == &wire.principal
         && binding.request_id() == wire.request_id.to_string()
@@ -123,7 +128,9 @@ async fn named(
     {
         return None;
     }
-    let found = lookup(state, Some(route.incarnation_id), 1).await.ok()?;
+    let found = lookup(state, Some(route.incarnation_id), None, 1)
+        .await
+        .ok()?;
     let [found] = found.as_slice() else {
         return None;
     };
@@ -270,11 +277,22 @@ pub(super) async fn end(
     hash: &str,
     viewer: &str,
     input: &SourceStartInput,
+    known: Option<&SourcePublishedLineage>,
     missing: SourceStartFailure,
 ) -> Result<SourceEndReceipt, ApiError> {
     let Some(found) = named(state, hash, viewer, input).await else {
         return Err(missing.response());
     };
+    // The same lineage check the live owner applies: an End naming another
+    // publication is not this incarnation's End.
+    let published = found.published();
+    if let Some(known) = known {
+        if known.incarnation_id != found.assignment().binding().incarnation_id()
+            || published != Some((known.session_id, known.control_epoch))
+        {
+            return Err(SourceStartFailure::Conflict.response());
+        }
+    }
     let confirmation_id = settle(state, &found, headers.deadline(Duration::from_secs(9)))
         .await
         .map_err(SourceStartFailure::response)?;
@@ -282,8 +300,8 @@ pub(super) async fn end(
         reference: input.reference.clone(),
         request_id: input.request_id,
         incarnation_id: found.assignment().binding().incarnation_id(),
-        session_id: None,
-        control_epoch: None,
+        session_id: published.map(|(session, _)| session),
+        control_epoch: published.map(|(_, epoch)| epoch),
         state: "settled",
         confirmation_id,
         settled: true,
@@ -328,14 +346,24 @@ pub(crate) async fn reconcile_loop(
     state: crate::state::AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
+    // Page past incarnations that cannot settle yet, so a batch of them
+    // never hides one that can.
+    let mut after = None;
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(RECONCILE_INTERVAL) => {}
         }
-        let Ok(found) = lookup(&state, None, RECONCILE_BATCH).await else {
+        let Ok(found) = lookup(&state, None, after, RECONCILE_BATCH).await else {
             continue;
         };
+        after = (found.len() == RECONCILE_BATCH)
+            .then(|| {
+                found
+                    .last()
+                    .map(|found| found.assignment().binding().incarnation_id())
+            })
+            .flatten();
         for found in found {
             if let Err(failure) = settle(&state, &found, Instant::now() + RECONCILE_BUDGET).await {
                 tracing::debug!(
