@@ -2430,7 +2430,8 @@ impl TranscodeManager {
                 let split = crate::copyseg::NativeSplitInventory::with_budget(
                     u64::try_from(ordinary_sizing.grant_bytes(limits)).unwrap_or(0),
                     u64::try_from(RollingScratchSizing::session_ceiling(limits)).unwrap_or(0),
-                );
+                )
+                .with_audio_index(audio_index);
                 #[cfg(target_os = "linux")]
                 let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
                 #[cfg(target_os = "linux")]

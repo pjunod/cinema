@@ -1710,7 +1710,8 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
           // Soundtrack alternates need encoder capacity a plain copy does not;
           // when the encoders are busy, keep the copy without alternates.
           if(!options.split_audio||!error||error.code!=="vod_family_capacity") throw error;
-          const {split_audio,...muxed}=options;
+          // `false` is the explicit muxed request; it outranks the caps token.
+          const muxed={...options,split_audio:false};
           return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);
         }),
       late=>releaseSession(late&&late.session_id));

@@ -7664,6 +7664,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         envelope.request.audio_index,
         envelope.request.subtitle_burn,
         envelope.request.hdr10,
+        crate::transcode::split_copy_eligible(&envelope.request, &file),
     )
     .map_err(str::to_owned)?;
     let offers = tokio::time::timeout_at(deadline, state.media_pool.offers(state, offer_request))

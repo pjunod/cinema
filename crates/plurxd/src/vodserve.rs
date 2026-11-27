@@ -982,6 +982,9 @@ pub(crate) struct VerifiedContinuousFamily {
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
     pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
+    /// The source stream behind the shared soundtrack, for its NAME,
+    /// LANGUAGE and stable rendition id.
+    pub audio_source: Option<plurx_core::transcode::split_master::SplitAudioSource>,
     pub candidates: HashMap<String, plurx_core::playback::candidate::CandidateId>,
 }
 

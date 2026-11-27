@@ -230,9 +230,13 @@ pub(super) fn normalize_wire_with_upgrade(
         .and_then(Value::as_array_mut)
     {
         values.retain(|value| {
-            !value
-                .as_str()
-                .is_some_and(|token| token.starts_with(RESERVED_RELAY_PREFIX))
+            !value.as_str().is_some_and(|token| {
+                token.starts_with(RESERVED_RELAY_PREFIX)
+                    // A shared receiver's grammar admits only subtitle
+                    // groups, so a split presentation is never requested
+                    // through a Source relay (P62 S2 §3).
+                    || token == plurx_core::playback::HLS_SPLIT_AV_TRANSPORT
+            })
         });
         if ready && supports && !direct {
             values.push(Value::String(RELAY_TRANSPORT.into()));
@@ -583,6 +587,21 @@ mod normalization_tests {
     use super::*;
     fn recipe() -> Vec<u8> {
         br#"{"session":{"caps":{"transports":["hls","hls-bounded-range-v1"]}}}"#.to_vec()
+    }
+    #[test]
+    fn a_shared_recipe_never_asks_for_a_split_presentation() {
+        let raw = br#"{"session":{"copy":true,"caps":{"transports":["hls","hls-split-av-v1","hls-bounded-range-v1"]}}}"#;
+        for ready in [false, true] {
+            let normalized = normalize_wire(raw, ready, false).expect("normalized recipe");
+            let value: Value = serde_json::from_slice(&normalized).expect("recipe JSON");
+            let transports = value["session"]["caps"]["transports"]
+                .as_array()
+                .expect("transports");
+            assert!(transports.iter().all(|token| token != "hls-split-av-v1"));
+            assert!(transports
+                .iter()
+                .any(|token| token == "hls-bounded-range-v1"));
+        }
     }
     #[test]
     fn exact_authenticated_header_only() {

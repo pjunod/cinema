@@ -1290,6 +1290,7 @@ mod manager_construct;
 mod manager_control;
 #[path = "transcode/manager/create.rs"]
 mod manager_create;
+pub(crate) use manager_create::split_copy_eligible;
 #[path = "transcode/manager/describe.rs"]
 mod manager_describe;
 #[path = "transcode/manager/maintenance.rs"]

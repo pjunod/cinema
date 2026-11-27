@@ -201,75 +201,88 @@ fn native_subtitle_media(
     out
 }
 
-pub(super) fn native_split_master_text(
+/// The native Safari split, described for the one split master writer.
+///
+/// The video is the converted Dolby Vision copy: the split only runs with
+/// `convert_dolby_vision`, whose Profile 8.1 output is PQ, so that is the
+/// range proved. Audio codec and channels come from the projected init. Both
+/// roles are projected from one muxed copy, so the copy's budget is the
+/// presentation's combined budget (S5 gives each role its own).
+pub(super) fn native_split_presentation(
     file: &MediaFile,
     context: &crate::transcode::HlsContext,
     ids: &crate::copyseg::NativeSplitInitIds,
-) -> Vec<u8> {
-    let mode = context
+    audio_index: Option<i64>,
+) -> plurx_core::transcode::split_master::SplitPresentation {
+    use plurx_core::transcode::split_master::{
+        SplitAudio, SplitBandwidth, SplitBudget, SplitPresentation, SplitVideo, VideoRange,
+    };
+    // Safari plays the copied HEVC only under its in-band parameter-set
+    // sample entries, so the master names those.
+    let codec = context
         .codecs
         .split(',')
         .next()
         .unwrap_or_default()
         .replacen("hvc1.", "hev1.", 1);
     let fallback = file.bitrate.unwrap_or(25_000_000).max(128_000) as u64;
-    let (peak, average) = context.bandwidth.map_or((fallback, fallback), |budget| {
+    let (peak_bps, average_bps) = context.bandwidth.map_or((fallback, fallback), |budget| {
         (budget.peak_bps, budget.average_bps)
     });
-    let mut out = format!(
-        "#EXTM3U\n#EXT-X-VERSION:10\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/{}/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH={peak},AVERAGE-BANDWIDTH={average},CODECS=\"{mode},mp4a.40.2\",VIDEO-RANGE=PQ,AUDIO=\"audio\"",
-        ids.audio,
-    );
-    use std::fmt::Write as _;
-    if let Some(supplemental) = &context.supplemental_codecs {
-        let supplemental = supplemental.replacen("dvh1.", "dvhe.", 1);
-        let _ = write!(out, ",SUPPLEMENTAL-CODECS=\"{supplemental}\"");
+    let stream = audio_index
+        .and_then(|index| {
+            file.audio_streams
+                .iter()
+                .find(|stream| stream.index == index)
+        })
+        .or_else(|| file.audio_streams.first());
+    SplitPresentation {
+        variants: vec![SplitVideo {
+            rendition_id: ids.video.clone(),
+            codec,
+            supplemental_codecs: context
+                .supplemental_codecs
+                .as_ref()
+                .map(|codecs| codecs.replacen("dvh1.", "dvhe.", 1)),
+            width: file.width.and_then(|width| u32::try_from(width).ok()),
+            height: file.height.and_then(|height| u32::try_from(height).ok()),
+            frame_rate: context
+                .frame_rate
+                .filter(|rate| rate.is_finite() && *rate > 0.0),
+            video_range: VideoRange::Pq,
+            budget: None,
+        }],
+        audio: vec![SplitAudio {
+            rendition_id: ids.audio.clone(),
+            source_index: stream.map_or(audio_index.unwrap_or(0), |stream| stream.index),
+            title: stream.and_then(|stream| stream.title.clone()),
+            language: stream.and_then(|stream| stream.language.clone()),
+            default: true,
+            channels: Some(ids.audio_channels),
+            codec: ids.audio_codec.to_owned(),
+            budget: None,
+        }],
+        bandwidth: SplitBandwidth::Combined(SplitBudget {
+            peak_bps,
+            average_bps: Some(average_bps),
+        }),
+        subtitles: String::new(),
+        independent_segments: false,
     }
-    if let (Some(width), Some(height)) = (file.width, file.height) {
-        let _ = write!(out, ",RESOLUTION={width}x{height}");
-    }
-    if let Some(rate) = context
-        .frame_rate
-        .filter(|rate| rate.is_finite() && *rate > 0.0)
-    {
-        let _ = write!(out, ",FRAME-RATE={rate:.3}");
-    }
-    let _ = write!(out, "\nvideo/{}/index.m3u8\n", ids.video);
-    out.into_bytes()
 }
 
-/// Preserve every verified video/audio declaration and attach only the common
-/// native text group. Source bitrate/raster never replace family media facts.
-pub(super) fn continuous_master_with_subtitles(
-    bytes: Vec<u8>,
+/// Render a split presentation with the native text group from the one
+/// subtitle writer. Source bitrate/raster never replace family media facts.
+pub(super) fn split_master_with_subtitles(
+    mut presentation: plurx_core::transcode::split_master::SplitPresentation,
     file: &MediaFile,
     selected: Option<i64>,
 ) -> Result<Vec<u8>, String> {
-    let subtitles = native_subtitle_media(file, selected, MasterRungs::active(), None);
-    if subtitles.is_empty() {
-        return Ok(bytes);
-    }
-    let master =
-        String::from_utf8(bytes).map_err(|_| "continuous master is not UTF-8".to_owned())?;
-    let mut out = String::new();
-    let mut inserted = false;
-    for line in master.lines() {
-        if line.starts_with("#EXT-X-STREAM-INF:") {
-            if !inserted {
-                out.push_str(&subtitles);
-                inserted = true;
-            }
-            out.push_str(line);
-            out.push_str(",SUBTITLES=\"subs\"\n");
-        } else {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !inserted {
-        return Err("continuous master has no video variants".into());
-    }
-    Ok(out.into_bytes())
+    presentation.subtitles = native_subtitle_media(file, selected, MasterRungs::active(), None);
+    presentation
+        .master_text()
+        .map(String::into_bytes)
+        .map_err(|error| error.to_string())
 }
 
 fn master_playlist_with_shape(

@@ -2106,6 +2106,7 @@ async fn prepared_relocation_owner(
         candidate.audio_index,
         candidate.subtitle_burn,
         candidate.hdr10,
+        crate::transcode::split_copy_eligible(candidate, source),
     )
     .ok()?;
     state

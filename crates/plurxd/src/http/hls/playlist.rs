@@ -210,7 +210,7 @@ pub(super) async fn master_playlist_response_local_before(
             .transcode
             .vod_file_for_owner(&owner)
             .ok_or_else(vod_resurrection_unavailable)?;
-        let bytes = continuous_master_with_subtitles(bytes, &file, query.subtitle)
+        let bytes = split_master_with_subtitles(bytes, &file, query.subtitle)
             .map_err(ApiError::Internal)?;
         return complete_buffered_response_before(
             state,
@@ -238,9 +238,9 @@ pub(super) async fn master_playlist_response_local_before(
     } else {
         None
     };
-    if let Some(ids) = native_split {
-        let bytes = native_split_master_text(&file, &context, &ids);
-        let bytes = continuous_master_with_subtitles(bytes, &file, query.subtitle)
+    if let Some((ids, audio_index)) = native_split {
+        let presentation = native_split_presentation(&file, &context, &ids, audio_index);
+        let bytes = split_master_with_subtitles(presentation, &file, query.subtitle)
             .map_err(ApiError::Internal)?;
         return complete_buffered_response_before(
             state,

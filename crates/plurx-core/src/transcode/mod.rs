@@ -32,6 +32,7 @@ pub mod manifest;
 mod pipeline;
 pub mod progress;
 mod recipe;
+pub mod split_master;
 mod vod;
 
 pub use avc_qualification::QualifiedSdrAvc;
