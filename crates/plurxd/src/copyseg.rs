@@ -318,6 +318,16 @@ impl Drop for Starved<'_> {
 const GRANT_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 const GRANT_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Headroom on the ordinary copy's measured rate for the rest of its startup.
+/// The rate is this title's at this position, so it does not need the 3x that
+/// covers a whole-title average; the split's guards recompute it on every
+/// pair, and an undecided split yields before an ordinary write waits.
+const ORDINARY_NEED_MARGIN: f64 = 2.0;
+
+/// The marker an ordinary write returns instead of waiting for scratch while
+/// an undecided split holds some: the split yields first.
+const SPLIT_YIELDS: &str = "an undecided native split holds scratch an ordinary write needs";
+
 /// Project the existing copy mux, keeping the copy child's audio clock
 /// and the rolling segment's extent. Prepared FEL may replace a video object
 /// only within that same extent before publication.
@@ -768,10 +778,14 @@ async fn native_copy_picture_clock_names_why_it_could_not_bind() {
 
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
-    /// The ordinary copy's own startup grant. Until the ordinary copy has
-    /// landed this many bytes, an undecided split may only write with growth
-    /// that leaves the rest of it unspent.
-    ordinary_startup: u64,
+    /// The ordinary copy's startup sizing: three times the title's average
+    /// rate over the startup window. It is an admission estimate, not bytes
+    /// the copy needs, so it is only the fallback before any media has landed
+    /// and the cap on what the measured need may ask for.
+    ordinary_startup_estimate: u64,
+    /// Media seconds the ordinary copy writes before its first served
+    /// snapshot: the startup runway plus one segment.
+    startup_secs: f64,
     /// The session's scratch ceiling. Both copies of the staged window must
     /// fit under it, or the split could never be served beside the ordinary
     /// copy it mirrors.
@@ -868,9 +882,9 @@ pub(crate) struct NativeSplitEntry {
 }
 
 impl NativeSplitInventory {
-    pub(crate) fn with_budget(ordinary_startup: u64, session_ceiling: u64) -> Self {
+    pub(crate) fn with_budget(ordinary_startup_estimate: u64, session_ceiling: u64) -> Self {
         Self {
-            ordinary_startup,
+            ordinary_startup_estimate,
             session_ceiling,
             ..Self::default()
         }
@@ -885,6 +899,17 @@ impl NativeSplitInventory {
     /// The source audio stream the copy carries.
     pub(crate) fn audio_index(&self) -> Option<i64> {
         self.audio_index
+    }
+
+    /// The media seconds the ordinary copy writes before its first served
+    /// snapshot, against which its remaining need is measured.
+    pub(crate) fn with_startup_secs(mut self, startup_secs: f64) -> Self {
+        self.startup_secs = if startup_secs.is_finite() {
+            startup_secs.max(0.0)
+        } else {
+            0.0
+        };
+        self
     }
 
     #[cfg(target_os = "linux")]
@@ -1231,6 +1256,10 @@ struct SessionDir {
     ordinary_bytes: std::sync::atomic::AtomicU64,
     /// The largest ordinary media object landed so far.
     largest_ordinary: std::sync::atomic::AtomicU64,
+    /// Media seconds of the ordinary segments this writer has landed,
+    /// counted as each lands, so they cover the same media as
+    /// `ordinary_bytes` when the split pair after it is weighed.
+    ordinary_secs: f64,
     /// A split the master declined has had its staged objects removed.
     split_discarded: bool,
     /// The `#EXTINF`/URI pairs, without the immutable header.
@@ -1304,6 +1333,7 @@ impl SessionDir {
             split_staged_bytes: 0,
             ordinary_bytes: std::sync::atomic::AtomicU64::new(0),
             largest_ordinary: std::sync::atomic::AtomicU64::new(0),
+            ordinary_secs: 0.0,
             split_discarded: false,
             entries: String::new(),
             published_secs: 0.0,
@@ -1409,36 +1439,87 @@ impl SessionDir {
         written
     }
 
-    /// What the ordinary copy's startup grant still has to carry. An optional
-    /// split write must leave this much of the allocation's grant unused.
+    /// Count one landed ordinary media segment's seconds, beside the bytes
+    /// `publish_file` already counted for it.
+    fn land_ordinary_media(&mut self, seconds: f64) {
+        if seconds.is_finite() && seconds > 0.0 {
+            self.ordinary_secs += seconds;
+        }
+    }
+
+    /// The ordinary copy's measured rate, in bytes per media second, once a
+    /// segment has landed.
+    fn ordinary_rate(&self) -> Option<f64> {
+        (self.ordinary_secs > 0.0).then(|| {
+            self.ordinary_bytes
+                .load(std::sync::atomic::Ordering::Relaxed) as f64
+                / self.ordinary_secs
+        })
+    }
+
+    /// The bytes the ordinary copy still has to land to reach its first
+    /// served snapshot, measured from what it has landed on this title at
+    /// this position.
     ///
-    /// - The ordinary copy's unspent startup grant.
-    /// - Until its first playlist is out, at least its next write: an ordinary
-    ///   write is authorized at twice its size until its rename settles, and
-    ///   the next segment is assumed as large as the largest so far. A refused
-    ///   ordinary write before the gate opens fails the whole start.
-    /// - While a warm start's prepared FEL head is still being staged, that
-    ///   head's own share, which the start reserved beside both copies.
+    /// - Before any segment lands, the startup estimate.
+    /// - Otherwise the measured rate over the remaining startup seconds,
+    ///   doubled for a peak the opening has not shown, and never less than
+    ///   the next write: an ordinary write is authorized at twice its size
+    ///   until its rename settles, and the next segment is assumed as large
+    ///   as the largest so far.
+    /// - Otherwise never more than the estimate.
+    fn ordinary_need(&self, inventory: &NativeSplitInventory) -> u64 {
+        let estimate = inventory.ordinary_startup_estimate;
+        let Some(rate) = self.ordinary_rate() else {
+            return estimate;
+        };
+        let remaining = (inventory.startup_secs - self.ordinary_secs).max(0.0);
+        let measured = (rate * remaining * ORDINARY_NEED_MARGIN).min(u64::MAX as f64) as u64;
+        let next = self
+            .largest_ordinary
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_mul(2);
+        // The next write's authorization is what a refusal before the gate
+        // would fail the start over, so it wins over the estimate's cap.
+        measured.min(estimate).max(next)
+    }
+
+    /// A warm start's prepared FEL head is staged whole beside both copies,
+    /// and none of it has landed: a full startup window at the measured rate.
+    #[cfg(target_os = "linux")]
+    fn head_need(&self, inventory: &NativeSplitInventory) -> u64 {
+        let estimate = inventory.ordinary_startup_estimate;
+        let Some(rate) = self.ordinary_rate() else {
+            return estimate;
+        };
+        let window = (rate * inventory.startup_secs * ORDINARY_NEED_MARGIN).min(u64::MAX as f64);
+        (window as u64).min(estimate)
+    }
+
+    /// What an optional split write must leave of the allocation's grant
+    /// unused: the ordinary copy's measured need, and while a warm start's
+    /// prepared FEL head is still being staged, that head's own window.
     fn ordinary_reserve(&self) -> u64 {
         let Some(inventory) = self.split_inventory.as_ref() else {
             return 0;
         };
-        let landed = self
-            .ordinary_bytes
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut reserve = inventory.ordinary_startup.saturating_sub(landed);
-        if !self.started {
-            let next = self
-                .largest_ordinary
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_mul(2);
-            reserve = reserve.max(next);
-        }
+        #[allow(unused_mut)]
+        let mut reserve = self.ordinary_need(inventory);
         #[cfg(target_os = "linux")]
         if inventory.prepared_head_pending() {
-            reserve = reserve.saturating_add(inventory.ordinary_startup);
+            reserve = reserve.saturating_add(self.head_need(inventory));
         }
         reserve
+    }
+
+    /// Whether an undecided split holds scratch an ordinary write may need.
+    fn undecided_split_holds_scratch(&self) -> bool {
+        !self.optional_write
+            && self.split_staged_bytes > 0
+            && self
+                .split_inventory
+                .as_ref()
+                .is_some_and(|inventory| inventory.chosen.get().is_none())
     }
 
     /// Wait until the budget authorizes this write, the session goes away, or
@@ -1465,6 +1546,14 @@ impl SessionDir {
         }
         if let Some(authorized) = grants.authorize(bytes) {
             return Ok(Some(authorized));
+        }
+        // The optional copy yields before the required one waits: the caller
+        // declines the undecided split, removes what it staged, and retries.
+        if self.undecided_split_holds_scratch() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                SPLIT_YIELDS,
+            ));
         }
         // Only a session that has never published can wait forever for
         // nothing, so only that one gets a deadline. Measured in polls, so
@@ -1536,21 +1625,23 @@ impl SessionDir {
                 (total.saturating_add(size), largest.max(size))
             });
         // The ordinary copy's startup is protected at the ledger, where each
-        // optional write must leave its unspent remainder (`ordinary_reserve`).
-        // What is checked here is only whether both copies of the window can
-        // ever fit under the session's ceiling: a split staged beyond it could
-        // never be served beside the ordinary copy it mirrors. `largest` is
-        // the write in flight, charged twice until its rename settles.
-        let ordinary = self
+        // optional write must leave its measured need unused
+        // (`ordinary_reserve`). What is checked here is whether both copies of
+        // the window, and what the ordinary copy still has to land, fit under
+        // the session's ceiling: a split staged beyond it could never be served
+        // beside the ordinary copy it mirrors. `largest` is the write in
+        // flight, charged twice until its rename settles.
+        let landed = self
             .ordinary_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(inventory.ordinary_startup);
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let need = self.ordinary_need(inventory);
         if !active
             && self
                 .split_staged_bytes
                 .saturating_add(payload)
                 .saturating_add(largest)
-                .saturating_add(ordinary)
+                .saturating_add(landed)
+                .saturating_add(need)
                 > inventory.session_ceiling
         {
             let (ids, declined_here) = inventory.settle("startup_budget_exceeded");
@@ -1562,7 +1653,8 @@ impl SessionDir {
                         staged_bytes = self.split_staged_bytes,
                         payload_bytes = payload,
                         largest_bytes = largest,
-                        ordinary_bytes = ordinary,
+                        ordinary_bytes = landed,
+                        ordinary_need_bytes = need,
                         session_ceiling = inventory.session_ceiling,
                         "native split layout declined before selection: both copies would exceed the session's scratch ceiling"
                     );
@@ -1608,7 +1700,7 @@ impl SessionDir {
     }
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
-        let committed = self.publish_file("init.mp4", &init.bytes).await?;
+        let committed = self.publish_ordinary("init.mp4", &init.bytes).await?;
         self.observe_object("init.mp4", committed, None);
         if self.split_inventory.is_some() {
             match NativeSplitAuthor::new(init.clone()) {
@@ -1676,6 +1768,7 @@ impl SessionDir {
         }
         self.split_discarded = true;
         self.split_author = None;
+        self.split_staged_bytes = 0;
         if let Some(inventory) = self.split_inventory.as_ref() {
             // Retention charges `bytes()` as live: forget the staged media so
             // the ledger stops counting what is about to be deleted. Rendered
@@ -1702,6 +1795,43 @@ impl SessionDir {
                     }
                 }
             }
+        }
+        // The ledger keeps charging what the split wrote until the session's
+        // next walk subsumes it, as it does for anything retention unlinks: a
+        // walk of our own could race that one and leave a newer write
+        // uncharged.
+    }
+
+    /// Publish an object of the ordinary copy. If its grant is refused while
+    /// an undecided split holds scratch, the split yields first: it is
+    /// declined, its staged objects are removed, and the write is retried,
+    /// waiting for capacity only then, as it always has.
+    async fn publish_ordinary(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+    ) -> std::io::Result<Option<crate::rolling_output::CommittedObject>> {
+        match self.publish_file(name, bytes).await {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && error.to_string() == SPLIT_YIELDS =>
+            {
+                if let Some(inventory) = self.split_inventory.as_ref() {
+                    let (_, declined_here) = inventory.settle("ordinary_write_starved");
+                    if declined_here {
+                        tracing::info!(
+                            target: "plurxd::copyseg",
+                            object = name,
+                            bytes = bytes.len(),
+                            staged_bytes = self.split_staged_bytes,
+                            "native split layout declined before selection: the ordinary copy needs the scratch it holds"
+                        );
+                    }
+                }
+                self.discard_declined_split().await;
+                self.publish_file(name, bytes).await
+            }
+            other => other,
         }
     }
 
@@ -1783,7 +1913,10 @@ impl SessionDir {
             )));
         }
         let name = published.name();
-        let committed = self.publish_file(&name, &published.segment.bytes).await?;
+        let committed = self
+            .publish_ordinary(&name, &published.segment.bytes)
+            .await?;
+        self.land_ordinary_media(published.seconds);
         // Ordinary cuts are timed by video. At EOF the mux may continue
         // after video ends, so the last cuts cannot qualify a retained seek.
         let video_index = (published.segment.video_ticks > 0
@@ -1815,7 +1948,7 @@ impl SessionDir {
         let first_playlist = !self.started;
         self.started = true;
         let text = self.playlist(false);
-        self.publish_file("index.m3u8", text.as_bytes())
+        self.publish_ordinary("index.m3u8", text.as_bytes())
             .await
             .map_err(PublishError::Io)?;
         if first_playlist {
@@ -1842,7 +1975,7 @@ impl SessionDir {
         // — the client sees VOD from the start.
         self.started = true;
         let text = self.playlist(true);
-        self.publish_file("index.m3u8", text.as_bytes())
+        self.publish_ordinary("index.m3u8", text.as_bytes())
             .await
             .map(|_| ())
     }
@@ -4521,11 +4654,18 @@ mod split_reserve_tests {
     use std::sync::atomic::AtomicI64;
     use std::sync::Arc;
 
-    // A production 4K Resume (2026-11-26), scaled down 1000x: a 91 MB ordinary
-    // startup, an 18 MB first segment, then 66 MB segments at 4K rates.
-    const STARTUP: u64 = 91_218;
-    const FIRST: usize = 18_222;
-    const NEXT: usize = 66_208;
+    // The 2026-11-27 production 4K Resume, scaled down 1000x: a 2123.4 MB
+    // startup estimate under a 2214.6 MB session ceiling, a 24.0 MB first
+    // segment, a 45.7 MB second, and about 254 MB per copy for segments 0..8.
+    const ESTIMATE: u64 = 2_123_374;
+    const CEILING: u64 = 2_214_593;
+    const STARTUP_SECS: f64 = 64.0;
+
+    fn inventory(estimate: u64, ceiling: u64) -> Arc<NativeSplitInventory> {
+        Arc::new(
+            NativeSplitInventory::with_budget(estimate, ceiling).with_startup_secs(STARTUP_SECS),
+        )
+    }
 
     fn writer(
         dir: PathBuf,
@@ -4546,14 +4686,15 @@ mod split_reserve_tests {
         (session, permit)
     }
 
-    /// Write one ordinary segment, then its split pair, as `write_segment`
-    /// does. Returns whether the split pair was staged.
-    async fn segment(session: &mut SessionDir, index: usize, bytes: usize) -> bool {
+    /// Land one ordinary segment of `secs` media, then stage its split pair,
+    /// as `write_segment` does. Returns whether the split pair was staged.
+    async fn segment(session: &mut SessionDir, index: usize, bytes: usize, secs: f64) -> bool {
         let media = vec![0u8; bytes];
         session
-            .publish_file(&format!("seg{index:05}.m4s"), &media)
+            .publish_ordinary(&format!("seg{index:05}.m4s"), &media)
             .await
             .expect("the ordinary copy is never refused here");
+        session.land_ordinary_media(secs);
         let (audio, video) = media.split_at(bytes / 8);
         session
             .publish_split_files(&[
@@ -4564,69 +4705,206 @@ mod split_reserve_tests {
             .expect("an optional split write never fails the copy")
     }
 
-    /// The split used to be capped at one ordinary startup for as long as the
-    /// layout was undecided, while the master needs it staged for the whole
-    /// window it serves. With room in the global budget, a 4K Resume stages
-    /// every segment of that window and the master can choose the split.
+    fn split_objects(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("session dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("split-"))
+            .count()
+    }
+
+    /// The startup estimate alone nearly fills the session's ceiling on a 4K
+    /// remux. Charged as if it were bytes, it left the split 91 MB and the
+    /// split declined at segment 1. Measured from what the ordinary copy has
+    /// landed, both copies of the served window fit.
     #[tokio::test]
-    async fn an_undecided_split_stages_the_whole_served_window_when_the_budget_allows() {
+    async fn a_split_stages_the_served_window_when_the_startup_estimate_fills_the_ceiling() {
         let root = tempfile::tempdir().expect("tempdir");
-        let inventory = Arc::new(NativeSplitInventory::with_budget(STARTUP, 2_000_000));
+        let inventory = inventory(ESTIMATE, CEILING);
         let (mut session, _permit) = writer(
             root.path().to_path_buf(),
-            (STARTUP * 2) as i64,
+            ESTIMATE as i64,
             10_000_000,
             &inventory,
         );
+        let mut copy = 0;
         for index in 0..9 {
-            let bytes = if index == 0 { FIRST } else { NEXT };
+            let (bytes, secs) = match index {
+                0 => (24_008, 4.888),
+                1 => (45_735, 5.0),
+                _ => (26_324, 6.0),
+            };
+            copy += bytes;
             assert!(
-                segment(&mut session, index, bytes).await,
+                segment(&mut session, index, bytes, secs).await,
                 "segment {index} staged its split pair"
             );
         }
+        assert!((250_000..260_000).contains(&copy), "about 254 MB per copy");
         assert_eq!(inventory.decline_reason(), None);
         assert!(inventory.chosen.get().is_none(), "the master still decides");
     }
 
-    /// When the global budget cannot grow, the split gives way: it declines
-    /// rather than spend what the ordinary copy still needs, and the ordinary
-    /// copy goes on writing within its own startup grant.
+    /// The need is the measured rate over the remaining startup seconds with
+    /// its margin, never below the next write and never above the estimate,
+    /// and the segment just landed counts in both bytes and seconds.
     #[tokio::test]
-    async fn an_undecided_split_never_spends_the_ordinary_startup() {
+    async fn the_ordinary_need_is_measured_from_landed_media() {
         let root = tempfile::tempdir().expect("tempdir");
-        let startup = 40_000;
-        let inventory = Arc::new(NativeSplitInventory::with_budget(startup, 2_000_000));
-        let (mut session, _permit) = writer(
-            root.path().to_path_buf(),
-            startup as i64,
-            startup as i64,
-            &inventory,
-        );
-        assert!(
-            !segment(&mut session, 0, 10_000).await,
-            "no growth pays for the split"
-        );
-        assert_eq!(inventory.decline_reason(), Some("optional_write_blocked"));
-        session
-            .publish_file("seg00001.m4s", &[0u8; 10_000])
-            .await
-            .expect("the ordinary copy still has its startup");
+        for (estimate, startup, expected) in [
+            // 1000 B/s over the remaining 60 s, doubled.
+            (1_000_000, STARTUP_SECS, 120_000),
+            // Capped at the estimate.
+            (50_000, STARTUP_SECS, 50_000),
+            // Nothing left to measure: the next write, at twice its size.
+            (1_000_000, 4.0, 8_000),
+        ] {
+            let inventory = Arc::new(
+                NativeSplitInventory::with_budget(estimate, u64::MAX).with_startup_secs(startup),
+            );
+            let (mut session, _permit) =
+                writer(root.path().to_path_buf(), 1_000_000, 10_000_000, &inventory);
+            session
+                .publish_ordinary("seg00000.m4s", &[0u8; 4_000])
+                .await
+                .expect("ordinary");
+            session.land_ordinary_media(4.0);
+            assert_eq!(
+                session.ordinary_need(&inventory),
+                expected,
+                "{estimate} {startup}"
+            );
+        }
     }
 
-    /// Under a session ceiling below two startups, both copies of the window
-    /// must fit beneath it, which is the old bound exactly.
+    #[tokio::test]
+    async fn before_any_segment_the_ordinary_need_is_the_startup_estimate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = inventory(ESTIMATE, CEILING);
+        let (session, _permit) = writer(root.path().to_path_buf(), 1_000, 1_000, &inventory);
+        assert_eq!(session.ordinary_need(&inventory), ESTIMATE);
+        assert_eq!(session.ordinary_reserve(), ESTIMATE);
+    }
+
+    /// A peak reel after a quiet opening raises the measured need: the next
+    /// pair no longer fits beside it, the split declines, and what it staged
+    /// leaves scratch.
+    #[tokio::test]
+    async fn a_peak_reel_declines_the_undecided_split_and_removes_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = inventory(1_000_000, 200_000);
+        let (mut session, _permit) =
+            writer(root.path().to_path_buf(), 1_000_000, 10_000_000, &inventory);
+        assert!(segment(&mut session, 0, 1_000, 4.0).await);
+        // 16_000 B over 8 s is 2000 B/s: 224_000 for the remaining 56 s.
+        assert!(!segment(&mut session, 1, 15_000, 4.0).await);
+        assert_eq!(inventory.decline_reason(), Some("startup_budget_exceeded"));
+        session.discard_declined_split().await;
+        assert_eq!(split_objects(root.path()), 0);
+        assert!(root.path().join("seg00001.m4s").exists());
+    }
+
+    /// When the ordinary copy's grant is refused while an undecided split
+    /// holds scratch, the split yields: it is declined and removed, and the
+    /// ordinary write lands once the session's walk sees the space it
+    /// returned, rather than the split keeping it.
+    #[tokio::test]
+    async fn an_undecided_split_yields_before_an_ordinary_write_waits() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = inventory(2_000, u64::MAX);
+        // A 10_000-byte grant and no room to grow.
+        let (mut session, permit) = writer(root.path().to_path_buf(), 10_000, 10_000, &inventory);
+        assert!(segment(&mut session, 0, 1_000, 4.0).await);
+        assert_eq!(split_objects(root.path()), 2);
+        // The session's periodic walk, standing in for its 30 s sample.
+        let ledger = Arc::clone(permit.ledger());
+        let key = permit.key();
+        let dir = root.path().to_path_buf();
+        let walk = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if split_objects(&dir) > 0 {
+                    continue;
+                }
+                let before = ledger.written_of(key);
+                let bytes = std::fs::read_dir(&dir)
+                    .expect("session dir")
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.metadata().ok())
+                    .filter(std::fs::Metadata::is_file)
+                    .map(|metadata| metadata.len() as i64)
+                    .sum();
+                ledger.observe_walk(key, bytes, before);
+                return;
+            }
+        });
+        // 4_200 bytes, authorized at twice that, exceed the 8_000 left while
+        // the split's 1_000 are still charged.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.publish_ordinary("seg00001.m4s", &[0u8; 4_200]),
+        )
+        .await
+        .expect("the ordinary write lands after the walk")
+        .expect("the ordinary write lands");
+        walk.await.expect("walk");
+        assert_eq!(inventory.decline_reason(), Some("ordinary_write_starved"));
+        assert_eq!(split_objects(root.path()), 0);
+        assert!(session.split_author.is_none());
+    }
+
+    /// Once the master chose the split, both copies are required: a refused
+    /// ordinary grant waits as it always has, and nothing is discarded.
+    #[tokio::test]
+    async fn a_selected_split_is_never_discarded_for_capacity() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = inventory(2_000, u64::MAX);
+        let (mut session, _permit) = writer(root.path().to_path_buf(), 10_000, 10_000, &inventory);
+        assert!(segment(&mut session, 0, 1_000, 4.0).await);
+        let _ = inventory.chosen.set(true);
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_millis(600),
+            session.publish_ordinary("seg00001.m4s", &[0u8; 4_200]),
+        )
+        .await;
+        assert!(waited.is_err(), "the required write waits for capacity");
+        assert_eq!(split_objects(root.path()), 2);
+        assert_eq!(inventory.decline_reason(), None);
+    }
+
+    /// Before the first playlist, the ordinary copy's next write is
+    /// authorized at twice its size, and a refusal then fails the start. The
+    /// split leaves room for that write even when the estimate is smaller.
+    #[tokio::test]
+    async fn the_next_ordinary_write_wins_over_a_small_estimate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inventory = inventory(10, u64::MAX);
+        let (mut session, _permit) = writer(root.path().to_path_buf(), 4_000, 4_000, &inventory);
+        session.gate_secs = 3600;
+        // 1_000 landed of a 4_000 grant leaves 3_000. The split pair, written
+        // at twice its 1_000 bytes, does not fit beside the 2_000 the next
+        // ordinary write needs, and the budget cannot grow.
+        assert!(!segment(&mut session, 0, 1_000, 1.0).await);
+        assert_eq!(inventory.decline_reason(), Some("optional_write_blocked"));
+        session
+            .publish_ordinary("seg00001.m4s", &[0u8; 1_000])
+            .await
+            .expect("the next ordinary write still fits");
+    }
+
+    /// Under a session ceiling below two startups, before any media lands,
+    /// both copies must fit beneath it beside the estimate.
     #[tokio::test]
     async fn a_capped_session_declines_where_both_copies_exceed_its_ceiling() {
         let root = tempfile::tempdir().expect("tempdir");
         for (video, staged) in [(40usize, true), (60, false)] {
-            let inventory = Arc::new(NativeSplitInventory::with_budget(100, 250));
+            let inventory = inventory(100, 250);
             let (mut session, _permit) =
                 writer(root.path().to_path_buf(), 10_000, 100_000, &inventory);
             let audio = vec![0u8; 50];
             let video_bytes = vec![0u8; video];
             // 50 + video staged, the larger again in flight, plus the 100-byte
-            // ordinary startup, against the 250-byte ceiling.
+            // estimate, against the 250-byte ceiling.
             let result = session
                 .publish_split_files(&[
                     ("split-audio-seg00000.m4s".to_owned(), audio.as_slice()),
@@ -4649,18 +4927,17 @@ mod split_reserve_tests {
     #[tokio::test]
     async fn a_declined_split_removes_its_staged_objects() {
         let root = tempfile::tempdir().expect("tempdir");
-        let inventory = Arc::new(NativeSplitInventory::with_budget(STARTUP, 2_000_000));
+        let inventory = inventory(ESTIMATE, u64::MAX);
         let (mut session, _permit) =
             writer(root.path().to_path_buf(), 1_000_000, 10_000_000, &inventory);
-        assert!(segment(&mut session, 0, FIRST).await);
+        assert!(segment(&mut session, 0, 24_008, 4.888).await);
         assert!(
             inventory.choose(None).is_none(),
             "the master settles on the mux"
         );
         session.discard_declined_split().await;
         assert!(root.path().join("seg00000.m4s").exists());
-        assert!(!root.path().join("split-audio-seg00000.m4s").exists());
-        assert!(!root.path().join("split-video-seg00000.m4s").exists());
+        assert_eq!(split_objects(root.path()), 0);
         assert!(session.split_author.is_none());
         assert_eq!(
             inventory.bytes(),
@@ -4669,47 +4946,27 @@ mod split_reserve_tests {
         );
     }
 
-    /// Before the first playlist, the ordinary copy's next write is
-    /// authorized at twice its size, and a refusal then fails the start. The
-    /// split leaves room for that write even when the startup estimate has
-    /// already been spent.
-    #[tokio::test]
-    async fn before_the_first_playlist_the_split_leaves_room_for_the_next_ordinary_write() {
-        let root = tempfile::tempdir().expect("tempdir");
-        // A 10-byte estimate the 1_000-byte first segment already overran.
-        let inventory = Arc::new(NativeSplitInventory::with_budget(10, 1_000_000));
-        let (mut session, _permit) = writer(root.path().to_path_buf(), 4_000, 4_000, &inventory);
-        session.gate_secs = 3600;
-        // 1_000 landed of a 4_000 grant leaves 3_000. The split pair, written
-        // at twice its 1_000 bytes, does not fit beside the 2_000 the next
-        // ordinary write needs, and the budget cannot grow.
-        assert!(!segment(&mut session, 0, 1_000).await);
-        assert_eq!(inventory.decline_reason(), Some("optional_write_blocked"));
-        session
-            .publish_file("seg00001.m4s", &[0u8; 1_000])
-            .await
-            .expect("the next ordinary write still fits");
-    }
-
-    /// A warm start reserved a share for its prepared FEL head beside both
-    /// copies. While that head is being staged the split leaves it alone.
+    /// A warm start's prepared FEL head is staged whole beside both copies.
+    /// While it is pending the split leaves a measured window for it.
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn a_warm_split_leaves_the_prepared_fel_share_while_it_is_staged() {
+    async fn a_warm_split_leaves_a_measured_window_for_the_prepared_head() {
         let root = tempfile::tempdir().expect("tempdir");
         for pending in [true, false] {
-            let inventory = NativeSplitInventory::with_budget(4_000, 1_000_000);
+            let inventory =
+                NativeSplitInventory::with_budget(4_000, u64::MAX).with_startup_secs(STARTUP_SECS);
             let inventory = Arc::new(if pending {
                 inventory.compare_prepared_head()
             } else {
                 inventory
             });
-            // Three startups reserved, as `prepared_native_fel_sizing` does,
-            // and no room to grow.
+            // No room to grow: the 16_000 left after the first segment pays
+            // for the pair beside the 8_000 next write, but not beside the
+            // head's 4_000 window too.
             let (mut session, _permit) =
-                writer(root.path().to_path_buf(), 12_000, 12_000, &inventory);
+                writer(root.path().to_path_buf(), 20_000, 20_000, &inventory);
             session.started = true;
-            let staged = segment(&mut session, 0, 4_000).await;
+            let staged = segment(&mut session, 0, 4_000, 4.0).await;
             assert_eq!(staged, !pending, "pending head {pending}");
         }
     }

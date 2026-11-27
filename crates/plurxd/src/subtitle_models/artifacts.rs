@@ -58,7 +58,9 @@ pub(crate) struct ManagedModel {
 #[cfg(unix)]
 mod local {
     use super::*;
-    use plurx_core::fs_secure::{open_read_nofollow_blocking, std_file_identity, SecureDirectory};
+    use plurx_core::fs_secure::{
+        local_file_identity, open_read_nofollow_blocking, SecureDirectory,
+    };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
     use std::{
@@ -179,7 +181,7 @@ mod local {
         {
             return Err("artifact_not_regular".into());
         }
-        let before = std_file_identity(file).map_err(|_| "artifact_identity_unavailable")?;
+        let before = local_file_identity(file).map_err(|_| "artifact_identity_unavailable")?;
         if before.size != size {
             return Err("artifact_length_mismatch".into());
         }
@@ -215,7 +217,7 @@ mod local {
             if count != size || format!("{:x}", hash.finalize()) != expected {
                 return Err("artifact_digest_mismatch".into());
             }
-            if std_file_identity(file).map_err(|_| "artifact_identity_unavailable")? != before {
+            if local_file_identity(file).map_err(|_| "artifact_identity_unavailable")? != before {
                 return Err("artifact_changed".into());
             }
             check()?;
@@ -229,7 +231,7 @@ mod local {
         }
         file.seek(SeekFrom::Start(0))
             .map_err(|_| "artifact_read_failed")?;
-        if std_file_identity(file).map_err(|_| "artifact_identity_unavailable")? != before {
+        if local_file_identity(file).map_err(|_| "artifact_identity_unavailable")? != before {
             return Err("artifact_changed".into());
         }
         check()?;
@@ -366,7 +368,7 @@ mod local {
             let mut manifest_file =
                 open_read_nofollow_blocking(&parent.join("subtitle-engine.json"))
                     .map_err(|_| "packaged_engine_manifest_unavailable")?;
-            let identity = std_file_identity(&manifest_file)
+            let identity = local_file_identity(&manifest_file)
                 .map_err(|_| "packaged_engine_manifest_unavailable")?;
             if !manifest_file
                 .metadata()
@@ -382,7 +384,7 @@ mod local {
                 .read_to_end(&mut bytes)
                 .map_err(|_| "packaged_engine_manifest_unavailable")?;
             if bytes.len() as u64 != identity.size
-                || std_file_identity(&manifest_file)
+                || local_file_identity(&manifest_file)
                     .map_err(|_| "packaged_engine_manifest_unavailable")?
                     != identity
             {
@@ -617,7 +619,7 @@ mod local {
         if metadata.len() != spec.download_bytes {
             return Err("artifact_length_mismatch".into());
         }
-        std_file_identity(&handle).map_err(|_| "model_metadata_unavailable".into())
+        local_file_identity(&handle).map_err(|_| "model_metadata_unavailable".into())
     }
 
     async fn model_directory(root: &Path) -> Result<SecureDirectory, String> {
@@ -974,7 +976,7 @@ mod local {
             .map_err(|_| "model_repair_identity_changed")?
             .into_std()
             .await;
-        let before = std_file_identity(&held).map_err(|_| "model_repair_identity_changed")?;
+        let before = local_file_identity(&held).map_err(|_| "model_repair_identity_changed")?;
         let expected = spec.sha256.clone();
         let size = spec.download_bytes;
         let hash_cancel = cancel.clone();
@@ -1543,7 +1545,7 @@ mod local {
                 .await
                 .expect("qualified local artifact");
             assert_eq!(
-                std_file_identity(&engine.self_test_handle).expect("held fixture"),
+                local_file_identity(&engine.self_test_handle).expect("held fixture"),
                 engine.self_test_identity
             );
             assert_eq!(engine.self_test_sha256, COMPANIONS[0].2);
@@ -1638,7 +1640,7 @@ mod local {
                     .is_none()
             );
             assert!(!name.exists());
-            assert!(std_file_identity(&held)
+            assert!(local_file_identity(&held)
                 .expect("held identity")
                 .same_inode(old_identity));
             let mut old_bytes = Vec::new();
@@ -1759,7 +1761,7 @@ mod local {
             let path = root.join(format!("{}.bin", spec.sha256));
             std::fs::write(&path, bytes).expect("large regular model");
             let mut handle = File::open(&path).expect("model");
-            let identity = std_file_identity(&handle).expect("identity");
+            let identity = local_file_identity(&handle).expect("identity");
             let before = CancellationToken::new();
             before.cancel();
             assert_eq!(
@@ -1896,7 +1898,7 @@ mod local {
             std::fs::write(&path, b"other bytes").expect("changed model");
             let expected = spec(b"model bytes");
             let mut handle = File::open(&path).expect("handle");
-            let identity = std_file_identity(&handle).expect("identity");
+            let identity = local_file_identity(&handle).expect("identity");
             // Model the same identity returned for two writes within one
             // filesystem tick, independent of this host's timestamp precision.
             DIGESTS

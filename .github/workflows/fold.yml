@@ -15,10 +15,12 @@ name: fold fragment folders
 # status.d/, and a fold per landing would mean a fold pull request per merge.
 # The page lags its folder by at most six hours.
 #
-# It uses the job's own token. Pushes and merges made with it start no
-# workflows, and nothing needs them to: the fold waits for no check but its
-# own. A manual run with `all` folds every fragment folder completely, as a
-# release cut does.
+# It pushes, opens and merges with FOLD_BOT_TOKEN, the token of the
+# plurx-fold-bot account (a write collaborator on this repository only). The
+# job's own token cannot open a pull request here. The fold waits for no check
+# but its own; its landing is a normal push, so landing-check judges it. A
+# manual run with `all` folds every fragment folder completely, as a release
+# cut does.
 on:
   schedule:
     - cron: "17 */6 * * *"
@@ -56,7 +58,7 @@ jobs:
         env:
           # Scoped to this one step; scripts/fold passes it to git through
           # the environment and to the API in a header, never in arguments.
-          FOLD_TOKEN: ${{ github.token }}
+          FOLD_BOT_TOKEN: ${{ secrets.FOLD_BOT_TOKEN }}
           FOLD_ALL: ${{ (inputs.all == true || inputs.all == 'true') && '--all' || '' }}
         run: python3 scripts/fold --publish $FOLD_ALL
       - name: Restore persistent runner workspace ownership

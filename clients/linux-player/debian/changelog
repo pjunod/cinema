@@ -1,3 +1,12 @@
+plurx-player (0.5.7-1) stonking; urgency=medium
+
+  * Name the EL pill FEL or MEL from the renderer's own per-frame NLQ level
+    (mpv +rogdv5.8 enhancement-layer-nlq-active) as soon as frames are
+    mapped, instead of waiting for the server's title scan; the scan stays a
+    cross-check, and a disagreement is marked on the pill and named in Info.
+
+ -- Claude Agent <noreply@anthropic.com>  Fri, 27 Nov 2026 15:20:00 -0500
+
 plurx-player (0.5.6-1) stonking; urgency=medium
 
   * Name the EL pill FEL or MEL when the server's title scan has classified

@@ -1945,10 +1945,7 @@ mod tests {
                 .expect("fence"),
         );
 
-        let mut held = Vec::with_capacity(plurx_core::media_io::MEDIA_IO_CONCURRENCY);
-        for _ in 0..plurx_core::media_io::MEDIA_IO_CONCURRENCY {
-            held.push(plurx_core::media_io::slot().await);
-        }
+        let held = plurx_core::media_io::hold_every_slot().await;
         let awaited = tokio::spawn({
             let fence = std::sync::Arc::clone(&fence);
             async move { fence.unchanged().await }
