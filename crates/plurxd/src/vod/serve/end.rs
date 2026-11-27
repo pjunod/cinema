@@ -246,14 +246,20 @@ impl VodServe {
             drop(rendition);
             #[cfg(target_os = "linux")]
             drop(_finite_cleanup_slot);
+            if let Some(reader) = adopted_reader {
+                reader.finish_detach();
+            }
+            // Cleanup is finished before the stopped role closes: the close
+            // releases this session's terminal record (and its finite client
+            // slots) only once its cleanup is finished, and drains only once
+            // that record is gone. Awaiting the close under the guard would
+            // hold the role's claim until the drain deadline.
+            drop(_completion);
             #[cfg(target_os = "linux")]
             if let Some((key, original)) = stopped_finite {
                 serve.shared.retire_stopped_finite(&key, original).await;
             }
             drop(serve);
-            if let Some(reader) = adopted_reader {
-                reader.finish_detach();
-            }
         });
     }
 
