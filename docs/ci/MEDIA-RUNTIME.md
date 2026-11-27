@@ -169,7 +169,7 @@ build, below, because the runtime no longer supplies the bundle.
 ## Helper bundle returned to the application build — 2026-11-12
 
 The runtime pinned on 2026-11-09 carried a bundle whose `source_sha256` was
-`cfb13f96…` while main's daemon expected `0ae1fc25…`. The dependency image is
+`cfb13f96…` while main's daemon expected `0ae1fc25…`. The dependency image was
 pinned to index digest
 `sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050`,
 published natively for amd64 and arm64 by the maintenance workflow, which also
