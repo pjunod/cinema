@@ -57,7 +57,7 @@ jobs:
           # Scoped to this one step; scripts/fold passes it to git through
           # the environment and to the API in a header, never in arguments.
           FOLD_TOKEN: ${{ github.token }}
-          FOLD_ALL: ${{ inputs.all && '--all' || '' }}
+          FOLD_ALL: ${{ (inputs.all == true || inputs.all == 'true') && '--all' || '' }}
         run: python3 scripts/fold --publish $FOLD_ALL
       - name: Restore persistent runner workspace ownership
         if: always()

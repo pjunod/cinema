@@ -249,6 +249,19 @@ class VerifyFoldCase(FoldTree):
         # The same result is not the fold of an older base with more fragments.
         self.assertNotEqual(FOLD.verify(self.root, "HEAD~1", [*pages, *removed]), [])
 
+    def test_a_page_with_other_line_endings_is_not_the_fold(self):
+        paths = self.fold()
+        page = self.root / "STATUS.md"
+        page.write_bytes(page.read_bytes().replace(b"\n", b"\r\n"))
+        problems = FOLD.verify(self.root, "HEAD", sorted({*paths, "STATUS.md"}))
+        self.assertTrue(any(problem.startswith("STATUS.md") for problem in problems), problems)
+
+    def test_a_fragment_with_a_non_ascii_name_folds_and_verifies(self):
+        (self.root / "tests/client-fixes.d/row-00.toml").rename(self.root / "tests/client-fixes.d/é.toml")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "rename"], cwd=self.root, check=True)
+        self.assertEqual(FOLD.verify(self.root, "HEAD", self.fold()), [])
+
 
 class PublishFoldCase(FoldTree):
     """`publish` lands only a verified fold, merged at the head it verified."""

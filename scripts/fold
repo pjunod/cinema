@@ -232,7 +232,7 @@ def _fold_inputs(root: Path, base: str, into: Path) -> None:
     """Write `base`'s copy of everything a fold reads into `into`."""
 
     wanted = [STATUS_PAGE, f"{STATUS_DIR}/", CLIENT_FIXES, f"{CLIENT_FIXES_DIR}/"]
-    for path in _git_out(root, "ls-tree", "-r", "--name-only", base, "--", *wanted).splitlines():
+    for path in filter(None, _git_out(root, "ls-tree", "-r", "-z", "--name-only", base, "--", *wanted).split("\0")):
         target = into / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(subprocess.run(["git", "show", f"{base}:{path}"], cwd=root, check=True,
@@ -253,10 +253,10 @@ def verify(root: Path, base: str, paths: list[str]) -> list[str]:
     with tempfile.TemporaryDirectory() as scratch:
         expected_root = Path(scratch)
         _fold_inputs(root, base, expected_root)
-        before = _fix_rows(_fix_texts(expected_root))
         try:
+            before = _fix_rows(_fix_texts(expected_root))
             variants = [changes(expected_root, everything) for everything in (False, True)]
-        except FoldError as error:
+        except (FoldError, tomllib.TOMLDecodeError) as error:
             return [f"the fold of {base} itself fails: {error}"]
         changed = set(paths)
         for pages, removed in variants:
@@ -264,7 +264,7 @@ def verify(root: Path, base: str, paths: list[str]) -> list[str]:
                 continue
             problems = []
             for page, text in pages.items():
-                if not (root / page).exists() or (root / page).read_text(encoding="utf-8") != text:
+                if not (root / page).exists() or (root / page).read_bytes() != text.encode("utf-8"):
                     problems.append(f"{page} is not the fold of {base}'s folder")
             problems += [f"{path} was absorbed but is still there" for path in removed if (root / path).exists()]
             for page, text in pages.items():
@@ -272,13 +272,16 @@ def verify(root: Path, base: str, paths: list[str]) -> list[str]:
             for path in removed:
                 (expected_root / path).unlink()
             if _fix_rows(_fix_texts(expected_root)) != before:
-                problems.append(f"the fold itself changed client-fix rows; scripts/fold is broken")
+                problems.append("the fold itself changed client-fix rows; scripts/fold is broken")
+            if changes(expected_root) != ({}, []):
+                problems.append("a second fold would change the result; scripts/fold is broken")
             return problems
         pages, removed = variants[0]
         expected = {*pages, *removed}
         return ([f"{path}: changed, but the fold of {base} does not change it" for path in sorted(changed - expected)]
                 + [f"{path}: the fold of {base} changes it, but this does not" for path in sorted(expected - changed)]
-                or [f"nothing to fold at {base}"])
+                or [f"nothing to fold at {base}"]) + [
+            "rebuild the fold from the current base with `scripts/fold --write` (or `--all`)"]
 
 
 # -- publishing the fold (the after-merge workflow) --------------------------------
