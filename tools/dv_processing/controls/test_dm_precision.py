@@ -1,11 +1,13 @@
-"""GPU checks of the precise CM4 transfer helpers in dv_dm.h.
+"""GPU checks of the CM4 display mapping and its transfer helpers in dv_dm.h.
 
 Environment:
   PLURX_DM_SHADER_CONTROL   a compiled dm_shader_control (any Vulkan device, lavapipe included)
   PLURX_DM_PARITY_SRC       at least five 3840x2160 float32 BT.2020/PQ RGB frames
   PLURX_DM_PARITY_SCRATCH   optional directory for the rasters; default: beside the control.
                             Never the system temporary directory: a run writes about 100 MB.
-  PLURX_DM_REQUIRE_FUSED_FMA=1  optional: refuse a device whose fma is not fused.
+  PLURX_DM_REQUIRE_FUSED_FMA=1  optional: refuse a device whose fma is not fused. Unfused results
+                            are inside the 1 ULP contract; this asks for the fused evaluation
+                            the shipped error figures describe (DV_HDR_PROCESSING_STATUS.md).
 
 test_cm4_real_crops_within_a_tenth_of_a_code keeps its historical regression ID.
 Each real channel must agree within 1.5e-6 PQ OR four binary32 epsilons of that
@@ -13,7 +15,7 @@ pixel's peak in linear light, with max dE_ITP below 0.05. Matrix cancellation
 before PQ can leave tiny light errors at a zero channel that exceed the PQ
 bound: the retained 600-nit crop differs by 2.42e-5 PQ but only 3.99e-8 nits.
 An instrumented pre-PQ readback reproduces that light residue with every RGB
-bit unchanged. This content-scaled acceptance does not weaken helper exactness.
+bit unchanged. This content-scaled acceptance does not weaken the helpers' own 1 ULP bound.
 
 test_helpers_match_their_cpu_evaluation is the check that can: every helper result must be the
 header's own CPU evaluation (run_pq_helper_exact.py: FUSED), which is within 1 ULP of correctly

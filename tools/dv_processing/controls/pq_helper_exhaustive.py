@@ -11,8 +11,11 @@ of a float32 rounding midpoint, the nearest float32 is not decided by it: those 
 listed and decided with the 60-digit Decimal reference of pq_helper_port.py instead.
 
 The helpers promise at most 1 ULP from the correctly rounded value on every input, fused or
-unfused; the report gives, per helper and mode, how many inputs are correctly rounded, how many
-are 1 ULP away and the worst distance. Exit 0 only if no input is further than 1 ULP.
+unfused, and never let a float operation meet a subnormal: each input also runs with flush-to-zero
+and denormals-are-zero on (as GPUs may) and must give the same bits. The report gives, per helper
+and mode, how many inputs are correctly rounded, how many are 1 ULP away, the worst distance and
+how many change when flushed. Exit 0 only if every input is counted, none is further than 1 ULP
+and none changes when flushed.
 """
 import os
 import subprocess
@@ -31,7 +34,22 @@ SCAN = r"""
 #include <atomic>
 #include "pq_reference.h"
 
-struct Tally { uint64_t exact = 0, one = 0, more = 0, ambiguous = 0; uint32_t worst = 0, worst_input = 0; };
+struct Tally { uint64_t exact = 0, one = 0, more = 0, ambiguous = 0, flushed = 0; uint32_t worst = 0, worst_input = 0; };
+
+// Flush-to-zero and denormals-are-zero, as GPUs may run: the helpers promise no float operation
+// meets a subnormal, so their bits must not change.
+#if defined(__aarch64__)
+static inline uint64_t fp_mode() { uint64_t r; __asm__ volatile("mrs %0, fpcr" : "=r"(r) : : "memory"); return r; }
+static inline void set_fp_mode(uint64_t r) { __asm__ volatile("msr fpcr, %0" : : "r"(r) : "memory"); }
+static const uint64_t FLUSH = 1ull << 24;   // FPCR.FZ
+#elif defined(__x86_64__)
+#include <xmmintrin.h>
+static inline uint64_t fp_mode() { return _mm_getcsr(); }
+static inline void set_fp_mode(uint64_t r) { __asm__ volatile("" : : : "memory"); _mm_setcsr((unsigned)r); __asm__ volatile("" : : : "memory"); }
+static const uint64_t FLUSH = 0x8040;      // MXCSR FTZ | DAZ
+#else
+#error "pq_helper_exhaustive needs a flush-to-zero control for this architecture"
+#endif
 
 static uint32_t wbits(float f) { uint32_t w; std::memcpy(&w, &f, 4); return w; }
 static float wfloat(uint32_t w) { float f; std::memcpy(&f, &w, 4); return f; }
@@ -65,6 +83,16 @@ static void scan(const char *name, Helper helper, Reference reference, FILE *amb
       for (uint64_t w = t; w < end; w += threads) {
         float x = wfloat((uint32_t)w);
         uint32_t got = wbits(helper(x));
+        // The volatile input and output keep the flushed evaluation between the mode switches
+        // (the compiler may not reuse `got` or move the arithmetic across them).
+        volatile float flushed_input = x;
+        volatile uint32_t flushed_bits;
+        uint64_t mode = fp_mode();
+        set_fp_mode(mode | FLUSH);
+        flushed_bits = wbits(helper(flushed_input));
+        set_fp_mode(mode);
+        uint32_t flushed = flushed_bits;
+        if (flushed != got) tally.flushed++;
         uint32_t want = nearest(reference((double)x));
         if (want == 0xffffffffu) { tally.ambiguous++; held[t].push_back((uint32_t)w); held[t].push_back(got); continue; }
         uint32_t d = got > want ? got - want : want - got;
@@ -76,14 +104,14 @@ static void scan(const char *name, Helper helper, Reference reference, FILE *amb
   for (auto &thread : pool) thread.join();
   Tally sum;
   for (auto &tally : tallies) {
-    sum.exact += tally.exact; sum.one += tally.one; sum.more += tally.more; sum.ambiguous += tally.ambiguous;
+    sum.exact += tally.exact; sum.one += tally.one; sum.more += tally.more; sum.ambiguous += tally.ambiguous; sum.flushed += tally.flushed;
     if (tally.worst > sum.worst || (tally.worst == sum.worst && tally.worst_input < sum.worst_input)) { sum.worst = tally.worst; sum.worst_input = tally.worst_input; }
   }
   for (auto &list : held)
     for (size_t i = 0; i < list.size(); i += 2) std::fprintf(ambiguous, "%s %08x %08x\n", name, list[i], list[i + 1]);
-  std::printf("%s exact %llu one %llu more %llu ambiguous %llu worst %u at %08x\n", name,
+  std::printf("%s exact %llu one %llu more %llu ambiguous %llu worst %u at %08x flushed %llu\n", name,
               (unsigned long long)sum.exact, (unsigned long long)sum.one, (unsigned long long)sum.more,
-              (unsigned long long)sum.ambiguous, sum.worst, sum.worst_input);
+              (unsigned long long)sum.ambiguous, sum.worst, sum.worst_input, (unsigned long long)sum.flushed);
 }
 
 int main(int argc, char **argv) {
@@ -135,14 +163,21 @@ def main():
             row[min(d, 2)] += 1
             if d > row[3]:
                 row[3], row[4] = d, w
+        reported = set()
         for line in run.stdout.strip().split("\n"):
-            name, _, exact, _, one, _, more, _, ambiguous, _, worst, _, at = line.split()
+            name, _, exact, _, one, _, more, _, ambiguous, _, worst, _, at, _, flushed = line.split()
+            reported.add(name)
             row = decided[name]
             exact, one, more, worst = int(exact) + row[0], int(one) + row[1], int(more) + row[2], max(int(worst), row[3])
             where = at if int(worst) >= row[3] else "%08x" % row[4]
             print("%-11s %s: %d inputs, %d correctly rounded, %d at 1 ULP, %d further; worst %d ULP (input 0x%s);"
-                  " %s decided exactly" % (mode, name, exact + one + more, exact, one, more, worst, where, ambiguous))
-            failed = failed or more > 0
+                  " %s decided exactly; %s change with subnormals flushed"
+                  % (mode, name, exact + one + more, exact, one, more, worst, where, ambiguous, flushed))
+            # Every non-negative finite float32 counted once (ambiguous ones as decided above).
+            failed = failed or more > 0 or int(flushed) > 0 or exact + one + more != port.INF
+        if reported != {"eotf", "oetf"}:
+            print(mode, "scan reported", sorted(reported), "not both helpers")
+            failed = True
     print("FAIL" if failed else "PASS")
     return 1 if failed else 0
 

@@ -226,6 +226,60 @@ class TableHelperBounds(unittest.TestCase):
 
         self.assertEqual(layout((work / "tables.h").read_text()), layout(pq_helper_port.TABLES.read_text()))
 
+    def test_double_reference_is_inside_the_bound_the_exhaustive_check_assumes(self):
+        # pq_helper_exhaustive.py decides each input from pq_reference.h unless it lies within
+        # PQR_BOUND (2^-36) of a rounding midpoint; that is sound only while the reference is
+        # that accurate. Keep a 16x margin: every sample, and the black, pole and white edges.
+        compiler = shutil.which("cc")
+        if not compiler:
+            raise RuntimeError("C compiler required for the PQ reference")
+        controls = ROOT / "tools/dv_processing/controls"
+        work = Path(self.scratch.name)
+        (work / "reference.c").write_text(
+            '#include "pq_reference.h"\n'
+            'double reference_eotf(double e) { return pqr_eotf(e); }\n'
+            'double reference_oetf(double y) { return pqr_oetf(y); }\n'
+            'double reference_bound(void) { return PQR_BOUND; }\n')
+        subprocess.run([compiler, "-std=c11", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I", str(controls),
+                        "-c", str(work / "reference.c"), "-o", str(work / "reference.o")], check=True)
+        subprocess.run([compiler, "-shared", str(work / "reference.o"), "-o", str(work / "reference.so"), "-lm"], check=True)
+        library = ctypes.CDLL(str(work / "reference.so"))
+        for name in ("reference_eotf", "reference_oetf", "reference_bound"):
+            getattr(library, name).restype = ctypes.c_double
+        library.reference_eotf.argtypes = library.reference_oetf.argtypes = [ctypes.c_double]
+        bound = library.reference_bound() / 16
+        value = pq_helper_port.value
+        from decimal import Decimal, getcontext
+        M1, M2, C1, C2, C3 = (pq_helper_port.M1, pq_helper_port.M2, pq_helper_port.C1,
+                              pq_helper_port.C2, pq_helper_port.C3)
+
+        def eotf(x):
+            getcontext().prec = 60
+            if not x > 0:
+                return None
+            p = Decimal(x) ** (1 / M2)
+            if p <= C1 or C2 - C3 * p <= 0:
+                return None
+            return 10000 * ((p - C1) / (C2 - C3 * p)) ** (1 / M1)
+
+        def oetf(y):
+            getcontext().prec = 60
+            p = (Decimal(y) / 10000) ** M1
+            return ((C1 + C2 * p) / (1 + C3 * p)) ** M2
+
+        edges = [value(w) for w in list(range(0x35443723, 0x35443723 + 4000, 13)) + list(range(0x3ffefbae - 4000, 0x3ffefbae, 11))]
+        for name, xs, exact, reference in (
+                ("eotf", self.samples["eotf"][0] + edges, eotf, library.reference_eotf),
+                ("oetf", [y for y in self.samples["oetf"][0] if 0 < y < 10000], oetf, library.reference_oetf)):
+            worst = 0
+            for x in xs:
+                want = exact(x)
+                if want is None or want == 0:
+                    continue
+                worst = max(worst, abs(Decimal(reference(x)) - want) / want)
+            with self.subTest(helper=name):
+                self.assertLess(worst, bound)
+
     def test_table_helper_edges(self):
         port, bits = self.ports["fused"], pq_helper_port.bits
         inf = float("inf")

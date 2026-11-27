@@ -335,7 +335,7 @@ enum { DV_DM_LATTICE_X = 66 };
 // Keep the legacy header expanded byte-for-byte for CM2.9, the lattice and
 // horizontal passes. CM4 point/final headers share one precise PQ definition and
 // carry only what their pass calls: the shader compiler inlines every call, so
-// its time grows with each instance of the split-float transfer functions. The
+// its time grows with each instance of the transfer functions. The
 // CM4 passes therefore convert all three channels in one vec3 instance, and
 // c4point_ic takes the ICtCp the pass already has instead of converting again.
 // Compile-time concatenation needs no allocations and no second independently
@@ -470,7 +470,7 @@ enum { DV_DM_LATTICE_X = 66 };
   DM_PQT_GLSL \
   "// Table-driven ST 2084 helpers (dm_pq_tables.h, controls/pq_table_gen.c). Each positive float32\n" \
   "// input selects one segment of its binade; tau, the input's position in it, is exact, and the\n" \
-  "// segment's polynomial is N + c1 tau (both double-word, c1 tau exact by fma) plus a float32 tail\n" \
+  "// segment's polynomial is N + c1 tau (both double-word, c1 tau split by fma) plus a float32 tail\n" \
   "// far below N, so one rounding at the end leaves every result within 1 ULP of the correctly\n" \
   "// rounded value: controls/pq_helper_exhaustive.py checks all float32 inputs, fused and unfused.\n" \
   "// No float operation here produces a subnormal; subnormal light is assembled from integers.\n" \
