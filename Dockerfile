@@ -82,7 +82,7 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
 # (its base, Debian snapshot and package list included) that this image was
 # published from. A contract fails when that recipe changes without a pin.
 # dv-dependency-recipe-sha256: a96a1717d7c66025e783e12e1e8c384d954d77a3fe4bdbb6352f93d8ff04bb4c
-FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050 AS dv-processing-dependencies
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:dfeb835a147680db0fb90826f99cb4f0a41467c8c42ce1718786686a10bbe066 AS dv-processing-dependencies
 
 # These stages sit before runtime-assets so release packaging keeps them
 # (validation/release_dockerfile.py); they see no daemon source.
@@ -130,7 +130,7 @@ RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplace
 # A base published before 2026-11-12 still carries a DV helper bundle of its
 # own. The runtime stage below discards it and installs the one built from
 # this context, so this pin never needs to follow tools/dv_processing.
-FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67 AS runtime-assets
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:4ec79d58de22ebb0cb09889de57f245cdd56a884ebec3a5327a90662ce12e6c9 AS runtime-assets
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
 # install on a persistent runner. These two tool images are pinned by index
@@ -236,7 +236,7 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
-ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67"
+ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:4ec79d58de22ebb0cb09889de57f245cdd56a884ebec3a5327a90662ce12e6c9"
 ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:
