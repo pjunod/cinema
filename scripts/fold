@@ -12,9 +12,10 @@ its own file to, and this folds the folder into the page:
 A pull request edits only the folder. Two places run this:
 
 * **after merge** -- `.github/workflows/fold.yml` runs `scripts/fold --publish`
-  every six hours on `main` and lands the result as a `chore(fold):` pull
-  request of its own. Merges into `main` happen one at a time, so this never
-  races an open pull request.
+  every six hours on `main`, checks the result with `verify` and lands it as
+  a `chore(fold):` pull request of its own, merged at the head it verified.
+  The fold only moves what is already on `main`, so that check is the only
+  one it waits for.
 * **at release** -- `scripts/release-cut` runs it too, so a release commit
   carries pages that match their folders.
 
@@ -36,6 +37,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import sys
+import tempfile
+import time
+import tomllib
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -191,15 +195,106 @@ def changes(root: Path, everything: bool = False) -> tuple[dict[str, str], list[
     return pages, removed
 
 
+# -- verifying a fold -----------------------------------------------------------------
+#
+# A fold only moves what is already on `main`: a fragment's rows into its ledger,
+# and the status folder into its page. So the one thing a fold needs checking for
+# is that it did exactly that. `verify` is that check; the fold workflow runs it
+# before it lands its own pull request, and paperwork runs it on any
+# `chore(fold):` pull request, so a hand fold gets the same check.
+
+
+def _git_out(root: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                          text=True).stdout
+
+
+def _fix_rows(texts: list[str]) -> list[str]:
+    """Every `[[fixes]]` row in these TOML texts, each as canonical JSON, sorted."""
+
+    rows = []
+    for text in texts:
+        for row in tomllib.loads(text).get("fixes", []):
+            rows.append(json.dumps(row, sort_keys=True, default=str))
+    return sorted(rows)
+
+
+def _fix_texts(root: Path) -> list[str]:
+    ledger = root / CLIENT_FIXES
+    folder = root / CLIENT_FIXES_DIR
+    texts = [ledger.read_text(encoding="utf-8")] if ledger.exists() else []
+    if folder.is_dir():
+        texts.extend(path.read_text(encoding="utf-8") for path in sorted(folder.glob("*.toml")))
+    return texts
+
+
+def _fold_inputs(root: Path, base: str, into: Path) -> None:
+    """Write `base`'s copy of everything a fold reads into `into`."""
+
+    wanted = [STATUS_PAGE, f"{STATUS_DIR}/", CLIENT_FIXES, f"{CLIENT_FIXES_DIR}/"]
+    for path in filter(None, _git_out(root, "ls-tree", "-r", "-z", "--name-only", base, "--", *wanted).split("\0")):
+        target = into / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(subprocess.run(["git", "show", f"{base}:{path}"], cwd=root, check=True,
+                                          capture_output=True).stdout)
+
+
+def verify(root: Path, base: str, paths: list[str]) -> list[str]:
+    """Why the fold in `root` is not exactly the fold of `base`, or [] when it is.
+
+    `paths` are the files the fold changed relative to `base`. The fold of
+    `base` is computed afresh, either kind (past each folder's bound, or all
+    of it as at a release cut), and `root` must match it exactly: the same
+    files changed, each page byte for byte, each absorbed fragment gone. The
+    fold itself is also held to what it is for: every client-fix row in the
+    ledger and its folder comes through unchanged.
+    """
+
+    with tempfile.TemporaryDirectory() as scratch:
+        expected_root = Path(scratch)
+        _fold_inputs(root, base, expected_root)
+        try:
+            before = _fix_rows(_fix_texts(expected_root))
+            variants = [changes(expected_root, everything) for everything in (False, True)]
+        except (FoldError, tomllib.TOMLDecodeError) as error:
+            return [f"the fold of {base} itself fails: {error}"]
+        changed = set(paths)
+        for pages, removed in variants:
+            if not (pages or removed) or changed != {*pages, *removed}:
+                continue
+            problems = []
+            for page, text in pages.items():
+                if not (root / page).exists() or (root / page).read_bytes() != text.encode("utf-8"):
+                    problems.append(f"{page} is not the fold of {base}'s folder")
+            problems += [f"{path} was absorbed but is still there" for path in removed if (root / path).exists()]
+            for page, text in pages.items():
+                (expected_root / page).write_text(text, encoding="utf-8")
+            for path in removed:
+                (expected_root / path).unlink()
+            if _fix_rows(_fix_texts(expected_root)) != before:
+                problems.append("the fold itself changed client-fix rows; scripts/fold is broken")
+            if changes(expected_root) != ({}, []):
+                problems.append("a second fold would change the result; scripts/fold is broken")
+            return problems
+        pages, removed = variants[0]
+        expected = {*pages, *removed}
+        return ([f"{path}: changed, but the fold of {base} does not change it" for path in sorted(changed - expected)]
+                + [f"{path}: the fold of {base} changes it, but this does not" for path in sorted(expected - changed)]
+                or [f"nothing to fold at {base}"]) + [
+            "rebuild the fold from the current base with `scripts/fold --write` (or `--all`)"]
+
+
 # -- publishing the fold (the after-merge workflow) --------------------------------
 
 FOLD_BRANCH = "fold/main"
+MERGE_ATTEMPTS = 12
+MERGE_RETRY_SECONDS = 10
 FOLD_TITLE = "chore(fold): fold fragment folders into their pages"
 FOLD_BODY = (
-    "Generated by `.github/workflows/fold.yml` after a merge into `main`: "
-    "`scripts/fold --write` rewrote the pages folded from their fragment folders "
-    "(`scripts/fold --list`). Nothing here is written by hand; the next fold "
-    "replaces this branch.\n\nChangelog: none — generated pages"
+    "Generated by `.github/workflows/fold.yml` from `main`: `scripts/fold` "
+    "rewrote the pages folded from their fragment folders (`scripts/fold --list`) "
+    "and `verify` confirmed the result is exactly that fold. Nothing here is "
+    "written by hand; the next fold replaces this branch.\n\nChangelog: none — generated pages"
 )
 
 
@@ -226,21 +321,24 @@ def _api(base: str, token: str, method: str, path: str, payload: dict | None = N
 
 
 def publish(root: Path, paths: list[str]) -> int:
-    """Commit the folded pages on `fold/main` and land them through a pull request.
+    """Verify the fold, commit it on `fold/main` and land it through a pull request.
 
-    The pull request goes through the same paperwork and fast lane as any
-    other and merges itself when its checks pass. The token must belong to an
-    account whose pushes start workflows (a bot user, not the job's own
-    token), or the pull request would never be checked and never merge.
+    The fold only moves what is already on `main`, so its check is `verify`,
+    run here on the exact tree it commits; it does not wait for the requested
+    lane (AGENTS.md, "Landing on main"). The merge is pinned to the verified
+    head, so nothing else can land under the fold's name. The pull request
+    keeps the landing in the forge's history, with its `Changelog:` field.
+    `FOLD_TOKEN` is the job's own token: nothing needs the fold's pushes to
+    start workflows, because nothing waits for them.
     """
 
-    token = os.environ.get("FOLD_BOT_TOKEN", "")
+    token = os.environ.get("FOLD_TOKEN", "")
     server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not token:
-        print("::notice::fold: FOLD_BOT_TOKEN is not set, so the folded pages were not "
-              "published; run `scripts/fold --write` and land them by hand (status.d/README.md)")
-        return 0
+        print("fold: --publish needs FOLD_TOKEN (the fold workflow passes the job's own token)",
+              file=sys.stderr)
+        return 2
     if not server or not repo:
         print("fold: --publish needs GITHUB_SERVER_URL and GITHUB_REPOSITORY", file=sys.stderr)
         return 2
@@ -248,6 +346,11 @@ def publish(root: Path, paths: list[str]) -> int:
     def git(*args: str) -> None:
         subprocess.run(["git", *args], cwd=root, check=True)
 
+    problems = verify(root, "HEAD", paths)
+    if problems:
+        for problem in problems:
+            print(f"::error::fold: {problem}")
+        return 1
     git("add", "-A", "--", *paths)
     git("-c", "user.name=plurx fold", "-c", "user.email=fold@noreply.invalid",
         "commit", "-q", "-m", FOLD_TITLE, "-m", FOLD_BODY)
@@ -255,6 +358,7 @@ def publish(root: Path, paths: list[str]) -> int:
     # The token reaches git through its environment, never its arguments.
     env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
            "GIT_CONFIG_VALUE_0": header.split("=", 1)[1]}
+    head = _git_out(root, "rev-parse", "HEAD").strip()
     subprocess.run(["git", "push", "--force", f"{server}/{repo}.git", f"HEAD:refs/heads/{FOLD_BRANCH}"],
                    cwd=root, check=True, env=env)
     owner, name = repo.split("/", 1)
@@ -272,19 +376,24 @@ def publish(root: Path, paths: list[str]) -> int:
                     {"base": "main", "head": FOLD_BRANCH, "title": FOLD_TITLE, "body": FOLD_BODY})
     number = pull["number"]
     # Forgejo drops the merge template's body on an API merge, so the message
-    # (and with it the Changelog field) is passed explicitly. A fold that only
-    # replaced the branch of a pull request already scheduled to merge gets a
-    # refusal here, which means there is nothing more to do.
-    try:
-        _api(server, token, "POST", f"/repos/{owner}/{name}/pulls/{number}/merge",
-             {"Do": "merge", "merge_when_checks_succeed": True,
-              "MergeTitleField": f"Merge pull request '{FOLD_TITLE}' (#{number}) from {FOLD_BRANCH} into main",
-              "MergeMessageField": FOLD_BODY})
-    except ForgeStatus as error:
-        if error.status not in (405, 409):
-            raise
-        print(f"fold: #{number} was already scheduled to merge ({error})")
-    print(f"fold: pull request #{number} carries {', '.join(paths)} and merges when its checks pass")
+    # (and with it the Changelog field) is passed explicitly. A new pull
+    # request's mergeability is computed in the background, so a refusal is
+    # retried for a while; one that persists (a conflict with a pull request
+    # that landed after this fold's base) fails the job, and the next fold
+    # starts again from the new `main`.
+    merge = {"Do": "merge", "head_commit_id": head,
+             "MergeTitleField": f"Merge pull request '{FOLD_TITLE}' (#{number}) from {FOLD_BRANCH} into main",
+             "MergeMessageField": FOLD_BODY}
+    for attempt in range(MERGE_ATTEMPTS):
+        try:
+            _api(server, token, "POST", f"/repos/{owner}/{name}/pulls/{number}/merge", merge)
+            break
+        except ForgeStatus as error:
+            if error.status not in (405, 409) or attempt == MERGE_ATTEMPTS - 1:
+                print(f"::error::fold: #{number} did not merge: {error}")
+                return 1
+            time.sleep(MERGE_RETRY_SECONDS)
+    print(f"fold: verified and landed #{number} ({head[:9]}) carrying {', '.join(paths)}")
     return 0
 
 

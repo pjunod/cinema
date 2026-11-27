@@ -43,6 +43,11 @@ same inputs are adopted, not repeated
 
 **Never add or remove labels in a loop.** Each label change is a run.
 
+**The fold pull request does not take the lane.** `chore(fold):` pull
+requests from `.github/workflows/fold.yml` only move content already on
+`main` into its folded pages. They land on `scripts/fold`'s `verify` instead
+(AGENTS.md, "Landing on main").
+
 ## What the lane does with each event
 
 | Event | Runs |
