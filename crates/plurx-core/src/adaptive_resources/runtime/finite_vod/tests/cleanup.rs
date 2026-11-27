@@ -813,6 +813,28 @@ async fn a_successor_close_rebinds_the_charge_and_a_restart_before_its_prepare_r
     reopened.drain().expect("join reopened journal");
 }
 
+/// A successor demand that will never be adopted (its collector stopped, or
+/// its predecessor never closed) leaves no family registered in the book.
+#[tokio::test]
+async fn an_abandoned_successor_demand_unregisters_its_family() {
+    let root = tempfile::tempdir().expect("durable finite fixture");
+    let (runtime, owner) = original_owner(root.path(), false);
+    let demand = owner.successor_demand().expect("a successor demand");
+    let family = demand.family;
+    let charge = runtime.accounting().expect("predecessor charge").used;
+    runtime.abandon_finite_successor(demand);
+    assert!(
+        runtime.remove_unused_family(family).is_err(),
+        "the abandoned successor's family already left the book"
+    );
+    assert_eq!(
+        runtime.accounting().expect("unchanged charge").used,
+        charge,
+        "abandoning a demand moves no charge"
+    );
+    drop(owner);
+}
+
 /// Before the producer arms its output, the role's own planned output has
 /// published nothing: a lookup is `None`, so a first init request starts the
 /// producer and waits. A member this role does not plan is still a state

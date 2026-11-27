@@ -132,6 +132,12 @@ impl NodeResourceRuntime {
         })
     }
 
+    /// A successor demand that will never be adopted (its succession was
+    /// abandoned): its fresh family leaves the book. It holds no charge.
+    pub fn abandon_finite_successor(&self, successor: FiniteSuccessorDemand) {
+        let _ = self.remove_unused_family(successor.family);
+    }
+
     pub(in crate::adaptive_resources::runtime) async fn finish_finite_close_into_successor(
         &self,
         selection: &mut Option<OwnedPreparation>,
@@ -148,15 +154,21 @@ impl NodeResourceRuntime {
             demand: Some(successor),
             outcome: None,
         };
-        self.finish_application_close_with(
-            selection,
-            index,
-            FinalApplicationRole::Finite,
-            workspace,
-            Some(&mut slot),
-            deadline,
-        )
-        .await?;
+        let closed = self
+            .finish_application_close_with(
+                selection,
+                index,
+                FinalApplicationRole::Finite,
+                workspace,
+                Some(&mut slot),
+                deadline,
+            )
+            .await;
+        if let Err(error) = closed {
+            // The close keeps its own retry; this successor demand is spent.
+            let _ = self.remove_unused_family(family);
+            return Err(error);
+        }
         let outcome = slot.outcome.ok_or(OperationError::State)?;
         if outcome.is_err() {
             // A refused successor never uses its family.

@@ -130,10 +130,25 @@ impl Shared {
     /// successor holds a demand and a reply, never a grant, so nothing is
     /// orphaned; each waiting succession refuses its parked sessions.
     pub(super) fn drop_pending_successors(&self) {
-        self.pending_successors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        let pending = std::mem::take(
+            &mut *self
+                .pending_successors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for (_, successor) in pending {
+            self.abandon_successor(successor);
+        }
+    }
+
+    /// A pending successor that no close will adopt: its fresh family
+    /// leaves the runtime book, and dropping its reply refuses the parked.
+    fn abandon_successor(&self, successor: PendingSuccessor) {
+        let PendingSuccessor { demand, reply } = successor;
+        if let Some(runtime) = self.resource_runtime.as_ref() {
+            runtime.abandon_finite_successor(demand);
+        }
+        drop(reply);
     }
 
     /// The successor a close of `key` must hand its charge to, if any.
@@ -225,7 +240,9 @@ impl Shared {
             // The exact predecessor did not enter its close (a new reader
             // attached, or it is still protected). Nothing was handed over:
             // put every parked attachment back on the same incarnation.
-            self.take_pending_successor(&key);
+            if let Some(successor) = self.take_pending_successor(&key) {
+                self.abandon_successor(successor);
+            }
             self.reattach(&old, parked).await;
             return Err("the predecessor did not close for its successor".into());
         }
