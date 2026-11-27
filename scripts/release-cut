@@ -12,7 +12,10 @@ wrong at 1 a.m.:
 3. set the one workspace version in Cargo.toml, keep both native apps'
    marketing versions equal to it (validation/mobile_versions.py requires
    that), rewrite every status document that quotes the version, then let
-   Cargo relock both lockfiles. Build numbers are not touched: they are
+   Cargo relock both lockfiles. The Apple marketing version moves the
+   reviewed project.yml fingerprints in validation/native_receipts.py, so
+   the cut re-pins them -- only when project.yml is otherwise unchanged
+   since its last review. Build numbers are not touched: they are
    derived at build time by scripts/build-number, never stored.
 
 It never tags. Under the weekly cadence (docs/RELEASING.md "The weekly
@@ -28,7 +31,9 @@ carry it on a Monday.
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -218,6 +223,77 @@ def set_mobile_versions(android: str, apple: str, version: str) -> tuple[str, st
     marketing = one(r'^\s*MARKETING_VERSION:\s*"([^"]+)"\s*$', apple, "Apple MARKETING_VERSION")
     apple = put(apple, marketing, version)
     return android, apple
+
+
+NATIVE_RECEIPTS = "validation/native_receipts.py"
+_APPLE_PIN = r"^    '" + re.escape(APPLE) + r"': '([0-9a-f]{64})',$"
+_APPLE_SHAPE = r'^APPLE_PROJECT_SHAPE = "([0-9a-f]{64})"$'
+_APPLE_COUNTER = r"^APPLE_BUILD_COUNTER = re\.compile\((rb'[^\n]*')\)$"
+_RELEASE_NOTE = r'^    # release: v\S+ changes only MARKETING_VERSION "[^"]*" -> "[^"]*"\.\n\Z'
+
+
+def repin_native_receipts(receipts: str, before: str, after: str, previous: str, version: str) -> str:
+    """The reviewed project.yml boundary moved by exactly the version bump the cut made.
+
+    validation/native_receipts.py pins project.yml's sha256 and its
+    counter-normalized shape. A cut changes only MARKETING_VERSION there, so
+    both pins move with it -- but only when they still describe `before`
+    exactly and `after` differs from it in that one line. Anything else is an
+    unreviewed change to the native build boundary, and the cut refuses it
+    rather than widen the boundary silently.
+    """
+
+    def found(pattern: str, label: str) -> re.Match[str]:
+        matches = list(re.finditer(pattern, receipts, re.MULTILINE))
+        if len(matches) != 1:
+            raise CutError(
+                f"{NATIVE_RECEIPTS}: expected exactly one {label}, found {len(matches)}; "
+                "restore it or update scripts/release-cut deliberately"
+            )
+        return matches[0]
+
+    pin = found(_APPLE_PIN, f"BUILD_SPECS pin for {APPLE}")
+    shape = found(_APPLE_SHAPE, "APPLE_PROJECT_SHAPE")
+    counter = re.compile(ast.literal_eval(found(_APPLE_COUNTER, "APPLE_BUILD_COUNTER").group(1)))
+
+    def shape_of(text: str) -> str:
+        normalized, count = counter.subn(rb"\g<1>0\g<2>", text.encode("utf-8"))
+        if count != 1:
+            raise CutError(f"{APPLE}: expected exactly one positive CURRENT_PROJECT_VERSION")
+        return hashlib.sha256(normalized).hexdigest()
+
+    if hashlib.sha256(before.encode("utf-8")).hexdigest() != pin.group(1) or shape_of(before) != shape.group(1):
+        raise CutError(
+            f"{APPLE} no longer matches its reviewed fingerprint in {NATIVE_RECEIPTS}: it changed "
+            "since the boundary was last reviewed. Review that change and re-pin BUILD_SPECS and "
+            "APPLE_PROJECT_SHAPE in its own pull request, then cut the release"
+        )
+    old_lines, new_lines = before.split("\n"), after.split("\n")
+    changed = [(old, new) for old, new in zip(old_lines, new_lines) if old != new]
+    if len(old_lines) != len(new_lines) or len(changed) != 1 or not all(
+        re.fullmatch(r'\s*MARKETING_VERSION:\s*"[^"]+"\s*', line) for line in changed[0]
+    ):
+        raise CutError(f"{APPLE}: the cut must change only its MARKETING_VERSION line")
+
+    above = receipts.rfind("\n", 0, pin.start() - 1) + 1
+    replacements = sorted(
+        (
+            (pin.span(1), hashlib.sha256(after.encode("utf-8")).hexdigest()),
+            (shape.span(1), shape_of(after)),
+            # The line directly above the pin says what the last cut moved. A
+            # reviewed pull request that re-pins the file may replace it with
+            # its own note; the cut then adds its line rather than refuse.
+            (
+                (above, pin.start()) if re.match(_RELEASE_NOTE, receipts[above : pin.start()])
+                else (pin.start(), pin.start()),
+                f'    # release: v{version} changes only MARKETING_VERSION "{previous}" -> "{version}".\n',
+            ),
+        ),
+        reverse=True,
+    )
+    for (start, end), value in replacements:
+        receipts = receipts[:start] + value + receipts[end:]
+    return receipts
 
 
 def _replace_one(text: str, pattern: str, value: str, where: str, label: str) -> str:
@@ -414,6 +490,16 @@ def cut(root: Path, version: str, date: str) -> list[str]:
         version,
     )
     moved = {"CHANGELOG.md": changelog, "Cargo.toml": cargo, ANDROID: android, APPLE: apple}
+    receipts_path = root / NATIVE_RECEIPTS
+    # A tree without the native receipts (a fixture) pins no Apple boundary.
+    if receipts_path.exists():
+        moved[NATIVE_RECEIPTS] = repin_native_receipts(
+            receipts_path.read_text(encoding="utf-8"),
+            (root / APPLE).read_text(encoding="utf-8"),
+            apple,
+            current,
+            version,
+        )
     claims = set_version_claims(
         lambda path: moved[path] if path in moved else (root / path).read_text(encoding="utf-8"),
         current,

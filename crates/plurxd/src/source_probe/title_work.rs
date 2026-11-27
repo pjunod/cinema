@@ -144,6 +144,35 @@ impl TitleTask {
         let fel: Option<String> = None;
         #[cfg(target_os = "linux")]
         state.transcode.observe_native_fel_backend(fel.clone());
+        // Before a maintenance or prewarm pass binds a title to this scanner,
+        // keep the aggregates it would only reproduce. (A playback pass binds
+        // nothing new: it skips titles bound to another scanner.) A read
+        // decides first, so a pass with nothing to carry writes nothing; if
+        // the carry cannot be decided, bind nothing this pass rather than
+        // rotate.
+        if !playback_only {
+            match state
+                .store
+                .carry_forward_dv_title_verdicts(
+                    &scanner,
+                    &crate::dv_tools::TITLE_SCANNER_PREDECESSORS
+                        .iter()
+                        .map(|digest| (*digest).to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .await
+            {
+                Ok(0) => {}
+                Ok(carried) => tracing::info!(
+                    carried,
+                    "kept title aggregates this scanner reproduces from its predecessor"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "carrying title aggregates forward");
+                    return Ok(None);
+                }
+            }
+        }
         let (demands, mut after): (Vec<TitleDemand>, Option<&mut i64>) = match dispatch {
             #[cfg(target_os = "linux")]
             TitleDispatch::Playback => (live_demands.unwrap_or_default(), Some(live_after)),

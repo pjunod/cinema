@@ -71,9 +71,7 @@ crops tightened from 2-3e-6 to under 7e-7 PQ; `test_dm_precision.py`
 enforces 1.5e-6. The helpers are one three-channel branchless implementation
 with Horner loops, so a CM4 shader compiles in about 2.4 s on lavapipe
 instead of 33-47 s (first proposal), with every parity output bit-identical.
-Correct rounding needs fused `fma`: lavapipe does not fuse, so
-`run_pq_helper_exact.py` accepts its unfused result there and
-`PLURX_DM_REQUIRE_FUSED_FMA=1` demands correct rounding on real GPUs.
+Superseded 2026-11-27 by [table helpers](CM4-TABLE-HELPERS.md): 1 ULP, ~90× faster.
 On real GPUs both lab6's AMD (RADV) and ROG's NVIDIA fuse `fma` and the
 helpers are correctly rounded on every sampled input. The shrunk build is
 bit-identical to the first precise build on AMD; on NVIDIA ten parity cases

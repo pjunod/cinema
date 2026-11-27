@@ -344,13 +344,21 @@ def check_folded_pages(base: str, paths: list[str], title: str) -> Result:
     except fold.FoldError as error:
         problems.append(str(error))
     # The fold's own pull request: its title, and a diff that touches nothing
-    # but folded pages and their fragment folders. The title alone is not enough.
+    # but folded pages and their fragment folders. The title alone is not enough,
+    # and such a pull request must also be exactly a fold of its base
+    # (`scripts/fold`'s `verify`), the one check a fold lands on.
     owned = {item.page for item in fold.FOLDS}
     folders = tuple(item.source for item in fold.FOLDS)
     by_fold = title.startswith("chore(fold):") and bool(paths) and all(
         path in owned or path.startswith(folders) for path in paths
     )
     cutover = not _at(base, "scripts/fold")
+    if by_fold:
+        # Against the merge base, as `paths` is: `main` may have gained
+        # fragments since the fold branched, and the merge keeps them.
+        fork = subprocess.run(["git", "merge-base", base, "HEAD"], cwd=ROOT, capture_output=True,
+                              text=True).stdout.strip() or base
+        problems.extend(fold.verify(ROOT, fork, paths))
     if not (by_fold or cutover or _is_release_cut(base, paths)):
         for item in fold.FOLDS:
             if item.page in paths:
