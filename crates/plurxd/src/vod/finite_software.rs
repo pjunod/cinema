@@ -945,6 +945,20 @@ async fn build_inner(
     if application_owner_bytes.is_some() && recovered.is_some() {
         return Err("adaptive attempt requires a fresh finite producer owner".into());
     }
+    if recovered.is_some() {
+        // A recovered S stands for the exact source object its claim names.
+        // A different object at the same path (even with the same size and
+        // mtime) must not attach to it: fence the live source against that
+        // version first, as a legacy build does. A refusal leaves the
+        // recovered S protected and unchanged.
+        drop(
+            crate::fragment_index_cluster::open_source_fence(
+                &recipe.file,
+                Some(object_version.as_str()),
+            )
+            .await?,
+        );
+    }
     if let Some(output) = recovered {
         let projected_metadata = projected_metadata
             .checked_add(
