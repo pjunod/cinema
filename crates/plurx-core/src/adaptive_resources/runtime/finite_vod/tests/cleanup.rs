@@ -739,6 +739,47 @@ async fn accepted_finite_cleanup_ignores_new_admission_epoch_but_waits_for_origi
     finish_same_ticket(runtime, owner, ticket).await;
 }
 
+/// Before the producer arms its output, the role's own planned output has
+/// published nothing: a lookup is `None`, so a first init request starts the
+/// producer and waits. A member this role does not plan is still a state
+/// error, never an empty answer.
+#[tokio::test]
+async fn an_unarmed_planned_output_has_no_file_yet_and_a_foreign_member_is_state() {
+    let root = tempfile::tempdir().expect("durable finite fixture");
+    let (runtime, owner) = original_owner(root.path(), false);
+    assert!(runtime
+        .acknowledge_finite_preparation_for_cleanup(&owner.preparation)
+        .await
+        .expect("original accepted preparation"));
+    let output = owner.output();
+    assert!(
+        matches!(output.file_len(FiniteFile::Init).await, Ok(None)),
+        "the producer has not armed its own planned output"
+    );
+    let foreign = FiniteOutput {
+        member: Uuid::new_v4(),
+        ..owner.output()
+    };
+    assert!(
+        foreign.file_len(FiniteFile::Init).await.is_err(),
+        "a member the role does not plan stays a state error"
+    );
+    runtime
+        .arm_scratch_bootstrap(&owner.preparation, 0, owner.scratch_member, deadline())
+        .await
+        .expect("original committed bootstrap arm, no root entry");
+    assert!(
+        matches!(output.file_len(FiniteFile::Init).await, Ok(None)),
+        "armed but unpublished"
+    );
+    drop((output, foreign));
+    let ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("same original cleanup");
+    finish_same_ticket(runtime, owner, ticket).await;
+}
+
 #[tokio::test]
 async fn definitely_unaccepted_finite_prepare_keeps_charge_until_same_no_root_ticket_drops_app_aliases(
 ) {

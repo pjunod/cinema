@@ -291,6 +291,11 @@ pub(super) fn reader_transition_progress(
 
 impl NodeResourceRuntime {
     /// Metadata lookup only; it does not open a directory or file.
+    ///
+    /// The role's own planned scratch member has published nothing before its
+    /// producer arms it, so a lookup then is `None`, not a state error: the
+    /// caller starts the producer and waits for the file. A member the role
+    /// does not plan, or a role already refunded or retiring, stays `State`.
     pub(in crate::adaptive_resources::runtime) async fn finite_file_len(
         &self,
         owner: &OwnedPreparation,
@@ -301,6 +306,9 @@ impl NodeResourceRuntime {
         self.validate_preparation(owner)?;
         let bundle = owner.state.lock().await;
         let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+        if planned_unarmed_member(role, requested_member) {
+            return Ok(None);
+        }
         let member = resolve_member(role, requested_member)?;
         let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
         Ok(bootstrap
@@ -1036,6 +1044,20 @@ fn retry_retained_transition(
     }
     Ok(())
 }
+/// The role's own planned scratch member that its producer has not armed yet,
+/// on a role that is neither refunded nor retiring.
+fn planned_unarmed_member(role: &OwnedRole, requested: Uuid) -> bool {
+    !role.refunded
+        && role.retirement.is_none()
+        && !role.bootstrap.contains_key(&requested)
+        && role.typed_members.as_ref().is_some_and(|members| {
+            members.iter().any(|member| {
+                matches!(member, v2::MemberPlan::ScratchAssetsV3 { slot, .. }
+                    if slot.member_id.uuid() == requested)
+            })
+        })
+}
+
 fn resolve_member(role: &OwnedRole, requested: Uuid) -> Result<Uuid, OperationError> {
     if role.bootstrap.contains_key(&requested) {
         return Ok(requested);
