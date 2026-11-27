@@ -326,4 +326,8 @@ async fn slot_service(port: CoreServicePort, shared: Arc<Shared>) {
             }
         }
     }
+    // The collector stopped: no close will hand a pending successor its
+    // charge. Each waiting succession gives its parked sessions the typed
+    // capacity answer; the predecessor keeps its ordinary whole refund.
+    shared.drop_pending_successors();
 }

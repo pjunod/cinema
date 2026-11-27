@@ -126,6 +126,16 @@ struct ParkedAttachment {
 }
 
 impl Shared {
+    /// Abandon every pending successor (its collector stopped). A pending
+    /// successor holds a demand and a reply, never a grant, so nothing is
+    /// orphaned; each waiting succession refuses its parked sessions.
+    pub(super) fn drop_pending_successors(&self) {
+        self.pending_successors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     /// The successor a close of `key` must hand its charge to, if any.
     pub(super) fn take_pending_successor(&self, key: &str) -> Option<PendingSuccessor> {
         self.pending_successors
