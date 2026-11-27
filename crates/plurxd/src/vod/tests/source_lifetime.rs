@@ -176,7 +176,10 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
         let mut rendition = serve
             .shared
             .build_rendition(
-                "owned-registration",
+                // The legacy generation path this drives is the one Source
+                // playback renditions take; an ordinary encoded key is a
+                // finite producer that admits at build.
+                "source-owned-registration",
                 None,
                 Recipe {
                     audio_excluded: false,
@@ -294,13 +297,32 @@ async fn source_deferred_rendition_preparation_creates_no_visible_demand_or_chil
     assert!(serve.shared.sessions.lock().await.is_empty());
     assert!(rendition.readers.lock().await.is_empty());
     assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
-    assert_eq!(encoding.admissions.software_in_use(), 0);
+    // A finite rendition (Linux) holds its admitted encoder claim from the
+    // build, without a reader, session or child; a legacy one admits only
+    // on demand.
+    let prepared_claim = encoding.admissions.software_in_use();
+    if cfg!(target_os = "linux") {
+        assert!(prepared_claim > 0, "the finite build owns its admitted claim");
+    } else {
+        assert_eq!(prepared_claim, 0);
+    }
     assert!(matches!(
         rendition.slot.belief().await,
         Producer::Absent { .. }
     ));
     drop(attachment);
     assert!(serve.shared.sessions.lock().await.is_empty());
+    assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+    serve
+        .shared
+        .purge_if_dormant(&rendition.key, Duration::ZERO)
+        .await;
+    wait_until(
+        "the unattached prepared rendition returns its claim",
+        Duration::from_secs(30),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
     assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
 }
 

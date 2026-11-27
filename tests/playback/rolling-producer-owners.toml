@@ -2183,6 +2183,8 @@ pattern = "publication_ready_at_ms"
 "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs" = 3
 "crates/plurxd/src/transcode/tests/source_actor.rs" = 5
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 2
+# run 9504 A1 fallback test: the staged predecessor's activation fixture (blocked publication, then confirm).
+"crates/plurxd/src/vodencode_manager_tests.rs" = 2
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2299,6 +2301,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs" = 1
 "crates/plurxd/src/transcode/tests/source_actor.rs" = 3
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 1
+# run 9504 A1 fallback test: the staged predecessor is activated blocked, as a real activation is.
+"crates/plurxd/src/vodencode_manager_tests.rs" = 1
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2990,6 +2994,10 @@ pattern = "purge_if_dormant"
 "crates/plurxd/src/vod/tests/chunk_03.rs" = 3
 "crates/plurxd/src/vod/tests/finite_software.rs" = 7
 "crates/plurxd/src/vod/tests/finite_software_restart.rs" = 1
+# run 9504: a finite rendition is retired by the dormant purge, not by the legacy slot; the test retires it before checking capacity.
+"crates/plurxd/src/vod/tests/source_lifetime.rs" = 1
+# run 9504: restarts, prepared root and AAC neighbors retire their finite renditions through the dormant purge.
+"crates/plurxd/src/vodencode_tests.rs" = 3
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -3357,8 +3365,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/vod/tests/preparation_storage.rs" = 1
 "crates/plurxd/src/vod/tests/source_lifetime.rs" = 6
 "crates/plurxd/src/vodencode.rs" = 3
-"crates/plurxd/src/vodencode_manager_tests.rs" = 2
-"crates/plurxd/src/vodencode_tests.rs" = 3
+# run 9504 A1 fallback test spawns the commit's Live create to observe its wait over background.
+"crates/plurxd/src/vodencode_manager_tests.rs" = 3
+# run 9504: explicit_vod spawns the active Live attach to observe its wait over background on the finite path.
+"crates/plurxd/src/vodencode_tests.rs" = 4
 "crates/plurxd/src/vodserve.rs" = 1
 "crates/plurxd/src/waitpool.rs" = 1
 "crates/plurxd/src/watched.rs" = 7
@@ -5286,8 +5296,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/vod/tests/retained_durable.rs" = 3
 "crates/plurxd/src/vod/tests/source_lifetime.rs" = 8
 "crates/plurxd/src/vodencode.rs" = 15
-"crates/plurxd/src/vodencode_manager_tests.rs" = 10
-"crates/plurxd/src/vodencode_tests.rs" = 11
+# run 9504 A1 fallback test bounds the live wait and the admitted create (+3).
+"crates/plurxd/src/vodencode_manager_tests.rs" = 13
+# run 9504: ordinary_auto/explicit_vod bound the Live attach after background yields (+1).
+"crates/plurxd/src/vodencode_tests.rs" = 12
 "crates/plurxd/src/vodserve.rs" = 1
 "crates/plurxd/src/waitpool.rs" = 1
 "crates/plurxd/src/watched.rs" = 16

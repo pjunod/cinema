@@ -376,32 +376,37 @@ async fn ordinary_auto_vod_start_registers_live_wait_over_background() {
     let mut req = request("ordinary-auto", 0.0);
     req.kind = SessionKind::Transcode { height: 144 };
     req.automatic = true;
-    serve
-        .try_create(
-            VodRecipeRequest {
-                admission_priority: Priority::Live,
-                encoding: Some(Arc::clone(&encoding)),
-                ..(&req).into()
-            },
-            &file,
-            &settings(),
-            VodAttribution {
-                user_name: "test",
-                item_title: "ordinary Auto",
-                supersession_user: "test",
-            },
-            "ordinary-auto".into(),
-        )
-        .await
-        .expect("ordinary attachment");
-    let rendition = rendition_of(&serve, "ordinary-auto").await;
-    assert_eq!(
-        rendition.readers.lock().await["ordinary-auto"].admission_priority,
-        Priority::Live
-    );
-    let init = tokio::spawn({
+    // The Live wait over background may be registered by the attachment
+    // itself (Linux's finite build admits its encoder at create) or by the
+    // first fetch (the lazily admitted legacy rendition). Either way the
+    // viewer's own Live purpose waits for background to yield, then is
+    // admitted; observe it across both steps.
+    let started = tokio::spawn({
         let serve = Arc::clone(&serve);
-        async move { fetched_bytes(&serve, "ordinary-auto", INIT_NAME).await }
+        let encoding = Arc::clone(&encoding);
+        let file = file.clone();
+        let req = req.clone();
+        async move {
+            serve
+                .try_create(
+                    VodRecipeRequest {
+                        admission_priority: Priority::Live,
+                        encoding: Some(encoding),
+                        ..(&req).into()
+                    },
+                    &file,
+                    &settings(),
+                    VodAttribution {
+                        user_name: "test",
+                        item_title: "ordinary Auto",
+                        supersession_user: "test",
+                    },
+                    "ordinary-auto".into(),
+                )
+                .await
+                .expect("ordinary attachment");
+            fetched_bytes(&serve, "ordinary-auto", INIT_NAME).await
+        }
     });
     wait_until(
         "ordinary Auto asks background to yield",
@@ -410,15 +415,20 @@ async fn ordinary_auto_vod_start_registers_live_wait_over_background() {
     )
     .await;
     assert!(
-        !init.is_finished(),
+        !started.is_finished(),
         "the real background permit still blocks admission"
     );
     drop(background);
-    assert!(!tokio::time::timeout(Duration::from_secs(20), init)
+    assert!(!tokio::time::timeout(Duration::from_secs(20), started)
         .await
         .expect("init after background settlement")
-        .expect("init task")
+        .expect("attach and init task")
         .is_empty());
+    let rendition = rendition_of(&serve, "ordinary-auto").await;
+    assert_eq!(
+        rendition.readers.lock().await["ordinary-auto"].admission_priority,
+        Priority::Live
+    );
     assert!(
         encoding.nonpreemptive_trial,
         "cached recipe metadata is not mutated"
@@ -473,6 +483,107 @@ async fn explicit_vod_attachment_priority_isolated_from_cached_auto_recipe() {
         let mut prepared = request("prepared-purpose", 0.0);
         prepared.kind = SessionKind::Transcode { height: 144 };
         prepared.automatic = cached_trial;
+        if cfg!(target_os = "linux") {
+            // A finite build admits at attachment. Speculative admission uses
+            // only spare capacity, so a prepared attach is refused while
+            // background holds the pool, instead of registering: the typed,
+            // retryable capacity outcome, with nothing left behind.
+            let refused = serve
+                .try_create(
+                    VodRecipeRequest {
+                        admission_priority: Priority::Speculative,
+                        encoding: Some(Arc::clone(&encoding)),
+                        ..(&prepared).into()
+                    },
+                    &file,
+                    &settings(),
+                    VodAttribution {
+                        user_name: "test",
+                        item_title: "prepared",
+                        supersession_user: "test",
+                    },
+                    "prepared-purpose".into(),
+                )
+                .await
+                .expect_err("a prepared attach never takes background capacity");
+            assert!(
+                refused.contains("vod_family_capacity")
+                    && refused.contains("compatibility pool is occupied"),
+                "typed capacity, not a producer failure: {refused}"
+            );
+            assert!(!refused.contains("producer_failed"), "{refused}");
+            assert!(
+                !encoding.admissions.live_is_waiting(),
+                "preparation cannot preempt background work"
+            );
+            assert!(serve.shared.sessions.lock().await.is_empty(), "no reader");
+            assert!(
+                serve.shared.renditions.lock().await.is_empty(),
+                "no rendition or child"
+            );
+            assert_eq!(
+                encoding.admissions.software_in_use(),
+                1,
+                "only background's own reservation remains"
+            );
+            // The ordinary viewer's own Live purpose is what waits for
+            // background to yield; the cached Auto recipe does not lend it.
+            let mut active = request("active-purpose", 0.0);
+            active.kind = SessionKind::Transcode { height: 144 };
+            active.automatic = true;
+            let attach = tokio::spawn({
+                let serve = Arc::clone(&serve);
+                let encoding = Arc::clone(&encoding);
+                let file = file.clone();
+                async move {
+                    serve
+                        .try_create(
+                            VodRecipeRequest {
+                                admission_priority: Priority::Live,
+                                encoding: Some(encoding),
+                                ..(&active).into()
+                            },
+                            &file,
+                            &settings(),
+                            VodAttribution {
+                                user_name: "test",
+                                item_title: "active",
+                                supersession_user: "test",
+                            },
+                            "active-purpose".into(),
+                        )
+                        .await
+                }
+            });
+            wait_until(
+                "the active attachment waits Live over background",
+                Duration::from_secs(5),
+                async || encoding.admissions.live_is_waiting(),
+            )
+            .await;
+            drop(background);
+            tokio::time::timeout(Duration::from_secs(20), attach)
+                .await
+                .expect("admitted after background yields")
+                .expect("attach task")
+                .expect("active attachment");
+            let rendition = rendition_of(&serve, "active-purpose").await;
+            {
+                let readers = rendition.readers.lock().await;
+                assert_eq!(readers["active-purpose"].admission_priority, Priority::Live);
+                assert_eq!(
+                    reader_admission_priority(&serve.shared.pool, &rendition, &readers),
+                    Some(Priority::Live)
+                );
+            }
+            assert_eq!(
+                encoding.is_speculative(),
+                cached_trial,
+                "shared recipe state is unchanged"
+            );
+            serve.end("active-purpose", Terminal::Deleted).await;
+            continue;
+        }
         serve
             .try_create(
                 VodRecipeRequest {
@@ -2578,6 +2689,12 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
             || {},
         )
         .await;
+    // A finite root stays a dormant owner of its claim after its last
+    // session ends; the daemon's dormant purge retires it.
+    serve
+        .shared
+        .purge_if_dormant(&rendition.key, Duration::ZERO)
+        .await;
     wait_until(
         "prepared root physically reaped",
         Duration::from_secs(5),
@@ -3150,7 +3267,10 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
     let rendition = serve
         .shared
         .build_rendition(
-            "capacity-verdict",
+            // Linux builds an ordinary encoded key as a finite producer that
+            // admits at build; this exercises the lazily admitted driver that
+            // Source playback renditions still take in production.
+            "source-capacity-verdict",
             None,
             Recipe {
                 audio_excluded: false,
@@ -3277,7 +3397,10 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
     let rendition = serve
         .shared
         .build_rendition(
-            "verdict-read",
+            // Linux builds an ordinary encoded key as a finite producer that
+            // admits at build; this exercises the lazily admitted driver that
+            // Source playback renditions still take in production.
+            "source-verdict-read",
             None,
             Recipe {
                 audio_excluded: false,
@@ -3647,23 +3770,18 @@ async fn encoded_pair(
     let rendition = rendition_of(serve, &session).await;
     assert!(rendition.failure().is_none(), "{:?}", rendition.failure());
     serve.end(&session, Terminal::Deleted).await;
-    rendition.gen_epoch.fetch_add(1, Relaxed);
-    let _ = rendition
-        .slot
-        .perform(
-            Step::Terminate {
-                why: Termination::Idle,
-            },
-            || {},
-        )
-        .await;
-    let mut manifest = rendition.manifest.lock().await;
-    let freed = rendition
-        .dir
-        .make_room(&mut manifest, &[], u64::MAX)
-        .await
-        .expect("force fresh generation");
-    sub_saturating(&serve.shared.working_set, freed.bytes);
+    // Force a fresh generation the way the daemon does: retire the dormant
+    // rendition (on Linux, its finite producer and output) so the next pair
+    // builds a new owner from its own entry rather than reusing this one.
+    let key = rendition.key.clone();
+    drop(rendition);
+    serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+    wait_until(
+        "the pair's rendition is retired",
+        Duration::from_secs(30),
+        async || !serve.shared.renditions.lock().await.contains_key(&key),
+    )
+    .await;
     (init, first, next)
 }
 
@@ -4250,6 +4368,19 @@ async fn assert_encoded_restarts(
             .expect("evict after reader detach");
         sub_saturating(&serve.shared.working_set, freed.bytes);
     }
+    // A finite rendition outlives its last session as a dormant owner of its
+    // admitted claim; the daemon's dormant purge is what retires it and
+    // returns capacity, after its native producer is reaped.
+    serve
+        .shared
+        .purge_if_dormant(key.as_deref().expect("restart rendition key"), Duration::ZERO)
+        .await;
+    wait_until(
+        "the dormant rendition retires its encoder",
+        Duration::from_secs(30),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
     assert_eq!(
         encoding.admissions.software_in_use(),
         0,

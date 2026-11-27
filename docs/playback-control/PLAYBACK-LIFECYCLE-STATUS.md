@@ -299,6 +299,18 @@ no second review or re-review was requested.
 | prepared work competed as foreground and ignored incumbent starvation | speculative admission uses only spare capacity, never registers ahead of foreground, and both an admission waiter and an accepted Waiting/Stalled exchange cancel the exact successor |
 | saving prepared handoff off left in-flight or staged work alive | the settings transition wakes current candidates, serializes the final setting read with reservation, and settles every unswitched registered successor before reopening |
 
+On Linux an ordinary software encoded rendition is a finite producer that
+admits its encoder when it is attached, not on its first fetch. Speculative
+admission still uses only spare capacity, so while background work holds the
+pool a Speculative prepared attach is refused with the typed, retryable
+`vod_family_capacity` outcome instead of being registered: a prepared encoded
+successor is not created under background contention; the commit falls back
+to a Live create, which registers a live wait over background and is admitted
+once it yields. The registered speculative attach made no encode progress
+under that contention either, so only the head start of a registration is
+lost. Regressions: `explicit_vod_attachment_priority_isolated_from_cached_auto_recipe`
+and `a_prepared_encoded_successor_under_background_falls_back_to_a_live_create`.
+
 The stale Android and Rust phase comments called out by the reviewer were also
 removed. PR #259 moved ready and received `fast-lane` at `af02d539`. Its first
 preflight accepted validation scope and mobile-version bookkeeping, then found

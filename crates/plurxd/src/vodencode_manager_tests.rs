@@ -3008,7 +3008,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         .await
         .err()
         .expect("the whole video/audio group does not fit");
-    assert!(refused.contains("vod_family_capacity"));
+    assert!(refused.contains("vod_family_capacity"), "{refused}");
     assert!(
         manager
             .vod
@@ -4034,4 +4034,292 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .await
         .expect("three soundtracks prepare");
     assert_eq!(soundtracks.len(), 3, "three soundtracks still split");
+}
+
+/// A staged, ordinary (uncaptured) VOD successor on a node whose encoded
+/// rendition is a finite producer: a real file, a confirmed predecessor and
+/// the reserved successor route `vod_prepare_first_before` recovers.
+#[cfg(target_os = "linux")]
+struct PreparedEncodedSuccessor {
+    _base: tempfile::TempDir,
+    _runtime: Option<crate::test_runtime::RealRuntime>,
+    manager: Arc<TranscodeManager>,
+    session_id: String,
+    user_id: i64,
+    recipe_json: String,
+    request: SessionRequest,
+}
+
+#[cfg(target_os = "linux")]
+async fn prepared_encoded_successor() -> PreparedEncodedSuccessor {
+    use plurx_core::store::{MediaSessionStore, SqliteStore, UserStore};
+    let base = crate::test_tempdir().expect("prepared successor fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let store: Arc<dyn Store> = sqlite.clone();
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            file.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "64")
+        .await
+        .expect("software budget");
+    let runtime = crate::test_runtime::for_finite_serving().await;
+    let renditions = base.path().join("manager").join("renditions");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_copy_test_vod(crate::vodserve::VodServe::new_with_runtime(
+        renditions.clone(),
+        Arc::clone(&store),
+        runtime.as_ref().map(crate::test_runtime::RealRuntime::handle),
+    ));
+    if let Some(runtime) = &runtime {
+        manager.vod.register_playback_cache(
+            &runtime.playback_budget(Arc::clone(&store), vec![renditions]),
+        );
+    }
+    let user = sqlite
+        .create_user("prepared", "hash", false)
+        .await
+        .expect("user");
+    let principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    let now = crate::media_sessions::unix_ms();
+    let predecessor = uuid::Uuid::new_v4().to_string();
+    let activation = plurx_core::domain::MediaSessionActivation {
+        incarnation_id: predecessor.clone(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        principal: principal.clone(),
+        playback_id: "prepared-fallback".into(),
+        recovery_epoch: "prepared-epoch".into(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: true,
+        request_id: None,
+        request_fingerprint: "a".repeat(64),
+        owner_node_id: "node".into(),
+        recipe_json: "{}".into(),
+        response_json: "{}".into(),
+        publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: now,
+        lease_expires_at_ms: now + 60_000,
+        expected_desired_revision: None,
+    };
+    assert!(sqlite
+        .activate_media_session(&activation)
+        .await
+        .expect("predecessor")
+        .is_some());
+    sqlite
+        .settle_media_session_activation(
+            &activation,
+            plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            now,
+        )
+        .await
+        .expect("confirm predecessor")
+        .expect("predecessor confirmed");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let incarnation = uuid::Uuid::new_v4().to_string();
+    let request = SessionRequest {
+        dv_processing_destination: None,
+        retain_output: None,
+        dv_refit_digest: None,
+        continuous_media: None,
+        quality_catalog: None,
+        candidate_context: None,
+        accepted_processed_ask: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        request_id: Some(incarnation.clone()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        ..reopen_request(file_id, "prepared-fallback", "unused", "unused")
+    };
+    let fixture = crate::media_sessions::takeover_eligible_route(&session_id, &incarnation);
+    let mut recipe: crate::media_sessions::RemoteStartRequest =
+        serde_json::from_str(&fixture.recipe_json).expect("typed recipe");
+    recipe.principal = principal.clone();
+    recipe.retained_output_receiver = None;
+    recipe.retained_output = None;
+    recipe.request = request.clone();
+    let recipe_json = serde_json::to_string(&recipe).expect("recipe");
+    // An ordinary staged successor: no output capture is pending or
+    // complete, so the first prime is the Speculative prepared recovery.
+    let preparation = plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: None,
+        incarnation_id: incarnation.clone(),
+        session_id: session_id.clone(),
+        principal,
+        playback_id: "prepared-fallback".into(),
+        expected_predecessor_incarnation_id: predecessor,
+        expected_predecessor_owner_node_id: "node".into(),
+        expected_predecessor_owner_epoch: 1,
+        request_fingerprint: "b".repeat(64),
+        owner_node_id: "node".into(),
+        recipe_json: recipe_json.clone(),
+        response_json: "{}".into(),
+        media_origin_ms: 0,
+        now_ms: now,
+        expected_desired_revision: None,
+        deadline_ms: now + 30_000,
+    };
+    assert!(sqlite
+        .prepare_media_session(&preparation)
+        .await
+        .expect("reserve")
+        .is_some());
+    PreparedEncodedSuccessor {
+        _base: base,
+        _runtime: runtime,
+        manager: Arc::new(manager),
+        session_id,
+        user_id: user.id,
+        recipe_json,
+        request,
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn prime_prepared_successor(f: &PreparedEncodedSuccessor) -> bool {
+    f.manager
+        .vod_prepare_first_before(
+            &f.recipe_json,
+            &f.session_id,
+            f.user_id,
+            crate::transcode::PreparedVodOwner {
+                node_id: "node".into(),
+                source_authority: None,
+            },
+            f.manager
+                .session_adoption_token(&f.session_id)
+                .expect("adoption"),
+            Some(1),
+            std::time::Instant::now() + Duration::from_secs(20),
+        )
+        .await
+}
+
+/// A finite encoded rendition admits at attachment, and Speculative
+/// admission uses only spare capacity. So a prepared encoded successor is not
+/// created while background work holds the pool; the viewer's commit falls
+/// back to an ordinary Live create, which waits for background to yield.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_prepared_encoded_successor_under_background_falls_back_to_a_live_create() {
+    use crate::admission::TranscodeResourceEstimate;
+    let background_estimate = TranscodeResourceEstimate {
+        hardware_slot: false,
+        cpu_threads: 1,
+        decoder_threads: None,
+    };
+    // Control: the same staged successor primes when nothing contends, so a
+    // refusal below is the capacity outcome, not a fixture gap.
+    let control = prepared_encoded_successor().await;
+    assert!(
+        prime_prepared_successor(&control).await,
+        "an uncontended prepared encoded successor primes"
+    );
+    let (prepared_incarnation, priority, _) = control
+        .manager
+        .vod
+        .test_prepared_reader_state(&control.session_id)
+        .await;
+    assert!(prepared_incarnation.is_some());
+    assert_eq!(priority, Priority::Speculative);
+    drop(control);
+
+    let f = prepared_encoded_successor().await;
+    let background = f
+        .manager
+        .admissions
+        .try_admit_bundle(2, 64, &background_estimate, Priority::Background)
+        .expect("background owns the pool");
+    assert!(
+        !prime_prepared_successor(&f).await,
+        "a Speculative prepared attach never takes background capacity"
+    );
+    assert!(
+        f.manager.vod.hls_facts(&f.session_id).await.is_none(),
+        "no prepared session or reader is left behind"
+    );
+    assert!(
+        !f.manager.admissions.live_is_waiting(),
+        "preparation never preempts background"
+    );
+    assert_eq!(
+        f.manager.admissions.software_in_use(),
+        1,
+        "only background's own reservation remains"
+    );
+    assert_eq!(
+        f.manager
+            .codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+        0,
+        "no encoder child was attached"
+    );
+
+    // The commit's fresh Live create outranks background as a promotion
+    // would: it registers a live wait and is admitted once background yields.
+    let mut commit = f.request.clone();
+    commit.request_id = Some(uuid::Uuid::new_v4().to_string());
+    let create = tokio::spawn({
+        let manager = Arc::clone(&f.manager);
+        async move { create_local_vod(&manager, &commit, "test").await }
+    });
+    let waited = tokio::time::timeout(Duration::from_secs(10), async {
+        while !f.manager.admissions.live_is_waiting() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "the Live create waits over background");
+    assert!(!create.is_finished(), "background still holds the pool");
+    drop(background);
+    let start = tokio::time::timeout(Duration::from_secs(30), create)
+        .await
+        .expect("admitted after background yields")
+        .expect("create task")
+        .expect("the commit's Live create");
+    let (prepared_incarnation, priority, _) = f
+        .manager
+        .vod
+        .test_prepared_reader_state(&start.session_id)
+        .await;
+    assert_eq!(prepared_incarnation, None, "an ordinary foreground session");
+    assert_eq!(priority, Priority::Live);
 }

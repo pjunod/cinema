@@ -670,12 +670,9 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         StatusCode::OK,
         "the play survives a recovered authority loss"
     );
-    let recovered_bytes = recovered
-        .into_body()
-        .collect()
+    let recovered_bytes = streamed_body(recovered.into_body())
         .await
-        .expect("complete recovered fragment")
-        .to_bytes();
+        .expect("complete recovered fragment");
     assert!(!recovered_bytes.is_empty());
     if encoded {
         let response = f
@@ -685,12 +682,9 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
             .await
             .expect("whole encoded fragment");
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = response
-            .into_body()
-            .collect()
+        let bytes = streamed_body(response.into_body())
             .await
-            .expect("whole encoded body")
-            .to_bytes();
+            .expect("whole encoded body");
         let decoded_input = f.root.path().join("encoded-alias-get.mp4");
         tokio::fs::write(&decoded_input, &bytes)
             .await
@@ -3482,4 +3476,18 @@ async fn jellyfin_contract_routes_answer_their_minimum_semantics_and_are_counted
         assert!(text.contains(line), "{line} missing from:\n{text}");
     }
     assert!(!text.contains(&f.item) && !text.contains(&f.token) && !text.contains(&play));
+}
+
+/// Read a response body as a client socket does: copy each frame out and
+/// drop it before polling the next. A finite reader lends one response
+/// buffer at a time, so holding every frame (as `collect` does) would wait
+/// on its own buffer.
+async fn streamed_body(mut body: axum::body::Body) -> Result<Vec<u8>, axum::Error> {
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame?.into_data() {
+            bytes.extend_from_slice(&data);
+        }
+    }
+    Ok(bytes)
 }

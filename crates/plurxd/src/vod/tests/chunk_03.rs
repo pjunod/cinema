@@ -3007,7 +3007,10 @@ async fn rendition_shipped_shape() {
     let rendition = serve
         .shared
         .build_rendition(
-            "shipped-shape",
+            // Linux builds an ordinary encoded key as a finite producer that
+            // admits at build; this exercises the lazily admitted driver that
+            // Source playback renditions still take in production.
+            "source-shipped-shape",
             None,
             Recipe {
                 audio_excluded: false,
