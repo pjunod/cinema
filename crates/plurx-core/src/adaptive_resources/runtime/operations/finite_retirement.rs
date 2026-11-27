@@ -228,6 +228,37 @@ impl NodeResourceRuntime {
                 return Err(OperationError::State);
             }
         }
+        if matches!(
+            plan.outputs.naming,
+            v2::scratch::OutputNamingV1::FiniteVodMetadataV2 { .. }
+        ) {
+            // Producer credit returns through S only for the complete title.
+            // A suffix generation (first_segment > 0) or any missing segment
+            // keeps its original R; it is closed, never retained.
+            let segment_count = usize::try_from(plan.outputs.segment_end_exclusive)
+                .map_err(|_| OperationError::State)?;
+            let mut init = false;
+            let mut segments = std::collections::BTreeSet::new();
+            for file in &full.files {
+                match file.published {
+                    Some(v2::scratch::OutputKey::Init) => init = file.logical_len > 0,
+                    Some(v2::scratch::OutputKey::Segment { index })
+                        if usize::try_from(index).is_ok_and(|index| index < segment_count)
+                            && file.logical_len > 0 =>
+                    {
+                        segments.insert(index);
+                    }
+                    _ => {}
+                }
+            }
+            if plan.outputs.first_segment != 0
+                || segment_count == 0
+                || !init
+                || segments.len() != segment_count
+            {
+                return Err(OperationError::State);
+            }
+        }
         let frozen_inventory_bytes = full.resident_inventory_bytes()?;
         if frozen_inventory_bytes > plan.limits.resident_memory_bytes {
             return Err(OperationError::State);

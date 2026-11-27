@@ -3826,14 +3826,6 @@ async fn encoded_pair_kept(
         )
         .await
         .expect("pair session");
-    // A finite producer (Linux) encodes one pass from seg00000; it has no
-    // restart at a later entry. Follow its frontier up to the pair, so each
-    // GET's own producer deadline covers one segment of progress rather
-    // than every segment before the entry at once.
-    #[cfg(target_os = "linux")]
-    for earlier in 0..entry {
-        let _ = fetched_bytes(serve, &session, &segment_name(u64::from(earlier))).await;
-    }
     let first = fetched_bytes(serve, &session, &segment_name(u64::from(entry))).await;
     let next = fetched_bytes(serve, &session, &segment_name(u64::from(entry + 1))).await;
     let init = fetched_bytes(serve, &session, "init.mp4").await;
@@ -3905,6 +3897,114 @@ async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbor
     let base = crate::test_tempdir().expect("AAC continuity fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
     assert_encoded_neighbor_continuity(base.path(), &file, &encoding).await;
+}
+
+/// A cold start at a later position builds its finite producer at that
+/// entry: the first segment is served without encoding the entries before
+/// it, and the finished suffix is never retired, admitted or cached as the
+/// title. Its whole charge returns when it retires.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn encoded_vod_cold_resume_starts_its_finite_producer_at_the_resume_entry() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("suffix start fixture");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let (serve, serve_runtime) = bare_serve_with_runtime(&base.join("suffix-renditions")).await;
+    let runtime = serve_runtime
+        .as_ref()
+        .map(crate::test_runtime::RealRuntime::handle)
+        .expect("Linux fixture runtime");
+    let idle = runtime.accounting().expect("idle accounting").used;
+    let entry = 44_u32;
+    let session = uuid::Uuid::new_v4().to_string();
+    let start = f64::from(entry) * encoding.grid.segment_ticks() as f64
+        / f64::from(encoding.grid.numerator);
+    let mut req = request(&session, start);
+    req.kind = SessionKind::Transcode { height: 144 };
+    serve
+        .try_create(
+            VodRecipeRequest {
+                split_soundtracks: Vec::new(),
+                admission_priority: crate::admission::Priority::Live,
+                root_admission: None,
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
+                companion: None,
+                soundtrack: None,
+                request: &req,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            &file,
+            &settings(),
+            VodAttribution {
+                user_name: "test",
+                item_title: "Suffix start",
+                supersession_user: "test",
+            },
+            session.clone(),
+        )
+        .await
+        .expect("resume session");
+    // One producer deadline covers the first segment: nothing before it is
+    // owed or made.
+    let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(entry))).await;
+    let rendition = rendition_of(&serve, &session).await;
+    let producer = rendition.dir.finite_producer().expect("finite producer");
+    // Still producing (positioned at the resume entry) or already finished.
+    match producer.belief() {
+        crate::prodexec::Producer::Running { positioned_at, .. }
+        | crate::prodexec::Producer::Stopped { positioned_at, .. } => {
+            assert_eq!(positioned_at, entry, "the producer starts at the resume entry");
+        }
+        crate::prodexec::Producer::Absent { .. } => {}
+    }
+    {
+        let manifest = rendition.manifest.lock().await;
+        for earlier in 0..entry {
+            assert!(
+                !manifest
+                    .state(earlier)
+                    .is_some_and(crate::titlestore::SegState::is_materialized),
+                "seg{earlier:05} is before the suffix and was never made"
+            );
+        }
+    }
+    // Read the suffix to the end of the title, as a player would.
+    for later in entry + 1..u32::try_from(rendition.plan.len()).expect("plan length") {
+        let _ = fetched_bytes(&serve, &session, &segment_name(u64::from(later))).await;
+    }
+    wait_until(
+        "the suffix producer finishes",
+        Duration::from_secs(30),
+        async || matches!(producer.belief(), crate::prodexec::Producer::Absent { .. }),
+    )
+    .await;
+    assert!(
+        !producer.retained_without_producer(),
+        "a finished suffix is never retired to S"
+    );
+    assert!(
+        !rendition.manifest.lock().await.is_admitted(),
+        "a suffix is never admitted as the complete title"
+    );
+    serve.end(&session, Terminal::Deleted).await;
+    let key = rendition.key.clone();
+    drop((producer, rendition));
+    wait_until(
+        "the suffix rendition retires",
+        Duration::from_secs(30),
+        async || {
+            serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+            !serve.shared.renditions.lock().await.contains_key(&key)
+        },
+    )
+    .await;
+    wait_until(
+        "the suffix producer's whole charge returns",
+        Duration::from_secs(30),
+        async || runtime.accounting().is_ok_and(|accounting| accounting.used == idle),
+    )
+    .await;
 }
 
 async fn assert_encoded_neighbor_continuity(

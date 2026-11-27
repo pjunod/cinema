@@ -670,6 +670,7 @@ pub struct SoftwareVodOwner {
     scratch_member: Uuid,
     directory_path: Arc<PathBuf>,
     encoded_process_marker: bool,
+    start_entry: u32,
     events: Option<SoftwareVodEvents>,
     control: Arc<FiniteControl>,
     #[cfg(target_os = "linux")]
@@ -1340,6 +1341,12 @@ impl SoftwareVodOwner {
         self.policy_generation
     }
 
+    /// The first segment this owner's producer writes. Nonzero means its
+    /// output is a suffix and can never be frozen or retired as the title.
+    pub fn start_entry(&self) -> u32 {
+        self.start_entry
+    }
+
     /// A terminal/failed driver clears positive service evidence without
     /// erasing the class cooldown or announcing native cleanup.
     #[cfg(target_os = "linux")]
@@ -1956,6 +1963,7 @@ impl NodeResourceRuntime {
             .then(|| self.finite_trial_key(&request))
             .flatten();
         let continuous_entry_deadline = request.continuous_entry_deadline.clone();
+        let start_entry = request.producer.start_entry();
         if request.generation_epoch == 0 {
             return Err(OperationError::BeforeReservation(
                 super::operations::PreReservationRefusal::Admission(
@@ -1978,6 +1986,8 @@ impl NodeResourceRuntime {
             || request.sources.len() != request.command.source_count()
             || !request.command.matches_producer(&request.producer)
             || request.producer.segment_count() != request.segment_count as usize
+            // A static artifact is a complete title; only it starts at 0.
+            || (static_artifact && start_entry != 0)
             || request
                 .sources
                 .iter()
@@ -2275,7 +2285,8 @@ impl NodeResourceRuntime {
                 },
                 outputs: OutputNamesV1 {
                     init: true,
-                    first_segment: 0,
+                    // A suffix generation's custody names only its own range.
+                    first_segment: request.producer.start_entry(),
                     segment_end_exclusive: u64::from(request.segment_count),
                     naming: if static_artifact {
                         OutputNamingV1::StaticArtifactV1 {
@@ -2475,6 +2486,7 @@ impl NodeResourceRuntime {
                 scratch_member: scratch_member.uuid(),
                 directory_path,
                 encoded_process_marker: request.encoded_process_marker,
+                start_entry,
                 events: Some(events),
                 control,
                 #[cfg(target_os = "linux")]

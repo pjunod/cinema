@@ -1076,6 +1076,9 @@ pub(crate) struct FiniteAdmissionRequest {
     /// before the attachment. The build claims its one worker instead of
     /// asking the pool for a second bundle.
     pub(crate) prepared: Option<EncodePermit>,
+    /// Where the request's first demand points. A fresh finite producer
+    /// starts at the video entry containing it, not at the title's start.
+    pub(crate) start_seconds: f64,
 }
 
 #[cfg(target_os = "linux")]

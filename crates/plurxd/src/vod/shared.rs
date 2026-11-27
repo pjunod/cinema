@@ -1526,6 +1526,7 @@ impl Shared {
             crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
                 prepared: None,
+                start_seconds: 0.0,
             },
         )
         .await
@@ -2045,6 +2046,7 @@ impl Shared {
             &crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
                 prepared: None,
+                start_seconds: 0.0,
             },
         )
         .await

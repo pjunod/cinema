@@ -1494,6 +1494,7 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
             .expect("actual node capacity")
             .capacity,
         0,
+        0.0,
     )
     .expect("actual finalized encoder creation bound with inherited None");
     drop(projection); // pure projection has no native/admission authority
@@ -1990,6 +1991,7 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
                 crate::vodencode::FiniteAdmissionRequest {
                     priority: crate::admission::Priority::Live,
                     prepared: None,
+                    start_seconds: 0.0,
                 },
                 application_bytes,
                 None,
@@ -2130,6 +2132,7 @@ async fn original_driver_pending(
             crate::vodencode::FiniteAdmissionRequest {
                 priority: crate::admission::Priority::Live,
                 prepared: None,
+                start_seconds: 0.0,
             },
             application_bytes,
             None,

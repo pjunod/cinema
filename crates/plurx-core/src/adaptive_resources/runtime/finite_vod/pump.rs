@@ -116,6 +116,12 @@ impl SoftwareAvcPumpPlan {
         Ok(result)
     }
 
+    /// The plan entry this producer starts at. A nonzero entry produces
+    /// only the suffix from it; such output is never a complete title.
+    pub fn start_entry(&self) -> u32 {
+        self.start_entry
+    }
+
     pub(super) fn matches_clock(
         &self,
         grid: crate::transcode::VodFrameGrid,

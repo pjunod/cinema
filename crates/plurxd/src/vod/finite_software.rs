@@ -16,6 +16,10 @@ const RETIRING: u8 = 2;
 const RETAINED: u8 = 3;
 const FAILED: u8 = 4;
 const PREPARING: u8 = 6;
+/// A suffix producer (nonzero start entry) reached the end of the title. Its
+/// output is not the complete title: it is never frozen, retired to S or
+/// cached, and its original R stays charged until its closing owner.
+const SUFFIX_COMPLETE: u8 = 7;
 const DRIVER_UNREGISTERED: u8 = 0;
 const DRIVER_REGISTERED: u8 = 1;
 const DRIVER_RETURNED: u8 = 2;
@@ -69,6 +73,8 @@ pub(crate) struct FiniteSoftwareProducer {
     owner_heap_bound: Option<usize>,
     control: SoftwareVodControl,
     stage: AtomicU8,
+    /// The first entry this producer writes; nonzero for a suffix.
+    start_entry: u32,
     produced_through: AtomicU64,
     suspended: AtomicBool,
     driver_state: AtomicU8,
@@ -138,6 +144,7 @@ impl FiniteSoftwareProducer {
         Self {
             control: owner.control(),
             generation_epoch: owner.generation_epoch(),
+            start_entry: owner.start_entry(),
             owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
             cache_grant: std::sync::Mutex::new(Some(cache_grant)),
@@ -584,6 +591,7 @@ impl FiniteSoftwareProducer {
             RUNNING => "its producer is running",
             RETIRING => "its producer is retiring",
             RETAINED => "its producer finished without publishing it",
+            SUFFIX_COMPLETE => "its producer started after it and has finished",
             FAILED => "its producer failed",
             _ => "its producer state is unknown",
         }
@@ -600,7 +608,7 @@ impl FiniteSoftwareProducer {
             if self.suspended.load(Acquire) {
                 Producer::Stopped {
                     produced_through,
-                    positioned_at: 0,
+                    positioned_at: self.start_entry,
                     reason: crate::prodsched::Hold::Ahead {
                         horizon: produced_through.unwrap_or(0),
                     },
@@ -608,7 +616,7 @@ impl FiniteSoftwareProducer {
             } else {
                 Producer::Running {
                     produced_through,
-                    positioned_at: 0,
+                    positioned_at: self.start_entry,
                 }
             }
         } else {
@@ -1042,6 +1050,7 @@ async fn build_inner(
         epoch,
         capacity,
         software_pool_threads,
+        admission.start_seconds,
     )?;
     if let Some(bytes) = application_owner_bytes {
         request
@@ -1662,6 +1671,18 @@ async fn run_body(
         // The original root/writer have joined above. Their physical closure
         // remains in core; leave settlement to the existing cleanup owner once
         // this driver and the remaining client metadata actually drop.
+        return;
+    }
+    if producer.start_entry != 0 {
+        // A suffix reached the end of the title. Its segments keep serving
+        // from the original R; entries before its start were never made, so
+        // it is not the complete title and must not freeze, retire to S or
+        // commit a retained cache. Its closing owner refunds the whole R.
+        producer.stage.store(SUFFIX_COMPLETE, Release);
+        owner.invalidate_policy_service(Instant::now());
+        tracing::debug!(target: "plurxd::vodserve", rendition = %rendition.key,
+            start_entry = producer.start_entry, "finite suffix producer finished");
+        rendition.kick();
         return;
     }
     // A completed output has no missing entry to rematerialize. Abort every

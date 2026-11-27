@@ -63,6 +63,8 @@ pub(crate) struct PreparedAdaptiveRecipe {
     duration_ms: i64,
     /// The attempt request's own admission priority, kept for its build.
     admission_priority: crate::admission::Priority,
+    /// The attempt request's first demand, where its producer starts.
+    start_seconds: f64,
 }
 
 #[cfg(target_os = "linux")]
@@ -808,6 +810,7 @@ impl VodServe {
         let finite_admission = crate::vodencode::FiniteAdmissionRequest {
             priority: prepared.admission_priority,
             prepared: transferred_root_credit(prepared.root_admission.as_ref(), &recipe),
+            start_seconds: prepared.request.start_seconds,
         };
         let attachment = self
             .shared
@@ -884,6 +887,7 @@ impl VodServe {
             recipe,
             duration_ms,
             admission_priority: prepared.admission_priority,
+            start_seconds: prepared.request.start_seconds,
         })
     }
 
@@ -905,6 +909,7 @@ impl VodServe {
             recipe,
             duration_ms,
             admission_priority,
+            start_seconds,
         } = prepared;
         self.shared
             .prepare_adaptive_attempt(
@@ -917,6 +922,7 @@ impl VodServe {
                 crate::vodencode::FiniteAdmissionRequest {
                     priority: admission_priority,
                     prepared: None,
+                    start_seconds,
                 },
                 application_owner_bytes,
                 continuous_entry_deadline,
@@ -945,6 +951,8 @@ impl VodServe {
             recipe,
             duration_ms,
             admission_priority: _,
+            // A static artifact is the complete title, from entry 0.
+            start_seconds: _,
         } = prepared;
         if !finite_software::selected_recipe(&recipe, false, false) {
             return Err("static artifact requires the selected software AVC recipe".into());
@@ -1041,6 +1049,8 @@ impl VodServe {
             epoch,
             capacity,
             software_pool_threads,
+            // A static artifact is the complete title.
+            0.0,
         )?;
         request = finite_profile::with_static_manifest_file(request)?;
         request
@@ -1061,6 +1071,8 @@ impl VodServe {
                 &crate::vodencode::FiniteAdmissionRequest {
                     priority: crate::admission::Priority::Background,
                     prepared: None,
+                    // A static artifact is the complete title.
+                    start_seconds: 0.0,
                 },
                 deadline,
                 None,
@@ -4264,6 +4276,7 @@ impl VodServe {
         let finite_admission = crate::vodencode::FiniteAdmissionRequest {
             priority: prepared.admission_priority,
             prepared: transferred_root_credit(prepared.root_admission.as_ref(), &recipe),
+            start_seconds: prepared.request.start_seconds,
         };
         let attachment = self
             .shared

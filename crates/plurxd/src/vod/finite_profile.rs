@@ -116,6 +116,7 @@ pub(super) fn compile(
     limit_epoch: u64,
     capacity: ResourceCapacity,
     software_pool_threads: u64,
+    start_seconds: f64,
 ) -> Result<(SoftwareVodRequest, u32), String> {
     let encoding = recipe
         .encoding
@@ -153,9 +154,19 @@ pub(super) fn compile(
     )?;
     let cpu_ns_per_second = cpu_service_claim(unspent_cpu_ns_per_second, software_threads)?;
 
+    // The producer starts at the video entry containing the first demand.
+    // Command, pump and output custody must all agree on this one entry.
+    if !start_seconds.is_finite() {
+        return Err("finite software start position is not finite".into());
+    }
+    let start_entry = super::plan::entry_containing(plan, start_seconds);
+    let start_entry_seconds = plan
+        .entry(start_entry)
+        .map(|entry| entry.start_ticks as f64 / f64::from(plan.timescale))
+        .ok_or("finite software start entry is outside the plan")?;
     let mut options = encoding.options.clone();
-    options.start_seconds = 0.0;
-    options.start_number = 0;
+    options.start_seconds = start_entry_seconds;
+    options.start_number = i64::from(start_entry);
     options.software_threads = Some(software_threads);
     let execution =
         TranscodeExecution::from_options(&recipe.file, &options, Pacing::unpaced(), ".")
@@ -262,7 +273,7 @@ pub(super) fn compile(
     };
     let pump = SoftwareAvcPumpPlan::new(
         plan.clone(),
-        0,
+        start_entry,
         encoding.grid,
         super::plan::shipped_policy(plan.timescale),
         memory,
