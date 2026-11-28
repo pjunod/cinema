@@ -1770,7 +1770,6 @@ impl TranscodeManager {
         root: &crate::vodserve::PreparedRootAdmission,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<bool, String> {
-        use plurx_core::fmp4::{segment_name, FragmentReader, Unit};
         let session = self
             .sessions
             .lock()
@@ -1837,14 +1836,13 @@ impl TranscodeManager {
         } else {
             0
         };
-        let input = tokio::fs::read(session.dir.join("init.mp4"))
-            .await
-            .map_err(|err| err.to_string())?;
-        let mut reader = FragmentReader::new();
-        reader.push(&input);
-        let Some(Unit::Init(init)) = reader.next_unit().map_err(|err| err.to_string())? else {
-            return Err("native splice copy init missing".into());
-        };
+        let format = split
+            .committed_video_format()
+            .ok_or("native splice has no committed video format")?;
+        let track = format
+            .init()
+            .video()
+            .ok_or("native splice format has no video")?;
         let grants = || {
             crate::copyseg::WriteGrants::new(
                 Arc::clone(permit.ledger()),
@@ -1931,38 +1929,43 @@ impl TranscodeManager {
             };
             last_attempted = index;
             let prepared = async {
-                let raw = tokio::fs::read(session.dir.join(segment_name(index)))
-                    .await
-                    .map_err(|err| err.to_string())?;
-                let next_raw = tokio::fs::read(session.dir.join(segment_name(index + 1)))
-                    .await
-                    .map_err(|err| err.to_string())?;
-                let mut author = crate::copyseg::NativeSplitAuthor::new(init.clone())
-                    .map_err(|err| err.to_string())?;
-                let first_sequence = u32::try_from(index)
+                let segment = split
+                    .open_splice_video(&session.dir, index, &format)
+                    .await?;
+                let next = split
+                    .open_splice_video(&session.dir, index + 1, &format)
+                    .await?;
+                let epoch_start = session
+                    .takeover
+                    .as_ref()
+                    .map_or(0, |epoch| epoch.media_sequence);
+                let first_sequence = u64::try_from(epoch_start)
                     .ok()
+                    .and_then(|first| index.checked_sub(first))
+                    .and_then(|relative| u32::try_from(relative).ok())
                     .and_then(|i| i.checked_mul(256))
                     .ok_or("native splice sequence overflow")?;
-                let mut segment = author
-                    .segment(&raw, first_sequence)
-                    .map_err(|err| err.to_string())?;
-                let next = author
-                    .segment(
-                        &next_raw,
-                        first_sequence
-                            .checked_add(256)
-                            .ok_or("native splice sequence overflow")?,
-                    )
-                    .map_err(|err| err.to_string())?;
-                if !author.video.admits_ordinary_return(&next.public_video)
-                    || segment.ordinary.tracks[0].sample_count() as u64 != entry.samples
+                let ordinary = segment
+                    .track(track.id)
+                    .ok_or("native splice ordinary video is missing")?;
+                let return_extent = next
+                    .track(track.id)
+                    .ok_or("native splice return video is missing")?;
+                if !format.admits_ordinary_return(&next)
+                    || ordinary.sample_count() as u64 != entry.samples
+                    || ordinary.base_decode_time.checked_add(ordinary.duration())
+                        != Some(return_extent.base_decode_time)
                 {
                     return Err("native splice has no verified ordinary return boundary".into());
                 }
-                segment.first_source_frame = source_frame_base
+                let first_source_frame = source_frame_base
                     .checked_add(entry.first_source_frame)
                     .ok_or("native splice source frame overflow")?;
-                let entries = segment.fel_windows(encoding.grid)?;
+                let entries = crate::copyseg::native_fel_windows(
+                    first_source_frame,
+                    entry.samples,
+                    encoding.grid,
+                )?;
                 let (windows, _) = runtime
                     .render_native_fel_windows(
                         file,
@@ -1976,9 +1979,15 @@ impl TranscodeManager {
                         Some(plan),
                     )
                     .await?;
-                let (bytes, proof) = segment
-                    .enhanced_video(&author, windows, first_sequence)?
-                    .into_parts();
+                let (bytes, proof) = crate::copyseg::NativeFelSegment::package(
+                    &segment,
+                    track,
+                    &segment,
+                    &format,
+                    windows,
+                    first_sequence,
+                )?
+                .into_parts();
                 let report = proof.report_for_publication(&bytes, plan, incarnation_id)?;
                 Ok::<_, String>((bytes, report))
             };
@@ -2074,6 +2083,9 @@ impl TranscodeManager {
                 .await
                 .is_err()
         {
+            if split.writer_owns_layout() {
+                return None;
+            }
             // The handler now serves the muxed master. Record that as the
             // layout, so a prepared or resumed start stops owning FEL
             // processing and its upgrade can use the successor instead of a
@@ -2102,7 +2114,13 @@ impl TranscodeManager {
                     u64::try_from(snapshot.last_segment).ok()?,
                 ))
             });
-        let chosen = split.choose(range);
+        let chosen = if split.writer_owns_layout() {
+            let (first, last) = range?;
+            split.window(first, last)?;
+            split.active_ids().cloned()
+        } else {
+            split.choose(range)
+        };
         tracing::info!(
             target: "plurxd::http::hls",
             session = %session_log_id(session_id),
@@ -2139,24 +2157,44 @@ impl TranscodeManager {
         let target = legacy
             .lines()
             .find(|line| line.starts_with("#EXT-X-TARGETDURATION:"))?;
-        let video_durations: Vec<_> = legacy
+        let mut playlist =
+            format!("#EXTM3U\n#EXT-X-VERSION:7\n{target}\n#EXT-X-MEDIA-SEQUENCE:{first}\n",);
+        if let Some(sequence) = legacy
             .lines()
-            .filter(|line| line.starts_with("#EXTINF:"))
-            .collect();
-        if video_durations.len() != entries.len() {
-            return None;
+            .find(|line| line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:"))
+        {
+            let _ = writeln!(playlist, "{sequence}");
         }
-        let mut playlist = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n{target}\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXT-X-MAP:URI=\"init/{rendition}.mp4\"\n",
-        );
-        for ((index, entry), video_duration) in (first..=last).zip(entries).zip(video_durations) {
-            if role == "audio" {
-                let seconds = entry.audio_ticks as f64 / 48_000.0;
-                let _ = writeln!(playlist, "#EXTINF:{seconds:.6},");
-            } else {
-                let _ = writeln!(playlist, "{video_duration}");
+        let _ = writeln!(playlist, "#EXT-X-MAP:URI=\"init/{rendition}.mp4\"");
+        let mut entries = entries.into_iter();
+        let mut next_index = first;
+        let mut pending_duration = false;
+        for line in legacy.lines().map(str::trim) {
+            if line == "#EXT-X-DISCONTINUITY" || line.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
+                let _ = writeln!(playlist, "{line}");
+            } else if line.starts_with("#EXTINF:") {
+                if pending_duration {
+                    return None;
+                }
+                let entry = entries.next()?;
+                pending_duration = true;
+                if role == "audio" {
+                    let seconds = entry.audio_ticks as f64 / 48_000.0;
+                    let _ = writeln!(playlist, "#EXTINF:{seconds:.6},");
+                } else {
+                    let _ = writeln!(playlist, "{line}");
+                }
+            } else if !line.starts_with('#') && !line.is_empty() {
+                if !pending_duration || u64::try_from(segment_index(line)?).ok()? != next_index {
+                    return None;
+                }
+                let _ = writeln!(playlist, "segment/{next_index}.m4s");
+                next_index = next_index.checked_add(1)?;
+                pending_duration = false;
             }
-            let _ = writeln!(playlist, "segment/{index}.m4s");
+        }
+        if pending_duration || next_index.checked_sub(1)? != last || entries.next().is_some() {
+            return None;
         }
         if snapshot.end_list {
             playlist.push_str("#EXT-X-ENDLIST\n");
@@ -2252,6 +2290,28 @@ impl TranscodeManager {
         child: Option<&crate::vodserve::ChildMediaRequest>,
         deadline: Instant,
     ) -> Result<SegmentPublication, SegmentOpenError> {
+        self.rolling_object_for_publication_before(session_id, name, child, false, deadline)
+            .await
+    }
+
+    pub(crate) async fn rolling_init_for_inspection_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+        deadline: Instant,
+    ) -> Result<SegmentPublication, SegmentOpenError> {
+        self.rolling_object_for_publication_before(session_id, name, None, true, deadline)
+            .await
+    }
+
+    async fn rolling_object_for_publication_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+        child: Option<&crate::vodserve::ChildMediaRequest>,
+        inspecting_init: bool,
+        deadline: Instant,
+    ) -> Result<SegmentPublication, SegmentOpenError> {
         // Guard against path traversal: segment names are `segNNNNN.ts` only.
         if !is_safe_segment(name) {
             return Ok(SegmentPublication::Missing(None));
@@ -2302,11 +2362,25 @@ impl TranscodeManager {
                 if inventory.window(index, index).is_none() {
                     return Ok(SegmentPublication::Pending(current_owner()));
                 }
-                session.dir.join(format!("split-{}-{name}", child.role))
-            } else {
-                session.dir.join(format!("split-{}.mp4", child.role))
             }
+            session.dir.join(inventory.child_object(
+                &child.role,
+                idx.map(|_| name),
+                &init_object_name(session.takeover.as_ref().map(|epoch| epoch.owner_epoch)),
+            ))
         } else {
+            if let Some(split) = session
+                .native_split
+                .as_ref()
+                .filter(|split| !split.allows_scalar())
+            {
+                if !split.primary_video() {
+                    return Ok(SegmentPublication::Pending(current_owner()));
+                }
+                if !inspecting_init || idx.is_some() {
+                    return Ok(SegmentPublication::Missing(Some(current_owner())));
+                }
+            }
             session.dir.join(name)
         };
         let (first_retained, requested_visibility) = {

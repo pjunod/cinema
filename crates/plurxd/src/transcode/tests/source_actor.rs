@@ -1286,6 +1286,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
     let request = SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
@@ -4603,6 +4604,7 @@ fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> Ses
     SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,

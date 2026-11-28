@@ -3970,6 +3970,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         kind: copy,
         split_audio: true,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         audio_index: Some(0),
         ..reopen_request(file_id, "split-admission", "unused", "unused")
     };
@@ -4010,6 +4011,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         &SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             ..req.clone()
         },
         &file,
@@ -4114,6 +4116,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .expect("copy index");
     let mut current = SessionRequest {
         vod_copy_layout: Some(crate::transcode::VodCopyLayout::PendingV1),
+        rolling_hls_layout: None,
         ..req.clone()
     };
     let four = manager

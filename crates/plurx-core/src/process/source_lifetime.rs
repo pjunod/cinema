@@ -14,7 +14,7 @@ pub use descriptors::{
     StdioMode,
 };
 pub use policy::{
-    configure_no_input_probe, daemon_roots_configured, daemon_working_directory,
+    configure_brokered_cwd, configure_no_input_probe, daemon_roots_configured,
     is_registered_broker, register_broker, set_daemon_roots, BrokerRegistration,
 };
 

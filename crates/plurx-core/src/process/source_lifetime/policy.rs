@@ -88,9 +88,14 @@ pub fn set_daemon_roots(owned: &[PathBuf], tools: &[PathBuf]) -> io::Result<()> 
     }
 }
 
-/// A configured daemon-owned working directory for children without path inputs.
-pub fn daemon_working_directory() -> Option<PathBuf> {
-    STATE.lock().ok()?.roots.as_ref()?.owned.first().cloned()
+/// Use the daemon's canonical working directory for a brokered child that
+/// needs no inherited directories or relative inputs.
+pub fn configure_brokered_cwd(command: &mut std::process::Command) {
+    if let Ok(state) = STATE.lock() {
+        if let Some(cwd) = state.roots.as_ref().and_then(|roots| roots.owned.first()) {
+            command.current_dir(cwd);
+        }
+    }
 }
 
 /// Prepare only an audited no-input candidate. Unqualified tools retain the

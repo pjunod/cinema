@@ -5603,6 +5603,11 @@ impl InitialProducerPolicy {
         }
     }
 
+    pub(crate) fn with_fragment_reader(mut self) -> Self {
+        self.exit_classifier = ProducerExitClassifier::CopyReader;
+        self
+    }
+
     /// Freeze the exact natural-exit completion policy beside attempt
     /// admission. The classifier may report playlist facts, but it cannot
     /// choose a more permissive expected duration or tolerance after exit.
@@ -5640,12 +5645,12 @@ impl InitialProducerPolicy {
                     ProducerStartupKind::Hardware
                         | ProducerStartupKind::MixedSoftwareDecode
                         | ProducerStartupKind::HardwareDecodeSoftwareEncode,
-                    ProducerExitClassifier::Immediate,
+                    ProducerExitClassifier::Immediate | ProducerExitClassifier::CopyReader,
                     ProducerRetryEligibility::AnyPrepublicationFailure,
                     true,
                 ) | (
                     ProducerStartupKind::Software,
-                    ProducerExitClassifier::Immediate,
+                    ProducerExitClassifier::Immediate | ProducerExitClassifier::CopyReader,
                     ProducerRetryEligibility::Never,
                     false,
                 ) | (

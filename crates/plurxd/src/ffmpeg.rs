@@ -1188,13 +1188,11 @@ async fn brokered_packet_probe_output(
     // Only the broker URL is an input. Avoid the daemon's ambient cwd for
     // an absolute probe while preserving relative tool resolution.
     if std::path::Path::new(command.as_std().get_program()).is_absolute() {
-        if let Some(cwd) = source_lifetime::daemon_working_directory() {
-            command.current_dir(cwd);
-        }
+        source_lifetime::configure_brokered_cwd(command.as_std_mut());
     }
     let manifest = crate::producer_spawn::Descriptors::default()
         .prepare(command, crate::producer_spawn::ChildStdios::CAPTURED)?;
-    source_lifetime::mediated(bounded::output_command_with_descriptors(
+    source_lifetime::brokered(bounded::output_command_with_descriptors(
         command,
         timeout,
         cap,

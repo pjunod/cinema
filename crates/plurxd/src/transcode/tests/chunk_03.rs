@@ -3271,6 +3271,44 @@
         assert!(served.ends_with("seg00002.m4s\n#EXT-X-ENDLIST\n"));
     }
 
+    #[tokio::test]
+    async fn split_child_playlists_keep_interior_discontinuities_on_both_clocks() {
+        let directory = crate::test_tempdir().expect("rolling split");
+        let store = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            directory.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut session = test_session(directory.path().to_owned());
+        let split = Arc::new(crate::copyseg::NativeSplitInventory::default());
+        let ids = split.seed_for_http_test(2);
+        split.choose(Some((0, 1))).expect("split layout");
+        session.native_split = Some(split);
+        let raw = b"#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-DISCONTINUITY-SEQUENCE:2\n#EXTINF:5.000,\nseg00000.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:6.000,\nseg00001.m4s\n#EXT-X-ENDLIST\n";
+        session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(raw.as_slice()),
+            producer_attempt: session.control.current_producer_attempt(),
+            revision: 1,
+            first_segment: 0,
+            last_segment: 1,
+            duration_ms: 11_000,
+            end_ms: 11_000,
+            end_list: true,
+            available_at: Instant::now(),
+        });
+        manager.sessions.lock().await.insert("rolling-split".to_owned(), Arc::new(session));
+        for (role, id, duration) in [("video", ids.video, "6.000"), ("audio", ids.audio, "4.000000")] {
+            let (bytes, _) = manager.native_split_child_playlist("rolling-split", role, &id)
+                .await.expect("child playlist");
+            let text = String::from_utf8(bytes).expect("playlist text");
+            assert!(text.contains("#EXT-X-DISCONTINUITY-SEQUENCE:2"));
+            assert!(text.contains(&format!("segment/0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:{duration},\nsegment/1.m4s")));
+            assert_eq!(text.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        }
+    }
+
     /// The rolling contract is not merely that EVENT disappears after a
     /// prune; it is that one session URL presents the same typeless envelope
     /// before and after that boundary. Only MEDIA-SEQUENCE and the retained
