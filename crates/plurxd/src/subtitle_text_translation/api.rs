@@ -93,7 +93,7 @@ pub(crate) async fn options(
         .await?
         .ok_or(ApiError::NotFound("file"))?;
     Ok(Json(
-        json!({"version":1,"file_id":file.id.to_string(),"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),"subtitles":file.subtitle_streams.iter().map(|track|json!({"index":track.index,"language":track.language,"title":track.title,"downloaded_subtitle_id":file.downloaded_subtitle(track.index).map(|caption|caption.stable_id()),"text_eligible":!plurx_core::tracks::is_bitmap_subtitle(&track.codec)})).collect::<Vec<_>>(),"configuration":config::read(&state).await?,"model_id":MODEL_ID,"input_languages":artifacts::catalog_public()["input_languages"],"workers":super::workers(&state).await?,"permissions":{"read":true,"create":user.is_admin},"server_now_ms":crate::state::clock_ms()}),
+        json!({"version":1,"file_id":file.id.to_string(),"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),"subtitles":file.subtitle_streams.iter().map(|track|json!({"index":track.index,"language":track.language,"title":track.title,"downloaded_subtitle_id":file.downloaded_subtitle(track.index).map(|caption|caption.stable_id()),"text_eligible":!plurx_core::tracks::is_bitmap_subtitle(&track.codec)})).collect::<Vec<_>>(),"configuration":config::read(&state).await?,"model_id":MODEL_ID,"input_languages":artifacts::catalog_public()["input_languages"],"workers":super::workers(&state).await?,"permissions":{"read":true,"create":crate::ai_subtitles::allowed(state.store.as_ref(),&user).await?},"server_now_ms":crate::state::clock_ms()}),
     ))
 }
 async fn model_action(
@@ -145,7 +145,7 @@ pub(crate) async fn verify(
     model_action(&state, user.id, input, ModelAction::Verify).await
 }
 pub(crate) async fn create(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path((file_id, index)): Path<(i64, i64)>,
     Json(input): Json<CreateRequest>,
@@ -162,7 +162,12 @@ pub(crate) async fn create(
             "Choose English text translation with the supported model".into(),
         ));
     }
-    if !config::read(&state).await?.enabled {
+    crate::ai_subtitles::may_start_new(&state, &user, None).await?;
+    if !crate::ai_subtitles::settings::read(&state)
+        .await?
+        .settings
+        .translate_text
+    {
         return Err(conflict(
             "disabled",
             "Enable text subtitle translation in Settings",
@@ -223,7 +228,7 @@ pub(crate) async fn create(
     enqueue(&state, user.id, &input.request_id, digest, payload).await
 }
 pub(crate) async fn retry(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
     Json(input): Json<RetryRequest>,
@@ -267,7 +272,12 @@ pub(crate) async fn retry(
             target_node_id,
             ..
         } => {
-            if !config::read(&state).await?.enabled {
+            crate::ai_subtitles::may_start_new(&state, &user, None).await?;
+            if !crate::ai_subtitles::settings::read(&state)
+                .await?
+                .settings
+                .translate_text
+            {
                 return Err(conflict(
                     "disabled",
                     "Enable text subtitle translation in Settings",
@@ -314,6 +324,10 @@ pub(crate) async fn retry(
             target_boot_id,
             ..
         } => {
+            // Model setup stays admin-only, whatever `who` allows.
+            if !user.is_admin {
+                return Err(ApiError::Forbidden);
+            }
             *admin_user_id = user.id;
             *target_node_id = state.node_id.clone();
             *target_boot_id = state.subtitle_models.boot_id.clone();

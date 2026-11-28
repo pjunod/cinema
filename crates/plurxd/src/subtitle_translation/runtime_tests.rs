@@ -143,6 +143,14 @@ async fn fixture(media: bool) -> Fixture {
         )
         .await
         .expect("translation on");
+    state
+        .store
+        .put_setting(
+            "subtitles.ai.v1",
+            crate::ai_subtitles::settings::TEST_ADMINS_ALL_ON,
+        )
+        .await
+        .expect("AI subtitles on");
     let library = state
         .store
         .create_library(&NewLibrary {

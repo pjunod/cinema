@@ -397,7 +397,7 @@ mod tests {
     fn text_artifact_upgrade_preserves_readers_and_legacy_worker_fences() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
         SqliteStore::apply_migrations_for_test(&conn, 120).expect("deployed v2");
-        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','unused',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.text_translation.config.v1','{\"version\":1,\"enabled\":true}');").expect("current source and authority");
+        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','unused',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.text_translation.config.v1','{\"version\":1,\"enabled\":true}'); INSERT OR IGNORE INTO settings(key,value) VALUES('subtitles.ai.v1','{\"version\":1,\"download_match\":true,\"translate_text\":true,\"from_audio\":true,\"ahead_of_time\":false,\"who\":\"admins\",\"quality\":\"balanced\"}');").expect("current source and authority");
         queued(
             &conn,
             "metadata",

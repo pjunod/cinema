@@ -15,7 +15,7 @@ fn fixture() -> (tempfile::TempDir, SqliteStore, rusqlite::Connection) {
     let path = dir.path().join("store.db");
     let store = SqliteStore::open(&path).expect("migrate");
     let conn = rusqlite::Connection::open(path).expect("connection");
-    conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.translation.config.v1','{\"version\":1,\"enabled\":true}');").expect("catalog");
+    conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.translation.config.v1','{\"version\":1,\"enabled\":true}'); INSERT OR IGNORE INTO settings(key,value) VALUES('subtitles.ai.v1','{\"version\":1,\"download_match\":true,\"translate_text\":true,\"from_audio\":true,\"ahead_of_time\":false,\"who\":\"admins\",\"quality\":\"balanced\"}');").expect("catalog");
     (dir, store, conn)
 }
 fn mutation(action: TranslationAction, now: i64) -> TranslationMutation {
@@ -159,7 +159,7 @@ async fn retarget_preserves_root_epoch_and_demand_but_never_reuses_a_producer_in
 #[tokio::test]
 async fn retarget_refuses_expired_or_revoked_demand_disable_and_newer_view() {
     for change in ["UPDATE subtitle_translation_demands SET expires_at_ms=1001", "UPDATE users SET is_admin=0 WHERE id=1",
-        "UPDATE settings SET value='{\"version\":1,\"enabled\":false}' WHERE key='subtitles.translation.config.v1'",
+        "UPDATE settings SET value='{\"version\":1,\"enabled\":false}' WHERE key='subtitles.translation.config.v1'; UPDATE settings SET value=json_set(value,'$.from_audio',json('false')) WHERE key='subtitles.ai.v1';",
         "UPDATE subtitle_translation_operations SET view_revision=view_revision+1"] {
         let (_dir,store,conn)=fixture();
         let created=store.mutate_subtitle_translation(create()).await.expect("create");

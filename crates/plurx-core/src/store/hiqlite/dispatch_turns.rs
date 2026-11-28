@@ -1,7 +1,9 @@
 //! Replicated installation of the shared dispatch-turn schema.
 use super::{admit_schema_migration, HiqliteAuthStore, RemoteShapeRow, SchemaMigrationAdmission};
 use crate::error::StoreError;
-use crate::store::background_job_turns::{expected_catalog, CATALOG, LIVE_TITLE_MIGRATION, SCHEMA};
+use crate::store::background_job_turns::{
+    expected_catalog, migrations_after, CATALOG, CURRENT, LIVE_TITLES, ORIGINAL, SCHEMA,
+};
 use hiqlite::macros::params;
 
 fn installed_matches(
@@ -40,17 +42,29 @@ impl HiqliteAuthStore {
         &self,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
-        let expected = expected_catalog(true)?;
+        let expected = expected_catalog(CURRENT)?;
         let installed = self.dispatch_turns_catalog().await?;
         let (predecessor, migrations) = if installed.is_empty() {
-            (Vec::new(), vec![SCHEMA, LIVE_TITLE_MIGRATION])
+            let mut migrations = vec![SCHEMA];
+            migrations.extend(migrations_after(ORIGINAL));
+            (Vec::new(), migrations)
         } else {
-            let original = expected_catalog(false)?;
             if installed_matches(&installed, &expected).is_ok() {
                 return Ok(());
             }
-            installed_matches(&installed, &original)?;
-            (original, vec![LIVE_TITLE_MIGRATION])
+            let mut found = None;
+            for generation in [LIVE_TITLES, ORIGINAL] {
+                let predecessor = expected_catalog(generation)?;
+                if installed_matches(&installed, &predecessor).is_ok() {
+                    found = Some((predecessor, migrations_after(generation)));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                StoreError::Migration(
+                    "dispatch turn schema has an incompatible or partial shape".into(),
+                )
+            })?
         };
         // Compare the whole observed layout again inside the replicated writer.
         // A concurrent winner is recognized only after reading its complete catalog.
@@ -89,7 +103,7 @@ mod tests {
     fn dispatch_turn_upgrade_agrees_with_replicated_catalog_and_rejects_partial_shape() {
         let db = rusqlite::Connection::open_in_memory().expect("database");
         SqliteStore::apply_migrations_for_test(&db, 123).expect("predecessor");
-        let expected = expected_catalog(false).expect("canonical extension");
+        let expected = expected_catalog(ORIGINAL).expect("canonical extension");
         assert!(!expected.is_empty());
         let installed = || {
             db.prepare(CATALOG)

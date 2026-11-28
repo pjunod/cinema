@@ -97,7 +97,7 @@ pub(super) fn range_interest(payload: &str, job: &str, fence: &str, now: &str) -
         r#"EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
  WHERE d.operation_id=json_extract({payload},'$.recipe.operation_id')
  AND d.operation_epoch=json_extract({payload},'$.recipe.operation_epoch')
- AND d.released=0 AND d.expires_at_ms>{now} AND u.is_admin=1
+ AND d.released=0 AND d.expires_at_ms>{now} AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))
  AND (json_extract({payload},'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract({payload},'$.recipe.profile.core_ms') AS INTEGER)
   AND CAST(d.position_ms/json_extract({payload},'$.recipe.profile.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
  OR EXISTS(SELECT 1 FROM subtitle_translation_range_continuities c
@@ -138,7 +138,7 @@ pub(super) async fn read<T: QueueSql>(
             }
             body["request_id"] = request_id.into();
             body["request_digest"] = request_digest.into();
-            "SELECT CASE WHEN r.body_digest=json_extract($1,'$.request_digest') THEN r.outcome_json ELSE json_object('outcome','request_conflict') END AS result_json FROM subtitle_translation_requests r WHERE r.user_id=json_extract($1,'$.user_id') AND r.request_id=json_extract($1,'$.request_id') AND EXISTS(SELECT 1 FROM users WHERE id=r.user_id AND is_admin=1)".into()
+            "SELECT CASE WHEN r.body_digest=json_extract($1,'$.request_digest') THEN r.outcome_json ELSE json_object('outcome','request_conflict') END AS result_json FROM subtitle_translation_requests r WHERE r.user_id=json_extract($1,'$.user_id') AND r.request_id=json_extract($1,'$.request_id') AND EXISTS(SELECT 1 FROM users WHERE id=r.user_id AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))".into()
         }
 
         TranslationQuery::RecipeOperation { recipe_key } => {
@@ -155,7 +155,7 @@ pub(super) async fn read<T: QueueSql>(
             body["operation_id"] = operation_id.into();
             format!(
                 r#"SELECT json_object('version',1,'operation_id',op.id,'operation_epoch',CAST(op.operation_epoch AS TEXT),'view_revision',CAST(op.view_revision AS TEXT),
- 'state',CASE WHEN op.stopped=0 AND op.state NOT IN ('failed','complete') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1) THEN 'suspended' ELSE op.state END,
+ 'state',CASE WHEN op.stopped=0 AND op.state NOT IN ('failed','complete') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))) THEN 'suspended' ELSE op.state END,
  'reason',op.reason,'retryable',json(CASE WHEN op.retryable=1 THEN 'true' ELSE 'false' END),'asset_id',op.asset_id,'manifest_revision',(SELECT CAST(manifest_revision AS TEXT) FROM subtitle_translation_assets WHERE id=op.asset_id),
  'file_id',CAST(op.file_id AS TEXT),'source_size',CAST(json_extract(op.source_json,'$.source_size') AS TEXT),'source_mtime',CAST(json_extract(op.source_json,'$.source_mtime') AS TEXT),'content_revision',(SELECT source_sha256 FROM subtitle_translation_assets WHERE id=op.asset_id),'audio_index',op.audio_index,'spoken_language',op.spoken_language,'output_language',CASE WHEN json_extract(op.profile_json,'$.task')='transcribe' THEN op.spoken_language ELSE 'en' END,'task',COALESCE(json_extract(op.profile_json,'$.task'),'translate'),
  'model_id',json_extract(op.profile_json,'$.model_id'),'model_sha256',json_extract(op.profile_json,'$.model_sha256'),'profile',json(op.profile_json),'timeline_contract',json_extract(op.profile_json,'$.timeline_contract'),
@@ -325,7 +325,7 @@ pub(super) async fn read<T: QueueSql>(
             }
             body["operation_id"] = operation_id.into();
             body["epoch"] = operation_epoch.into();
-            "SELECT json_object('demand_id',d.id,'playback_id',d.playback_id,'continuity_id',d.continuity_id,'generation',d.generation,'user_id',d.user_id,'position_ms',d.position_ms,'playback_rate',d.playback_rate,'paused',json(CASE WHEN d.paused=1 THEN 'true' ELSE 'false' END),'expires_at_ms',d.expires_at_ms) AS result_json FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id JOIN subtitle_translation_operations op ON op.id=d.operation_id AND op.operation_epoch=d.operation_epoch WHERE op.stopped=0 AND d.operation_id=json_extract($1,'$.operation_id') AND d.operation_epoch=json_extract($1,'$.epoch') AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1 ORDER BY d.user_id,d.id LIMIT 16".into()
+            "SELECT json_object('demand_id',d.id,'playback_id',d.playback_id,'continuity_id',d.continuity_id,'generation',d.generation,'user_id',d.user_id,'position_ms',d.position_ms,'playback_rate',d.playback_rate,'paused',json(CASE WHEN d.paused=1 THEN 'true' ELSE 'false' END),'expires_at_ms',d.expires_at_ms) AS result_json FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id JOIN subtitle_translation_operations op ON op.id=d.operation_id AND op.operation_epoch=d.operation_epoch WHERE op.stopped=0 AND d.operation_id=json_extract($1,'$.operation_id') AND d.operation_epoch=json_extract($1,'$.epoch') AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)) ORDER BY d.user_id,d.id LIMIT 16".into()
         }
         TranslationQuery::CoreState {
             operation_id,
@@ -354,7 +354,7 @@ pub(super) async fn read<T: QueueSql>(
             }
             body["node_id"] = node_id.into();
             body["after"] = json!(after);
-            "SELECT json_object('operation_id',id,'operation_epoch',operation_epoch,'preparation_job_id',preparation_job_id,'asset_id',asset_id,'state',state,'source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms) AS result_json FROM subtitle_translation_operations o WHERE o.target_node_id=json_extract($1,'$.node_id') AND o.stopped=0 AND o.state NOT IN ('failed','complete') AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=o.id AND d.operation_epoch=o.operation_epoch AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1) AND (json_extract($1,'$.after') IS NULL OR o.id>json_extract($1,'$.after')) ORDER BY o.id LIMIT 33".into()
+            "SELECT json_object('operation_id',id,'operation_epoch',operation_epoch,'preparation_job_id',preparation_job_id,'asset_id',asset_id,'state',state,'source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms) AS result_json FROM subtitle_translation_operations o WHERE o.target_node_id=json_extract($1,'$.node_id') AND o.stopped=0 AND o.state NOT IN ('failed','complete') AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=o.id AND d.operation_epoch=o.operation_epoch AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))) AND (json_extract($1,'$.after') IS NULL OR o.id>json_extract($1,'$.after')) ORDER BY o.id LIMIT 33".into()
         }
     };
     let rows = store.queue_sql(sql, encode(&body)?, false, true).await?;

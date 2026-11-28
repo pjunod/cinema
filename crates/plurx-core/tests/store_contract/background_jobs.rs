@@ -6073,6 +6073,10 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             })
             .await
             .expect("save unready");
+        store
+            .put_setting("subtitles.ai.v1", r#"{"version":1,"download_match":true,"translate_text":true,"from_audio":true,"ahead_of_time":false,"who":"admins","quality":"balanced"}"#)
+            .await
+            .expect("AI subtitles from audio on");
         assert_eq!(saved["outcome"], "saved", "{backend}");
         let profile = TranslationProfile {
             task: Default::default(),

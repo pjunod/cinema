@@ -653,6 +653,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-translation"
         | "/api/v1/subtitle-translation/models"
         | "/api/v1/subtitle-text-translation/config"
+        | "/api/v1/ai-subtitles/settings"
         | "/api/v1/subtitle-text-translation/models"
         | "/api/v1/subtitle-text-translation/models/install"
         | "/api/v1/subtitle-text-translation/models/verify"
@@ -2005,6 +2006,10 @@ pub fn router(state: AppState) -> Router {
             "/subtitle-text-translation/config",
             get(crate::subtitle_text_translation::api::settings)
                 .put(crate::subtitle_text_translation::api::update_settings),
+        )
+        .route(
+            "/ai-subtitles/settings",
+            get(crate::ai_subtitles::get_settings).put(crate::ai_subtitles::put_settings),
         )
         .route(
             "/subtitle-text-translation/models",

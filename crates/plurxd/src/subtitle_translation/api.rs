@@ -338,6 +338,7 @@ pub async fn options(
     let default_profile_id = preferred.as_ref().map(TranslationProfile::id).transpose()?;
     let preferred_model = preferred.as_ref().map(|profile| profile.model_id.as_str());
     let file = file(&state, file_id).await?;
+    let may = crate::ai_subtitles::allowed(state.store.as_ref(), &user).await?;
     let (assets, next) = asset_page(&state, user.id, file.id, None).await?;
     let mut audio = Vec::new();
     let mut any_supported = false;
@@ -359,7 +360,7 @@ pub async fn options(
         "content_revision":null,"duration_ms":file.duration_ms,"source_origin_ms":source_origin_ms,"timeline_contract":super::profile::selected_profile().timeline_contract,
         "default_profile_id":default_profile_id,"audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":super::profile::profiles().into_iter().map(|profile| profile_summary(profile, preferred_model)).collect::<Result<Vec<_>,_>>()?,
         "capability":{"supported":any_supported,"reason":if any_supported{None}else{Some(capability_reason)}},
-        "permissions":{"read":true,"demand":user.is_admin,"stop":user.is_admin,"resume":user.is_admin},
+        "permissions":{"read":true,"demand":may,"stop":may,"resume":may},
         "assets":assets,"assets_next_cursor":next,"server_now_ms":crate::state::clock_ms()}),
     )
 }
@@ -747,11 +748,12 @@ fn mutation_receipt(value: &Value, outcome: &str) -> Result<Value, ApiError> {
 }
 
 pub async fn create(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     ApiPath(file_id): ApiPath<i64>,
     Json(input): Json<CreateRequest>,
 ) -> Result<Response, ApiError> {
+    crate::ai_subtitles::may_start(&state, &user).await?;
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     window(&input.playback_id, input.position_ms, input.playback_rate)?;
     let task = input.task.unwrap_or_else(|| {
@@ -830,6 +832,11 @@ pub async fn create(
         TranslationQuery::RecipeOperation { recipe_key },
     )
     .await?;
+    let joining = existing
+        .first()
+        .map(|existing| field(existing, "operation_id"))
+        .transpose()?;
+    crate::ai_subtitles::may_start_new(&state, &user, joining).await?;
     let target = if let Some(existing) = existing.first() {
         field(existing, "target_node_id")?.to_owned()
     } else {
@@ -863,11 +870,12 @@ pub async fn create(
     .await
 }
 pub async fn demand(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     ApiPath((operation_id, demand_id)): ApiPath<(String, String)>,
     Json(input): Json<DemandRequest>,
 ) -> Result<Response, ApiError> {
+    crate::ai_subtitles::may_start(&state, &user).await?;
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     id(&operation_id)?;
     id(&demand_id)?;
@@ -903,11 +911,12 @@ pub async fn demand(
     .await
 }
 pub async fn release(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     ApiPath((operation_id, demand_id)): ApiPath<(String, String)>,
     Json(input): Json<ReleaseRequest>,
 ) -> Result<Response, ApiError> {
+    crate::ai_subtitles::may_start(&state, &user).await?;
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     id(&operation_id)?;
     id(&demand_id)?;
@@ -939,11 +948,12 @@ pub async fn release(
     .await
 }
 pub async fn stop(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     ApiPath(operation_id): ApiPath<String>,
     Json(input): Json<StopRequest>,
 ) -> Result<Response, ApiError> {
+    crate::ai_subtitles::may_start(&state, &user).await?;
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     id(&operation_id)?;
     let request_digest = config::request_digest(
@@ -966,12 +976,13 @@ pub async fn stop(
     .await
 }
 pub async fn retry(
-    AdminUser(user): AdminUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     ApiPath(operation_id): ApiPath<String>,
     Json(input): Json<RetryRequest>,
 ) -> Result<Response, ApiError> {
     id(&operation_id)?;
+    crate::ai_subtitles::may_start_new(&state, &user, None).await?;
     let request_digest = config::request_digest(
         "POST",
         &format!("/subtitle-translation/operations/{operation_id}/retry"),
@@ -2054,7 +2065,7 @@ mod tests {
         let path = dir.path().join("store.db");
         let store = SqliteStore::open(&path).expect("real schema");
         let conn = rusqlite::Connection::open(path).expect("fixture connection");
-        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.translation.config.v1','{\"version\":1,\"enabled\":true}');").expect("real catalog setup");
+        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.translation.config.v1','{\"version\":1,\"enabled\":true}'); INSERT OR IGNORE INTO settings(key,value) VALUES('subtitles.ai.v1','{\"version\":1,\"download_match\":true,\"translate_text\":true,\"from_audio\":true,\"ahead_of_time\":false,\"who\":\"admins\",\"quality\":\"balanced\"}');").expect("real catalog setup");
         let input = create_input();
         let digest = config::request_digest("POST", "/files/1/subtitle-translation", &input)
             .expect("original wire digest");
@@ -2090,7 +2101,7 @@ mod tests {
             .await
             .expect("atomic accepted preparation");
         assert_eq!(first["outcome"], "accepted");
-        conn.execute_batch("UPDATE files SET size=101,mtime=21,probe_json=NULL WHERE id=1; UPDATE settings SET value='{\"version\":1,\"enabled\":false}' WHERE key='subtitles.translation.config.v1';").expect("source and admission change after lost response");
+        conn.execute_batch("UPDATE files SET size=101,mtime=21,probe_json=NULL WHERE id=1; UPDATE settings SET value='{\"version\":1,\"enabled\":false}' WHERE key='subtitles.translation.config.v1'; UPDATE settings SET value=json_set(value,'$.from_audio',json('false')) WHERE key='subtitles.ai.v1';").expect("source and admission change after lost response");
         let replay = config::replay(&store, 1, &input.request_id, &digest, 70_000)
             .await
             .expect("retained replay after first-use expiry")

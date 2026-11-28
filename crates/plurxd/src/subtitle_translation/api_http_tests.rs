@@ -83,6 +83,14 @@ async fn fixture() -> Fixture {
         )
         .await
         .expect("translation on");
+    state
+        .store
+        .put_setting(
+            "subtitles.ai.v1",
+            crate::ai_subtitles::settings::TEST_ADMINS_ALL_ON,
+        )
+        .await
+        .expect("AI subtitles on");
     let library = state
         .store
         .create_library(&NewLibrary {
@@ -532,7 +540,7 @@ async fn create_replays_before_source_or_settings_changes_but_rechecks_current_a
     let expected = mutation_receipt(&receipt, "accepted").expect("safe receipt");
     let first = body(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(input(serde_json::to_value(&request).expect("input"))),
@@ -551,6 +559,15 @@ async fn create_replays_before_source_or_settings_changes_but_rechecks_current_a
         )
         .await
         .expect("disable");
+    f.state
+        .store
+        .put_setting(
+            "subtitles.ai.v1",
+            &crate::ai_subtitles::settings::TEST_ADMINS_ALL_ON
+                .replace("\"from_audio\":true", "\"from_audio\":false"),
+        )
+        .await
+        .expect("disable AI speech");
     let changed_probe = ProbeResult {
         video_codec: Some("h264".into()),
         ..Default::default()
@@ -568,7 +585,7 @@ async fn create_replays_before_source_or_settings_changes_but_rechecks_current_a
         .expect("scanner changed source");
     let replay = body(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(input(serde_json::to_value(&request).expect("input"))),
@@ -582,7 +599,7 @@ async fn create_replays_before_source_or_settings_changes_but_rechecks_current_a
     changed["paused"] = json!(true);
     refused(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(input(changed)),
@@ -598,7 +615,7 @@ async fn create_replays_before_source_or_settings_changes_but_rechecks_current_a
         .expect("revoke admin");
     refused(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(request),
@@ -618,7 +635,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     let playback = request.playback_id.clone();
     let created = body(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(request),
@@ -642,7 +659,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     demand_body["paused"] = json!(false);
     let renewed = body(
         demand(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath((op.clone(), demand_id.clone())),
             Json(input(demand_body.clone())),
@@ -655,7 +672,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     assert_eq!(renewed["demand_generation"], "2");
     let replay = body(
         demand(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath((op.clone(), demand_id.clone())),
             Json(input(demand_body)),
@@ -671,7 +688,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     release_body["playback_id"] = json!(playback);
     let released = body(
         release(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath((op.clone(), demand_id)),
             Json(input(release_body)),
@@ -685,7 +702,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     stop_body["expected_operation_epoch"] = created["operation_epoch"].clone();
     let stopped = body(
         stop(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(op.clone()),
             Json(input(stop_body.clone())),
@@ -698,7 +715,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     assert_eq!(stopped["operation_epoch"], "2");
     let stopped_replay = body(
         stop(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(op.clone()),
             Json(input(stop_body)),
@@ -731,7 +748,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     retry_body["paused"] = json!(false);
     let resumed = body(
         retry(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(op.clone()),
             Json(input(retry_body.clone())),
@@ -745,7 +762,7 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     retry_body["request_id"] = json!(uuid::Uuid::new_v4().to_string());
     refused(
         retry(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(op),
             Json(input(retry_body)),
@@ -777,7 +794,7 @@ async fn invalid_create_and_demands_never_leave_partial_jobs_or_authority() {
         bad[field] = value;
         refused(
             create(
-                AdminUser(f.admin.clone()),
+                AuthUser(f.admin.clone()),
                 State(f.state.clone()),
                 ApiPath(f.file.id),
                 Json(input(bad)),
@@ -792,7 +809,7 @@ async fn invalid_create_and_demands_never_leave_partial_jobs_or_authority() {
     expired["intent_expires_at_ms"] = json!(0);
     refused(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(input(expired)),
@@ -806,7 +823,7 @@ async fn invalid_create_and_demands_never_leave_partial_jobs_or_authority() {
     stale["source_size"] = json!((f.file.size + 1).to_string());
     refused(
         create(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(input(stale)),
@@ -818,7 +835,7 @@ async fn invalid_create_and_demands_never_leave_partial_jobs_or_authority() {
     .await;
     refused(
         create(
-            AdminUser(f.viewer.clone()),
+            AuthUser(f.viewer.clone()),
             State(f.state.clone()),
             ApiPath(f.file.id),
             Json(input(base)),
@@ -895,7 +912,7 @@ async fn manifest_leases_reuse_etags_but_a_new_stop_view_cannot_be_hidden_by_not
     stop_input["expected_operation_epoch"] = json!("1");
     body(
         stop(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(recipe.operation_id.clone()),
             Json(input(stop_input)),
@@ -1199,7 +1216,7 @@ async fn failed_range_projection_retry_and_stale_failure_pages_use_the_live_view
     retry_input["paused"] = json!(false);
     let retried = body(
         retry(
-            AdminUser(f.admin.clone()),
+            AuthUser(f.admin.clone()),
             State(f.state.clone()),
             ApiPath(recipe.operation_id.clone()),
             Json(input(retry_input)),
@@ -1437,4 +1454,113 @@ async fn asset_listing_continues_after_sixteen_entries_without_duplicates_or_acc
         "invalid_request",
     )
     .await;
+}
+
+async fn seed_operation_as(f: &Fixture, user: &User, language: &str) -> Value {
+    let request = create_input(f, language);
+    let digest = config::request_digest(
+        "POST",
+        &format!("/files/{}/subtitle-translation", f.file.id),
+        &request,
+    )
+    .expect("request digest");
+    f.state
+        .store
+        .mutate_subtitle_translation(TranslationMutation {
+            user_id: user.id,
+            request_id: request.request_id.clone(),
+            request_digest: digest,
+            intent_expires_at_ms: request.intent_expires_at_ms,
+            now_ms: crate::state::clock_ms(),
+            action: TranslationAction::Create {
+                source: SourceRevision {
+                    file_id: f.file.id,
+                    source_size: f.file.size,
+                    source_mtime: f.file.mtime,
+                },
+                profile: super::super::profile::selected_profile(),
+                audio_index: 0,
+                spoken_language: language.into(),
+                duration_ms: 61_000,
+                target_node_id: f.state.node_id.clone(),
+                playback_id: request.playback_id.clone(),
+                position_ms: 0,
+                playback_rate: 1.0,
+                paused: false,
+                continuity_id: None,
+            },
+        })
+        .await
+        .expect("operation fixture")
+}
+
+/// AI subtitles T2: a non-admin may start progressive work only when
+/// `subtitles.ai.v1` says everyone (403 otherwise), and holds at most two
+/// active operations; a third new start is 429 while joining an operation
+/// already running is not counted.
+#[tokio::test]
+async fn non_admin_create_needs_who_everyone_and_is_bounded_to_two_active_operations() {
+    let f = fixture().await;
+    refused(
+        create(
+            AuthUser(f.viewer.clone()),
+            State(f.state.clone()),
+            ApiPath(f.file.id),
+            Json(create_input(&f, "de")),
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "ai_subtitles_admins_only",
+    )
+    .await;
+    f.state
+        .store
+        .put_setting(
+            "subtitles.ai.v1",
+            &crate::ai_subtitles::settings::TEST_ADMINS_ALL_ON
+                .replace("\"who\":\"admins\"", "\"who\":\"everyone\""),
+        )
+        .await
+        .expect("everyone");
+    for language in ["de", "fr"] {
+        let receipt = seed_operation_as(&f, &f.viewer, language).await;
+        assert_eq!(receipt["outcome"], "accepted", "{receipt}");
+    }
+    refused(
+        create(
+            AuthUser(f.viewer.clone()),
+            State(f.state.clone()),
+            ApiPath(f.file.id),
+            Json(create_input(&f, "es")),
+        )
+        .await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "ai_subtitles_busy",
+    )
+    .await;
+    let joined = body(
+        create(
+            AuthUser(f.viewer.clone()),
+            State(f.state.clone()),
+            ApiPath(f.file.id),
+            Json(create_input(&f, "de")),
+        )
+        .await
+        .expect("joining a running operation is not a new start"),
+    )
+    .await;
+    assert!(joined["operation_id"].is_string(), "{joined}");
+    // An admin's new start passes the per-user bound and the `who` check; in
+    // this fixture it then stops at worker selection, never at the bound.
+    let admin = create(
+        AuthUser(f.admin.clone()),
+        State(f.state.clone()),
+        ApiPath(f.file.id),
+        Json(create_input(&f, "es")),
+    )
+    .await;
+    if let Err(error) = admin {
+        assert_ne!(error.code(), Some("ai_subtitles_busy"), "{error:?}");
+        assert_ne!(error.code(), Some("ai_subtitles_admins_only"), "{error:?}");
+    }
 }

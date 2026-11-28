@@ -109,11 +109,10 @@ pub(crate) async fn replay(
     request_digest: &str,
     now: i64,
 ) -> Result<Option<serde_json::Value>, ApiError> {
-    if !store
-        .get_user(user_id)
-        .await?
-        .is_some_and(|user| user.is_admin)
-    {
+    let Some(user) = store.get_user(user_id).await? else {
+        return Err(failure(StatusCode::FORBIDDEN, "permission_denied", now));
+    };
+    if !crate::ai_subtitles::allowed(store, &user).await? {
         return Err(failure(StatusCode::FORBIDDEN, "permission_denied", now));
     }
     let rows = store

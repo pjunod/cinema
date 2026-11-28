@@ -22,6 +22,7 @@ use plurx_core as observer_core;
 #[path = "../../plurx-core/tests/fixtures/startup_observer.rs"]
 mod sharing_fixture_clock;
 
+mod ai_subtitles;
 mod artifact_integrity;
 mod background_jobs;
 mod backup;
@@ -3353,6 +3354,11 @@ async fn probe_system(
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
     seed_always_on_playback_settings(store).await?;
+    // Admission reads only `subtitles.ai.v1`; derive it from the older
+    // switches once per cluster before any worker claims.
+    crate::ai_subtitles::settings::seed(store.as_ref())
+        .await
+        .map_err(|error| anyhow::anyhow!("seed AI subtitle settings: {error:?}"))?;
     // Representative comparisons run only on an explicit idle-node request.
     // A saved receipt is reusable only for this executable/fixture/driver set.
     let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)

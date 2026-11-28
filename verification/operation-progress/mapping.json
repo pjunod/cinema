@@ -392,10 +392,10 @@
       {
         "table": "caption migration exact-shape recognizer outside selected library model",
         "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
-        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
+        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2,",
         "scope": "item",
         "item": "fn version",
-        "item_sha256": "6a33ab08d23923e43af7cae6c9bca9f8b1d9e23c46180ea692cbc8b70f49be08"
+        "item_sha256": "c92c41ed922488d70c4d7248ba83c9b4e9485634bd1228bd86ca7cf6507a1441"
       },
       {
         "table": "caption retarget queue effects remain kind-scoped outside selected library model",
@@ -412,6 +412,14 @@
         "scope": "item",
         "item": "trigger subtitle_translation_capture_continuity",
         "item_sha256": "8feb9d732dd136b65e3e28efd2597e393f1a9877714a3e38614f213a09ab29ae"
+      },
+      {
+        "table": "caption settings-authorized continuity effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_authority.sql",
+        "anchor": "WHEN NEW.kind='subtitle_translation_range' AND NEW.state='running' AND NEW.fence>OLD.fence",
+        "scope": "item",
+        "item": "trigger subtitle_translation_capture_continuity",
+        "item_sha256": "ee0e0f5f60f800c5fbd670fadbb8f4d08f374bc43bdc5a082bd68365f8de3b39"
       },
       {
         "table": "caption demand revocation affects only captured caption grants outside selected library model",
