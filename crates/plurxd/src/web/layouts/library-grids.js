@@ -161,6 +161,8 @@ function libraryPaintRows(body,groups,done,state){
       row={section,strip,cards:new Map(),position:0,limit:LIB_ROW_CHUNK,items:[]};
       LIB_ROW_NODES.set(strip,row);state.rows.set(group.key,row);
     }
+    // A page can arrive before the strip dispatches its pending scroll event.
+    if(row.section.isConnected)row.position=row.strip.scrollLeft;
     if(row.section!==before)body.insertBefore(row.section,before);
     before=row.section.nextElementSibling;
     libraryElement(row.section,".library-group-count").textContent=`${group.items.length}${done?"":" loaded"}`;

@@ -79,13 +79,17 @@ test("rows preserve cards, focus, and horizontal scroll as later pages arrive",a
     const {page,errors}=await setup(browser,{reply:async url=>{if(url.searchParams.get("offset")==="200")await blocked;}});
     await page.goto("http://library.test/#/library/1");
     await page.waitForSelector("#library-row-A .poster");
-    await page.evaluate(()=>{
+    const position=await page.evaluate(()=>{
       const card=document.querySelector("#library-row-A .poster:nth-child(5)");
-      card.setAttribute("data-same-node","yes");card.focus();
-      document.querySelector("#library-row-A .rowscroll").scrollLeft=200;
+      const strip=card.parentElement,second=strip.children[1];
+      card.setAttribute("data-same-node","yes");card.focus({preventScroll:true});
+      // Deliver the page before the row's scroll listener can update its snapshot.
+      strip.addEventListener("scroll",event=>event.stopImmediatePropagation(),true);
+      const left=strip.scrollLeft+second.getBoundingClientRect().left-strip.getBoundingClientRect().left;
+      strip.scrollTo({left,behavior:"instant"});
+      return strip.scrollLeft;
     });
-    await page.waitForFunction(()=>document.querySelector("#library-row-A .rowscroll").scrollLeft>0);
-    const position=await page.locator("#library-row-A .rowscroll").evaluate(el=>el.scrollLeft);
+    assert.ok(position>100,"the row reached its second snap point");
     release();await loaded(page);
     assert.equal(await page.locator('[data-same-node="yes"]').count(),1);
     assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute("data-same-node")),"yes");
