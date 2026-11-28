@@ -3006,7 +3006,8 @@ pattern = "purge_if_dormant"
 # run 9504 follow-up: shared_audio's leak check and the finite verdict test retire through the dormant purge.
 # A-149C1506 suffix start: the cold-resume test retires its finished suffix through the dormant purge.
 # A-C6EECF11 successor: the far-seek test retires its successor generation through the dormant purge.
-"crates/plurxd/src/vodencode_tests.rs" = 7
+# run 9651: shared_audio retires its finite video role through the dormant purge before its credits check.
+"crates/plurxd/src/vodencode_tests.rs" = 8
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or

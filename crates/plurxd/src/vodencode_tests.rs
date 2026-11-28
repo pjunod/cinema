@@ -1246,6 +1246,20 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             .await;
         assert!(rendition.readers.lock().await.is_empty());
     }
+    // On Linux the video role is finite: its dormant incarnation owns its
+    // claim until the dormant purge retires it, and that close waits for
+    // every strong alias. Hold only a Weak from here.
+    drop(publication.owner);
+    let video_key = video_rendition.key.clone();
+    let _legacy_alias = (!cfg!(target_os = "linux")).then(|| Arc::clone(&video_rendition));
+    let video_rendition = {
+        let strong = video_rendition;
+        Arc::downgrade(&strong)
+    };
+    serve
+        .shared
+        .purge_if_dormant(&video_key, Duration::ZERO)
+        .await;
     // End and slot reap do not join an in-flight driver preparation pass. Wait
     // for that pass to observe the removed demand and release its permit too.
     wait_until(
@@ -1254,9 +1268,13 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         async || encoding.admissions.software_in_use() == 0,
     )
     .await;
-    for rendition in [&soundtrack, &video_rendition] {
+    assert!(
+        soundtrack.retained_admission.current().is_none(),
+        "cache owns no family credit"
+    );
+    if let Some(video_rendition) = video_rendition.upgrade() {
         assert!(
-            rendition.retained_admission.current().is_none(),
+            video_rendition.retained_admission.current().is_none(),
             "cache owns no family credit"
         );
     }
