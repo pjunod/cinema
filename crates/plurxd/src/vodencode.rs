@@ -1433,7 +1433,7 @@ impl Encoding {
             // This input is the source duration, not an already rounded plan
             // end. Re-rounding the latter could add another whole video frame.
             let duration_ms = (duration_seconds * 1_000.0).round() as i64;
-            let end_seconds = self.grid.shared_audio_end_ticks(duration_ms) as f64
+            let end_seconds = audio.end_ticks_on_grid(duration_ms, self.grid) as f64
                 / f64::from(plurx_core::transcode::VOD_AUDIO_RATE);
             audio
                 .args_with_source_clock(&execution, end_seconds, self.source_clock)

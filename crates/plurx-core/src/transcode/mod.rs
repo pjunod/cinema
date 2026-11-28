@@ -75,6 +75,7 @@ pub use macos::{
 };
 pub use pipeline::{Pipeline, ReconstructedPqInput, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
+pub(crate) use vod::VOD_AAC_MAX_SEGMENT_TICKS;
 pub use vod::{
     vod_audio_anchor, vod_completed_reconstructed_pipe_args, vod_pipe_args,
     vod_pipe_args_with_reorder, vod_pipe_args_with_source_clock, vod_reconstructed_pipe_args,

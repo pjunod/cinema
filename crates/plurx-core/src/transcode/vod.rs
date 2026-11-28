@@ -85,6 +85,10 @@ impl VodSourceClock {
 
 pub const VOD_AUDIO_RATE: u32 = 48_000;
 pub const VOD_AAC_FRAME_SAMPLES: u64 = 1_024;
+/// The copy plan's 15-second ceiling plus allowance for rounding at both
+/// ends. The publisher also enforces its separate interval byte limit.
+pub(crate) const VOD_AAC_MAX_SEGMENT_TICKS: u64 =
+    VOD_AUDIO_RATE as u64 * super::COPY_SEGMENT_MAX_SECS as u64 + VOD_AAC_FRAME_SAMPLES;
 /// The sample entry promised by encoded HEVC HLS presentations. The fMP4
 /// normalizer already promotes/removes in-band parameter sets for this entry.
 pub const VOD_HEVC_SAMPLE_ENTRY: &str = "hvc1";
@@ -139,11 +143,7 @@ fn shared_audio_plan_ticks(duration: u64, bitrate_kbps: u32) -> SegmentPlan {
             kind: PlanEntryKind::AudioTail,
             start_ticks: start,
             duration_ticks: ticks,
-            est_bytes: u64::from(bitrate_kbps)
-                .saturating_mul(1_000)
-                .saturating_mul(ticks)
-                .saturating_mul(3)
-                / (u64::from(VOD_AUDIO_RATE) * 16),
+            est_bytes: shared_audio_entry_bytes(bitrate_kbps, ticks),
             cut: if start + ticks == duration {
                 PlanCut::EndOfStream
             } else {
@@ -159,6 +159,76 @@ fn shared_audio_plan_ticks(duration: u64, bitrate_kbps: u32) -> SegmentPlan {
         target_duration: if entries.is_empty() { 0 } else { 3 },
         entries,
     }
+}
+
+fn shared_audio_entry_bytes(bitrate_kbps: u32, ticks: u64) -> u64 {
+    u64::from(bitrate_kbps)
+        .saturating_mul(1_000)
+        .saturating_mul(ticks)
+        .saturating_mul(3)
+        / (u64::from(VOD_AUDIO_RATE) * 16)
+}
+
+fn shared_audio_plan_aligned_to_video(
+    video: &SegmentPlan,
+    end_ticks: u64,
+    bitrate_kbps: u32,
+) -> Option<SegmentPlan> {
+    let first = video.entries.first()?;
+    if first.start_ticks != 0 || video.timescale == 0 || video.len() > 100_000 {
+        return None;
+    }
+    let frame_denominator = u128::from(video.timescale) * u128::from(VOD_AAC_FRAME_SAMPLES);
+    let mut plan = SegmentPlan {
+        version: SEGPLAN_VERSION,
+        timescale: VOD_AUDIO_RATE,
+        entries: Vec::with_capacity(video.len()),
+        target_duration: 0,
+    };
+    let mut start = 0_u64;
+    for boundary in video.entries.iter().skip(1).map(|entry| entry.start_ticks) {
+        // Round each absolute time once. A tie goes to the later AAC frame.
+        let numerator = u128::from(boundary) * u128::from(VOD_AUDIO_RATE);
+        let frame = (numerator + frame_denominator / 2) / frame_denominator;
+        let end = u64::try_from(frame * u128::from(VOD_AAC_FRAME_SAMPLES)).ok()?;
+        if end >= end_ticks {
+            return None;
+        }
+        push_shared_audio_interval(&mut plan, bitrate_kbps, start, end, PlanCut::Clean)?;
+        start = end;
+    }
+    push_shared_audio_interval(
+        &mut plan,
+        bitrate_kbps,
+        start,
+        end_ticks,
+        PlanCut::EndOfStream,
+    )?;
+    Some(plan)
+}
+
+fn push_shared_audio_interval(
+    plan: &mut SegmentPlan,
+    bitrate_kbps: u32,
+    start: u64,
+    end: u64,
+    cut: PlanCut,
+) -> Option<()> {
+    let ticks = end
+        .checked_sub(start)
+        .filter(|ticks| (1..=VOD_AAC_MAX_SEGMENT_TICKS).contains(ticks))?;
+    let seconds = u32::try_from(ticks.div_ceil(u64::from(VOD_AUDIO_RATE))).ok()?;
+    plan.target_duration = plan.target_duration.max(seconds);
+    plan.entries.push(PlanEntry {
+        index: u32::try_from(plan.entries.len()).ok()?,
+        kind: PlanEntryKind::AudioTail,
+        start_ticks: start,
+        duration_ticks: ticks,
+        est_bytes: shared_audio_entry_bytes(bitrate_kbps, ticks),
+        cut,
+        fragments: 0,
+    });
+    Some(())
 }
 
 /// The declared OUTPUT cadence, not a claim that the input is constant-rate.
@@ -474,6 +544,7 @@ pub struct VodSharedAudioRendition {
     source_object_version: String,
     facts: crate::fmp4::AacSampleEntryFacts,
     bitrate_kbps: u32,
+    aligned_plan: Option<std::sync::Arc<SegmentPlan>>,
 }
 
 impl VodSharedAudioRendition {
@@ -494,7 +565,7 @@ impl VodSharedAudioRendition {
             || source_object_version
                 .bytes()
                 .any(|byte| byte.is_ascii_control())
-            || VodSharedAudioRecipe::from_plan(plan).as_ref() != Some(recipe)
+            || VodSharedAudioRecipe::from_plan(plan).is_none_or(|base| base.digest != recipe.digest)
         {
             return Err(crate::fmp4::Fmp4Error::Unsupported(
                 "soundtrack does not match its source-bound recipe".into(),
@@ -503,10 +574,14 @@ impl VodSharedAudioRendition {
         Ok(Self {
             rendition_id: rendition_id.to_owned(),
             init_id: hex::encode(Sha256::digest(&init.bytes)),
-            recipe_id: recipe.digest.clone(),
+            recipe_id: recipe.digest().to_owned(),
             source_object_version: source_object_version.to_owned(),
             facts: recipe.verify_init(init)?,
             bitrate_kbps: recipe.audio_bitrate_kbps,
+            aligned_plan: recipe
+                .alignment
+                .as_ref()
+                .map(|alignment| alignment.plan.clone()),
         })
     }
     pub fn rendition_id(&self) -> &str {
@@ -529,6 +604,14 @@ impl VodSharedAudioRendition {
     }
 
     pub fn media_playlist(&self, plan: &SegmentPlan) -> Result<String, crate::fmp4::Fmp4Error> {
+        if let Some(aligned) = self.aligned_plan.as_deref() {
+            if aligned != plan {
+                return Err(crate::fmp4::Fmp4Error::Unsupported(
+                    "split soundtrack plan differs from its verified recipe".into(),
+                ));
+            }
+            return Ok(rendition_media_playlist(plan, &self.init_id));
+        }
         continuous_media_playlist(
             plan,
             &self.init_id,
@@ -550,8 +633,12 @@ fn continuous_media_playlist(
     frame_ticks: u64,
     kind: PlanEntryKind,
 ) -> Result<String, crate::fmp4::Fmp4Error> {
-    use std::fmt::Write;
     validate_continuous_media_plan(plan, timescale, span, frame_ticks, kind)?;
+    Ok(rendition_media_playlist(plan, init_id))
+}
+
+fn rendition_media_playlist(plan: &SegmentPlan, init_id: &str) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(256 + plan.entries.len() * 48);
     out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
     let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", plan.target_duration);
@@ -561,12 +648,12 @@ fn continuous_media_playlist(
         let _ = writeln!(
             out,
             "#EXTINF:{:.6},\nsegment/{}.m4s",
-            entry.seconds(timescale),
+            entry.seconds(plan.timescale),
             entry.index
         );
     }
     out.push_str("#EXT-X-ENDLIST\n");
-    Ok(out)
+    out
 }
 
 fn validate_continuous_media_plan(
@@ -1035,8 +1122,9 @@ impl VodSplitCopyFamily {
             )
         };
         soundtracks.sort_by_key(|track| track.source_index);
+        // Two streams can have byte-identical decoder configuration. Their
+        // init URLs are still distinct because each is under its rendition.
         let mut renditions = std::collections::BTreeSet::new();
-        let mut inits = std::collections::BTreeSet::new();
         if soundtracks.is_empty()
             || soundtracks
                 .windows(2)
@@ -1046,7 +1134,6 @@ impl VodSplitCopyFamily {
                     || track.audio.rendition_id == video.rendition_id
                     || track.audio.init_id == video.init_id
                     || !renditions.insert(track.audio.rendition_id.as_str())
-                    || !inits.insert(track.audio.init_id.as_str())
             })
             || !soundtracks
                 .iter()
@@ -1219,6 +1306,13 @@ pub struct VodSharedAudioRecipe {
     audio_offset_ms: i64,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
+    alignment: Option<CopySoundtrackAlignment>,
+    digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopySoundtrackAlignment {
+    plan: std::sync::Arc<SegmentPlan>,
     digest: String,
 }
 
@@ -1254,12 +1348,55 @@ impl VodSharedAudioRecipe {
             audio_offset_ms: media.audio_offset_ms,
             audio_channels: media.audio_channels,
             audio_bitrate_kbps: media.audio_bitrate_kbps,
+            alignment: None,
             digest: hex::encode(hash.finalize()),
         })
     }
 
     pub fn digest(&self) -> &str {
-        &self.digest
+        self.alignment
+            .as_ref()
+            .map_or(&self.digest, |alignment| &alignment.digest)
+    }
+
+    /// Freeze a copy presentation's AAC cuts without changing the shared
+    /// video's identity or the continuous-quality soundtrack's fixed grid.
+    pub fn align_to_copy_video(
+        &mut self,
+        video: &SegmentPlan,
+        duration_ms: i64,
+        grid: VodFrameGrid,
+    ) -> Option<()> {
+        use sha2::{Digest, Sha256};
+
+        let aligned = shared_audio_plan_aligned_to_video(
+            video,
+            grid.shared_audio_end_ticks(duration_ms),
+            self.audio_bitrate_kbps,
+        )?;
+        let mut hash = Sha256::new();
+        hash.update(b"vod-copy-video-aligned-aac-v1\0");
+        hash.update(self.digest.as_bytes());
+        hash.update(aligned.timescale.to_le_bytes());
+        for entry in &aligned.entries {
+            hash.update(entry.start_ticks.to_le_bytes());
+            hash.update(entry.duration_ticks.to_le_bytes());
+        }
+        self.alignment = Some(CopySoundtrackAlignment {
+            plan: std::sync::Arc::new(aligned),
+            digest: hex::encode(hash.finalize()),
+        });
+        Some(())
+    }
+
+    pub fn end_ticks_on_grid(&self, duration_ms: i64, grid: VodFrameGrid) -> u64 {
+        self.alignment
+            .as_ref()
+            .and_then(|alignment| alignment.plan.entries.last())
+            .map_or_else(
+                || grid.shared_audio_end_ticks(duration_ms),
+                PlanEntry::end_ticks,
+            )
     }
 
     pub fn verify_init(
@@ -1276,15 +1413,23 @@ impl VodSharedAudioRecipe {
     }
 
     pub fn plan(&self, duration_ms: i64) -> SegmentPlan {
-        vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps)
+        self.alignment.as_ref().map_or_else(
+            || vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps),
+            |alignment| alignment.plan.as_ref().clone(),
+        )
     }
 
     /// A presentation's soundtrack shares its film end with the frozen video
     /// cadence while keeping independent, whole-AAC-frame interval boundaries.
     pub fn plan_on_grid(&self, duration_ms: i64, grid: VodFrameGrid) -> SegmentPlan {
-        shared_audio_plan_ticks(
-            grid.shared_audio_end_ticks(duration_ms),
-            self.audio_bitrate_kbps,
+        self.alignment.as_ref().map_or_else(
+            || {
+                shared_audio_plan_ticks(
+                    grid.shared_audio_end_ticks(duration_ms),
+                    self.audio_bitrate_kbps,
+                )
+            },
+            |alignment| alignment.plan.as_ref().clone(),
         )
     }
 
@@ -1969,6 +2114,60 @@ pub fn vod_completed_reconstructed_pipe_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_soundtrack_uses_nearest_aac_frames_on_the_indexed_video_timeline() {
+        let mut video = SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 90_000,
+            entries: Vec::new(),
+            target_duration: 15,
+        };
+        // The first boundary is exactly halfway between AAC frames. The
+        // second is irregular and must be rounded from the absolute origin.
+        for (index, [start, end]) in [[0, 540_480], [540_480, 1_361_110], [1_361_110, 1_900_000]]
+            .into_iter()
+            .enumerate()
+        {
+            video.entries.push(PlanEntry {
+                index: index as u32,
+                kind: PlanEntryKind::Video,
+                start_ticks: start,
+                duration_ticks: end - start,
+                est_bytes: 0,
+                cut: PlanCut::Clean,
+                fragments: 1,
+            });
+        }
+        let end = 1_013_333;
+        let audio = shared_audio_plan_aligned_to_video(&video, end, 160).unwrap();
+        let starts = audio
+            .entries
+            .iter()
+            .map(|entry| entry.start_ticks)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [0, 288_768, 726_016]);
+        assert_eq!(audio.entries.last().unwrap().end_ticks(), end);
+        assert_eq!(audio.target_duration, 10);
+        assert_eq!(audio.entries.last().unwrap().cut, PlanCut::EndOfStream);
+        assert!(audio
+            .entries
+            .windows(2)
+            .all(|pair| pair[0].end_ticks() == pair[1].start_ticks));
+        let mut rendition = split_audio('a', 'b', 2);
+        rendition.aligned_plan = Some(std::sync::Arc::new(audio.clone()));
+        let playlist = rendition
+            .media_playlist(&audio)
+            .expect("verified aligned playlist");
+        assert!(playlist.contains("#EXT-X-TARGETDURATION:10\n"));
+        assert!(playlist.contains("#EXTINF:6.016000,\nsegment/0.m4s"));
+        assert!(rendition
+            .media_playlist(&vod_shared_audio_plan(21_000, 160))
+            .is_err());
+        assert!(shared_audio_plan_aligned_to_video(&video, 726_016, 160).is_none());
+        video.entries[1].start_ticks = 1;
+        assert!(shared_audio_plan_aligned_to_video(&video, end, 160).is_none());
+    }
 
     #[test]
     fn held_source_origin_is_precise_signed_and_distinguishes_demux_default() {
@@ -3206,6 +3405,7 @@ mod tests {
                 samples_per_frame: 1_024,
             },
             bitrate_kbps: 160,
+            aligned_plan: None,
         };
         assert!(VodPresentationFamily::new(family.clone(), Some(soundtrack.clone())).is_err());
         let mut voiced = family;
@@ -3541,6 +3741,7 @@ mod tests {
                 samples_per_frame: 1_024,
             },
             bitrate_kbps: 160,
+            aligned_plan: None,
         }
     }
 
@@ -3669,7 +3870,7 @@ video/{a}/index.m3u8\n",
         assert!(VodSplitCopyFamily::new(split_video(), dup_rendition, 1).is_err());
         let mut dup_init = tracks();
         dup_init[1].audio.init_id = dup_init[0].audio.init_id.clone();
-        assert!(VodSplitCopyFamily::new(split_video(), dup_init, 1).is_err());
+        assert!(VodSplitCopyFamily::new(split_video(), dup_init, 1).is_ok());
         let mut video_rendition = tracks();
         video_rendition[0].audio.rendition_id = "a".repeat(64);
         assert!(VodSplitCopyFamily::new(split_video(), video_rendition, 1).is_err());

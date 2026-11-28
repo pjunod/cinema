@@ -1409,9 +1409,38 @@ impl VodServe {
             }
             None => None,
         };
-        // A split copy attaches every soundtrack beside its one shared video.
+        let split = !prepared.split_soundtracks.is_empty();
+        if split && (continuous || prepared.encoding.is_some()) {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "split soundtracks require an indexed copy video",
+            ));
+        }
+        let (attachment, incoming_logical) = self
+            .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
+            .await?;
+        let rendition = Arc::clone(&attachment.rendition);
+        drop(attachment);
+
+        // Bind every soundtrack to the actual immutable video plan before
+        // resolving its own identity and storage.
         let mut split_renditions = Vec::with_capacity(prepared.split_soundtracks.len());
-        for (request, soundtrack) in &prepared.split_soundtracks {
+        for (request, mut soundtrack) in std::mem::take(&mut prepared.split_soundtracks) {
+            let duration_ms = file.duration_ms.unwrap_or_default();
+            let aligned = Arc::get_mut(&mut soundtrack).and_then(|encoding| {
+                let grid = encoding.grid;
+                encoding.shared_audio.as_mut()?.align_to_copy_video(
+                    &rendition.plan,
+                    duration_ms,
+                    grid,
+                )
+            });
+            if aligned.is_none() {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_family_invalid",
+                    "split soundtrack cannot follow the indexed video boundaries",
+                ));
+            }
             let attachment = self
                 .resolve_rendition(
                     &mut VodRecipeRequest {
@@ -1420,8 +1449,8 @@ impl VodServe {
                         measured_candidate: None,
                         retained_capture: RetainedOutputCapture::New,
                         companion: None,
-                        request,
-                        encoding: Some(Arc::clone(soundtrack)),
+                        request: &request,
+                        encoding: Some(soundtrack),
                         soundtrack: None,
                         split_soundtracks: Vec::new(),
                     },
@@ -1435,18 +1464,6 @@ impl VodServe {
             split_renditions.push(Arc::clone(&attachment.rendition));
             drop(attachment);
         }
-        let split = !split_renditions.is_empty();
-        if split && (continuous || prepared.encoding.is_some()) {
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_family_invalid",
-                "split soundtracks require an indexed copy video",
-            ));
-        }
-        let (attachment, incoming_logical) = self
-            .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
-            .await?;
-        let rendition = Arc::clone(&attachment.rendition);
-        drop(attachment);
         if split && !rendition.recipe.audio_excluded {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_family_invalid",

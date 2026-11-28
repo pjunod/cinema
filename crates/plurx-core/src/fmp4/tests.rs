@@ -204,6 +204,60 @@ fn shared_soundtrack_facts_verify_actual_aac_configuration() {
 }
 
 #[test]
+fn dolby_soundtrack_facts_verify_actual_ac3_and_ec3_configuration() {
+    crate::testfixtures::require_ffmpeg();
+    for (encoder, codec, channels, layout) in [
+        ("ac3", "ac-3", 6, "5.1"),
+        ("eac3", "ec-3", 6, "5.1"),
+        ("eac3", "ec-3", 2, "stereo"),
+    ] {
+        let bytes = run(Command::new(ffmpeg()).args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("anullsrc=r=48000:cl={layout}"),
+            "-t",
+            "0.2",
+            "-c:a",
+            encoder,
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]));
+        let (mut init, _, _) = read_all(&bytes);
+        assert_eq!(
+            dolby_audio_sample_entry_facts(&init).expect("Dolby decoder configuration"),
+            DolbyAudioSampleEntryFacts {
+                codec,
+                channels,
+                joc: false,
+            }
+        );
+        init.tracks.push(init.tracks[0].clone());
+        assert!(dolby_audio_sample_entry_facts(&init).is_err());
+    }
+}
+
+#[test]
+fn ec3_soundtrack_facts_include_dependent_channels_and_joc() {
+    // One independent 5.1 service, with its dependent rear surround pair.
+    let mut config = vec![0, 0, 0x20, 0x0f, 0x02, 0x02];
+    assert_eq!(ec3_config_facts(&config).unwrap().channels, 8);
+    assert!(!ec3_config_facts(&config).unwrap().joc);
+    config.extend([1, 16]);
+    assert!(ec3_config_facts(&config).unwrap().joc);
+    assert!(ec3_config_facts(&config[..5]).is_err());
+    assert!(ec3_config_facts(&config[..7]).is_err());
+    config[1] = 1;
+    assert!(ec3_config_facts(&config).is_err());
+}
+
+#[test]
 fn continuous_avc_facts_come_from_the_actual_single_sample_entry() {
     crate::testfixtures::require_ffmpeg();
     let mut command = Command::new(ffmpeg());
