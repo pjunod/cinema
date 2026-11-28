@@ -1777,6 +1777,42 @@ impl JobFence {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn legacy_m7_rate_stop(
+        &self,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+        fit_table: [u8; 32],
+    ) -> Result<Option<plurx_core::store::dv_m7_attempts::M7LegacyRateStop>, StoreError> {
+        let state = self.0.state.lock().await;
+        let Some(authority) = self.m7_candidate_authority(&state, probe, scope).await? else {
+            return Ok(None);
+        };
+        self.0
+            .store
+            .legacy_m7_rate_stop(&authority, fit_table)
+            .await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn supersede_m7_rate_stop(
+        &self,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+        legacy: &plurx_core::store::dv_m7_attempts::M7LegacyRateStop,
+        fit_table: [u8; 32],
+        plan: M7CandidatePlan,
+    ) -> Result<M7CandidateAnchor, StoreError> {
+        let state = self.0.state.lock().await;
+        let Some(authority) = self.m7_candidate_authority(&state, probe, scope).await? else {
+            return Ok(M7CandidateAnchor::Fenced);
+        };
+        self.0
+            .store
+            .supersede_m7_rate_stop(&authority, legacy, fit_table, plan)
+            .await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn m7_candidate_slots(
         &self,
         probe: &M7SourceProbe,

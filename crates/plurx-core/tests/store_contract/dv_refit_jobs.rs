@@ -1189,3 +1189,205 @@ async fn an_m7_record_is_published_with_its_title_and_dies_with_its_generation()
     })
     .await;
 }
+
+#[tokio::test]
+async fn legacy_m7_rate_stop_can_archive_and_replace_the_fenced_source_ledger_once() {
+    use plurx_core::{
+        store::dv_m7_attempts::{
+            M7CandidateAnchor, M7CandidateAuthority, M7CandidateIntent, M7CandidatePlan,
+            M7CandidateReservation, M7CandidateScope,
+        },
+        transcode::dv_m7_receipt::M7SourceProbe,
+    };
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "m7-rate-supersession", true).await;
+        let fit = land_fit(&store, &file, &helper(), 0).await;
+        let mut table = [0; 32];
+        hex::decode_to_slice(&fit, &mut table).expect("fit digest");
+        let original = m7('a');
+        let successor = m7('b');
+        let scanner = "a".repeat(64);
+        let source = [31; 32];
+        let legacy_plan = M7CandidatePlan {
+            protocol_sha256: [32; 32],
+            recipe_sha256: [33; 32],
+            maximum_attempts: 4,
+        };
+        let new_plan = M7CandidatePlan {
+            protocol_sha256: [34; 32],
+            recipe_sha256: [35; 32],
+            ..legacy_plan
+        };
+        let attempt = M7CandidateIntent {
+            source_sha256: source,
+            protocol_sha256: legacy_plan.protocol_sha256,
+            recipe_sha256: legacy_plan.recipe_sha256,
+            binding_sha256: [36; 32],
+            slot: 0,
+            target_kbps: 85_068,
+            maximum_attempts: 4,
+        };
+        let authority = |demand: &TitleDemand, token: JobToken, at| M7CandidateAuthority {
+            token,
+            source_probe: M7SourceProbe::from_probe_json(&demand.probe_json).expect("probe"),
+            scope: M7CandidateScope {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                probe_revision: demand.probe_revision,
+                scanner_digest: scanner.clone(),
+                source_sha256: source,
+            },
+            now_ms: at,
+        };
+
+        assert_eq!(sweep(&store, &original).await, vec![file.id], "{backend}");
+        let old_demand = store
+            .dv_title_demands(&scanner, 0, now())
+            .await
+            .expect("title demands")
+            .into_iter()
+            .find(|demand| demand.file_id == file.id)
+            .expect("title");
+        let job = queued_attempt(&store, &file, now()).await;
+        let token = claim(&store, &job, JobKind::DvTitleScan)
+            .await
+            .token
+            .expect("title claim");
+        let owner = authority(&old_demand, token.clone(), now());
+        assert_eq!(
+            store
+                .anchor_dv_m7_candidate(&owner, legacy_plan)
+                .await
+                .expect("old anchor"),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&owner, attempt.clone())
+                .await
+                .expect("old slot"),
+            M7CandidateReservation::Reserved,
+            "{backend}"
+        );
+        let old_gate = "NP1 did not land a rate-only candidate: OutsideTargetBounds(77504)";
+        let published = store
+            .publish_dv_title_job(PublishTitleJob {
+                token,
+                output: TitleOutput {
+                    file_id: file.id,
+                    probe_revision: old_demand.probe_revision,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    scanner_digest: scanner.clone(),
+                    stats: DvTitleStats::from_probe_json(&old_demand.probe_json)
+                        .expect("title stats"),
+                },
+                m7: Some(outcome(
+                    &original,
+                    M7OutcomeKind::Inconclusive,
+                    Some(old_gate),
+                )),
+                now_ms: now(),
+            })
+            .await
+            .expect("legacy stop");
+        assert!(matches!(published, JobPublishOutcome::Published { .. }));
+        assert!(sweep(&store, &original).await.is_empty());
+        assert_eq!(sweep(&store, &successor).await, vec![file.id], "{backend}");
+        assert!(sweep(&store, &successor).await.is_empty());
+
+        let renewed_demand = store
+            .dv_title_demands(&scanner, 0, now())
+            .await
+            .expect("title demands")
+            .into_iter()
+            .find(|demand| demand.file_id == file.id)
+            .expect("title");
+        assert_eq!(renewed_demand.probe_revision, old_demand.probe_revision);
+        let job = queued_attempt(&store, &file, now()).await;
+        let token = claim(&store, &job, JobKind::DvTitleScan)
+            .await
+            .token
+            .expect("renewed claim");
+        let current = authority(&renewed_demand, token, now());
+        let mut legacy = store
+            .legacy_m7_rate_stop(&current, table)
+            .await
+            .expect("lookup")
+            .expect("legacy stop");
+        assert_eq!(legacy.gate, old_gate);
+        assert_eq!(legacy.refused_target(), Some(77_504));
+        assert_eq!(legacy.ledger.slots, vec![attempt.clone()]);
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&owner, &legacy, table, new_plan)
+                .await
+                .expect("fence"),
+            M7CandidateAnchor::Fenced,
+            "{backend}"
+        );
+        legacy.ledger.slots[0].target_kbps += 1;
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &legacy, table, new_plan)
+                .await
+                .expect("CAS"),
+            M7CandidateAnchor::DifferentProtocol,
+            "{backend}"
+        );
+        legacy.ledger.slots[0] = attempt.clone();
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &legacy, table, new_plan)
+                .await
+                .expect("supersede"),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        let archived = store
+            .legacy_m7_rate_stop(&current, table)
+            .await
+            .expect("archived lookup")
+            .expect("archive");
+        assert_eq!(archived.gate, old_gate);
+        assert_eq!(archived.ledger.slots, vec![attempt.clone()]);
+        let current_ledger = store
+            .dv_m7_candidate_slots(&current)
+            .await
+            .expect("live lookup")
+            .expect("new ledger");
+        assert_eq!(current_ledger.protocol_sha256, new_plan.protocol_sha256);
+        assert!(current_ledger.slots.is_empty());
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&current, attempt)
+                .await
+                .expect("old slot fence"),
+            M7CandidateReservation::Conflict,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &legacy, table, new_plan)
+                .await
+                .expect("retry"),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        let third = M7CandidatePlan {
+            protocol_sha256: [37; 32],
+            ..new_plan
+        };
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &archived, table, third)
+                .await
+                .expect("once"),
+            M7CandidateAnchor::DifferentProtocol,
+            "{backend}"
+        );
+    })
+    .await;
+}

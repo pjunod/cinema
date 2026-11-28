@@ -23,11 +23,15 @@ use sha2::{Digest, Sha256};
 
 mod journal;
 mod production;
-pub(super) use production::{prepare_authored, reclaim_candidate_media, PrepareError};
+pub(super) use production::{
+    prepare_authored, reclaim_candidate_media, verify_legacy_rate_stop, PrepareError,
+};
 
 type Hash = [u8; 32];
 
-const RECIPE_REVISION: u32 = 1;
+const RECIPE_REVISION: u32 = 2;
+const BENEFIT_MAP_REVISION: u32 = 1;
+const LEGACY_MIN_TARGET_KBPS: u32 = 83_334;
 const INPUT_FORMAT: &str = "plurx-composed-model-b-topleft-v2";
 const MODE: &str = "lumazfsp";
 const GRID: usize = 16;
@@ -38,7 +42,6 @@ const THRESHOLD_NITS: f64 = 1.0;
 const MICRO: i32 = 1_000_000;
 const FRAMES: u32 = 48;
 const MAX_TARGET_KBPS: u32 = 125_000;
-const MIN_TARGET_KBPS: u32 = 83_334;
 const BUF_KBIT: u32 = 136_000;
 const MAX_ATTEMPTS: u8 = 4;
 const PREDICTION_OVERHEAD_MBPS: f64 = 0.03;
@@ -214,7 +217,7 @@ pub(super) fn build_map(
     };
     let regions = ordered_regions(&offsets, bw, frame.raster, positive, &cancelled)?;
     Ok(BenefitMap {
-        revision: RECIPE_REVISION,
+        revision: BENEFIT_MAP_REVISION,
         method: MODE,
         scoring_revision: SCORING_REVISION,
         source_ordinal: frame.source.ordinal,
@@ -332,7 +335,7 @@ pub(super) struct RatePlan {
     pub maximum_attempts: u8,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(super) struct FrozenRecipe {
     revision: u32,
     scoring_revision: u32,
@@ -350,6 +353,8 @@ pub(super) struct FrozenRecipe {
     frame_ticks: u32,
     hdr: StaticHdr,
     rate: RatePlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_bounds_kbps: Option<[u32; 2]>,
     maxrate_kbps: u32,
     buffer_kbit: u32,
 }
@@ -373,12 +378,14 @@ pub(super) enum RoiControl {
 impl FrozenRecipe {
     pub(super) fn new(cadence: Rational, hdr: StaticHdr, rate: RatePlan) -> Result<Self, Error> {
         let [low, high] = rate.authored_band_kbps;
+        let min_target = (u64::from(low) * 3).div_ceil(4) as u32;
+        let max_target = (u64::from(high) * 11 / 10).min(u64::from(MAX_TARGET_KBPS)) as u32;
         if !matches!(
             (cadence.numerator(), cadence.denominator()),
             (24, 1) | (24_000, 1001)
         ) || low == 0
             || low > high
-            || !admitted_target(rate.initial_target_kbps)
+            || !(min_target..=max_target).contains(&rate.initial_target_kbps)
             || !(1..=MAX_ATTEMPTS).contains(&rate.maximum_attempts)
             || hdr
                 .max_cll_fall
@@ -410,6 +417,7 @@ impl FrozenRecipe {
             frame_ticks: cadence.denominator(),
             hdr,
             rate,
+            target_bounds_kbps: Some([min_target, max_target]),
             maxrate_kbps: MAX_TARGET_KBPS,
             buffer_kbit: BUF_KBIT,
         })
@@ -425,9 +433,27 @@ impl FrozenRecipe {
 
     pub(super) fn recipe_sha256(&self) -> Hash {
         let mut digest = Sha256::new();
-        digest.update(b"plurx.m7.np1.recipe.v1\0");
+        let domain = if self.revision == 1 {
+            b"plurx.m7.np1.recipe.v1\0"
+        } else {
+            b"plurx.m7.np1.recipe.v2\0"
+        };
+        digest.update(domain);
         digest.update(serde_json::to_vec(self).expect("fixed recipe serializes"));
         digest.finalize().into()
+    }
+
+    /// Reconstruct the historical serialization for read-only rate replay.
+    fn legacy_v1(&self) -> Self {
+        Self {
+            revision: 1,
+            target_bounds_kbps: None,
+            ..self.clone()
+        }
+    }
+
+    pub(super) fn recipe_v1_sha256(&self) -> Hash {
+        self.legacy_v1().recipe_sha256()
     }
 
     /// Direct avcodec dictionary. The parent separately sets the encoder
@@ -439,7 +465,8 @@ impl FrozenRecipe {
         target_kbps: u32,
         control: RoiControl,
     ) -> Result<Vec<(&'static str, String)>, Error> {
-        if !admitted_target(target_kbps)
+        let [min_target, max_target] = self.target_bounds_kbps.ok_or(Error::Recipe)?;
+        if !(min_target..=max_target).contains(&target_kbps)
             || control != RoiControl::Candidate && target_kbps != self.rate.initial_target_kbps
         {
             return Err(Error::Recipe);
@@ -503,6 +530,10 @@ impl FrozenRecipe {
         let mut decision = RateDecision::Encode(self.rate.initial_target_kbps);
         let [low, high] = self.rate.authored_band_kbps.map(|v| f64::from(v) / 1000.0);
         let target = (low + high) / 2.0;
+        let [min_target, max_target] = self
+            .target_bounds_kbps
+            .unwrap_or([LEGACY_MIN_TARGET_KBPS, MAX_TARGET_KBPS])
+            .map(f64::from);
         let duration =
             f64::from(self.frames) * f64::from(self.frame_ticks) / f64::from(self.timescale);
         for (index, attempt) in attempts.iter().enumerate() {
@@ -534,7 +565,7 @@ impl FrozenRecipe {
                     ratio_proposal
                 };
                 let rounded = proposed.round_ties_even();
-                if !(f64::from(MIN_TARGET_KBPS)..=f64::from(MAX_TARGET_KBPS)).contains(&rounded) {
+                if !(min_target..=max_target).contains(&rounded) {
                     RateDecision::Inconclusive(RateStop::OutsideTargetBounds(rounded as i64))
                 } else {
                     let next = rounded as u32;
@@ -552,10 +583,6 @@ impl FrozenRecipe {
         }
         Ok(decision)
     }
-}
-
-fn admitted_target(target: u32) -> bool {
-    (MIN_TARGET_KBPS..=MAX_TARGET_KBPS).contains(&target)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -773,6 +800,48 @@ mod tests {
             FrozenRecipe::new(Rational::new(24_000, 1001).unwrap(), different, recipe.rate)
                 .unwrap();
         assert_ne!(different.recipe_sha256(), recipe.recipe_sha256());
+    }
+
+    #[test]
+    fn relative_bounds_admit_a_correction_previously_refused_at_the_legacy_floor() {
+        let cadence = Rational::new(24, 1).unwrap();
+        let recipe = FrozenRecipe::new(
+            cadence,
+            recipe(cadence).hdr,
+            RatePlan {
+                authored_band_kbps: [84_217, 85_068],
+                initial_target_kbps: 85_068,
+                maximum_attempts: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(recipe.target_bounds_kbps, Some([63_163, 93_574]));
+        let attempt = RateAttempt {
+            target_kbps: 85_068,
+            encoded_video_packet_bytes: 23_218_000,
+        };
+        let RateDecision::Inconclusive(RateStop::OutsideTargetBounds(target)) =
+            recipe.legacy_v1().rate_decision(&[attempt]).unwrap()
+        else {
+            panic!("the original recipe must refuse the correction");
+        };
+        assert_eq!(
+            recipe.rate_decision(&[attempt]).unwrap(),
+            RateDecision::Encode(target as u32)
+        );
+        for (target, admitted) in [
+            (63_162, false),
+            (63_163, true),
+            (93_574, true),
+            (93_575, false),
+        ] {
+            assert_eq!(
+                recipe
+                    .encoder_options(target, RoiControl::Candidate)
+                    .is_ok(),
+                admitted
+            );
+        }
     }
 
     #[test]

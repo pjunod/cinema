@@ -1378,6 +1378,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_m7_attempts::SCHEMA,
     // v138: each title generation's M7 outcome, its identity and fitted table.
     super::dv_m7_outcomes::SCHEMA,
+    // v139: preserve the legacy rate-admission outcome and candidate ledger.
+    super::dv_m7_attempts::SUPERSESSION_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

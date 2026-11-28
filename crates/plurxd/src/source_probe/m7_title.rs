@@ -461,7 +461,10 @@ mod recovery;
 
 use super::{
     dv_title::{self, M7WindowRange},
-    m7_candidate::{prepare_authored, FrozenRecipe, PrepareError, RatePlan, StaticHdr},
+    m7_candidate::{
+        prepare_authored, verify_legacy_rate_stop, FrozenRecipe, PrepareError, RatePlan, RateStop,
+        StaticHdr,
+    },
     m7_comparison::{self, ComparisonInput, EvaluationWindow, FrozenProtocol, PublicationReadback},
 };
 use plurx_core::transcode::{
@@ -481,7 +484,8 @@ use serde::Serialize;
 use std::{io::Write, sync::Arc};
 use tempfile::{NamedTempFile, TempDir};
 
-const AUTOMATIC_PROTOCOL: &str = "plurx-m7-early-rap-window-calibration-v1";
+const LEGACY_AUTOMATIC_PROTOCOL: &str = "plurx-m7-early-rap-window-calibration-v1";
+const AUTOMATIC_PROTOCOL: &str = "plurx-m7-early-rap-window-calibration-v2";
 const FRAMES: usize = 48;
 const BASELINE_WINDOWS: usize = 2;
 const SOURCE_RATE_BAND_PERCENT: u32 = 1;
@@ -566,35 +570,24 @@ async fn measure_new_title(
             let publications = fitted.readbacks(context, &title, &windows, scratch.path()).await?;
             source.layout.roi = publication_active_area(&publications, source.layout.raster)?;
             source.layout.sites_per_frame().map_err(string)?;
-            let mut calibration = Vec::new();
-            let mut evaluation = Vec::new();
-            for (index, (frames, (whole, seek))) in windows.into_iter().zip(publications).enumerate() {
-                if index < BASELINE_WINDOWS {
-                    calibration.push(calibrate(
-                        context, &title, source.layout, &frames, &whole, &seek,
-                        &fitted, &scratch, reserve_bytes,
-                    ).await?);
-                } else {
-                    evaluation.push((frames, whole, seek));
-                }
-            }
-            let margin = frozen_margin(&calibration)?;
             let table_sha: [u8; 32] = hex::decode(fitted.table().digest())
                 .map_err(string)?.try_into().map_err(|_| "M7 fitted digest length changed")?;
             let recipe_sha = recipe.recipe_sha256();
-            let freeze = serde_json::to_vec(&serde_json::json!({
+            let mut exposures = windows.into_iter().zip(publications);
+            let baseline = exposures.by_ref().take(BASELINE_WINDOWS).collect::<Vec<_>>();
+            let evaluation = exposures.map(|(frames, (whole, seek))| (frames, whole, seek))
+                .collect::<Vec<_>>();
+            let mut freeze = serde_json::json!({
                 "schema": AUTOMATIC_PROTOCOL,
                 "source_sha256": hex::encode(title.content_sha256),
                 "probe_sha256": hex::encode(title.probe_sha256),
                 "model": MODEL_VERSION,
                 "fitted_table_sha256": hex::encode(table_sha),
-                "margin": margin.value(),
-                "calibration": calibration,
                 "evaluation": evaluation.iter().map(|(frames, whole, seek)| serde_json::json!({
                     "frames": frames.iter().map(|frame| serde_json::json!({
                         "ordinal": frame.ordinal, "pts": frame.pts, "duration": frame.duration,
-                        "au": hex::encode(frame.access_unit_sha256),
-                        "rpu": hex::encode(frame.rpu_sha256), "vcl": hex::encode(frame.bl_vcl_sha256),
+                        "au": hex::encode(frame.access_unit_sha256), "rpu": hex::encode(frame.rpu_sha256),
+                        "vcl": hex::encode(frame.bl_vcl_sha256),
                     })).collect::<Vec<_>>(),
                     "whole": hex::encode(whole.readback_sha256),
                     "seek": hex::encode(seek.readback_sha256),
@@ -608,7 +601,46 @@ async fn measure_new_title(
                 },
                 "recipe_sha256": hex::encode(recipe_sha),
                 "recipe": &recipe,
-            })).map_err(string)?;
+            });
+            let legacy = context.fence.legacy_m7_rate_stop(&source_probe, &scope, table_sha)
+                .await.map_err(string)?;
+            let calibration = if let Some(legacy) = &legacy {
+                let old_protocol = hex::encode(legacy.ledger.protocol_sha256);
+                let old_dir = root.join("experiments").join(hex::encode(title.content_sha256))
+                    .join(&old_protocol);
+                let raw = tokio::task::spawn_blocking({
+                    let old_dir = old_dir.clone();
+                    let old_protocol = old_protocol.clone();
+                    move || load_json(&old_dir.join("native-protocol.json"), Some(&old_protocol))
+                }).await.map_err(string)??;
+                let original: serde_json::Value = serde_json::from_slice(&raw).map_err(string)?;
+                if original["recipe_sha256"] != hex::encode(legacy.ledger.recipe_sha256)
+                    || legacy.ledger.recipe_sha256 != recipe.recipe_v1_sha256()
+                {
+                    return Err(EvaluationError::Deferred("M7 legacy recipe differs".into()));
+                }
+                let refused = legacy.refused_target().ok_or("M7 legacy rate stop is invalid")?;
+                verify_legacy_rate_stop(&old_dir, &legacy.ledger, &recipe, source.layout.raster, refused)
+                    .await.map_err(string)?;
+                let calibration = legacy_calibration(&original, &freeze, source.layout, &baseline)?;
+                freeze["supersedes_protocol_sha256"] = serde_json::json!(old_protocol);
+                // Carry the authenticated calibration records into the new freeze.
+                freeze["calibration"] = original["calibration"].clone();
+                calibration
+            } else {
+                let mut calibration = Vec::with_capacity(BASELINE_WINDOWS);
+                for (frames, (whole, seek)) in baseline {
+                    calibration.push(calibrate(
+                        context, &title, source.layout, &frames, &whole, &seek,
+                        &fitted, &scratch, reserve_bytes,
+                    ).await?);
+                }
+                freeze["calibration"] = serde_json::json!(&calibration);
+                calibration
+            };
+            let margin = frozen_margin(&calibration)?;
+            freeze["margin"] = serde_json::json!(margin.value());
+            let freeze = serde_json::to_vec(&freeze).map_err(string)?;
             let protocol_sha: [u8; 32] = Sha256::digest(&freeze).into();
             let directory = root.join("experiments")
                 .join(hex::encode(title.content_sha256)).join(hex::encode(protocol_sha));
@@ -617,7 +649,13 @@ async fn measure_new_title(
                 recipe_sha256: recipe_sha,
                 maximum_attempts: rate.maximum_attempts,
             };
-            match context.fence.anchor_m7_candidate(&source_probe, &scope, plan).await.map_err(string)? {
+            let anchor = if let Some(legacy) = &legacy {
+                context.fence.supersede_m7_rate_stop(&source_probe, &scope, legacy, table_sha, plan)
+                    .await
+            } else {
+                context.fence.anchor_m7_candidate(&source_probe, &scope, plan).await
+            }.map_err(string)?;
+            match anchor {
                 M7CandidateAnchor::Ready => {}
                 M7CandidateAnchor::DifferentProtocol => return Err(EvaluationError::Inconclusive(
                     "this source already has a different frozen experiment".into(),
@@ -680,6 +718,9 @@ async fn measure_new_title(
 
 fn candidate_error(error: PrepareError) -> EvaluationError {
     match error {
+        PrepareError::RateInconclusive(RateStop::OutsideTargetBounds(_)) => {
+            EvaluationError::Inconclusive(format!("NP1 rate policy v2: {error}"))
+        }
         PrepareError::RateInconclusive(_)
         | PrepareError::ActualRate
         | PrepareError::IncompleteAttempt { .. } => {
@@ -1110,13 +1151,67 @@ fn publication_active_area(
     stable.ok_or("M7 fitted readback has no active area evidence".into())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CalibrationEvidence {
     window: CalibrationWindow,
     samples: u64,
     model_means: [f64; 4],
     whole_readback: [u8; 32],
     seek_readback: [u8; 32],
+}
+
+type BaselineExposure = (
+    Vec<FrameEvidence>,
+    (PublicationReadback, PublicationReadback),
+);
+
+fn legacy_calibration(
+    original: &serde_json::Value,
+    current: &serde_json::Value,
+    layout: CaptureLayout,
+    baseline: &[BaselineExposure],
+) -> Result<Vec<CalibrationEvidence>, String> {
+    if original["schema"] != LEGACY_AUTOMATIC_PROTOCOL
+        || [
+            "source_sha256",
+            "probe_sha256",
+            "model",
+            "fitted_table_sha256",
+            "evaluation",
+            "layout",
+            "source_video_rate",
+        ]
+        .iter()
+        .any(|&field| original[field].is_null() || original[field] != current[field])
+    {
+        return Err("M7 legacy calibration bindings differ".into());
+    }
+    let calibration: Vec<CalibrationEvidence> =
+        serde_json::from_value(original["calibration"].clone()).map_err(string)?;
+    if calibration.len() != baseline.len()
+        || calibration
+            .iter()
+            .zip(baseline)
+            .any(|(evidence, (frames, (whole, seek)))| {
+                let Some((first, last)) = frames.first().zip(frames.last()) else {
+                    return true;
+                };
+                evidence.samples == 0
+                    || evidence.window.receipt_sha256 == [0; 32]
+                    || evidence.window.time_base != layout.time_base
+                    || evidence.window.first_ordinal != first.ordinal
+                    || evidence.window.last_ordinal != last.ordinal
+                    || evidence.window.first_pts != first.pts
+                    || Some(evidence.window.end_pts) != last.pts.checked_add(last.duration)
+                    || evidence.whole_readback != whole.readback_sha256
+                    || evidence.seek_readback != seek.readback_sha256
+            })
+        || original["margin"].as_f64() != Some(frozen_margin(&calibration)?.value())
+    {
+        return Err("M7 legacy calibration evidence differs".into());
+    }
+    Ok(calibration)
 }
 
 #[expect(

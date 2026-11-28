@@ -133,6 +133,13 @@ sources.
 - The helper and source changes also change M7's automatic identity, so the
   idle sweep reopens titles recorded as Unsupported under the old one.
 
+The automatic NP1 recipe revision 2 freezes the inclusive encoder target
+interval `[ceil(0.75 × band_low), min(floor(1.10 × band_high), 125000)]`
+in kb/s. This replaces the Michael-era 83,334 kb/s proposal floor for
+automatic trials. The authored packet-rate band and four-model scoring
+rules still govern admission. The sealed Michael comparison keeps its
+original recipe.
+
 ## Evidence
 
 - `tools/dv_processing/test_refit_exact.c`: identity with the v1 NLQ, for

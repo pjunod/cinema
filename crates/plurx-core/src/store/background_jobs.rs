@@ -3088,6 +3088,18 @@ pub trait BackgroundJobStore: Send + Sync {
         plan: super::dv_m7_attempts::M7CandidatePlan,
     ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError>;
 
+    async fn legacy_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        fit_table: [u8; 32],
+    ) -> Result<Option<super::dv_m7_attempts::M7LegacyRateStop>, StoreError>;
+    async fn supersede_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        legacy: &super::dv_m7_attempts::M7LegacyRateStop,
+        fit_table: [u8; 32],
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError>;
     async fn dv_m7_candidate_slots(
         &self,
         authority: &super::dv_m7_attempts::M7CandidateAuthority,
@@ -4337,6 +4349,22 @@ LIMIT 1
         super::dv_m7_attempts::anchor(self, authority, plan).await
     }
 
+    async fn legacy_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        fit_table: [u8; 32],
+    ) -> Result<Option<super::dv_m7_attempts::M7LegacyRateStop>, StoreError> {
+        super::dv_m7_attempts::legacy_rate_stop(self, authority, fit_table).await
+    }
+    async fn supersede_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        legacy: &super::dv_m7_attempts::M7LegacyRateStop,
+        fit_table: [u8; 32],
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError> {
+        super::dv_m7_attempts::supersede(self, authority, legacy, fit_table, plan).await
+    }
     async fn dv_m7_candidate_slots(
         &self,
         authority: &super::dv_m7_attempts::M7CandidateAuthority,

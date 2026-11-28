@@ -868,8 +868,9 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')",
 /// A title is stale when its generation has no recorded M7 outcome, or when
 /// its outcome is `unsupported` (or the sweep's own `pending`) and was
 /// recorded under another identity or another fitted table. `result`,
-/// `not_applicable` and `inconclusive` are never reopened here; an
-/// administrator's re-evaluation forgets the record instead. The reopen keeps
+/// `not_applicable` and other `inconclusive` outcomes remain terminal. A
+/// legacy target-bound stop can reopen once under a new M7 identity while
+/// its fitted table still matches. The original outcome is archived. The reopen keeps
 /// the generation, so the title job reuses its stored aggregate instead of
 /// reading the source again, and records `pending` under this identity and
 /// table in the same transaction: the loop-breaker, so a title reopens at most
@@ -902,6 +903,14 @@ pub(super) async fn reopen_stale_m7<T: QueueSql>(
         source_mtime: i64,
     }
     let current = super::dv_m7_outcomes::CURRENT_FIT_TABLE;
+    let prefix = super::dv_m7_attempts::LEGACY_GATE_PREFIX;
+    let legacy_stop = format!(
+        "(o.outcome='inconclusive' AND o.fit_table<>'' AND o.fit_table={current}
+ AND o.identity IS NOT json_extract($1,'$.identity')
+ AND o.gate='{prefix}' || printf('%lld',CAST(substr(o.gate,{},length(o.gate)-{}) AS INTEGER)) || ')'
+ AND NOT EXISTS(SELECT 1 FROM dv_m7_rate_supersessions_v1 history WHERE history.revision=d.revision))",
+        prefix.len()+1, prefix.len()+1
+    );
     let candidates = format!(
         "FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
  LEFT JOIN dv_m7_title_outcomes_v1 o ON o.revision=d.revision
@@ -909,7 +918,7 @@ WHERE d.terminal=1 AND d.scanner_digest IS NOT NULL
  AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
  AND json_type(f.probe_json,'$.{field}')='object'
  AND (o.revision IS NULL OR (o.outcome IN ('unsupported','pending')
-  AND (o.identity IS NOT json_extract($1,'$.identity') OR o.fit_table IS NOT {current})))
+  AND (o.identity IS NOT json_extract($1,'$.identity') OR o.fit_table IS NOT {current})) OR {legacy_stop})
  AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
   AND job.state IN ('queued','running','cancelling')
   AND json_extract(job.payload_json,'$.file_id')=f.id)",
@@ -995,6 +1004,18 @@ WHERE revision IN (SELECT d.revision {candidates}
                     guard.clone(),
                 ),
                 (ENQUEUE_SQL.to_owned(), body),
+                (
+                    format!(
+                        "INSERT INTO dv_m7_rate_supersessions_v1(revision,file_id,old_identity,new_identity,fit_table,gate,at_ms)
+SELECT d.revision,d.file_id,o.identity,json_extract($1,'$.identity'),o.fit_table,o.gate,o.at_ms
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+JOIN dv_m7_title_outcomes_v1 o ON o.revision=d.revision
+WHERE d.revision=json_extract($1,'$.revision') AND d.file_id=json_extract($1,'$.file') AND d.terminal=0
+ AND {legacy_stop} AND EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')"
+                    ),
+                    guard.clone(),
+                ),
                 (
                     format!(
                         "INSERT INTO dv_m7_title_outcomes_v1(revision,file_id,identity,fit_table,outcome,gate,at_ms)

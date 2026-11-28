@@ -28,7 +28,8 @@
 // libdovi's parse of the same RPU. libdovi keeps the bitstream's
 // pred_pivot_value deltas; FFmpeg's AVDOVIReshapingCurve.pivots are their
 // running sums. Comparing them element by element refused every title whose
-// luma curve has more than the two pivots 0 and 1023.
+// luma curve has more than the two pivots 0 and 1023. The decoder validates
+// the absolute curve bounds before this comparison.
 static inline bool refit_pivots_agree(const uint16_t *deltas, size_t count,
                                       const uint16_t *absolute, int num_pivots) {
   if (!deltas || !absolute || num_pivots < 2 || count != (size_t)num_pivots)

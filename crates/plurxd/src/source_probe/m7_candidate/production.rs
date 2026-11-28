@@ -25,7 +25,7 @@ use plurx_core::{
         source_lifetime::{self, ArgumentProfile},
         ChildWork,
     },
-    store::dv_m7_attempts::{M7CandidateIntent, M7CandidateReservation},
+    store::dv_m7_attempts::{M7CandidateIntent, M7CandidateLedger, M7CandidateReservation},
     transcode::{
         dv_m7_receipt::M7SourceProbe,
         dv_m7_scoring::capture::{
@@ -736,6 +736,66 @@ fn packet_identity(packets: &PacketBook) -> Hash {
     digest.finalize().into()
 }
 
+/// Validate the exact spent v1 slots and replay their rate history. This never
+/// launches an encoder or uses v1 control receipts to qualify the new encoder.
+pub(in crate::source_probe) async fn verify_legacy_rate_stop(
+    trial_directory: &Path,
+    ledger: &M7CandidateLedger,
+    recipe: &FrozenRecipe,
+    raster: [u16; 2],
+    refused_target: i64,
+) -> Result<()> {
+    let legacy = recipe.legacy_v1();
+    if ledger.slots.is_empty()
+        || ledger.recipe_sha256 != legacy.recipe_sha256()
+        || ledger.maximum_attempts != legacy.rate.maximum_attempts
+        || !(super::LEGACY_MIN_TARGET_KBPS..=super::MAX_TARGET_KBPS)
+            .contains(&legacy.rate.initial_target_kbps)
+    {
+        return Err(PrepareError::Authority("exact historical NP1 recipe"));
+    }
+    let path = trial_directory.to_owned();
+    let source = ledger.source_sha256;
+    let protocol = ledger.protocol_sha256;
+    let grid = legacy.encoder_grid();
+    let bindings: Vec<_> = ledger
+        .slots
+        .iter()
+        .map(|slot| (slot.slot, slot.target_kbps, slot.binding_sha256))
+        .collect();
+    let attempts = blocking(move || {
+        let journal = Journal::open_existing(&path, source, protocol).map_err(journal_error)?;
+        journal
+            .observe_rate_only(&bindings, |recovered| {
+                let proof = recovered.proof;
+                let slot = proof.intent.slot;
+                let packets = packet_book(&recovered.bytes, grid, raster, false, None)
+                    .map_err(|_| journal::Error::Consumed(slot))?;
+                if proof.packet_census != packet_identity(&packets)
+                    || proof.encoded_payload_bytes != packets.payload_bytes
+                {
+                    return Err(journal::Error::Consumed(slot));
+                }
+                Ok(RateAttempt {
+                    target_kbps: proof.intent.target_kbps,
+                    encoded_video_packet_bytes: packets.payload_bytes,
+                })
+            })
+            .map_err(journal_error)
+    })
+    .await?;
+    let new_target = u32::try_from(refused_target).map_err(execution)?;
+    if legacy.rate_decision(&attempts).map_err(execution)?
+        != RateDecision::Inconclusive(RateStop::OutsideTargetBounds(refused_target))
+        || recipe.rate_decision(&attempts).map_err(execution)? != RateDecision::Encode(new_target)
+    {
+        return Err(PrepareError::Authority(
+            "legacy-only rate admission refusal",
+        ));
+    }
+    Ok(())
+}
+
 fn restore_encoded(
     journal: &Journal,
     intent: Intent,
@@ -896,7 +956,7 @@ impl Plan {
         let grid = recipe.encoder_grid();
         let [width, height] = run.planes.layout.raster;
         let hdr = recipe.hdr;
-        let mut bytes = b"PLXM7R01".to_vec();
+        let mut bytes = b"PLXM7R02".to_vec();
         let mode = match control {
             RoiControl::None => 0,
             RoiControl::Zero => 1,

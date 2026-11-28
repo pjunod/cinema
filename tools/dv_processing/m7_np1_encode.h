@@ -16,7 +16,7 @@
 /*
  * mux_rgb --m7-encode-np1-v1
  * Inherited fd 4 is the owned output directory. Fd 6 contains packed
- * composed yuv420p10le frames (Y, Cb, Cr). Fd 7 contains the PLXM7R01 plan.
+ * composed yuv420p10le frames (Y, Cb, Cr). Fd 7 contains the PLXM7R02 plan.
  * Outputs within fd 4 are encoded.mp4 and encode.receipt, both exclusive.
  *
  * Plan scalars and ROI records are little-endian; digests are raw SHA-256.
@@ -67,7 +67,6 @@ enum {
   M7_NP1_HASH_BYTES = 32,
   M7_NP1_MAX_OUTPUT = 64 * 1024 * 1024,
   M7_NP1_AVIO_BUFFER = 65536,
-  M7_NP1_MIN_ABR = 83334,
   M7_NP1_PEAK_ABR = 125000,
   M7_NP1_BUF_KBIT = 136000,
 };
@@ -166,7 +165,7 @@ static void m7_np1_plan_bytes(void *data, size_t size, off_t *offset, off_t exte
 
 static void m7_np1_validate_recipe(struct m7_np1_recipe *recipe) {
   const uint8_t *h = recipe->wire;
-  m7_np1_need(!memcmp(h, "PLXM7R01", 8), "recipe version");
+  m7_np1_need(!memcmp(h, "PLXM7R02", 8), "recipe version");
   recipe->mode = AV_RL32(h + 8);
   recipe->width = AV_RL32(h + 12);
   recipe->height = AV_RL32(h + 16);
@@ -175,6 +174,10 @@ static void m7_np1_validate_recipe(struct m7_np1_recipe *recipe) {
   recipe->target = AV_RL32(h + 32);
   uint32_t initial = AV_RL32(h + 36);
   uint32_t low = AV_RL32(h + 40), high = AV_RL32(h + 44);
+  // Mirror the frozen Rust recipe using the same integer rounding.
+  uint64_t min_target = ((uint64_t)low * 3 + 3) / 4;
+  uint64_t max_target = (uint64_t)high * 11 / 10;
+  if (max_target > M7_NP1_PEAK_ABR) max_target = M7_NP1_PEAK_ABR;
   recipe->light_present = AV_RL32(h + 48);
   for (unsigned i = 0; i < 8; i++)
     recipe->primaries[i] = AV_RL16(h + 56 + 2 * i);
@@ -187,8 +190,8 @@ static void m7_np1_validate_recipe(struct m7_np1_recipe *recipe) {
                   AV_RL32(h + 20) == M7_NP1_FRAMES &&
                   ((recipe->timescale == 24 && recipe->frame_ticks == 1) ||
                    (recipe->timescale == 24000 && recipe->frame_ticks == 1001)) &&
-                  initial >= M7_NP1_MIN_ABR && initial <= M7_NP1_PEAK_ABR &&
-                  recipe->target >= M7_NP1_MIN_ABR && recipe->target <= M7_NP1_PEAK_ABR &&
+                  initial >= min_target && initial <= max_target &&
+                  recipe->target >= min_target && recipe->target <= max_target &&
                   (recipe->mode == 2 || recipe->target == initial) &&
                   low > 0 && high >= low && AV_RL32(h + 52) == 0,
               "frozen NP1 raster, cadence and rate controls");

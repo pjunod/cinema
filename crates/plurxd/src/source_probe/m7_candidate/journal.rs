@@ -156,6 +156,14 @@ pub(super) struct Journal {
 
 impl Journal {
     pub fn open(path: &Path, source: Hash, protocol: Hash) -> Result<Self, Error> {
+        Self::open_bound(path, source, protocol, true)
+    }
+
+    pub fn open_existing(path: &Path, source: Hash, protocol: Hash) -> Result<Self, Error> {
+        Self::open_bound(path, source, protocol, false)
+    }
+
+    fn open_bound(path: &Path, source: Hash, protocol: Hash, create: bool) -> Result<Self, Error> {
         let source_path = path
             .parent()
             .ok_or(Error::Binding("source experiment parent"))?;
@@ -172,7 +180,12 @@ impl Journal {
             return Err(Error::Binding("verified native protocol hash"));
         }
 
-        let lock = open_at(&source, "np1-candidate.lock", libc::O_RDWR | libc::O_CREAT)?;
+        let lock_flags = if create {
+            libc::O_RDWR | libc::O_CREAT
+        } else {
+            libc::O_RDONLY
+        };
+        let lock = open_at(&source, "np1-candidate.lock", lock_flags)?;
         if !lock.metadata()?.is_file() || lock.metadata()?.len() != 0 {
             return Err(Error::Binding("held source journal lock"));
         }
@@ -186,7 +199,7 @@ impl Journal {
                 error.into()
             });
         }
-        let directory = child_directory(&experiment, "candidate", true)?;
+        let directory = child_directory(&experiment, "candidate", create)?;
         Ok(Self {
             experiment,
             directory,
@@ -246,19 +259,79 @@ impl Journal {
 
     pub fn recover(&self, intent: Intent) -> Result<RecoveredEncode, Error> {
         slot_number(intent.slot)?;
-        self.drop_partial(&intent_name(intent.slot))?;
-        let expected = self.read_consumed::<Intent>(&intent_name(intent.slot), intent.slot)?;
-        if expected != intent {
-            return Err(Error::Consumed(intent.slot));
-        }
         let name = proof_name(intent.slot);
-        let Some(proof) = record::<EncodeProof>(&self.directory, &name)
-            .map_err(|error| consumed(error, intent.slot))?
-        else {
+        self.drop_partial(&intent_name(intent.slot))?;
+        self.verify_intent(intent)?;
+        let Some(proof) = self.encode_proof(intent.slot)? else {
             self.drop_unverified(&media_name(intent.slot))?;
             self.drop_partial(&name)?;
             return Err(Error::Consumed(intent.slot));
         };
+        let recovered = self.verify_encoded(intent, proof)?;
+        self.drop_partial(&media_name(intent.slot))?;
+        self.drop_partial(&name)?;
+        Ok(recovered)
+    }
+
+    /// Verify old rate-only evidence without deleting or repairing old journal files.
+    pub fn observe_rate_only<T>(
+        &self,
+        bindings: &[(u8, u32, Hash)],
+        observe: impl Fn(RecoveredEncode) -> Result<T, Error>,
+    ) -> Result<Vec<T>, Error> {
+        match open_at(&self.experiment, "completion", libc::O_RDONLY) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(Error::Binding("historical experiment has a completion")),
+        }
+        for name in [
+            AUTHORED,
+            AUTHORED_MEDIA,
+            &part_name(AUTHORED),
+            &part_name(AUTHORED_MEDIA),
+        ] {
+            match open_at(&self.directory, name, libc::O_RDONLY) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+                Ok(_) => return Err(Error::Binding("historical experiment reached authoring")),
+            }
+        }
+        let gate: GateProof =
+            record(&self.directory, GATES)?.ok_or(Error::Binding("historical encoder gates"))?;
+        bindings
+            .iter()
+            .map(|&(slot, target, binding)| {
+                slot_number(slot)?;
+                let intent = self.read_consumed::<Intent>(&intent_name(slot), slot)?;
+                if intent.revision != JOURNAL_REVISION
+                    || intent.slot != slot
+                    || intent.target_kbps != target
+                    || intent.identity() != binding
+                    || intent.binding != gate.binding
+                    || intent.gates != gate.identity()
+                    || intent.closure != gate.closure
+                {
+                    return Err(Error::Consumed(slot));
+                }
+                let proof = self.encode_proof(slot)?.ok_or(Error::Consumed(slot))?;
+                observe(self.verify_encoded(intent, proof)?)
+            })
+            .collect()
+    }
+
+    fn verify_intent(&self, intent: Intent) -> Result<(), Error> {
+        let expected = self.read_consumed::<Intent>(&intent_name(intent.slot), intent.slot)?;
+        if expected != intent {
+            return Err(Error::Consumed(intent.slot));
+        }
+        Ok(())
+    }
+
+    fn encode_proof(&self, slot: u8) -> Result<Option<EncodeProof>, Error> {
+        record(&self.directory, &proof_name(slot)).map_err(|error| consumed(error, slot))
+    }
+
+    fn verify_encoded(&self, intent: Intent, proof: EncodeProof) -> Result<RecoveredEncode, Error> {
         let bytes = read(&self.directory, &media_name(intent.slot), MAX_ENCODED_BYTES)
             .map_err(|error| consumed(error, intent.slot))?
             .ok_or(Error::Consumed(intent.slot))?;
@@ -272,8 +345,6 @@ impl Journal {
         {
             return Err(Error::Consumed(intent.slot));
         }
-        self.drop_partial(&media_name(intent.slot))?;
-        self.drop_partial(&name)?;
         Ok(RecoveredEncode { proof, bytes })
     }
 

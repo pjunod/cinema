@@ -35,6 +35,48 @@ CREATE TABLE dv_m7_candidate_attempts_v1 (
 ) STRICT
 "#;
 
+/// Immutable evidence for the one automatic retry of a legacy rate-admission stop.
+pub(crate) const SUPERSESSION_SCHEMA: &str = r#"
+CREATE TABLE dv_m7_rate_supersessions_v1 (
+  revision INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  old_identity TEXT NOT NULL,
+  new_identity TEXT NOT NULL,
+  fit_table TEXT NOT NULL,
+  gate TEXT NOT NULL,
+  at_ms INTEGER NOT NULL,
+  source_sha256 TEXT UNIQUE,
+  old_ledger TEXT CHECK (old_ledger IS NULL OR json_valid(old_ledger)),
+  new_protocol TEXT,
+  new_recipe TEXT,
+  new_cap INTEGER,
+  CHECK ((source_sha256 IS NULL)=(old_ledger IS NULL)
+    AND (source_sha256 IS NULL)=(new_protocol IS NULL)
+    AND (source_sha256 IS NULL)=(new_recipe IS NULL)
+    AND (source_sha256 IS NULL)=(new_cap IS NULL))
+) STRICT
+"#;
+
+pub(crate) const SUPERSESSION_SHAPE_SQL: &str =
+    "SELECT name,sql FROM sqlite_master WHERE type='table' AND name='dv_m7_rate_supersessions_v1'";
+
+pub(crate) fn has_supersession_schema(rows: &[(String, String)]) -> Result<bool, StoreError> {
+    match rows {
+        [] => Ok(false),
+        [(name, sql)]
+            if name == "dv_m7_rate_supersessions_v1"
+                && sql
+                    .split_whitespace()
+                    .eq(SUPERSESSION_SCHEMA.split_whitespace()) =>
+        {
+            Ok(true)
+        }
+        _ => Err(StoreError::Migration(
+            "invalid M7 rate supersession schema".into(),
+        )),
+    }
+}
+
 pub(crate) const SHAPE_SQL: &str =
     "SELECT name,sql FROM sqlite_master WHERE type='table' AND name='dv_m7_candidate_attempts_v1'";
 
@@ -59,6 +101,13 @@ pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreErro
     if !has_schema(&observed.collect::<Result<Vec<_>, _>>()?)? {
         return Err(StoreError::Migration(
             "M7 candidate attempt schema missing".into(),
+        ));
+    }
+    let mut query = conn.prepare(SUPERSESSION_SHAPE_SQL)?;
+    let observed = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    if !has_supersession_schema(&observed.collect::<Result<Vec<_>, _>>()?)? {
+        return Err(StoreError::Migration(
+            "M7 rate supersession schema missing".into(),
         ));
     }
     Ok(())
@@ -206,6 +255,7 @@ impl M7CandidateLedger {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Serialize)]
 struct StoredLedger {
     source_sha256: String,
     protocol_sha256: String,
@@ -270,6 +320,13 @@ pub(super) async fn lookup<T: QueueSql>(
             Err(invalid())
         };
     };
+    decode_ledger(value, authority).map(Some)
+}
+
+fn decode_ledger(
+    value: &str,
+    authority: &M7CandidateAuthority,
+) -> Result<M7CandidateLedger, StoreError> {
     let stored: StoredLedger = serde_json::from_str(value).map_err(|_| invalid())?;
     let result = M7CandidateLedger {
         source_sha256: read_digest(&stored.source_sha256)?,
@@ -293,7 +350,105 @@ pub(super) async fn lookup<T: QueueSql>(
             return Err(invalid());
         }
     }
-    Ok(Some(result))
+    Ok(result)
+}
+
+/// The archived stop and exact candidate reservations used for its replay proof.
+pub struct M7LegacyRateStop {
+    pub gate: String,
+    pub ledger: M7CandidateLedger,
+}
+
+pub(super) const LEGACY_GATE_PREFIX: &str =
+    "NP1 did not land a rate-only candidate: OutsideTargetBounds(";
+
+impl M7LegacyRateStop {
+    pub fn refused_target(&self) -> Option<i64> {
+        let digits = self
+            .gate
+            .strip_prefix(LEGACY_GATE_PREFIX)?
+            .strip_suffix(')')?;
+        digits
+            .parse::<i64>()
+            .ok()
+            .filter(|value| value.to_string() == digits)
+    }
+}
+
+pub(super) async fn legacy_rate_stop<T: QueueSql>(
+    store: &T,
+    authority: &M7CandidateAuthority,
+    fit_table: Digest,
+) -> Result<Option<M7LegacyRateStop>, StoreError> {
+    let mut body = authority.body()?;
+    body["fit_table"] = json!(hex::encode(fit_table));
+    let rows = store
+        .queue_sql(LEGACY_SQL.clone(), encode(&body)?, false, true)
+        .await?;
+    #[derive(Deserialize)]
+    struct Legacy {
+        gate: String,
+        ledger: Value,
+    }
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let Legacy { gate, ledger } = serde_json::from_str(row).map_err(|_| invalid())?;
+    let legacy = M7LegacyRateStop {
+        gate,
+        ledger: decode_ledger(&ledger.to_string(), authority)?,
+    };
+    if legacy.refused_target().is_none() {
+        return Err(invalid());
+    }
+    Ok(Some(legacy))
+}
+
+pub(super) async fn supersede<T: QueueSql>(
+    store: &T,
+    authority: &M7CandidateAuthority,
+    legacy: &M7LegacyRateStop,
+    fit_table: Digest,
+    plan: M7CandidatePlan,
+) -> Result<M7CandidateAnchor, StoreError> {
+    plan.validate()?;
+    if legacy.refused_target().is_none()
+        || plan.maximum_attempts == 0
+        || legacy.ledger.slots.is_empty()
+        || plan.maximum_attempts != legacy.ledger.maximum_attempts
+        || plan.protocol_sha256 == legacy.ledger.protocol_sha256
+        || plan.recipe_sha256 == legacy.ledger.recipe_sha256
+        || legacy.ledger.source_sha256 != authority.scope.source_sha256
+    {
+        return Err(invalid());
+    }
+    let mut body = authority.body()?;
+    bind_plan(&mut body, plan);
+    body["fit_table"] = json!(hex::encode(fit_table));
+    body["fit_version"] = json!(crate::transcode::dv_refit::FIT_VERSION);
+    body["gate"] = json!(legacy.gate);
+    body["old"] = serde_json::to_value(StoredLedger {
+        source_sha256: hex::encode(legacy.ledger.source_sha256),
+        protocol_sha256: hex::encode(legacy.ledger.protocol_sha256),
+        recipe_sha256: hex::encode(legacy.ledger.recipe_sha256),
+        maximum_attempts: legacy.ledger.maximum_attempts,
+        slots: legacy.ledger.slots.clone(),
+    })
+    .map_err(|_| invalid())?;
+    let body = encode(&body)?;
+    // The exact legacy reservations move with this source before any new
+    // reservation can succeed. Old workers still compare the active plan.
+    store
+        .queue_transaction(vec![
+            (ARCHIVE_SQL.clone(), body.clone()),
+            (SUPERSEDE_SQL.clone(), body),
+        ])
+        .await?;
+    Ok(match lookup(store, authority).await? {
+        Some(ledger) if ledger.plan() == plan => M7CandidateAnchor::Ready,
+        Some(_) => M7CandidateAnchor::DifferentProtocol,
+        None => M7CandidateAnchor::Fenced,
+    })
 }
 
 pub(super) async fn reserve<T: QueueSql>(
@@ -410,6 +565,81 @@ WHERE EXISTS(SELECT 1 FROM permitted)
  AND json_array_length(ledger.slots_json)=json_extract($1,'$.slot')
  AND json_array_length(ledger.slots_json)<ledger.maximum_attempts
 RETURNING 'true' AS result_json
+"#,
+    )
+});
+
+const LEDGER_JSON: &str =
+    "json_object('source_sha256',ledger.source_sha256,'protocol_sha256',ledger.protocol_sha256,
+ 'recipe_sha256',ledger.recipe_sha256,'maximum_attempts',ledger.maximum_attempts,
+ 'slots',json(ledger.slots_json))";
+
+static LEGACY_SQL: LazyLock<String> = LazyLock::new(|| {
+    statement(&format!(
+        r#"
+SELECT json_object('gate',history.gate,'ledger',json(COALESCE(history.old_ledger,{LEDGER_JSON}))) AS result_json
+FROM permitted
+JOIN dv_m7_candidate_attempts_v1 ledger ON ledger.source_sha256=json_extract(body,'$.source_sha256')
+JOIN dv_m7_rate_supersessions_v1 history ON history.fit_table=json_extract(body,'$.fit_table')
+WHERE history.source_sha256=ledger.source_sha256
+ OR (history.source_sha256 IS NULL
+ AND history.file_id=json_extract(body,'$.output.file_id')
+ AND history.revision=json_extract(body,'$.output.probe_revision'))
+ORDER BY history.source_sha256 IS NULL LIMIT 1
+"#,
+    ))
+});
+
+static ARCHIVE_SQL: LazyLock<String> = LazyLock::new(|| {
+    statement(&format!(
+        r#"
+UPDATE dv_m7_rate_supersessions_v1 AS history
+SET source_sha256=json_extract($1,'$.source_sha256'),
+ old_ledger=(SELECT {LEDGER_JSON} FROM dv_m7_candidate_attempts_v1 ledger
+  WHERE ledger.source_sha256=json_extract($1,'$.source_sha256')),
+ new_protocol=json_extract($1,'$.protocol_sha256'),
+ new_recipe=json_extract($1,'$.recipe_sha256'),new_cap=json_extract($1,'$.maximum_attempts')
+WHERE EXISTS(SELECT 1 FROM permitted)
+ AND history.file_id=json_extract($1,'$.output.file_id')
+ AND history.revision=json_extract($1,'$.output.probe_revision')
+ AND history.source_sha256 IS NULL
+ AND history.fit_table=json_extract($1,'$.fit_table')
+ AND history.gate=json_extract($1,'$.gate')
+ AND EXISTS(SELECT 1 FROM files f WHERE f.id=history.file_id
+  AND history.fit_table={current_fit})
+ AND EXISTS(SELECT 1 FROM dv_m7_title_outcomes_v1 outcome WHERE outcome.revision=history.revision
+  AND outcome.identity=history.new_identity AND outcome.fit_table=history.fit_table
+  AND outcome.outcome='pending')
+ AND NOT EXISTS(SELECT 1 FROM dv_m7_rate_supersessions_v1 previous
+  WHERE previous.source_sha256=json_extract($1,'$.source_sha256'))
+ AND EXISTS(SELECT 1 FROM dv_m7_candidate_attempts_v1 ledger
+  WHERE ledger.source_sha256=json_extract($1,'$.source_sha256')
+  AND ledger.protocol_sha256=json_extract($1,'$.old.protocol_sha256')
+  AND ledger.recipe_sha256=json_extract($1,'$.old.recipe_sha256')
+  AND ledger.maximum_attempts=json_extract($1,'$.old.maximum_attempts')
+  AND json(ledger.slots_json)=json_extract($1,'$.old.slots'))
+"#,
+        current_fit = super::dv_m7_outcomes::CURRENT_FIT_TABLE,
+    ))
+});
+
+static SUPERSEDE_SQL: LazyLock<String> = LazyLock::new(|| {
+    statement(
+        r#"
+UPDATE dv_m7_candidate_attempts_v1 AS ledger
+SET protocol_sha256=json_extract($1,'$.protocol_sha256'),
+ recipe_sha256=json_extract($1,'$.recipe_sha256'),
+ maximum_attempts=json_extract($1,'$.maximum_attempts'),slots_json='[]'
+WHERE EXISTS(SELECT 1 FROM permitted)
+ AND ledger.source_sha256=json_extract($1,'$.source_sha256')
+ AND ledger.protocol_sha256=json_extract($1,'$.old.protocol_sha256')
+ AND ledger.recipe_sha256=json_extract($1,'$.old.recipe_sha256')
+ AND ledger.maximum_attempts=json_extract($1,'$.old.maximum_attempts')
+ AND EXISTS(SELECT 1 FROM dv_m7_rate_supersessions_v1 history
+  WHERE history.source_sha256=ledger.source_sha256
+  AND history.new_protocol=json_extract($1,'$.protocol_sha256')
+  AND history.new_recipe=json_extract($1,'$.recipe_sha256')
+  AND history.new_cap=json_extract($1,'$.maximum_attempts'))
 "#,
     )
 });

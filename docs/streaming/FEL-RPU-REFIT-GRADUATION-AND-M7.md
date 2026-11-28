@@ -332,7 +332,15 @@ policy and the measurement gives no estimate of encoder repeatability. The
 route freezes this margin, the evaluation census, the source mastering
 declaration and the NP1 recipe before examining a candidate. The authored
 rate sits within a one-percent interval ending at the measured selected video
-rate. The whole-title census counts selected coded packet bytes, including FEL
+rate. NP1 recipe revision 2 lets the encoder propose targets from
+`ceil(0.75 × band_low)` through `min(floor(1.10 × band_high), 125000)`
+kb/s. The recipe digest binds both bounds. The previous 83,334 kb/s target
+floor came from the Michael trial tooling and prevented corrections for
+lower-rate titles. The proposal bounds are distinct from the authored
+packet-rate band, which still ends at the measured source rate. The frozen
+Michael result retains its original recipe and evidence.
+
+The whole-title census counts selected coded packet bytes, including FEL
 and RPU. It binds that total to the exact selected-stream presentation extent
 and time base before the recipe is frozen. These bounded exposure measurements
 carry no full-title qualification.
@@ -340,8 +348,12 @@ carry no full-title qualification.
 The durable experiment identity combines the raw full-source SHA-256 and the
 frozen protocol SHA-256. The replicated title authority anchors one protocol per
 source and grants each candidate slot once, including across node changes and
-duplicate catalogue entries. A pending slot with missing coded proof cannot
-supply another candidate trial. The title job can expose complete title facts
+duplicate catalogue entries. The one-time transition from recipe v1 to v2
+requires a recorded target-bound stop, an exact replay of its spent slots,
+and matching source, fitted readback, and calibration evidence. The store
+archives the v1 outcome and reservations before replacing the active protocol.
+A pending slot with missing coded proof cannot supply another candidate trial.
+The title job can expose complete title facts
 to the existing F+ fitter while its M7 work remains queued.
 
 A completed comparison seals the full report, exact binding and bounded pending
