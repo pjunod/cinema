@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const REVISION: u32 = 1;
-/// The generation of the trace reader that wrote a [`Proof`]. It is not part
+/// The generation of the trace reader used for a node-local refusal. It is not part
 /// of [`REVISION`], which feeds every HEVC index identity: raising that would
 /// re-index every HEVC file. Generation 2 reads trace lines glued onto another
 /// thread's message and a promoting copy's in-band sets; generation 1 (absent
@@ -161,9 +161,8 @@ pub struct Proof {
     pub slices: u64,
     /// None means verified; a reason means this complete scan refused copy.
     pub refusal: Option<String>,
-    /// The trace reader generation that wrote this proof ([`PARSER`]); 0 on
-    /// proofs stored before the field existed. Left out of the stored form at
-    /// 0, so those keep their exact bytes.
+    /// The reader generation for a node-local refusal ([`PARSER`]).
+    /// Zero preserves the stored form of permits and unstamped refusals.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub parser: u32,
 }
@@ -190,10 +189,9 @@ impl Proof {
         true
     }
 
-    /// A completed refusal is still a current analysis; do not rescan it
-    /// until source identity or analyzer revision changes.
+    /// A current refusal is reusable for the same source, node and reader.
     pub fn current_on_node(&self, object: &str, node: &str) -> bool {
-        self.current_refusal_or_permit()
+        !self.refusal_needs_reanalysis()
             && self.revision == REVISION
             && !object.is_empty()
             && !node.is_empty()
@@ -205,11 +203,13 @@ impl Proof {
     /// have refused: a refusal from an older [`PARSER`] is not a fact about
     /// the source.
     pub fn current_refusal(&self) -> Option<&str> {
-        self.refusal.as_deref().filter(|_| self.parser >= PARSER)
+        self.refusal
+            .as_deref()
+            .filter(|_| !self.refusal_needs_reanalysis())
     }
 
-    fn current_refusal_or_permit(&self) -> bool {
-        self.refusal.is_none() || self.parser >= PARSER
+    pub fn refusal_needs_reanalysis(&self) -> bool {
+        self.refusal.is_some() && (self.parser < PARSER || self.revision != REVISION)
     }
 
     pub fn permits_on_node(&self, object: &str, node: &str) -> bool {
@@ -693,6 +693,7 @@ impl Trace {
 
     pub fn finish(mut self, source_object_version: String, stream_index: u32) -> Proof {
         self.finish_input();
+        let parser = if self.refusal.is_some() { PARSER } else { 0 };
         Proof {
             revision: REVISION,
             source_object_version,
@@ -701,7 +702,7 @@ impl Trace {
             source_sha256: None,
             slices: self.slices,
             refusal: self.refusal,
-            parser: PARSER,
+            parser,
         }
     }
 }
@@ -1417,10 +1418,11 @@ mod tests {
         assert!(!old.current_on_node("object", "node"));
         assert_eq!(old.current_refusal(), None);
 
-        let permit = Proof {
-            refusal: None,
-            ..old.clone()
-        };
+        let mut trace = Trace::default();
+        trace.feed(fixture().as_bytes());
+        let mut permit = trace.finish("object".into(), 0);
+        permit.source_node_id = "node".into();
+        assert_eq!(permit.parser, 0);
         assert!(permit.current_on_node("object", "node"));
         assert!(permit.permits_on_node("object", "node"));
 

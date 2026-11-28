@@ -706,6 +706,7 @@ impl VodServe {
         video: CopyVideoOptions,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
         purpose: AttachmentPurpose,
+        verify_hevc: bool,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if let Some(viewer) = viewer {
             viewer.require_local_authority().map_err(str::to_owned)?;
@@ -840,6 +841,14 @@ impl VodServe {
         if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
             if !proof.bind_equivalent_source(&observation.source_sha256, node_id, &object_version) {
                 return Err("HEVC artifact is not bound to the fully attested source".into());
+            }
+            // Let the caller use a fresh local index or queue preparation.
+            // The attested portable artifact itself remains intact.
+            if verify_hevc
+                && !video.retains_hevc_parameter_sets()
+                && proof.refusal_needs_reanalysis()
+            {
+                return Ok(None);
             }
         }
         Ok(Some((index, object_version, artifact.cache_key)))

@@ -2919,6 +2919,9 @@ pub fn encode_cluster_fragment_index_blob(
         }
         proof.source_object_version.clear();
         proof.source_node_id.clear();
+        // Reader generation applies to the issuing node's refusal. Portable
+        // blobs keep their existing identity and canonical encoding.
+        proof.parser = 0;
     }
     let header = serde_json::to_vec(&BlobHeader {
         segplan_version: index.version,
@@ -3162,6 +3165,9 @@ fn v3_portable_promotion(
         }
         proof.source_object_version.clear();
         proof.source_node_id.clear();
+        // Reader generation applies to the issuing node's refusal. Portable
+        // blobs keep their existing identity and canonical encoding.
+        proof.parser = 0;
         proof.source_sha256 = Some(source_sha256.to_ascii_lowercase());
     }
     Ok(promotion)
@@ -3805,6 +3811,7 @@ mod tests {
             .expect("HEVC regression fixture");
         proof.source_node_id = "two".into();
         proof.source_object_version = "object-two".into();
+        proof.parser = 0;
         assert_eq!(
             first,
             encode_cluster_fragment_index_blob(&index, &source, &pipeline)
@@ -3817,14 +3824,31 @@ mod tests {
             .hevc_configuration
             .as_mut()
             .expect("HEVC regression fixture");
+        assert_eq!(proof.parser, 0);
         assert!(!proof.permits_on_node("object-two", "two"));
         assert!(proof.bind_equivalent_source(&source, "two", "object-two"));
         assert!(proof.permits_on_node("object-two", "two"));
+
+        let proof = index.promotion.hevc_configuration.as_mut().expect("proof");
+        proof.refusal = Some("previous reader refused copy".into());
+        let legacy_refusal =
+            encode_cluster_fragment_index_blob(&index, &source, &pipeline).expect("legacy refusal");
         index
             .promotion
             .hevc_configuration
             .as_mut()
-            .expect("HEVC regression fixture")
+            .expect("proof")
+            .parser = crate::hevc_configuration::PARSER;
+        assert_eq!(
+            encode_cluster_fragment_index_blob(&index, &source, &pipeline).expect("local refusal"),
+            legacy_refusal,
+            "local reader generation leaves the immutable portable blob unchanged"
+        );
+        index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("proof")
             .source_sha256 = None;
         assert!(encode_cluster_fragment_index_blob(&index, &source, &pipeline).is_err());
     }
@@ -4318,6 +4342,12 @@ mod tests {
         let proof = index.promotion.hevc_configuration.as_mut().expect("proof");
         proof.source_node_id = "two".into();
         proof.source_object_version = "held-two".into();
+        proof.parser = 0;
+        assert_eq!(
+            cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+                .expect("legacy identity"),
+            output
+        );
         assert_eq!(
             first,
             encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
@@ -4325,12 +4355,9 @@ mod tests {
         );
         let decoded =
             decode_cluster_fragment_index_blob_v3(&first, &source, &output).expect("decoded");
-        assert!(!decoded
-            .index
-            .promotion
-            .hevc_configuration
-            .expect("proof")
-            .permits_on_node("held-two", "two"));
+        let proof = decoded.index.promotion.hevc_configuration.expect("proof");
+        assert_eq!(proof.parser, 0);
+        assert!(!proof.permits_on_node("held-two", "two"));
         index
             .promotion
             .hevc_configuration

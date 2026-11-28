@@ -2007,7 +2007,14 @@ impl TranscodeManager {
             .fragment_index(file.id, &identity)
             .await
             .map_err(|_| SourceWorkerError::Unresolved)?
-            .is_some()
+            .is_some_and(|index| {
+                video.retains_hevc_parameter_sets()
+                    || index
+                        .promotion
+                        .hevc_configuration
+                        .as_ref()
+                        .is_none_or(|proof| !proof.refusal_needs_reanalysis())
+            })
         {
             return Ok(());
         }
@@ -2056,7 +2063,7 @@ impl TranscodeManager {
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
         owner.gate.current_preparation(&owner.assignment).await?;
-        if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+        let refused_copy = if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
             // This scan read the held local source, not a peer's index. Bind
             // its original-header proof to the actual assigned physical node
             // before VOD copy admission can rely on it.
@@ -2069,17 +2076,14 @@ impl TranscodeManager {
                 .as_mut()
                 .ok_or(SourceWorkerError::Unsupported)?;
             proof.source_node_id = source_node_id.to_owned();
-            let verified = if video.retains_hevc_parameter_sets() {
-                // Retaining copies deliver changing parameter sets rather
-                // than deleting them; VOD does not require a constant proof.
-                proof.current_on_node(&object_version, source_node_id)
-            } else {
-                proof.permits_on_node(&object_version, source_node_id)
-            };
-            if !verified {
+            if !proof.current_on_node(&object_version, source_node_id) {
                 return Err(SourceWorkerError::Unsupported);
             }
-        }
+            !video.retains_hevc_parameter_sets()
+                && !proof.permits_on_node(&object_version, source_node_id)
+        } else {
+            false
+        };
         self.store
             .put_fragment_index(file.id, &index)
             .await
@@ -2088,6 +2092,9 @@ impl TranscodeManager {
             return Err(SourceWorkerError::Unavailable);
         }
         owner.gate.current_preparation(&owner.assignment).await?;
+        if refused_copy {
+            return Err(SourceWorkerError::Unsupported);
+        }
         Ok(())
     }
 
