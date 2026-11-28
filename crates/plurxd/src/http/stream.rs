@@ -2882,13 +2882,12 @@ async fn decision_for_file(
             .flatten();
         }
 
-        Some(
+        Some(plurx_core::playback::candidate::unique_public_candidates(
             accepted
                 .into_iter()
                 .filter(|entry| !entry.candidate.processed_dv || entry.dispatch_supported)
-                .map(|entry| entry.candidate)
-                .collect::<Vec<_>>(),
-        )
+                .map(|entry| entry.candidate),
+        ))
     } else {
         None
     };
