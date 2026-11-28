@@ -912,6 +912,45 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     } else {
         manager
     });
+    if matches!(video, SourceFixtureVideo::Hdr10Promotion) {
+        let options =
+            manager.source_copy_video_options(&media, planning_probe.as_deref(), false, false);
+        assert!(options.promotes_parameter_sets());
+        let mut stale = plurx_core::segplan::FragmentIndex::new(
+            24,
+            vec![plurx_core::segplan::IndexRow {
+                dts: 0,
+                first_cto: None,
+                duration: 12,
+                bytes: 100,
+                video_bytes: 80,
+                class: plurx_core::fmp4::CutClass::CleanIdr,
+            }],
+            "a".repeat(64),
+            crate::fragindex::identity_for(&media, options),
+        );
+        stale.promotion.hevc_configuration = Some(plurx_core::hevc_configuration::Proof {
+            revision: plurx_core::hevc_configuration::REVISION,
+            source_node_id: state.node_id.clone(),
+            source_object_version: crate::fragment_index_cluster::inspect_source(&media)
+                .await
+                .expect("actual source identity"),
+            source_sha256: None,
+            stream_index: 0,
+            slices: 0,
+            refusal: Some("source extradata lacks a complete decoder configuration".into()),
+            parser: 0,
+        });
+        store
+            .put_fragment_index(media.id, &stale)
+            .await
+            .expect("old refusal stored under the current copy recipe");
+        assert!(store
+            .fragment_index(media.id, &stale.source)
+            .await
+            .expect("read stale fixture")
+            .is_some());
+    }
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store
