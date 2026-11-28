@@ -7875,6 +7875,24 @@ fn start_request_with_id(request_id: &str) -> LiveTvStartRequest {
     }
 }
 
+#[test]
+fn a_legacy_ingress_cannot_issue_live_split_with_a_capable_client() {
+    let mut request = start_request_with_id("0123456789abcdef0123456789abcdef");
+    request.playback = Some(
+        serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "caps": {"v": 2, "transports": ["hls-split-av-v1"]}
+        }))
+        .expect("playback caps"),
+    );
+    assert!(request.allows_split());
+
+    // The JSON on the old internal start route has no ingress affirmation.
+    let legacy = LiveTvStartRequest::from(LiveTvStartRequestV2::from(&request));
+    assert!(!legacy.allows_split());
+    assert!(!same_start(&request, &legacy));
+}
+
 /// The production failure, as a test. A client mints its request id from
 /// sixteen random bytes, so the hex digit a UUID reserves for its version
 /// is random too: fifteen ids in sixteen are not version 4. The owner
