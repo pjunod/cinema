@@ -916,19 +916,21 @@ fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
     let mut plan = vec![
         "DROP TRIGGER dv_title_jobs_bind_authority;".to_owned(),
         "DROP TRIGGER dv_title_jobs_scanner_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_bind;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_publish;".to_owned(),
         "ALTER TABLE dv_title_jobs_demand DROP COLUMN aggregate_revision;".to_owned(),
         "ALTER TABLE dv_title_jobs_demand DROP COLUMN scanner_generation;".to_owned(),
+        "DROP TABLE dv_title_jobs_schema;".to_owned(),
     ];
-    for (kind, name) in [
-        ("TRIGGER", "dv_title_jobs_bind"),
-        ("TRIGGER", "dv_title_jobs_publish"),
-        ("TABLE", "dv_title_jobs_schema"),
+    for name in [
+        "dv_title_jobs_bind",
+        "dv_title_jobs_publish",
+        "dv_title_jobs_schema",
     ] {
         let (_, sql) = source
             .iter()
             .find(|(object, _)| object == name)
             .expect("v2 witness");
-        plan.push(format!("DROP {kind} {name};"));
         plan.push(format!("{};", sql.trim_end_matches(';')));
     }
     plan.push("INSERT INTO dv_title_jobs_schema VALUES(1,2); PRAGMA user_version=138;".into());
