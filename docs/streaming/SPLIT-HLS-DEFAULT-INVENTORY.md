@@ -1,8 +1,10 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
-**Status:** open — S1 of P62 (metrics, first copy-HLS baseline) merged; S2
-([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 merged; S4 and S5 in verification; S6–S8 pending ·
-**Owner:** Claude Opus 5.5 · **Effort:** `E-5F2C2E9EA4` ·
+**Status:** qualification open. S1–S4 are merged. S5 is in promotion and
+S6–S8 are under verification. The [rendition contract](SPLIT-HLS-RENDITION-CONTRACT.md)
+describes the current producer and client interfaces.
+
+**Owner:** Codex · **Effort:** `E-5F2C2E9EA4` ·
 **Written:** 2026-11-26 against `main` @ `8724851ba`
 
 Goal: every supported HLS surface plays directly published, separate video and
@@ -15,7 +17,29 @@ Every `file:line` is from `8724851ba`; re-verify by function name.
 
 `P/` = `crates/plurxd/src`, `C/` = `crates/plurx-core/src`.
 
-## 1. What ships today
+## Current qualification
+
+| Surface | Candidate evidence | Remaining evidence |
+|---|---|---|
+| Indexed VOD copy | Real Chrome muxed and split attachments played without stalls. The aligned AAC control used two copy producers and no encoder. The primed fixture used an AAC encoder. | Representative capacity and retained audio-switch comparisons. |
+| Encoded VOD | S4 passed the verified opening-window and fallback regressions for SDR, HDR10, and processed Dolby Vision Profile 8.1. | Same-title cold and retained attachment capacity across muxed and split. |
+| Rolling HLS | S5 covers stable rendition IDs, paired discontinuities, takeover epochs, and native FEL source-clock verification. | Exact promotion and device qualification. |
+| Live TV and Shared Source | The production Live TV writer and finite and growing Source HTTP fixtures served the verified child objects. The growing Source soundtrack retains its terminal audio flush. | Exact promotion and mixed-fleet playback. |
+| Jellyfin | The typed grammar keeps owner-authenticated video and audio links. Its device profile controls split negotiation. | Physical client playback. |
+| Safari, Apple apps, Android and Linux player | Browser and native client contract tests ran, and a real mpv fixture switched tracks on one attachment. | Split playback and control continuity on physical client hardware. |
+
+The [45-second copy comparison](../performance/evidence/split-hls-copy-qualification-20261128.json)
+records the request count, bytes, first-frame time, producer generations,
+and sampled CPU and scratch. The sampled split CPU was higher for the
+single-viewer primed fixture. Capacity remains open.
+
+If qualification exposes incorrect A/V alignment, a missing issued child
+object, failure on a previously supported client, or a sustained capacity
+regression, stop expanding split negotiation. Reopen affected playback
+through the supported muxed path before publishing the new attachment.
+Keep issued objects available under their retained identities.
+
+## 1. Starting release inventory
 
 Three split-shaped layouts exist, and they share no contract.
 
