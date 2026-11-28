@@ -1345,6 +1345,7 @@ paths = [
   "crates/plurxd/src/live_tv/tests.rs",
   "crates/plurxd/src/live_tv.rs",
   "crates/plurxd/src/live_tv/resource.rs",
+  "crates/plurxd/src/live_tv/split.rs",
   "crates/plurx-core/src/live_tv_resource.rs",
   "crates/plurx-core/src/store/hiqlite_live_tv_resource.rs",
   "crates/plurx-core/src/store/sqlite/live_tv_resource.rs",
