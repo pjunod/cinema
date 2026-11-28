@@ -152,7 +152,10 @@ UPDATE dv_title_jobs_demand SET scanner_digest='old';
                 [request],
             )
         };
-        assert!(rotate(r#"{"scanner":"new"}"#).is_err(), "legacy bind");
+        assert_eq!(
+            rotate(r#"{"scanner":"new"}"#).expect("legacy bind skips"),
+            0
+        );
         let carried = conn
             .execute("UPDATE dv_title_jobs_demand SET scanner_digest='new'", [])
             .expect("legacy carry-forward skips conflicting bindings");
