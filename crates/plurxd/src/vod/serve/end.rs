@@ -213,6 +213,7 @@ impl VodServe {
                 if session.tombstone.is_some() && exact_cleanup && exact_rendition {
                     session.rendition = None;
                     session.retained_output = None;
+                    session.encoded_projection = None;
                 }
             }
             drop(sessions);

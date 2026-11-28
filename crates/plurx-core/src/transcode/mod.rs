@@ -83,10 +83,10 @@ pub use vod::{
     vod_audio_anchor, vod_completed_reconstructed_pipe_args, vod_pipe_args,
     vod_pipe_args_with_reorder, vod_pipe_args_with_source_clock, vod_reconstructed_pipe_args,
     vod_reconstructed_video_origin, vod_shared_audio_args, vod_shared_audio_plan,
-    VodCopyVideoRendition, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
-    VodSharedAudioRecipe, VodSharedAudioRendition, VodSourceAudio, VodSourceClock,
-    VodSplitCopyFamily, VodSplitSoundtrack, VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES,
-    VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
+    vod_split_media_playlist, VodCopyVideoRendition, VodFrameGrid, VodPresentationFamily,
+    VodRenditionBandwidth, VodSharedAudioRecipe, VodSharedAudioRendition, VodSourceAudio,
+    VodSourceClock, VodSplitCopyFamily, VodSplitSoundtrack, VodVideoFamily, VodVideoRung,
+    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
 pub use vod_copy_layout::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
