@@ -28,8 +28,11 @@ pub(crate) fn validated_empty_title_rewind(
 ) -> Vec<String> {
     let v1 = title_fixture_shape(1);
     let v2 = title_fixture_shape(2);
+    let v3 = title_fixture_shape(3);
     assert!(
-        (marker_version == 1 && actual == v1) || (marker_version == 2 && actual == v2),
+        (marker_version == 1 && actual == v1)
+            || (marker_version == 2 && actual == v2)
+            || (marker_version == 3 && actual == v3),
         "exact published title shape and matching generation required"
     );
     assert_eq!(marker, 1, "current title marker required");
@@ -49,7 +52,7 @@ pub(crate) fn validated_empty_title_rewind(
 
 pub(crate) fn title_fixture_shape(version: i64) -> Vec<(String, String)> {
     assert!(
-        matches!(version, 1 | 2),
+        matches!(version, 1..=3),
         "published title generation required"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("title generation witness");
@@ -57,10 +60,15 @@ pub(crate) fn title_fixture_shape(version: i64) -> Vec<(String, String)> {
     expected
         .execute_batch(include_str!("../../src/store/dv_title_jobs.sql"))
         .expect("published title v1");
-    if version == 2 {
+    if version >= 2 {
         expected
             .execute_batch(include_str!("../../src/store/dv_title_jobs_v2.sql"))
             .expect("published title v2");
+    }
+    if version >= 3 {
+        expected
+            .execute_batch(include_str!("../../src/store/dv_title_jobs_v3.sql"))
+            .expect("published title v3");
     }
     title_fixture_objects(&expected)
 }
@@ -82,6 +90,33 @@ pub(crate) fn assert_title_fixture_generation(connection: &rusqlite::Connection,
         "exact historical title topology required"
     );
     require_fixture_marker(connection, "dv_title_jobs_schema", version);
+}
+
+/// Restore v2 title authority and keep the demand rows and sequence.
+pub(crate) fn published_title_v2_restore_plan() -> Vec<String> {
+    let source = title_fixture_shape(2);
+    let mut plan = vec![
+        "DROP TRIGGER dv_title_jobs_bind_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_scanner_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_bind;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_publish;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN aggregate_revision;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN scanner_generation;".to_owned(),
+        "DROP TABLE dv_title_jobs_schema;".to_owned(),
+    ];
+    for name in [
+        "dv_title_jobs_bind",
+        "dv_title_jobs_publish",
+        "dv_title_jobs_schema",
+    ] {
+        let (_, sql) = source
+            .iter()
+            .find(|(object, _)| object == name)
+            .expect("v2 witness");
+        plan.push(format!("{};", sql.trim_end_matches(';')));
+    }
+    plan.push("INSERT INTO dv_title_jobs_schema VALUES(1,2);".into());
+    plan
 }
 
 /// Restore only v132's replaced objects from the immutable v114 witness.

@@ -2425,6 +2425,9 @@ impl HiqliteAuthStore {
         store.install_storage_domain_pending_schema(None).await?;
         store.install_dv_refit_schema(None).await?;
         store.install_analysis_source_scope_schema(None).await?;
+        // Last: the lease expand replaces the resource views the managed v7
+        // step and the analysis source scope just installed.
+        store.install_source_leases_schema(None, true).await?;
         Ok(store)
     }
 
@@ -2643,7 +2646,8 @@ impl HiqliteAuthStore {
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
                     self.install_dv_refit_schema(admission).await?;
-                    return self.install_analysis_source_scope_schema(admission).await;
+                    self.install_analysis_source_scope_schema(admission).await?;
+                    return self.install_source_leases_schema(admission, false).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4367,7 +4371,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+    async fn source_arbitration_layout_has_v1_marker(&self) -> Result<Option<bool>, StoreError> {
         let expected = super::background_jobs_resources::source_arbitration_objects()?;
         let names = expected
             .iter()
@@ -4379,20 +4383,53 @@ impl HiqliteAuthStore {
         if installed.is_empty() {
             return Ok(None);
         }
-        if installed.len() != expected.len()
-            || installed
-                .iter()
-                .zip(&expected)
-                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
-        {
+        let rows = installed
+            .iter()
+            .map(|row| (row.name.clone(), row.sql.clone()))
+            .collect::<Vec<_>>();
+        if !super::source_leases::accepts_extension_shape(&rows, &expected) {
             return Err(StoreError::Migration(
                 "foreground source arbitration extension has incompatible shape".into(),
             ));
         }
-        // authority: reader admission requires the committed source-arbitration singleton.
-        let marker=self.client().query_consistent_map::<CountRow,_>("source_arbitration_shape", "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
-        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+        Ok(Some(
+            rows.iter()
+                .any(|(name, _)| name == "background_source_schema"),
+        ))
     }
+
+    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+        let Some(has_v1_marker) = self.source_arbitration_layout_has_v1_marker().await? else {
+            return Ok(None);
+        };
+        if !has_v1_marker {
+            return Ok(Some(self.source_leases_schema_version().await? == Some(3)));
+        }
+        let marker = self
+            .client()
+            // authority: reader admission requires the committed source-arbitration singleton.
+            .query_consistent_map::<CountRow, _>(
+                "source_arbitration_shape",
+                "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",
+                params!(),
+            )
+            .await;
+        match marker {
+            Ok(rows) => Ok(Some(matches!(rows.as_slice(), [row] if row.count == 1))),
+            Err(error) => {
+                // Another startup may have contracted since our catalogue read.
+                // Only the exact contracted layout can settle a vanished v1 marker.
+                if self.source_arbitration_layout_has_v1_marker().await? == Some(false)
+                    && self.source_leases_schema_version().await? == Some(3)
+                {
+                    Ok(Some(true))
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     async fn install_source_arbitration_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -4937,7 +4974,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn dv_title_jobs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+    async fn dv_title_jobs_catalogue_version(&self) -> Result<Option<i64>, StoreError> {
         // authority: committed extension shape and marker fence title-job migration.
         let rows = self
             .client()
@@ -4951,26 +4988,35 @@ impl HiqliteAuthStore {
             .into_iter()
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
-        let version = super::dv_title_jobs_schema::version(&shape)?;
-        if matches!(version, Some(1 | 2)) {
-            // authority: exact committed extension marker, not a local cache.
-            let rows = self
-                .client()
-                .query_consistent_map::<CountRow, _>(
-                    "dv_title_jobs_schema_version",
-                    if version == Some(1) {
-                        super::dv_title_jobs_schema::MARKER_SQL_V1
-                    } else {
-                        super::dv_title_jobs_schema::MARKER_SQL
-                    },
-                    params!(),
-                )
-                .await?;
-            if !matches!(rows.as_slice(), [row] if row.count == 1) {
-                return Err(StoreError::Migration("title jobs marker missing".into()));
+        super::dv_title_jobs_schema::version(&shape)
+    }
+
+    async fn dv_title_jobs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let Some(version) = self.dv_title_jobs_catalogue_version().await? else {
+            return Ok(None);
+        };
+        let rows = self
+            .client()
+            // A concurrent migration can commit between the catalogue and marker reads.
+            .query_consistent_map::<CountRow, _>(
+                "dv_title_jobs_schema_version",
+                "SELECT version AS count FROM dv_title_jobs_schema WHERE singleton=1",
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] if row.count == version => Ok(Some(version)),
+            [row]
+                if version < 3
+                    && row.count == 3
+                    && self.dv_title_jobs_catalogue_version().await? == Some(3) =>
+            {
+                Ok(Some(3))
             }
+            _ => Err(StoreError::Migration(
+                "title jobs marker does not match catalogue".into(),
+            )),
         }
-        Ok(version)
     }
 
     async fn install_dv_title_jobs_schema(
@@ -4979,20 +5025,16 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.dv_title_jobs_schema_version().await?;
-        if version == Some(2) {
+        if version == Some(3) {
             return Ok(());
         }
-        let statements = (if version == Some(1) {
-            super::dv_title_jobs_schema::migration_statements()
-        } else {
-            super::dv_title_jobs_schema::statements()
-        })
-        .into_iter()
-        .map(|sql| (sql, params!()))
-        .collect::<Vec<_>>();
+        let statements = super::dv_title_jobs_schema::migration_statements(version)
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.dv_title_jobs_schema_version().await? == Some(2) {
+        if self.dv_title_jobs_schema_version().await? == Some(3) {
             return Ok(());
         }
         result?;
@@ -5499,6 +5541,119 @@ impl HiqliteAuthStore {
         Err(StoreError::Migration(
             "storage domain pending schema install did not settle".into(),
         ))
+    }
+
+    async fn source_leases_catalogue_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: the committed lease catalogue decides expand and contract.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "source_leases_schema_version",
+                super::source_leases::shape_sql(),
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        super::source_leases::version(&shape)
+    }
+
+    async fn source_leases_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let Some(version) = self.source_leases_catalogue_version().await? else {
+            return Ok(None);
+        };
+        let rows = self
+            .client()
+            // authority: pair the marker with the observed catalogue or its exact successor.
+            .query_consistent_map::<CountRow, _>(
+                "source_leases_schema_version",
+                "SELECT version AS count FROM source_lease_schema WHERE singleton=1",
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] if row.count == version => Ok(Some(version)),
+            [row] if version == 2 && row.count == 3 => {
+                if self.source_leases_catalogue_version().await? == Some(3) {
+                    Ok(Some(3))
+                } else {
+                    Err(StoreError::Migration(
+                        "source lease schema marker does not match catalogue".into(),
+                    ))
+                }
+            }
+            _ => Err(StoreError::Migration(
+                "source lease schema marker does not match catalogue".into(),
+            )),
+        }
+    }
+
+    /// Source leases, installed last. The expand runs on the first start of a
+    /// lease-aware binary; v1 objects stay so a node still on the old binary
+    /// keeps serving playback. The contract drops them on the first start
+    /// after every active node has heartbeated the lease capability, normally
+    /// the next deploy; until then it is refused and the expanded store runs.
+    /// A new cluster (`fresh`) contracts at once.
+    async fn install_source_leases_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+        fresh: bool,
+    ) -> Result<(), StoreError> {
+        static WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        admit_schema_migration(admission)?;
+        let mut version = self.source_leases_schema_version().await?;
+        if version.is_none() {
+            let mut statements = vec![("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name GLOB 'source_lease*') THEN 1 ELSE json('source lease expand raced') END".to_owned(), params!())];
+            statements.extend(
+                super::source_leases::statements(super::source_leases::EXPAND)
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let attempt = self.schema_migration_transaction(statements).await;
+            version = self.source_leases_schema_version().await?;
+            if version.is_none() {
+                attempt?;
+                return Err(StoreError::Migration(
+                    "source lease expand did not settle".into(),
+                ));
+            }
+        }
+        if version == Some(3) {
+            return Ok(());
+        }
+        let ready = if fresh {
+            "1".to_owned()
+        } else {
+            crate::cluster::membership::source_leases_ready_predicate()
+        };
+        let mut statements = vec![(format!("SELECT CASE WHEN {ready} THEN 1 ELSE json('source lease contract waits for every node') END"), params!())];
+        statements.extend(
+            super::source_leases::statements(super::source_leases::CONTRACT)
+                .into_iter()
+                .map(|sql| (sql, params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.source_leases_schema_version().await? == Some(3) {
+            tracing::info!("source lease contract applied: v1 source-owner objects dropped");
+            return Ok(());
+        }
+        // The expanded store is complete on its own; the contract retries on
+        // the next start.
+        if !WAITING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            match attempt {
+                Ok(_) => tracing::info!(
+                    "source lease contract waits for every node to run a lease-aware binary"
+                ),
+                Err(error) => {
+                    tracing::info!(%error, "source lease contract waits for every node to run a lease-aware binary")
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn library_annotations_schema_version(&self) -> Result<Option<i64>, StoreError> {
@@ -7315,7 +7470,10 @@ impl MetricsStore for HiqliteAuthStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND (CASE WHEN c.authority_expires_at_ms>0 THEN c.authority_expires_at_ms WHEN c.phase='cleanup_pending' THEN c.updated_at_ms WHEN c.phase='paused' THEN 0 ELSE NULL END) <= $2 * 1000 - 180000), \
+                        'source_recovery_pending', (SELECT COUNT(*) FROM source_leases WHERE expires_at_ms <= $2 * 1000 - 180000), \
+                        'source_leases', json_object('playback',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'playback'),'job',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'job'),'analysis',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'analysis'),'lease',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'lease'),'offline',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'offline')), \
+                        'source_readers_per_root', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_root' AND CAST(value AS INTEGER) BETWEEN 1 AND 16), 2), \
+                        'source_lease_schema_version', COALESCE((SELECT version FROM source_lease_schema WHERE singleton = 1), 0), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = $1",

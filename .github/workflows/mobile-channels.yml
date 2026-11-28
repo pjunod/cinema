@@ -59,7 +59,7 @@ jobs:
   publish:
     name: upload TestFlight and Google Play internal builds
     needs: scope
-    if: needs.scope.outputs.publish == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.publish == 'true')
     # A signing identity is an extra capability, not a general Apple CI label.
     runs-on: [self-hosted, macOS, ARM64, mobile-release]
     timeout-minutes: 120

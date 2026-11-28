@@ -1,6 +1,7 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
-**Status:** open — S1 of P62 (metrics, first copy-HLS baseline) built; S2–S8 not started ·
+**Status:** open — S1 of P62 (metrics, first copy-HLS baseline) merged; S2
+([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 in verification; S4–S8 pending ·
 **Owner:** Claude Opus 5.5 · **Effort:** `E-5F2C2E9EA4` ·
 **Written:** 2026-11-26 against `main` @ `8724851ba`
 
@@ -106,16 +107,16 @@ Each slice is one batched pull request into `main`.
 | # | Slice | Acceptance |
 |---|---|---|
 | S1 | Metrics and muxed baselines (§5), this document | Baseline half of the capacity criterion; the matrix |
-| S2 | One rendition contract and a caps v2 split capability; media-pool protocol bump; all masters generated from it | Contract, identity |
-| S3 | VOD copy split by default: audio copied or projected when decodable, AAC otherwise; lifts the 2–3 limit; atomic group publication; muxed admission fallback before exposure | Capacity, identity |
+| S2 | One rendition contract and one writer for every split master; caps v2 token `hls-split-av-v1` with `split_audio: false` as the muxed opt-out; one split eligibility predicate; protocol 13: a split copy offer names its audio-free video ([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) | Contract, identity |
+| S3 | VOD copy split by default: audio copied or projected when decodable, AAC otherwise; AC-3/E-AC-3 init facts; audio cuts on the packet nearest each video boundary (moved from S2); lifts the 2–3 limit; atomic group publication; muxed admission fallback before exposure | Capacity, identity |
 | S4 | VOD transcode and processed DV/HDR windows on the contract | Contract |
 | S5 | Rolling copy and transcode, recovery, reopen, takeover, cross-node relay; seek and reopen onto the native splice; stop writing the native split's muxed copy ([readers](NATIVE-SPLIT-MUXED-READERS.md)) | Identity, recovery; the native split's write-saving acceptance ([§3](NATIVE-SPLIT-MUXED-READERS.md#3-what-the-split-only-change-has-to-do)) |
 | S6 | Live TV, sharing and Jellyfin | Matrix |
 | S7 | Apple, Android, web native Safari and Linux clients; diagnostics name the audio rendition | Player matrix |
 | S8 | Qualification on physical devices, failure paths, rolling upgrade, capacity against S1, then the default | All |
 
-S2 and S3 start after P49's pull request #1888 lands, because it changes the
-split video key.
+S2 and S3 started after P49's pull request #1888 landed (2026-11-27), because
+it changed the split video key.
 
 ## 5. How the baseline is measured
 
@@ -177,5 +178,6 @@ measured yet, because the lab host lacks the pinned media runtime.
 The bytes are equal. The split costs about 2.6× the requests, because its AAC
 segments are about 2 s against copy video segments of up to 6 s, and it adds
 an encoder per soundtrack. S2's contract should align audio segment
-boundaries with the video plan. S3's audio copy or projection removes the
-encoders. Both claims are checked against this reading.
+boundaries with the video plan; it is a producer change, so S3 carries it with
+the audio copy or projection that removes the encoders. Both claims are checked
+against this reading.

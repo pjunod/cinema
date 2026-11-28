@@ -43,6 +43,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
     ));
     let request = crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -212,6 +213,7 @@ async fn started_session_cleanup_shipped_shape() {
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2156,6 +2158,99 @@ async fn every_capacity_refusal_class_carries_its_code() {
         assert!(!message.contains('['), "the class tag is not the viewer's sentence: {message}");
         assert!(crate::transcode::is_retryable_capacity_error(&error), "still the capacity class server-side");
     }
+}
+
+/// The caps token asks for a split copy; the legacy flag still does; and
+/// `split_audio: false` is the explicit muxed request that outranks the token
+/// (the web player's capacity retry). Neither asks anything of a transcode.
+#[test]
+fn split_copy_request_follows_the_token_and_the_explicit_opt_out() {
+    let request = |body: serde_json::Value| {
+        let create: CreateSession = serde_json::from_value(body).expect("create body");
+        create.into_request(42, 1080).split_audio
+    };
+    let token = serde_json::json!({"v":2,"transports":["hls","hls-split-av-v1"]});
+    let plain = serde_json::json!({"v":2,"transports":["hls"]});
+    assert!(request(serde_json::json!({"playback_id":"p","copy":true,"caps":token})));
+    assert!(request(serde_json::json!({"playback_id":"p","copy":true,"split_audio":true,"caps":plain})));
+    assert!(request(serde_json::json!({"playback_id":"p","copy":true,"split_audio":true})));
+    assert!(!request(serde_json::json!({"playback_id":"p","copy":true,"split_audio":false,"caps":token})));
+    assert!(!request(serde_json::json!({"playback_id":"p","copy":true,"caps":plain})));
+    assert!(!request(serde_json::json!({"playback_id":"p","copy":true})));
+    assert!(!request(serde_json::json!({"playback_id":"p","caps":token})));
+}
+
+/// The owner's admission and the ingress's placement prediction share this
+/// one rule, so a split copy offer is made exactly for the requests the owner
+/// would split (P62 S2 §3).
+#[test]
+fn split_copy_eligibility_is_one_rule_for_owner_and_ingress() {
+    let request = |body: serde_json::Value| {
+        let create: CreateSession = serde_json::from_value(body).expect("create body");
+        let mut request = create.into_request(42, 1080);
+        request.prepare_vod_copy_layout();
+        request
+    };
+    let stream = |index| plurx_core::domain::AudioStream {
+        index,
+        ..Default::default()
+    };
+    let mut file = hls_file(vec![]);
+    file.video_codec = Some("h264".into());
+    file.hdr = None;
+    file.audio_streams = vec![stream(0), stream(1)];
+    let split = request(serde_json::json!({"playback_id":"p","copy":true,"split_audio":true}));
+    let eligible = |request: &crate::transcode::SessionRequest, file| {
+        crate::transcode::split_copy_eligible(request, file)
+    };
+    assert!(eligible(&split, &file));
+    let mut three = file.clone();
+    three.audio_streams.push(stream(2));
+    assert!(eligible(&split, &three));
+    let mut four = three.clone();
+    four.audio_streams.push(stream(3));
+    assert!(eligible(&split, &four), "new layout supports larger groups");
+    let mut one = file.clone();
+    one.audio_streams.truncate(1);
+    assert!(eligible(&split, &one));
+
+    let legacy = crate::transcode::SessionRequest {
+        vod_copy_layout: None,
+        ..split.clone()
+    };
+    assert!(eligible(&legacy, &file));
+    assert!(eligible(&legacy, &three));
+    assert!(
+        !eligible(&legacy, &four),
+        "legacy layout retains its admission rules"
+    );
+    assert!(!eligible(&legacy, &one));
+    let mut silent = file.clone();
+    silent.audio_streams.clear();
+    assert!(!eligible(&split, &silent));
+
+    let mut frozen_mux = split.clone();
+    assert!(frozen_mux.seal_vod_copy_layout(Some(crate::transcode::VodCopyLayout::Muxed), true));
+    assert!(!eligible(&frozen_mux, &file));
+    let mut hevc = file.clone();
+    hevc.video_codec = Some("hevc".into());
+    assert!(!eligible(&split, &hevc));
+    let muxed = request(serde_json::json!({"playback_id":"p","copy":true}));
+    assert!(!eligible(&muxed, &file));
+    let burned = request(
+        serde_json::json!({"playback_id":"p","copy":true,"split_audio":true,"subtitle_burn":3}),
+    );
+    assert!(!eligible(&burned, &file));
+    let transcode = request(serde_json::json!({"playback_id":"p","split_audio":true}));
+    assert!(!eligible(&transcode, &file));
+    let mut dv = split.clone();
+    dv.kind = crate::transcode::SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: true,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    assert!(!eligible(&dv, &file));
 }
 
 #[test]

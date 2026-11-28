@@ -1338,6 +1338,7 @@ pub(super) fn preserve_prepared_audio(
     // selection: a successor copy keeps them exactly as its predecessor did.
     candidate.split_audio = predecessor.split_audio
         && matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. });
+    candidate.prepare_vod_copy_layout();
     let same_track_and_route = candidate.audio_index == predecessor.audio_index
         && candidate.audio_claim == predecessor.audio_claim
         && candidate.audio_offset_ms == predecessor.audio_offset_ms;
@@ -1906,7 +1907,10 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
-        split_audio: None,
+        // A server-built successor never reads the per-start caps token from
+        // the retained caps: it is muxed here, and `preserve_prepared_audio`
+        // carries a split predecessor's alternates onto a successor copy.
+        split_audio: Some(false),
         processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
@@ -2106,6 +2110,7 @@ async fn prepared_relocation_owner(
         candidate.audio_index,
         candidate.subtitle_burn,
         candidate.hdr10,
+        crate::transcode::split_copy_eligible(candidate, source),
     )
     .ok()?;
     state
@@ -2949,7 +2954,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     // again would push a viewer thirty seconds into a film that started at
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
-    let staged_request = crate::transcode::SessionRequest {
+    let mut staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         retain_output: None,
         dv_refit_digest: match candidate.kind {
@@ -2971,12 +2976,26 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         control_sequence: None,
         ..candidate.clone()
     };
+    staged_request.prepare_vod_copy_layout();
     let Some(local_user_id) = route.principal.local_user_id() else {
         return PreparationStageOutcome::refused(
             session_id,
             PreparationStageRefusal::PrincipalUnsupported,
         );
     };
+    let captures_output = successor_owner_captures_output(
+        state,
+        successor_owner,
+        staged_request.presentation,
+        prime_worker,
+    )
+    .await;
+    if !captures_output
+        && staged_request.vod_copy_layout == Some(crate::transcode::VodCopyLayout::PendingV1)
+    {
+        staged_request.split_audio = false;
+        staged_request.vod_copy_layout = None;
+    }
     let staged_recipe = RemoteStartRequest {
         retained_output: None,
         retained_output_receiver: Some(1),
@@ -3102,12 +3121,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             .as_ref()
             .map(|context| context.candidate_id),
         quality_candidates: candidate.quality_catalog.as_ref().map(|catalog| {
-            catalog
-                .candidates
-                .iter()
-                .filter(|entry| entry.dispatch_supported && !entry.partial)
-                .map(|entry| entry.candidate.clone())
-                .collect()
+            plurx_core::playback::candidate::unique_public_candidates(
+                catalog
+                    .candidates
+                    .iter()
+                    .filter(|entry| entry.dispatch_supported && !entry.partial)
+                    .map(|entry| entry.candidate.clone()),
+            )
         }),
         session_id: staged_session_id.clone(),
         playlist_url,
@@ -3176,13 +3196,6 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
                 serde_json::Value::String(PREPARED_SINGLE_VARIANT_SHAPE.to_owned()),
             );
     }
-    let captures_output = successor_owner_captures_output(
-        state,
-        successor_owner,
-        staged_request.presentation,
-        prime_worker,
-    )
-    .await;
     if captures_output {
         response_value
             .as_object_mut()

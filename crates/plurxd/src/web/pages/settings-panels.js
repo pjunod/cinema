@@ -17,7 +17,7 @@ const DEVELOPER_MOVED={"cinema-sharing-settings":"sharing","jellyfin-compatibili
   "enable-dolby-vision-processing":"playback","enable-display-target-hdr10":"playback","enable-output-preparation":"playback",
   "enable-vod-reorder":"playback","enable-auto-quality":"playback","enable-display-auto":"playback","enable-content-encoding":"playback",
   "enable-sdr-codecs":"playback","enable-indexing-while-serving":"analysis","enable-applied-view":"cluster","create-plan":"playback",
-  "settings-https":"system","settings-source-recovery":"system"};
+  "settings-https":"system","settings-source-launch":"system"};
 // Every section is a route: #/settings/<section>. The bare #/settings (and
 // the older #/admin) land on the last section this browser visited, so the
 // address bar names the section and the back button walks between them.
@@ -117,7 +117,7 @@ function settingsPanel(tab,d){
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
   if(tab==="users")        return usersPanel(d.users,d.settings);
-  if(tab==="system")       return systemPanel(d.sys,httpsSettingsMount(d.https),sourceRecoveryMount(d.sourceRecovery));
+  if(tab==="system")       return systemPanel(d.sys,httpsSettingsMount(d.https),sourceLaunchMount(d.sourceLaunch));
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d)+cinemaSharingCard(d.settings,d.developerReadiness);
   if(tab==="remotes")      return remotesPanel(d.settings,d.developerReadiness);
@@ -468,14 +468,78 @@ function librariesPanel(libs,status,settings,dv){
     <div class="card" style="padding:8px 10px 4px">
       <table><thead><tr><th>Name</th><th>Kind</th><th>Paths</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table>
-    </div>${storageDomainsCard()}`;
+    </div>${sourceReadersCard(settings)}${storageDomainsCard()}`;
+}
+// Source readers are admitted per exact library root. Each root defaults to two
+// maintenance readers plus one protected live slot. Domain caps are optional.
+function sourceReadersCard(settings){
+  const s=settings||{};
+  return setCard(cardHead("Background source readers","How many background reads of original media each library root may run at once.",'<span class="pill">'+esc(s.source_readers_per_root||2)+' per root</span>')+
+    '<div class="setfields"><div><label for="source-readers-per-root">Background source readers per library root</label><input id="source-readers-per-root" type="number" min="1" max="16" value="'+esc(s.source_readers_per_root||2)+'"></div></div>'+
+    '<p class="hint">Each library root admits this many maintenance reads across the cluster, with one additional slot reserved for live demand. Playback is separate. Root overrides appear below. Node counts are informational; mapped storage-domain caps are optional and unlimited unless explicitly set. Lowering a cap never stops a reader.</p>'+
+    '<div id="source-readers-nodes"><button type="button" class="ghost sm" onclick="loadSourceReaders(this)">Load roots and domains</button></div>'+
+    '<div id="source-readers-status" role="status"></div><div class="err" id="source-readers-error" role="alert"></div>'+
+    setCardFoot("saveSourceReaders"),{id:"source-readers-card"});
+}
+function sourceReadersRows(settings,capacity,domainIds){
+  const s=settings||{},c=capacity||{},overrides=s.source_readers_root_overrides||{},domainReaders=s.storage_domain_source_readers||{};
+  const roots=(c.roots||[]).map(root=>({...root,root_id:String(root.root_id)}));
+  for(const id of Object.keys(overrides))if(!roots.some(root=>root.root_id===id))roots.push({root_id:id,library_name:"Removed library root",root_path:"",maintenance:0,live:0});
+  const rootRows=roots.sort((a,b)=>a.root_id.localeCompare(b.root_id)).map(root=>{
+    const id=root.root_id,removed=root.library_name==="Removed library root"||!root.root_path,value=removed?"":overrides[id]??"",label=root.root_path?(root.library_name||"Library")+" · "+root.root_path:(root.library_name==="Removed library root"?"Removed library root · Source root":root.library_name||"Source root");
+    return '<tr data-source-reader-root="'+esc(id)+'"'+(removed?' data-source-reader-removed="true"':'')+'><td>'+esc(label)+'</td><td>'+esc(root.maintenance??0)+' maintenance · '+esc(root.live??0)+' live</td><td><input type="number" min="1" max="16" placeholder="'+(removed?"Clears on save":"Use default")+'" aria-label="Background source readers on '+esc(label)+'" value="'+esc(value)+'"'+(removed?" disabled":"")+'></td></tr>';
+  }).join("");
+  const nodes=(c.nodes||[]).map(node=>'<tr><td>'+esc(node.node_id)+'</td><td>'+esc(node.maintenance??0)+' maintenance · '+esc(node.live??0)+' live · '+esc(node.playback??0)+' playback</td></tr>').join("");
+  const domains=[...new Set([...(domainIds||[]),...Object.keys(domainReaders),...(c.domains||[]).map(d=>String(d.domain_id))])].sort();
+  const domainRows=domains.map(id=>{
+    const d=(c.domains||[]).find(row=>String(row.domain_id)===id)||{};
+    return '<tr data-source-reader-domain="'+esc(id)+'"><td>'+esc(id)+'</td><td>'+esc(d.maintenance??0)+' maintenance · '+esc(d.live??0)+' live</td><td><input type="number" min="1" max="16" placeholder="Unlimited" aria-label="Aggregate background source readers on domain '+esc(id)+'" value="'+esc(domainReaders[id]??"")+'"></td></tr>';
+  }).join("");
+  return '<table><thead><tr><th>Library root</th><th>Readers now</th><th>Override</th></tr></thead><tbody>'+(rootRows||'<tr><td colspan="3" class="muted">No library roots are configured.</td></tr>')+'</tbody></table>'+
+    '<table><thead><tr><th>Node (informational)</th><th>Readers now</th></tr></thead><tbody>'+(nodes||'<tr><td colspan="2" class="muted">No node is reading source media.</td></tr>')+'</tbody></table>'+
+    (domains.length?'<table><thead><tr><th>Optional storage-domain aggregate cap</th><th>Readers now</th><th>Limit</th></tr></thead><tbody>'+domainRows+'</tbody></table>':"");
+}
+function sourceReadersEffect(capacity){
+  const c=capacity||{},waiting=[];
+  for(const root of c.roots||[])if(root.waiting_to_apply)waiting.push((root.library_name||"Root")+" "+(root.root_path||root.root_id)+" is running "+root.maintenance+" of "+root.readers);
+  for(const d of c.domains||[])if(d.waiting_to_apply)waiting.push("domain "+d.domain_id+" is running "+d.maintenance+" of "+d.readers);
+  return waiting.length?"Saved — "+waiting.join("; ")+"; applies as readers finish.":"Saved — in effect.";
+}
+async function loadSourceReaders(btn){
+  const mount=document.getElementById("source-readers-nodes"),error=document.getElementById("source-readers-error");
+  if(btn)btn.disabled=true;
+  if(error)error.textContent="";
+  try{
+    const [summary,domains]=await Promise.all([api("/analysis/summary"),api("/cluster/work/storage-domains").catch(()=>({mappings:[]}))]);
+    const ids=(domains.mappings||[]).map(m=>m.domain_id).filter(Boolean);
+    if(mount)mount.innerHTML=sourceReadersRows(SETTINGS_DATA&&SETTINGS_DATA.settings,summary.source_capacity,ids);
+  }catch(e){if(error)error.textContent=e.message;if(btn)btn.disabled=false;}
+}
+async function saveSourceReaders(btn){
+  const error=document.getElementById("source-readers-error"),status=document.getElementById("source-readers-status");
+  if(error)error.textContent="";
+  if(btn)btn.disabled=true;
+  const number=input=>input.value.trim()===""?null:Number(input.value);
+  const body={source_readers_per_root:Number((/** @type {HTMLInputElement} */(document.getElementById("source-readers-per-root"))).value)};
+  const roots=/** @type {NodeListOf<HTMLTableRowElement>} */(document.querySelectorAll("[data-source-reader-root]"));
+  if(roots.length)body.source_readers_root_overrides=Object.fromEntries([...roots].map(row=>[row.dataset.sourceReaderRoot,row.dataset.sourceReaderRemoved==="true"?null:number(row.querySelector("input"))]));
+  const domains=[...document.querySelectorAll("[data-source-reader-domain]")];
+  if(domains.length)body.storage_domain_source_readers=Object.fromEntries(domains.map(row=>[(/** @type {HTMLElement} */(row)).dataset.sourceReaderDomain,number(row.querySelector("input"))]));
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body}));
+    const summary=await api("/analysis/summary");
+    const line=sourceReadersEffect(summary.source_capacity);
+    if(status)status.textContent=line;
+    setCardSaved(btn,"Saved");
+    toast(line);
+  }catch(e){if(error)error.textContent=e.message;if(btn)btn.disabled=false;}
 }
 // Shared storage budgets. Graduated from Developer on 2026-09-28 under Paul's
 // Developer lifecycle: durable cluster work is deployed and its plan has no
 // fleet receipt to wait for, so the editor lives beside the roots it names.
 function storageDomainsCard(){
-  return setCard(`${cardHead(settingsClusterEnabled()?"Shared storage budgets":"Storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
-    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced${settingsClusterEnabled()?" across nodes":" on this server"}: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
+  return setCard(`${cardHead(settingsClusterEnabled()?"Shared storage budgets":"Storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">optional aggregate cap above</span>')}
+    <p class="hint">An unset domain has no aggregate cap. A library with multiple roots reserves each root before starting. Explicit domain caps add an optional aggregate limit. Library jobs also share provider concurrency. Maintenance requests are paced${settingsClusterEnabled()?" across nodes":" on this server"}: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
     <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
     <p class="hint">Changes save at once and take effect as soon as nothing would lose its budget: library jobs on a changed root finish first, and readers on a domain a root is leaving finish first. Playback never has to stop.</p>
     <div id="storage-domain-status" role="status"></div>
@@ -522,7 +586,7 @@ function storageDomainsStatus(data,libraries){
     const total=Number(data.waiting_total??pending.waiting_total??identities.size);
     line=`Saved (revision ${revision}). ${waiting.join(" ")}`;
     if(total>identities.size)line+=` Waiting on ${total} holders in total.`;
-    if(stuckIdentities.size)line+=` ${stuckIdentities.size} of the readers ${stuckIdentities.size===1?"belongs":"belong"} to a process that is no longer running. They clear when source custody recovery settles them (Activity → Source readers).`;
+    if(stuckIdentities.size)line+=` ${stuckIdentities.size} of the readers ${stuckIdentities.size===1?"belongs":"belong"} to a process that is no longer running. They clear within a minute of their lease expiring (Activity → Source readers).`;
     line+=` Playback and jobs keep their current budgets until then.`;
     const kindLabels={job:"Background job",analysis:"Analysis",lease:"Library lease",offline:"Offline download",foreground:"Playback",pause:"Paused job"};
     const visibleRows=rows.slice(0,8).map(holder=>{

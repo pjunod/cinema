@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Bit-exactness of the precise CM4 transfer helpers of dv_dm.h, on the GPU.
+"""The CM4 transfer helpers of dv_dm.h on the GPU, against their CPU evaluation.
 
 usage: run_pq_helper_exact.py DM_SHADER_CONTROL SCRATCH_DIR [unfused-fma|no-precise]
 
 Runs dm_shader_control --pq-helper for dfi_eq_finish_eotf and eqpq_oetf3 over the samples of
-pq_helper_port.py and compares every result, bit for bit, with the correctly rounded float32 of
-the exact ST 2084 function (60 significant decimal digits, rounded exactly). The helpers promise
-that value when fma is fused and `precise` is honoured; see pq_helper_port.py.
+pq_helper_port.py and compares every result, bit for bit, with the same header compiled for the
+CPU (pq_helper_port.py), fused and with fma as a*b+c. Both CPU evaluations are within 1 ULP of
+the correctly rounded float32 of the exact ST 2084 function on every float32 input
+(pq_helper_exhaustive.py); each sample's distance from that value is reported as well.
 
 Three outcomes, on the last line:
-  EXACT    (exit 0)  every result is correctly rounded.
-  UNFUSED  (exit 3)  not exact, but bit-identical to the same header evaluated on the CPU with
-                     fma as a*b+c: the device (or the mutation) does not fuse fma, and everything
-                     else, `precise` included, ran as written. lavapipe (Mesa 25.2) is such a
-                     device: it lowers fma to a multiply and an add.
-  FAIL     (exit 1)  anything else, including a control that did not run.
+  FUSED    (exit 0)  every result is the header's fused CPU evaluation.
+  UNFUSED  (exit 3)  every result is the header's CPU evaluation with fma as a*b+c: the device
+                     (or the mutation) does not fuse fma, and everything else, `precise`
+                     included, ran as written. lavapipe (Mesa 25.2) is such a device.
+  FAIL     (exit 1)  anything else, including a control that did not run or any sample more than
+                     1 ULP from correctly rounded.
 
-The optional mutation makes the control break its copy of the header on purpose (fma as a*b+c,
-or `precise` removed). A mutated run must not be EXACT, and without `precise` it must be FAIL;
-controls/test_dm_precision.py checks that, so a device on which the check has no power is noticed.
+The optional mutation makes the control break its copy of the header on purpose (every fma as
+a separately rounded multiply and add, or `precise` removed). A mutated run must not be FUSED,
+and without `precise` it must be FAIL; controls/test_dm_precision.py checks that, so a device on
+which the check has no power is noticed.
 """
 import os
 import struct
@@ -57,33 +59,32 @@ def main():
         return 2
     control, work, mutation = sys.argv[1], sys.argv[2], sys.argv[3:]
     os.makedirs(work, exist_ok=True)
-    exact = unfused = True
     try:
-        unfused_port = port.build(work, "unfused-fma")
+        ports = {mode: port.build(work, mode) for mode in ("fused", "unfused-fma")}
     except (RuntimeError, subprocess.CalledProcessError) as error:
-        print("no CPU evaluation of the header (%s): an inexact device cannot be classified" % error)
-        unfused_port = None
+        print("no CPU evaluation of the header (%s): the device cannot be classified" % error)
+        print("FAIL")
+        return 1
+    fused = unfused = bounded = True
     for helper, (inputs, reference) in port.HELPERS.items():
         xs = inputs()
         got = gpu(control, work, helper, xs, mutation)
         if got is None:
-            exact = unfused = False
+            fused = unfused = False
             continue
         wrong, worst, sample = port.compare(xs, got, [reference(x) for x in xs])
         line = "%-5s %d samples, %d not correctly rounded, worst %d ULP" % (helper, len(xs), wrong, worst)
         if sample:
             line += "  (input %r: GPU 0x%08x, exact 0x%08x)" % sample
-        exact = exact and wrong == 0
-        if unfused_port is None:
-            unfused = False
-        else:
-            differing = port.compare(xs, got, unfused_port.run(helper, xs))[0]
-            line += "; %d differ from the header with fma as a*b+c" % differing
-            unfused = unfused and differing == 0
+        bounded = bounded and worst <= 1
+        differ = {mode: port.compare(xs, got, evaluation.run(helper, xs))[0] for mode, evaluation in ports.items()}
+        line += "; %d differ from the header fused, %d with fma as a*b+c" % (differ["fused"], differ["unfused-fma"])
+        fused = fused and differ["fused"] == 0
+        unfused = unfused and differ["unfused-fma"] == 0
         print(line)
-    verdict = "EXACT" if exact else "UNFUSED" if unfused else "FAIL"
+    verdict = "FAIL" if not bounded else "FUSED" if fused else "UNFUSED" if unfused else "FAIL"
     print(verdict)
-    return {"EXACT": 0, "UNFUSED": 3, "FAIL": 1}[verdict]
+    return {"FUSED": 0, "UNFUSED": 3, "FAIL": 1}[verdict]
 
 
 if __name__ == "__main__":

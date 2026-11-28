@@ -1,6 +1,7 @@
 use super::shared::AttachmentPurpose;
 use super::*;
 use crate::fragment_index_cluster::HeldSource as _;
+use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
 
 /// One request's resolved native recipe, before any rendition is attached.
 struct PreparedVodRecipe {
@@ -21,6 +22,26 @@ fn processed_instance_key(canonical_key: &str, incarnation: &str, nonce: [u8; 16
     hash.update(crate::ffmpeg::encoded_process_identity().as_bytes());
     hash.update(nonce);
     hex::encode(hash.finalize())
+}
+
+/// Bound preparation only. Once the reader graph changes, its existing
+/// release and serving owners remain responsible for completion.
+async fn before_split_deadline<T>(
+    deadline: Option<Instant>,
+    work: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match deadline {
+        None => work.await,
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::time::timeout(remaining, work).await.map_err(|_| {
+                crate::transcode::vod_refusal_error(
+                    "vod_family_invalid",
+                    "private split copy preparation timed out",
+                )
+            })?
+        }
+    }
 }
 
 impl VodServe {
@@ -745,16 +766,34 @@ impl VodServe {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
         };
-        let cluster_cache_enabled = prepared.encoding.is_none() && settings.index_cluster_cache;
-        // A published v3 copy index is preferred over the v2 cluster artifact
-        // and the node-local index; without one the order below is unchanged.
-        let (copy_index, own_source) = match prepared.encoding {
-            None => match self.try_copy_index_v3(file, video, purpose).await? {
-                Some(found) => (found.index, Some(found.own)),
-                None => (None, None),
-            },
-            Some(_) => (None, None),
+        let issued_video = match (prepared.encoding.is_none(), req.vod_copy_layout.as_ref()) {
+            (true, Some(VodCopyLayout::SplitV1 { video, .. })) => Some(video),
+            _ => None,
         };
+        let issued_index = issued_video.and_then(|video| video.index_key.as_deref());
+        let issued_v3 = issued_index.filter(|key| key.starts_with("copy-index-v3:"));
+        let cluster_cache_enabled = prepared.encoding.is_none()
+            && issued_video.map_or(settings.index_cluster_cache, |_| issued_index.is_some());
+        // Fresh sessions prefer the best available index. Recovery picks the
+        // index generation that owns the already-issued video and audio cuts.
+        let (copy_index, own_source) =
+            if prepared.encoding.is_none() && (issued_video.is_none() || issued_v3.is_some()) {
+                match self
+                    .try_copy_index_v3_matching(file, video, purpose, issued_v3)
+                    .await?
+                {
+                    Some(found) => (found.index, Some(found.own)),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+        if issued_v3.is_some() && copy_index.is_none() {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "the issued split copy index is unavailable",
+            ));
+        }
         // A local viewer's copy start without a v3 index asks the Analysis
         // worker to build one, whether or not a legacy or v2 index serves
         // this start: v3 is the index every node shares, and playing a title
@@ -781,7 +820,7 @@ impl VodServe {
         } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, viewer, purpose)
+            self.try_cluster_fragment_index_matching(file, video, viewer, purpose, issued_index)
                 .await
         } else {
             Ok(None)
@@ -826,6 +865,14 @@ impl VodServe {
                 )
             }
         };
+        if issued_video.is_some()
+            && (index.is_none() || cluster_cache_key.as_deref() != issued_index)
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "the issued split copy index no longer resolves exactly",
+            ));
+        }
         if purpose == AttachmentPurpose::SelectedDetail && index.is_none() {
             return Err("selected copy needs an existing fragment index".into());
         }
@@ -1004,6 +1051,23 @@ impl VodServe {
             ),
             current => current,
         };
+        // The source moved between soundtrack preparation and this inspection:
+        // refuse before any video is produced; a fresh start re-prepares all.
+        if prepared.encoding.is_none()
+            && !prepared.split_soundtracks.is_empty()
+            && !super::vod_serve_split::split_family_shares_source(
+                source_object_version.as_deref(),
+                prepared
+                    .split_soundtracks
+                    .iter()
+                    .map(|(_, soundtrack)| soundtrack.source_object_version.as_str()),
+            )
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_rescan_required",
+                "split video and soundtracks do not share one source revision",
+            ));
+        }
         let recipe = Recipe {
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
@@ -1038,6 +1102,14 @@ impl VodServe {
         media: &[Arc<Rendition>],
         priority: crate::admission::Priority,
     ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
+        Self::reserve_media_group_with_policy(media, priority, false).await
+    }
+
+    async fn reserve_media_group_with_policy(
+        media: &[Arc<Rendition>],
+        priority: crate::admission::Priority,
+        split: bool,
+    ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
         let refuse = || {
             crate::transcode::vod_refusal_error(
                 "vod_family_capacity",
@@ -1048,7 +1120,7 @@ impl VodServe {
         // keys. Enforce that order before acquiring any binding: overlapping
         // groups always lock A before B, and a duplicate cannot self-deadlock.
         if media.is_empty()
-            || media.len() > 3
+            || (!split && media.len() > 3)
             || media.windows(2).any(|pair| pair[0].key >= pair[1].key)
         {
             return Err(refuse());
@@ -1085,6 +1157,16 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
+        if split
+            && estimates
+                .iter()
+                .try_fold(0_usize, |sum, estimate| {
+                    sum.checked_add(estimate.cpu_threads)
+                })
+                .is_none_or(|threads| threads > software_budget)
+        {
+            return Err(refuse());
+        }
         // Foreground family starts participate in the same preemption protocol
         // as ordinary encoders. Keep the waiter alive across every attempt so
         // background indexing yields and cannot reclaim its released budget.
@@ -1178,12 +1260,64 @@ impl VodServe {
 
     async fn try_create_with_release_fence(
         &self,
-        mut prepared: VodRecipeRequest<'_>,
+        prepared: VodRecipeRequest<'_>,
         file: &MediaFile,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
         fences: VodCreateFences<'_>,
+    ) -> Result<VodStart, String> {
+        let fallback = (!prepared.split_soundtracks.is_empty()
+            && matches!(
+                prepared.request.vod_copy_layout,
+                Some(VodCopyLayout::PendingV1)
+            )
+            && prepared.root_admission.is_none())
+        .then(|| VodRecipeRequest {
+            admission_priority: prepared.admission_priority,
+            measured_candidate: prepared.measured_candidate.clone(),
+            retained_capture: prepared.retained_capture.clone(),
+            ..VodRecipeRequest::from(prepared.request)
+        });
+        let started = self
+            .attach_vod_session(
+                prepared,
+                file,
+                settings,
+                attribution,
+                session_id.clone(),
+                &fences,
+            )
+            .await;
+        let Some(fallback) = fallback else {
+            return started;
+        };
+        if let Err(error) = &started {
+            if crate::transcode::vod_refusal(error).is_some_and(|(code, _)| {
+                matches!(code, "vod_family_invalid" | "vod_family_capacity")
+            }) {
+                tracing::info!(
+                    target: "plurxd::vodserve",
+                    file_id = file.id,
+                    %error,
+                    "split copy refused before publication; preparing muxed copy"
+                );
+                return self
+                    .attach_vod_session(fallback, file, settings, attribution, session_id, &fences)
+                    .await;
+            }
+        }
+        started
+    }
+
+    async fn attach_vod_session(
+        &self,
+        mut prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        fences: &VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
         if let Some(viewer) = &fences.viewer {
             viewer.require_local_authority().map_err(str::to_owned)?;
@@ -1392,44 +1526,122 @@ impl VodServe {
             }
             None => None,
         };
-        // A split copy attaches every soundtrack beside its one shared video.
-        let mut split_renditions = Vec::with_capacity(prepared.split_soundtracks.len());
-        for (request, soundtrack) in &prepared.split_soundtracks {
-            let attachment = self
-                .resolve_rendition(
-                    &mut VodRecipeRequest {
-                        admission_priority,
-                        root_admission: None,
-                        measured_candidate: None,
-                        retained_capture: RetainedOutputCapture::New,
-                        companion: None,
-                        request,
-                        encoding: Some(Arc::clone(soundtrack)),
-                        soundtrack: None,
-                        split_soundtracks: Vec::new(),
-                    },
-                    file,
-                    settings,
-                    fences.viewer.as_ref(),
-                    None,
-                )
-                .await?
-                .0;
-            split_renditions.push(Arc::clone(&attachment.rendition));
-            drop(attachment);
-        }
-        let split = !split_renditions.is_empty();
+        let split = !prepared.split_soundtracks.is_empty();
+        let current_split = req.vod_copy_layout.as_ref().is_some_and(|layout| {
+            matches!(
+                layout,
+                VodCopyLayout::PendingV1 | VodCopyLayout::SplitV1 { .. }
+            )
+        });
+        let split_deadline = (current_split && split).then(|| {
+            let now = Instant::now();
+            let budget = fences
+                .serving_admission
+                .as_ref()
+                .map_or(settings.block_budget, |fence| {
+                    let remaining = fence.deadline.saturating_duration_since(now);
+                    // Leave part of the same serving grant available for the
+                    // muxed retry of a fresh request after split preparation.
+                    let available = if matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1))
+                    {
+                        remaining / 2
+                    } else {
+                        remaining
+                    };
+                    settings.block_budget.min(available)
+                });
+            now + budget
+        });
+        let refuse_split =
+            |reason: &str| crate::transcode::vod_refusal_error("vod_family_invalid", reason);
         if split && (continuous || prepared.encoding.is_some()) {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_family_invalid",
                 "split soundtracks require an indexed copy video",
             ));
         }
-        let (attachment, incoming_logical) = self
-            .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
-            .await?;
+        let video =
+            self.resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None);
+        let (attachment, incoming_logical) = before_split_deadline(split_deadline, video)
+            .await
+            .map_err(|error| {
+                if split_deadline.is_some() {
+                    refuse_split(&error)
+                } else {
+                    error
+                }
+            })?;
         let rendition = Arc::clone(&attachment.rendition);
         drop(attachment);
+
+        if let Some(VodCopyLayout::SplitV1 { video, .. }) = req.vod_copy_layout.as_ref() {
+            if rendition.key != video.rendition_id {
+                return Err(refuse_split(
+                    "split recovery could not reproduce the issued video identity",
+                ));
+            }
+        }
+
+        // Bind every soundtrack to the actual immutable video plan before
+        // resolving its own identity and storage.
+        let mut split_renditions = Vec::with_capacity(prepared.split_soundtracks.len());
+        for (request, mut soundtrack) in std::mem::take(&mut prepared.split_soundtracks) {
+            if current_split {
+                let duration_ms = file.duration_ms.unwrap_or_default();
+                let aligned = Arc::get_mut(&mut soundtrack).and_then(|encoding| {
+                    let grid = encoding.grid;
+                    let audio = encoding.shared_audio.as_mut()?;
+                    if audio
+                        .align_to_copy_video(&rendition.plan, duration_ms, grid)
+                        .is_some()
+                    {
+                        return Some(());
+                    }
+                    if audio.is_source_copy()
+                        && matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1))
+                    {
+                        audio.discard_source_copy();
+                        return audio.align_to_copy_video(&rendition.plan, duration_ms, grid);
+                    }
+                    None
+                });
+                if aligned.is_none() {
+                    return Err(refuse_split(
+                        "split soundtrack cannot follow the indexed video boundaries",
+                    ));
+                }
+            }
+            let mut audio_request = VodRecipeRequest {
+                admission_priority,
+                root_admission: None,
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
+                companion: None,
+                request: &request,
+                encoding: Some(soundtrack),
+                soundtrack: None,
+                split_soundtracks: Vec::new(),
+            };
+            let audio = self.resolve_rendition(
+                &mut audio_request,
+                file,
+                settings,
+                fences.viewer.as_ref(),
+                None,
+            );
+            let attachment = before_split_deadline(split_deadline, audio)
+                .await
+                .map_err(|error| {
+                    if current_split {
+                        refuse_split(&error)
+                    } else {
+                        error
+                    }
+                })?
+                .0;
+            split_renditions.push(Arc::clone(&attachment.rendition));
+            drop(attachment);
+        }
         if split && !rendition.recipe.audio_excluded {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_family_invalid",
@@ -1453,11 +1665,10 @@ impl VodServe {
         }
         let mut build_guards = Vec::with_capacity(media.len());
         for child in &media {
+            let gate = self.shared.rendition_build_gate(&child.key);
             build_guards.push(
-                self.shared
-                    .rendition_build_gate(&child.key)
-                    .lock_owned()
-                    .await,
+                before_split_deadline(split_deadline, async { Ok(gate.lock_owned().await) })
+                    .await?,
             );
         }
         {
@@ -1490,16 +1701,34 @@ impl VodServe {
             // Encoded roles reserve their credit atomically. A split copy's
             // shared video is a copy and holds no encode credit.
             let unreserved = |child: &Arc<Rendition>| {
-                deferred(child) || split && child.recipe.encoding.is_none()
+                deferred(child)
+                    || split
+                        && child.recipe.encoding.as_ref().is_none_or(|encoding| {
+                            encoding
+                                .shared_audio
+                                .as_ref()
+                                .is_some_and(|audio| audio.is_source_copy())
+                        })
             };
             let admitted = media
                 .iter()
                 .filter(|child| !unreserved(child))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut permits = Self::reserve_media_group(&admitted, admission_priority)
+            let mut permits = if split && admitted.is_empty() {
+                Vec::new()
+            } else {
+                before_split_deadline(
+                    split_deadline,
+                    Self::reserve_media_group_with_policy(
+                        &admitted,
+                        admission_priority,
+                        current_split,
+                    ),
+                )
                 .await?
-                .into_iter();
+            }
+            .into_iter();
             media
                 .into_iter()
                 .map(|child| {
@@ -1548,6 +1777,76 @@ impl VodServe {
             Vec::new()
         };
 
+        let _split_cache_pins = if current_split && split {
+            let pins = std::iter::once(&rendition)
+                .chain(&split_renditions)
+                .map(|child| crate::playback_cache::pin(child.dir.path()))
+                .collect::<io::Result<Vec<_>>>()
+                .map_err(|error| refuse_split(&format!("pinning private split group: {error}")))?;
+            let verify =
+                self.prepare_split_copy_group(&rendition, &split_renditions, req.audio_index);
+            before_split_deadline(split_deadline, verify)
+                .await
+                .map_err(|error| refuse_split(&error))?;
+            pins
+        } else {
+            Vec::new()
+        };
+
+        let vod_copy_layout = if current_split && split {
+            let mut soundtracks = Vec::with_capacity(split_renditions.len());
+            for child in &split_renditions {
+                let (Some(source_index), Some(audio)) = (
+                    child.recipe.audio_index,
+                    child
+                        .recipe
+                        .encoding
+                        .as_ref()
+                        .and_then(|encoding| encoding.shared_audio.as_ref()),
+                ) else {
+                    return Err(refuse_split("soundtrack identity is incomplete"));
+                };
+                let init_id = child
+                    .identity
+                    .lock()
+                    .await
+                    .identity
+                    .as_ref()
+                    .map(|identity| identity.served_init.clone())
+                    .ok_or_else(|| refuse_split("soundtrack init identity is missing"))?;
+                soundtracks.push(VodSoundtrackIdentity {
+                    source_index,
+                    rendition_id: child.key.clone(),
+                    init_id,
+                    source_copy: audio.is_source_copy(),
+                });
+            }
+            soundtracks.sort_unstable_by_key(|track| track.source_index);
+            let issued = VodCopyLayout::SplitV1 {
+                video: VodSplitVideoIdentity {
+                    rendition_id: rendition.key.clone(),
+                    index_key: rendition.recipe.cluster_cache_key.clone(),
+                },
+                soundtracks,
+            };
+            if !issued.valid() {
+                return Err(refuse_split(
+                    "split soundtrack identities exceed the durable recipe contract",
+                ));
+            }
+            Some(issued)
+        } else if current_split || matches!(req.vod_copy_layout, Some(VodCopyLayout::Muxed)) {
+            Some(VodCopyLayout::Muxed)
+        } else {
+            None
+        };
+        if matches!(req.vod_copy_layout, Some(VodCopyLayout::SplitV1 { .. }))
+            && req.vod_copy_layout != vod_copy_layout
+        {
+            return Err(refuse_split(
+                "split recovery could not reproduce the issued soundtrack identities",
+            ));
+        }
         // The sorted build gates still pin the exact cached rendition here.
         // Same-key substitution cannot spend another recipe's prepared credit.
         let processed_reuse_scope = prepared
@@ -1629,8 +1928,8 @@ impl VodServe {
                 ));
             }
         }
-        let _release_transition = if let Some(release_fence) = fences.release_fence {
-            let guard = release_fence.transition.lock_owned().await;
+        let _release_transition = if let Some(release_fence) = fences.release_fence.as_ref() {
+            let guard = Arc::clone(&release_fence.transition).lock_owned().await;
             if release_fence.released.load(Acquire) {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_session_released",
@@ -1658,6 +1957,7 @@ impl VodServe {
         let mut replacement = Session {
             children: Vec::new(),
             requested_audio_index: req.audio_index,
+            vod_copy_layout: vod_copy_layout.clone(),
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: processed_reuse_scope
@@ -1810,6 +2110,18 @@ impl VodServe {
                 ));
             }
         }
+        if current_split
+            && split
+            && private_media.iter().any(|child| {
+                child.rendition.closed.load(Acquire)
+                    || child.rendition.failure().is_some()
+                    || self.source_changed(&child.rendition)
+            })
+        {
+            return Err(refuse_split(
+                "split media changed before session attachment",
+            ));
+        }
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {
@@ -1845,6 +2157,19 @@ impl VodServe {
             obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
         rendition.revoke_preparation();
+        let default_soundtrack = req
+            .audio_index
+            .filter(|selected| {
+                split_renditions
+                    .iter()
+                    .any(|audio| audio.recipe.audio_index == Some(*selected))
+            })
+            .or_else(|| {
+                split_renditions
+                    .iter()
+                    .filter_map(|audio| audio.recipe.audio_index)
+                    .min()
+            });
         for child in &private_media {
             let entry = media_entry_containing_ms(
                 &child.rendition.plan,
@@ -1866,11 +2191,11 @@ impl VodServe {
                     reader
                 });
             } else {
-                let split = split_readers
+                let split_reader = split_readers
                     .iter_mut()
                     .find(|(audio, _)| Arc::ptr_eq(audio, &child.rendition))
                     .map(|(_, readers)| readers);
-                let readers = if let Some(readers) = split {
+                let readers = if let Some(readers) = split_reader {
                     Some(readers)
                 } else if companion_rendition
                     .as_ref()
@@ -1898,6 +2223,9 @@ impl VodServe {
                     reader.nonpreemptive_trial = nonpreemptive_trial;
                     reader.companion_bootstrap = child.companion_bootstrap;
                     reader.authority_only = child.companion_bootstrap;
+                    reader.on_demand_only = current_split
+                        && split
+                        && child.rendition.recipe.audio_index != default_soundtrack;
                     reader
                 });
                 *child.rendition.dormant_since.lock().expect("dormant lock") = None;
@@ -2016,6 +2344,8 @@ impl VodServe {
         Ok(VodStart {
             session_id,
             duration_ms,
+            split,
+            vod_copy_layout,
         })
     }
 }
@@ -2098,6 +2428,7 @@ impl ReservedSourceVodRendition {
             .ok_or_else(|| "Source attachment has already committed".to_owned())?;
         Ok(SourcePendingStartInfo {
             info: crate::transcode::StartInfo {
+                vod_copy_layout: None,
                 processed_dv_profile: self
                     .rendition
                     .recipe
@@ -2639,6 +2970,7 @@ impl VodServe {
         let replacement = Session {
             children: Vec::new(),
             requested_audio_index: req.audio_index,
+            vod_copy_layout: None,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: None,
@@ -2827,6 +3159,8 @@ impl VodServe {
         Ok(VodStart {
             session_id,
             duration_ms,
+            split: false,
+            vod_copy_layout: None,
         })
     }
 
@@ -3430,6 +3764,7 @@ mod principal_demand_tests {
         );
         let request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,

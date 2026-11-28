@@ -12,6 +12,36 @@ bump may break compatibility and a **patch** bump never does.
 `Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
 from the landing commits into the dated section below. -->
 
+## [0.9.3] — 2026-11-27
+<!-- changelog-through: 75990958a9fed06e0fa140da1ff659433d881b7f -->
+
+### Added
+- Prometheus series `plurx_hls_requests_total` and `plurx_hls_response_bytes_total` (HLS requests and bytes by surface, resource and rendition role) and `plurx_vod_segment_answers_total` (VOD segment reuse); `playback-lab --server-metrics` records them per case.
+
+### Changed
+- A processed HDR upgrade refused after its trial now names which recovery read missed, and the new `plurx_playback_preparation_processed_recovery_unavailable_total{reason}` counter counts each reason by admission stage.
+
+### Fixed
+- Dolby Vision title scans and other per-file maintenance no longer wait behind work reading a different disk of the same library.
+- Playback info and the Linux player no longer call a Dolby Vision Profile 7 minimal enhancement layer (MEL) "FEL", or an unscanned title's layer FEL; a MEL title's row and EL pill say MEL.
+- the iPhone and iPad version picker dropped each version's Dolby Vision line and clipped long release names
+- the Linux player's EL pill now reads MEL or FEL when the title scan has classified a Dolby Vision Profile 7 enhancement layer, matching the info panel.
+- macOS desktop updates now delete superseded runtime versions (keeping the active one and the one before it) and old app backups, instead of keeping a 1.6 GB copy for every update forever.
+- Custom tags now apply to videos inside folders, and Home rows built from those tags show them. Saving a new Home row twice no longer creates a duplicate row.
+- A three-server cluster no longer briefly reports replication as behind on one or more nodes right after its own writes; a server that is down or stalled is still reported at once, and cluster status reads now give up waiting sooner so they no longer risk timing out the roster check.
+- background jobs whose worker died no longer show as running for hours; they return to the queue about a minute after their lease lapses.
+- Resuming a 4K Dolby Vision title partway through can again use the faster in-place enhancement switch, instead of waiting for a separate upgraded stream.
+- Shared copies are admitted against the node's memory. Each verified copy, whether a viewer's growing copy or an Analysis gap fill, charges a per-node budget
+  (⅛ of node or cgroup memory, or PLURX_COPY_MEMORY_BUDGET) before its FFmpeg child starts, and returns it when the copy ends. Viewers are served before background work, and a copy that doesn't fit answers busy.
+  The budget counts plurxd's heap only, not FFmpeg.
+- A shared copy of a high-bitrate source, such as a 4K remux with 70 MB fragments, now streams instead of failing with copy_range_input_limit.
+  Each copy is admitted for one segment of its file's bitrate. Its memory charge then follows what it actually holds: it grows as larger fragments arrive and shrinks after each segment.
+  A viewer's copy always grows within the node, and waits for room rather than failing when the node is full. An Analysis gap fill pauses until there is room. Only a copy larger than the node's own memory is refused. A finished copy returns its memory at once.
+- A shared HEVC title whose file carries its decoder settings only inside the video stream now stops at once with a named reason and offers to convert it.
+  It used to fail as "too large" after a long wait. Copying such a file is still refused, as it is for local playback.
+- GPU tone-mapping with libplacebo (Vulkan) no longer fails to start on Intel QuickSync nodes; its device setup now derives Vulkan and QSV from one VA-API device.
+- The web player's quality menu labels cropped 4K titles as 4K, keeps lower rungs distinct, and says before you choose when a quality converts to SDR.
+
 ## [0.9.2] — 2026-11-26
 <!-- changelog-through: 6410a406eb4237e0f13181a6c9be54bbf3bd1664 -->
 
@@ -4536,7 +4566,8 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/pjunod/plurx/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/pjunod/plurx/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.1
 [0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...e3eec613f9de4b2f1a9c705ce058bc14d55a16fc

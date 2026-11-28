@@ -11,6 +11,8 @@ import tempfile
 import textwrap
 import tomllib
 import unittest
+
+from validation import mirror_guard
 from unittest import mock
 
 from validation import runner_fleet as runner_fleet_module
@@ -38,8 +40,15 @@ GITHUB_HOSTED_RUNNERS = frozenset(
 )
 
 
-def read(path: str) -> str:
+def read_raw(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def read(path: str) -> str:
+    # A CI workflow is read without its public-mirror gate: every contract here
+    # is about the recipe, and the gate is held by its own test below.
+    text = read_raw(path)
+    return mirror_guard.strip(text) if mirror_guard.is_ci_workflow(path) else text
 
 
 def make_dry_run_commands(target: str, *variables: str) -> list[str]:
@@ -67,8 +76,12 @@ def make_dry_run_commands(target: str, *variables: str) -> list[str]:
     return commands
 
 
-def workflow_job_blocks(path: str) -> dict[str, str]:
-    jobs = read(path).split("\njobs:\n", 1)[1]
+def raw_job_blocks(path: str) -> dict[str, str]:
+    return workflow_job_blocks(path, raw=True)
+
+
+def workflow_job_blocks(path: str, raw: bool = False) -> dict[str, str]:
+    jobs = (read_raw(path) if raw else read(path)).split("\njobs:\n", 1)[1]
     starts = list(re.finditer(r"(?m)^  ([a-zA-Z0-9_-]+):\n", jobs))
     return {
         match.group(1): jobs[match.start() : starts[index + 1].start()]
@@ -797,6 +810,7 @@ assert.equal(context.ACT_TIMER, null);
         checkout_revision: str = "a" * 40,
         tracked_dirty: bool = False,
         discovery_image: str | None = None,
+        shared_image: str = "",
     ) -> tuple[int, Path, Path, Path, Path, Path]:
         """Run a real rollout recipe with the checker and Docker stubbed."""
 
@@ -816,6 +830,8 @@ assert.equal(context.ACT_TIMER, null);
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
+            '  *"fleet-image pull"*) printf "%s" "${STUB_SHARED_IMAGE:-}" ;;\n'
+            f'  *"fleet-image push"*) printf "%s" "$PLURX_IMAGE" > "{directory / "fleet-image-push-ran"}" ;;\n'
             f'  *docker-hardware*) printf "%s" "$3" > "{directory / 'hardware-output-path'}"; '
             f'echo docker-compose.yml; exit {hardware_exit} ;;\n'
             f'  *--emit-start-period*) printf derived > "{derive_marker}"; echo 2535s ;;\n'
@@ -859,6 +875,8 @@ assert.equal(context.ACT_TIMER, null);
         environment["STUB_IMAGE_REVISION"] = image_revision
         environment["STUB_CHECKOUT_REVISION"] = checkout_revision
         environment["STUB_TRACKED_DIRTY"] = "1" if tracked_dirty else "0"
+        environment["STUB_SHARED_IMAGE"] = shared_image
+        environment.pop("PLURX_IMAGE", None)
         if discovery_image is not None:
             environment["STUB_DISCOVERY_IMAGE"] = discovery_image
         result = subprocess.run(
@@ -939,6 +957,67 @@ assert.equal(context.ACT_TIMER, null);
         self.assertTrue(up_marker.exists())
         # The period that was proved is the period that gets applied.
         self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+        # Nothing to share (no registry, dirty tree or pinned image): no push.
+        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+
+        # No node had shared this clean commit: build, then share it.
+        code, _, _, _, up_marker, _ = self._run_rollout_recipe(
+            "docker-up",
+            "docker compose up -d --build",
+            proof_exit=0,
+            shared_image="share " + "a" * 40,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(up_marker.exists())
+        self.assertTrue((up_marker.parent / "fleet-image-push-ran").exists())
+
+    def test_docker_up_starts_a_shared_commit_image_without_building(self):
+        # Another node already built this commit: the source deploy must not
+        # compile it again. The shared image ID is what gets proved and run.
+        shared = "sha256:" + "2" * 64
+        rollout = [
+            line
+            for line in make_dry_run_commands("docker-up")
+            if "docker compose up -d --build" in line
+        ][0]
+        pull = rollout.index("fleet-image pull")
+        # After the hardware overlay, so a Pi or override image is seen; before
+        # the proof, so the shared image is what gets proved.
+        self.assertGreater(pull, rollout.index("docker-hardware"))
+        self.assertLess(pull, rollout.rindex("python3 ../scripts/validate-docker-startup-budget"))
+        self.assertLess(
+            rollout.index("docker compose up -d --no-build --pull never"),
+            rollout.index("docker compose up -d --build"),
+        )
+        self.assertLess(
+            rollout.index("docker compose up -d --build"),
+            rollout.index("fleet-image push"),
+        )
+
+        code, _, derive_marker, proof_marker, up_marker, image_marker = (
+            self._run_rollout_recipe(
+                "docker-up",
+                "docker compose up -d --build",
+                proof_exit=0,
+                shared_image="use " + shared,
+            )
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertEqual(image_marker.read_text(encoding="utf-8"), shared)
+        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+
+        # A refused proof still leaves the running container alone.
+        code, _, _, _, up_marker, _ = self._run_rollout_recipe(
+            "docker-up",
+            "docker compose up -d --build",
+            proof_exit=2,
+            shared_image="use " + shared,
+        )
+        self.assertNotEqual(code, 0)
+        self.assertFalse(up_marker.exists())
 
     def test_prebuilt_image_rollout_matching_revision_proves_then_replaces(self):
         commands = make_dry_run_commands("docker-image-up")
@@ -3583,7 +3662,7 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
+        for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 150), ("cluster_wal", 60)):
             with self.subTest(job=name):
                 self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
                 # The serial Store suite is not a compiler lane; the full unit
@@ -5526,6 +5605,54 @@ assert.equal(context.ACT_TIMER, null);
             if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
                 continue  # GitHub-hosted by design; see the GitHub-only contract
             self.assertNotRegex(workflow, r"(?m)^ +runs-on: (?:ubuntu|macos)-")
+
+    def test_every_forgejo_job_is_skipped_on_the_public_github_mirror(self):
+        # The mirror is a verbatim push of every ref, so each file here also
+        # exists on github.com, where a workflow file can be edited by anyone
+        # whose pull request a maintainer approves. A guard inside a file is
+        # therefore only defence in depth: the boundary is that no self-hosted
+        # runner is registered to the mirror, which no test here can see. What
+        # this does hold is that a newly added or renamed Forgejo workflow does
+        # not arrive on GitHub already willing to start a job. Every job of
+        # every workflow that is not GitHub-only carries the exact negative
+        # gate in its own job-level `if`, and none can start from
+        # pull_request_target.
+        gate = "github.server_url != 'https://github.com'"
+        checked = 0
+        repository_gated = {".github/workflows/compile.yml", ".github/workflows/validation-marker-units.yml"}
+        for path in sorted(
+            p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern)
+        ):
+            relative = path.relative_to(ROOT).as_posix()
+            if relative in GITHUB_ONLY_WORKFLOWS or relative == ".github/workflows/media-runtime-public.yml":
+                continue
+            text = read_raw(relative)
+            self.assertNotIn("pull_request_target", text, relative)
+            for name, block in raw_job_blocks(relative).items():
+                with self.subTest(job=f"{relative}:{name}"):
+                    code = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+                    header = re.split(r"(?m)^    steps:", code, maxsplit=1)[0]
+                    condition = re.search(r"(?ms)^    if:(.*?)(?=^    [a-z_-]+:|\Z)", header)
+                    self.assertIsNotNone(condition, f"{relative}:{name} has no job-level if")
+                    # The gate leads the condition and everything else is its
+                    # right operand: `gate`, `gate && (...)` or the same inside
+                    # `${{ }}`. `x || gate`, `!(gate)` and `gate || x` all start
+                    # the job on the mirror and are refused.
+                    flat = " ".join(condition.group(1).split())
+                    flat = re.sub(r"^>-? ", "", flat)
+                    if relative in repository_gated:
+                        self.assertTrue(
+                            flat.startswith("${{ github.repository == 'noirr/plurx' && "), relative)
+                    elif flat == gate + " && github.ref == 'refs/heads/main'":
+                        pass  # landing-check and mobile-channels: the original exact form
+                    else:
+                        self.assertRegex(
+                            flat,
+                            r"^(?:\$\{\{ )?" + re.escape(gate) + r"(?: && \(.*\))?(?: \}\})?$",
+                            f"{relative}:{name} is not gated off on the mirror",
+                        )
+                    checked += 1
+        self.assertGreater(checked, 80)
 
     def test_github_only_workflows_never_reach_the_fleet(self):
         # Forgejo runs every file in .github/workflows, and the GitHub mirror

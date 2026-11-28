@@ -168,23 +168,60 @@ local RANGE_SHORT = {dolby_vision='DV', hdr10='HDR10', hlg='HLG', sdr='SDR'}
 local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
 -- EL is this player's own fact. The private mpv's native-dovi-target-state
 -- reports enhancement-layer-composed as a level: true while the picture its
--- native Dolby renderer maps has the enhancement layer composed in. Whether
--- that layer is full (FEL) or minimal (MEL) is the server's complete-title
--- classification (the enhancement's el_kind); without it the pill says the
--- kind is not reported. The FEL pill stays the server's claim alone.
+-- native Dolby renderer maps has the enhancement layer composed in. From
+-- +rogdv5.8 it also reports enhancement-layer-nlq-active, the renderer's own
+-- per-frame decision whether that composed layer is full (FEL: an active NLQ
+-- residual) or minimal (MEL: an identity one). The EL pill follows that level
+-- like the composition level. The server's complete-title classification (the
+-- enhancement's el_kind) is the cross-check: when both name the layer and
+-- disagree, the pill keeps the renderer's name with a mark and the Info row
+-- names both. An mpv without the field keeps the server's name alone.
 local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
 local EL_KIND = {fel=' — the full enhancement layer (FEL)',
     mel=' — a minimal enhancement layer (MEL), which adds no picture detail'}
--- A badge's pill text. When the server's title scan names the layer, the EL
--- pill names it too: FEL for a full layer, MEL for a minimal one, as the panel
--- does; an unclassified layer keeps EL. A FEL label already on a pill (the
--- server's own FEL claim) is not drawn twice.
+-- A badge's pill text. The EL pill names the layer FEL for a full layer and
+-- MEL for a minimal one: the native renderer's kind when it reports one,
+-- otherwise the server's title scan, as the panel does; an unnamed layer
+-- keeps EL. A FEL label already on a pill (the server's own FEL claim) is not
+-- drawn twice, and when the renderer names the layer that claim is only the
+-- server's side of the cross-check.
 local EL_LABEL = {fel='FEL', mel='MEL'}
+-- The kind the native renderer reports for the presented picture: 'fel',
+-- 'mel', or nil when it reports none (older mpv, another renderer, or no
+-- composed layer).
+local function renderer_el_kind(view)
+    local n,r=view.native,view.renderer
+    if r and r.kind~='native' then return nil end
+    if view.p.colormatrix~='dolbyvision' then return nil end
+    if n['enhancement-layer-composed']~=true then return nil end
+    local nlq=n['enhancement-layer-nlq-active']
+    if type(nlq)~='boolean' then return nil end
+    return nlq and 'fel' or 'mel'
+end
+-- The renderer's kind, then the server's; the second value is true when both
+-- name the layer and disagree.
+-- The server's side: its title scan, else its own active FEL claim.
+local function server_el_kind(view)
+    local e=view.enhancement
+    if not e then return nil end
+    if EL_LABEL[e.el_kind] then return e.el_kind end
+    for _,badge in ipairs(type(e.active)=='table' and e.active or {}) do
+        if badge=='FEL' then return 'fel' end
+    end
+end
+local function el_kind(view)
+    local scan=server_el_kind(view)
+    local mine=renderer_el_kind(view)
+    if mine then return mine,scan~=nil and scan~=mine,scan end
+    return scan,false,scan
+end
 local function badge_labels(badges,view)
-    local kind=view.enhancement and EL_LABEL[view.enhancement.el_kind]
+    local k,disagree=el_kind(view)
+    local kind=EL_LABEL[k] and (EL_LABEL[k]..(disagree and '!' or ''))
+    local named=renderer_el_kind(view)~=nil
     local labels,seen={},{}
     for _,badge in ipairs(badges) do
-        local label=(badge=='EL' and kind) or badge
+        local label=((badge=='EL' or (badge=='FEL' and named)) and kind) or badge
         if not seen[label] then seen[label]=true; labels[#labels+1]=label end
     end
     return labels
@@ -309,7 +346,13 @@ local function enhancement_state(view)
         put('DYN',true,'DYN: per-shot Dolby display mapping on this device'..target..' by '..how)
         -- The level speaks for the native renderer. Other renderers, and mpv
         -- builds without the level, keep the inference from the stream.
-        local kind=EL_KIND[server and server.el_kind] or ' (full or minimal is not reported)'
+        local k,disagree,scan=el_kind(view)
+        local kind=EL_KIND[k] or ' (full or minimal is not reported)'
+        if disagree then
+            kind=kind.."; the server's title scan says "..EL_LABEL[scan]..', which disagrees'
+        elseif scan and renderer_el_kind(view) then
+            kind=kind..", as the server's title scan says"
+        end
         local composed=view.native['enhancement-layer-composed']
         if type(composed)=='boolean' and not (r and r.kind~='native') then
             if composed then

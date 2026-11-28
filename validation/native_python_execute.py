@@ -102,8 +102,6 @@ def main(kind):
             print('selection_sha256=' + retention.digest(SELECTION.read_bytes()), file=output)
             if 'node_preflight' in plan:
                 print('node_selection=true', file=output)
-            if 'root_ownership' in plan:
-                print('root_ownership_retained=true', file=output)
             if 'formal_preflight' in plan:
                 print('formal_worker_refinement_retained=true', file=output)
             if 'apple_preflight' in plan:

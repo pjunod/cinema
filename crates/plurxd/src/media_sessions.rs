@@ -1851,6 +1851,7 @@ pub(crate) fn source_session_request_is_valid(
         principal,
         plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. }
     ) && principal.valid_admission_shape()
+        && request.vod_copy_layout.is_none()
         && session_request_fields_are_valid(request, true)
         && request.presentation == crate::transcode::Presentation::Vod
 }
@@ -1860,7 +1861,9 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 }
 
 fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
-    request.dv_processing_route().is_ok() && request
+    request.dv_processing_route().is_ok()
+        && request.vod_copy_layout_valid()
+        && request
         .dv_refit_digest.as_deref().is_none_or(|digest|
             matches!(request.kind, SessionKind::Copy { convert_dolby_vision: true, .. })
                 && crate::dv_refit_serving::digest_bytes(digest).is_some())
@@ -1919,6 +1922,9 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) vod_copy_layout: Option<crate::transcode::VodCopyLayout>,
+
     /// Owner answer carried separately from the strict legacy JSON body.
     #[serde(skip)]
     pub processed_dv_profile: Option<u8>,
@@ -2201,6 +2207,7 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            vod_copy_layout: info.vod_copy_layout,
             processed_dv_profile: info.processed_dv_profile,
             processed_fel: info.processed_fel,
             retained_output: info.retained_output,
@@ -2255,7 +2262,19 @@ impl RemoteStartResponse {
     }
 
     pub(crate) fn is_valid(&self) -> bool {
+        use crate::transcode::VodCopyLayout;
+
+        let copied_vod = self.vod && matches!(self.kind, SessionKind::Copy { .. });
+        let muxed_path = self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id);
+        let split_path = copied_vod
+            && self.playlist_url == format!("/api/v1/hls/{}/master.m3u8", self.session_id);
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && match &self.vod_copy_layout {
+                None => muxed_path || split_path,
+                Some(VodCopyLayout::PendingV1) => false,
+                Some(VodCopyLayout::Muxed) => copied_vod && muxed_path,
+                Some(layout @ VodCopyLayout::SplitV1 { .. }) => split_path && layout.valid(),
+            }
             && self.processed_dv_profile.is_none_or(|profile| {
                 profile == 8
                     && self.vod
@@ -2270,12 +2289,6 @@ impl RemoteStartResponse {
                 .audio_delivery
                 .as_ref()
                 .is_none_or(|audio| audio.valid_snapshot())
-            && (self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
-                // A split copy enters through its family master.
-                || self.vod
-                    && matches!(self.kind, SessionKind::Copy { .. })
-                    && self.playlist_url
-                        == format!("/api/v1/hls/{}/master.m3u8", self.session_id))
             && self
                 .duration_ms
                 .is_none_or(|duration| (0..=MAX_MEDIA_MILLIS).contains(&duration))
@@ -7664,6 +7677,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         envelope.request.audio_index,
         envelope.request.subtitle_burn,
         envelope.request.hdr10,
+        crate::transcode::split_copy_eligible(&envelope.request, &file),
     )
     .map_err(str::to_owned)?;
     let offers = tokio::time::timeout_at(deadline, state.media_pool.offers(state, offer_request))

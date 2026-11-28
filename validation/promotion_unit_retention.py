@@ -12,6 +12,7 @@ import subprocess
 import zlib
 import xml.etree.ElementTree as ET
 import urllib.parse
+from validation import mirror_guard
 from validation import python_unit_receipts as r
 
 LANES = {'rust', 'apple', 'android_jvm', 'android_device', 'web_preflight'}
@@ -30,7 +31,6 @@ PROTOCOL_PATHS = {
     'tests/validation/test_selected_apple_preflight.py',
     'tests/operations/test_apple_tv_navigation_gate.py',
     'validation/selected_node_preflight.py',
-    'validation/selected_root_custody.py',
     'tests/validation/test_selected_node_preflight.py',
     'validation/selected_python_dependencies.py',
     'tests/validation/test_selected_python_dependencies.py',
@@ -264,7 +264,7 @@ def git_bytes(commit, path):
     result = subprocess.run(['git', 'show', commit + ':' + path], capture_output=True)
     if result.returncode:
         return None
-    return result.stdout
+    return mirror_guard.strip_if_workflow(path, result.stdout)
 
 
 @lru_cache(maxsize=256)

@@ -18,7 +18,7 @@ jobs:
     # The existing :host registration launches one bounded standard Docker child.
     # Fixed default, sharing and replicated corpora need more than the old 120m.
     timeout-minutes: 240
-    if: github.ref == 'refs/heads/main'
+    if: github.server_url != 'https://github.com' && (github.ref == 'refs/heads/main')
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"

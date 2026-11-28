@@ -328,6 +328,24 @@ impl SourceLinkIdentity {
             && self.source_mtime == file.mtime
     }
 
+    pub(super) fn recovery_scope(
+        self,
+        playback_id: &str,
+        recovery_epoch: &str,
+    ) -> plurx_core::store::CandidateRecoveryScope {
+        plurx_core::store::CandidateRecoveryScope {
+            user_id: self.user_id,
+            playback_id: playback_id.to_owned(),
+            recovery_epoch: recovery_epoch.to_owned(),
+            file_id: self.file_id,
+            source_size: self.source_size,
+            source_mtime: self.source_mtime,
+            source_object_version: self.source_object_version,
+            credential_generation: self.credential_generation,
+            client_class: self.client_class,
+        }
+    }
+
     pub(crate) fn candidate(
         &self,
         recipe_digest: [u8; 32],
@@ -1130,13 +1148,9 @@ fn measured_link_prior(
     if response.session_id != route.session_id {
         return None;
     }
-    let mut matches = response
-        .quality_candidates?
-        .into_iter()
-        .filter(|candidate| candidate.id == id);
-    let candidate = matches.next()?;
-    if matches.next().is_some()
-        || !candidate.identity_matches()
+    let candidates = response.quality_candidates?;
+    let candidate = plurx_core::playback::candidate::single_public_row(&candidates, id)?;
+    if !candidate.identity_matches()
         || candidate.recipe_digest != value.binding.recipe_digest
         || candidate.route != value.binding.route
         || candidate.target_height == 0
@@ -1861,6 +1875,7 @@ mod tests {
         ));
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

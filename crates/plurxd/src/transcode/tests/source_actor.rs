@@ -151,6 +151,10 @@ enum SourceFixtureVideo {
     Hdr10,
     Hdr10Promotion,
     Hdr10Retention,
+    /// An HDR10 source whose second half redefines PPS 0 (other chroma QP
+    /// offsets), the chunk-encoded WEB-DL shape, with no census recorded: the
+    /// first play of the title anywhere is this shared one.
+    Hdr10UncensusedVarying,
     /// The HDR10 source scanned as Dolby Vision Profile 8.1 on a node with
     /// `dovi_rpu`, started by an HDR10 player: the planner strips to the
     /// HDR10 base. The generated stream carries no RPU (no fixture encoder
@@ -262,6 +266,22 @@ async fn source_copy_cold_hdr10_index_matches_probe_selected_retention_recipe() 
     Box::pin(source_copy_preadmission_fixture_with_hdr10(
         5,
         SourceFixtureVideo::Hdr10Retention,
+    ))
+    .await;
+}
+
+/// A Source-first copy of a title that redefines its parameter sets measures
+/// the census under the Source's own owner and keeps them. Before, the Source
+/// read the stored probe as it stood, so with no census its copy deleted the
+/// in-band VPS/SPS/PPS: the cold index refused the configuration change and
+/// the title could not be copied from the Source at all until some local play
+/// or index pass measured it. Recording the census here also leaves the
+/// grant's witnessed revision standing, which the later activation checks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_first_copy_of_an_uncensused_varying_hevc_title_keeps_its_parameter_sets() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10UncensusedVarying,
     ))
     .await;
 }
@@ -426,6 +446,62 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
+    if matches!(video, SourceFixtureVideo::Hdr10UncensusedVarying) {
+        // Keep the first second as encoded and append a second one whose PPS
+        // 0 says other chroma QP offsets: the record (from the first) is
+        // stale for every picture after the join.
+        let first = directory.path().join("first.mp4");
+        let second = directory.path().join("second.mp4");
+        let trimmed = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args(["-v", "error", "-i"])
+            .arg(&file)
+            .args(["-t", "1", "-c", "copy", "-y"])
+            .arg(&first)
+            .output()
+            .await
+            .expect("first half");
+        assert!(
+            trimmed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&trimmed.stderr)
+        );
+        let redefined = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args([
+                "-v", "error", "-f", "lavfi", "-i", "color=s=128x72:r=24",
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000", "-c:a", "eac3",
+                "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+                "-color_trc", "smpte2084", "-color_primaries", "bt2020", "-colorspace", "bt2020nc",
+                "-x265-params", "pools=1:frame-threads=1:wpp=0:repeat-headers=1:keyint=12:min-keyint=12:scenecut=0:bframes=0:cbqpoffs=-1:crqpoffs=-2:colorprim=9:transfer=16:colormatrix=9:hdr10=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+                "-t", "1", "-y",
+            ])
+            .arg(&second)
+            .output()
+            .await
+            .expect("redefining half");
+        assert!(
+            redefined.status.success(),
+            "{}",
+            String::from_utf8_lossy(&redefined.stderr)
+        );
+        let list = directory.path().join("concat.txt");
+        std::fs::write(&list, "file 'first.mp4'\nfile 'second.mp4'\n").expect("concat list");
+        let joined = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args(["-v", "error", "-f", "concat", "-safe", "0", "-i"])
+            .arg(&list)
+            .args(["-c", "copy", "-y"])
+            .arg(&file)
+            .output()
+            .await
+            .expect("joined source");
+        assert!(
+            joined.status.success(),
+            "{}",
+            String::from_utf8_lossy(&joined.stderr)
+        );
+        for scratch in [first, second, list] {
+            std::fs::remove_file(scratch).expect("fixture scratch");
+        }
+    }
     if source_fixture_native(mode) {
         let caption = directory.path().join("actual.srt");
         std::fs::write(
@@ -909,7 +985,16 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         return;
     }
     if mode >= 5 {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        source_actual_actor_boxed(
+            state,
+            manager,
+            prepared,
+            assignment,
+            mode,
+            video,
+            client.clone(),
+        )
+        .await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -951,7 +1036,16 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     drop(admitted);
     assert_eq!(manager.admissions.software_in_use(), 0);
     if (2..=4).contains(&mode) {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        source_actual_actor_boxed(
+            state,
+            manager,
+            prepared,
+            assignment,
+            mode,
+            video,
+            client.clone(),
+        )
+        .await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -1152,6 +1246,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
     );
     let request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
@@ -1228,10 +1323,11 @@ fn source_actual_actor_boxed(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    video: SourceFixtureVideo,
     client: hiqlite::Client,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(source_actual_actor(
-        state, manager, prepared, assignment, mode, client,
+        state, manager, prepared, assignment, mode, video, client,
     ))
 }
 async fn source_actual_actor(
@@ -1240,6 +1336,7 @@ async fn source_actual_actor(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    video: SourceFixtureVideo,
     client: hiqlite::Client,
 ) {
     // A Dolby Vision Profile 8.1 strip delivers exactly the HDR10 base.
@@ -2079,9 +2176,25 @@ async fn source_actual_actor(
                 .hevc_configuration
                 .as_ref()
                 .expect("original HEVC header proof");
-            assert!(proof.permits_on_node(&object, &state.node_id));
-            assert!(!proof.permits_on_node(&object, "another-node"));
-            assert!(!proof.permits_on_node("another-object", &state.node_id));
+            if matches!(video, SourceFixtureVideo::Hdr10UncensusedVarying) {
+                // The Source measured the census itself, found the
+                // redefinition, and cut the retaining copy: its index is the
+                // retaining identity, and the header proof records the
+                // change a deleting copy could not have delivered.
+                let census = plurx_core::transcode::hevc_census::stored(&file, probe.as_deref())
+                    .expect("census recorded by the Source start");
+                assert_eq!(
+                    census.verdict,
+                    plurx_core::transcode::hevc_census::Verdict::Varying
+                );
+                assert!(options.retains_hevc_parameter_sets());
+                assert!(proof.current_on_node(&object, &state.node_id));
+                assert!(proof.refusal.is_some(), "{proof:?}");
+            } else {
+                assert!(proof.permits_on_node(&object, &state.node_id));
+                assert!(!proof.permits_on_node(&object, "another-node"));
+                assert!(!proof.permits_on_node("another-object", &state.node_id));
+            }
             assert!(index.promotion.indexed_hdr10_metadata);
             assert!(!index.promotion.hdr10_sei.is_empty());
         }
@@ -4450,6 +4563,7 @@ async fn source_sparse_input_reserves_before_write_and_releases_only_after_close
 fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> SessionRequest {
     SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,

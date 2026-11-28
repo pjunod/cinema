@@ -107,6 +107,14 @@ tests = ["process::census::clippy_refuses_every_spawning_method_outside_tests"]
 reason = "Reads the workspace clippy.toml (an input of every crate already)."
 
 [[dynamic]]
+crate = "plurxd"
+file = "crates/plurxd/src/media_io_guard_tests.rs"
+function = "media_identity_reads_go_through_media_io"
+reads = ["crates/plurxd/src/**", "crates/plurx-core/src/**"]
+tests = ["media_io_guard_tests::media_identity_reads_go_through_media_io"]
+reason = "Walks the plurxd and plurx-core sources for direct std_file_identity calls on media descriptors."
+
+[[dynamic]]
 crate = "plurx-core"
 file = "crates/plurx-core/src/process/mod.rs"
 function = "output_job_owned_call_sites_are_the_audited_set"

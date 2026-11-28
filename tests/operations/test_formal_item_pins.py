@@ -397,7 +397,7 @@ checksum = "bbbb"
 
     def test_python_pins_the_function(self) -> None:
         source = "#!/usr/bin/env python3\nimport os\n\n\ndef validated_challenge(data_dir, node):\n    return node\n\n\ndef other():\n    return 1\n"
-        path = "scripts/source-custody-recovery"
+        path = "scripts/example-helper"
         pinned = row(source, "def validated_challenge(data_dir, node):", source=path)
         self.assertEqual(pinned["item"], "def validated_challenge")
         self.assertEqual(check(source.replace("return 1", "return 2"), pinned, path), [])

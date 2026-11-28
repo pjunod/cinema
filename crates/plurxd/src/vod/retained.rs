@@ -273,6 +273,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
     serve.shared.retained_artifacts.collect(temp.path()).await;
     let mut request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2272,6 +2273,7 @@ mod tests {
         }
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -2661,6 +2663,7 @@ mod tests {
         };
         let session = Session {
             requested_audio_index: None,
+            vod_copy_layout: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -3642,6 +3645,7 @@ mod tests {
         };
         let request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

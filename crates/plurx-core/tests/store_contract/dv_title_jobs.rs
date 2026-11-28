@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 fn probe() -> ProbeResult {
     ProbeResult {
+        container: Some("mkv".into()),
         video_codec: Some("hevc".into()),
         dolby_vision: DolbyVisionFacts {
             profile: Some(7),
@@ -66,7 +67,7 @@ async fn demand(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand
 async fn bound(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand {
     let current = demand(store, file, scanner).await;
     store
-        .bind_dv_title_demand(current.probe_revision, scanner)
+        .bind_dv_title_demand(current.probe_revision, scanner, 1, 1_000)
         .await
         .expect("bind installed scanner");
     demand(store, file, scanner).await
@@ -290,7 +291,7 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(demand.probe_revision, &scanner)
+                .bind_dv_title_demand(demand.probe_revision, &scanner, 1, 1_000)
                 .await
                 .expect("idempotent scanner binding"),
             Some(demand.probe_revision),
@@ -445,12 +446,29 @@ async fn title_reprobe_and_scanner_aba_never_reuse_a_request_or_attach_old_resul
         let scanner_b = "b".repeat(64);
         let file = seed(&store, "title-aba").await;
         let (first, first_job) = active(&store, file.id, &scanner_a, 1_000).await;
-        let second = bound(&store, file.id, &scanner_b).await;
-        let third = bound(&store, file.id, &scanner_a).await;
+        let second = store
+            .bind_dv_title_demand(first.probe_revision, &scanner_b, 2, 1_001)
+            .await
+            .expect("bind successor")
+            .expect("successor revision");
+        assert_eq!(
+            store
+                .bind_dv_title_demand(second, &scanner_a, 1, 1_002)
+                .await
+                .expect("refuse downgrade"),
+            None,
+            "{backend}: the old A cannot reclaim its binding"
+        );
+        let third_revision = store
+            .bind_dv_title_demand(second, &scanner_a, 3, 1_002)
+            .await
+            .expect("bind a new release with A's bytes")
+            .expect("third revision");
+        let third = demand(&store, file.id, &scanner_a).await;
+        assert_eq!(third.probe_revision, third_revision);
         assert!(
-            first.probe_revision < second.probe_revision
-                && second.probe_revision < third.probe_revision,
-            "{backend}: scanner A->B->A needs monotonic generations"
+            first.probe_revision < second && second < third.probe_revision,
+            "{backend}: revisions increase even when scanner bytes repeat"
         );
         assert!(matches!(
             store
@@ -589,7 +607,7 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
         .is_empty());
     assert_eq!(
         store
-            .bind_dv_title_demand(current.probe_revision, &scanner)
+            .bind_dv_title_demand(current.probe_revision, &scanner, 1, 1_000)
             .await
             .expect("same scanner"),
         Some(current.probe_revision)
@@ -605,6 +623,12 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
 async fn title_priority_observation_requires_live_higher_priority_same_node_work() {
     use plurx_core::store::background_jobs_probe::{generation, ProbeCoordinator};
     for_each_backend(|store, backend| async move {
+        // One background reader per node beside the live slot: the numbers this
+        // contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("source readers per root");
         let scanner = "a".repeat(64);
         let file = seed(&store, "title-priority").await;
         let (_, title) = active(&store, file.id, &scanner, 1_000).await;
@@ -946,7 +970,7 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
             .is_empty());
         assert!(
             store
-                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .request_dv_fel_requalification(file.id, &scanner, 1)
                 .await
                 .expect("requalify"),
             "{backend}"
@@ -958,7 +982,7 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
         let (attempt, attempt_job) = active(&store, file.id, &scanner, 3_000).await;
         assert!(
             !store
-                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .request_dv_fel_requalification(file.id, &scanner, 1)
                 .await
                 .expect("requalify during a scan"),
             "{backend}"
@@ -1000,6 +1024,7 @@ fn analysis(file: &MediaFile, scanner: &str) -> AnalysisTitleOutput {
         source_size: file.size,
         source_mtime: file.mtime,
         scanner_digest: scanner.into(),
+        scanner_generation: 1,
         stats: stats(),
     }
 }
@@ -1061,7 +1086,7 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(open.probe_revision, &scanner)
+                .bind_dv_title_demand(open.probe_revision, &scanner, 1, 1_000)
                 .await
                 .expect("rebind"),
             Some(open.probe_revision),
@@ -1073,49 +1098,91 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
             "{backend}"
         );
 
-        // Another scanner rotates the generation away with its aggregate.
+        // Equal generations cannot select different scanner digests.
         let other = "b".repeat(64);
+        assert_eq!(
+            store
+                .bind_dv_title_demand(open.probe_revision, &other, 1, 1_000)
+                .await
+                .expect("conflicting bind"),
+            None,
+            "{backend}"
+        );
+
+        // The successor rotates demand while retaining the published aggregate.
         let rotated = store
-            .bind_dv_title_demand(open.probe_revision, &other)
+            .bind_dv_title_demand(open.probe_revision, &other, 2, 1_000)
             .await
             .expect("rotate")
             .expect("rotated");
         assert_ne!(rotated, open.probe_revision, "{backend}");
-        assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .bind_dv_title_demand(rotated, &scanner, 1, 1_000)
+                .await
+                .expect("old worker"),
+            None,
+            "{backend}"
+        );
+        assert!(!demand(&store, file.id, &other).await.aggregate_current);
+        assert!(store
+            .dv_title_demand_for_file(&scanner, 1, file.id, 1_000)
+            .await
+            .expect("old worker discovery")
+            .is_none());
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("old analysis worker"),
+            AnalysisTitleOutcome::NoDemand,
+            "{backend}"
+        );
 
         // That scanner's queued job keeps its generation: the pass does not
         // rotate it away, and the job publishes its own answer.
         let other_demand = demand(&store, file.id, &other).await;
-        assert!(matches!(
-            enqueue(&store, &other_demand, &other, 4_000).await,
-            EnqueueOutcome::Accepted { .. }
-        ));
+        let EnqueueOutcome::Accepted { job_id, .. } =
+            enqueue(&store, &other_demand, &other, 4_000).await
+        else {
+            panic!("successor demand must enqueue");
+        };
         assert_eq!(
             store
-                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                    scanner_generation: 3,
+                    ..analysis(&file, &scanner)
+                })
                 .await
                 .expect("busy"),
             AnalysisTitleOutcome::Busy,
             "{backend}"
         );
         assert_eq!(
-            demand(&store, file.id, &scanner).await.probe_revision,
-            rotated,
-            "{backend}: not rotated"
+            demand(&store, file.id, &other).await.probe_revision,
+            rotated
         );
 
-        // A job's completed answer for this scanner is not replaced.
-        let (job_demand, job) = active(&store, file.id, &scanner, 5_000).await;
+        // The successor replaces the retained aggregate and settles the demand.
+        let job = claim(&store, &job_id, 4_001).await;
         assert!(matches!(
             store
-                .publish_dv_title_job(publication(&job_demand, &job, &scanner, 5_001))
+                .publish_dv_title_job(publication(&other_demand, &job, &other, 4_002))
                 .await
                 .expect("job publication"),
             JobPublishOutcome::Published { .. }
         ));
         assert_eq!(
             store
-                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                    scanner_generation: 2,
+                    ..analysis(&file, &other)
+                })
                 .await
                 .expect("settled"),
             AnalysisTitleOutcome::Current,
@@ -1240,7 +1307,7 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             q::VerdictState::Current(_)
         ));
         assert!(store.attach_dv_title_viewer(TitleViewerRequest {
-            file_id:id,viewer:"late-exact-viewer".into(),request:second.clone(),scanner_digest:scanner.clone(),
+            file_id:id,viewer:"late-exact-viewer".into(),request:second.clone(),scanner_digest:scanner.clone(),scanner_generation:1,
             deadline_ms:60_000,now_ms:1007,
         }).await.expect("late exact viewer"));
         assert!(matches!(
@@ -1496,8 +1563,17 @@ async fn title_expired_unbounded_cancelled_and_stale_playback_do_not_promote() {
                         .expect("replace source");
                 }
                 "scanner" => {
+                    let successor = "c".repeat(64);
+                    assert_eq!(
+                        store
+                            .bind_dv_title_demand(requested.probe_revision, &successor, 2, 1_001)
+                            .await
+                            .expect("live viewer fences rotation"),
+                        None,
+                        "{backend}"
+                    );
                     store
-                        .bind_dv_title_demand(requested.probe_revision, &"c".repeat(64))
+                        .bind_dv_title_demand(requested.probe_revision, &successor, 2, 5_000)
                         .await
                         .expect("replace scanner generation");
                 }
@@ -1614,7 +1690,7 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("retain recipe with no active viewer"));
         use plurx_core::store::background_jobs_resources::{
-            BackgroundSourceOwner, BackgroundSourceRegistration, SOURCE_AUTHORITY_REAP_GRACE_MS,
+            BackgroundSourceOwner, BackgroundSourceRegistration, SOURCE_LEASE_GRACE_MS,
         };
         let token = old.token.clone().expect("claim");
         let expiry = token.lease_expires_ms;
@@ -1623,12 +1699,8 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("register source")
         else {
-            panic!("expected charged source custody on {backend}")
+            panic!("expected charged source lease on {backend}")
         };
-        assert!(store
-            .activate_background_source_custody(custody.clone(), uuid::Uuid::new_v4().to_string())
-            .await
-            .expect("activate reader"));
         for (now, expired) in [(expiry - 1, false), (expiry, true)] {
             let counts = store.job_counts(now).await.expect("counts");
             let row = counts
@@ -1652,7 +1724,10 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 "{backend}"
             );
         }
-        let contend = store
+        // The replacement takes the job over at a new fence at once; the old
+        // fence's lease is not deleted and keeps charging every other reader
+        // through its grace, and the old worker loses publication by fence.
+        let takeover = store
             .claim_job(ClaimJob {
                 job_id: old.id.clone(),
                 expected_revision: old.revision,
@@ -1665,23 +1740,24 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 dispatched_at_ms: expiry,
             })
             .await
-            .expect("attempt replacement while physical reader is still charged");
-        assert!(
-            matches!(contend, ClaimOutcome::Contended),
-            "{backend}: {contend:?}"
-        );
-        // The expired-lease sweep honours the same charged reader.
+            .expect("replacement claim at expiry");
+        let ClaimOutcome::Claimed { job: current } = takeover else {
+            panic!("{backend}: replacement takes the expired attempt over: {takeover:?}")
+        };
+        // The expired-lease sweep does not revoke the replacement: it reaches
+        // only a lease expired by its grace, and the old fence's lease is no
+        // longer the job's.
         store
-            .requeue_expired_running_jobs(expiry)
+            .requeue_expired_running_jobs(expiry + SOURCE_LEASE_GRACE_MS)
             .await
-            .expect("sweep while the reader is charged");
-        let waiting = store
+            .expect("sweep after the takeover");
+        let live = store
             .background_job(&old.id)
             .await
             .expect("job")
             .expect("job");
-        assert_eq!(waiting.state, JobState::Running, "{backend}");
-        assert_eq!(waiting.revision, old.revision, "{backend}");
+        assert_eq!(live.state, JobState::Running, "{backend}");
+        assert_eq!(live.revision, current.revision, "{backend}");
         assert!(store
             .resolve_background_source_custody(custody.clone())
             .await
@@ -1726,11 +1802,23 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
         };
         assert!(
             claim_analysis(expiry).await.is_none(),
-            "{backend}: analysis must leave the second reader to playback"
+            "{backend}: the old reader stays charged, so analysis leaves the live slot to playback"
         );
-        let recovered_at = expiry + SOURCE_AUTHORITY_REAP_GRACE_MS;
+        assert!(store
+            .settle_job(SettleJob {
+                token: current.token.expect("new token"),
+                settlement: JobSettlement::Yield {
+                    error_code: Some("title_interrupted".into()),
+                    not_before_ms: expiry + 2,
+                    checkpoint: None,
+                },
+                now_ms: expiry + 1,
+            })
+            .await
+            .expect("new owner can settle"));
+        let recovered_at = expiry + SOURCE_LEASE_GRACE_MS;
         store
-            .reap_settled_source_custody(recovered_at)
+            .reap_expired_source_leases(recovered_at)
             .await
             .expect("normal bounded sweep");
         assert!(store
@@ -1738,7 +1826,6 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("observe release")
             .is_none());
-        let current = claim(&store, &old.id, recovered_at).await;
         assert!(current.fence > old.fence, "{backend}");
         let attempts = store.job_attempts(&old.id).await.expect("attempts");
         assert_eq!(attempts.len(), 2, "{backend}");
@@ -1752,18 +1839,6 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 .expect("late publication"),
             JobPublishOutcome::LostOwnership
         ));
-        assert!(store
-            .settle_job(SettleJob {
-                token: current.token.expect("new token"),
-                settlement: JobSettlement::Yield {
-                    error_code: Some("title_interrupted".into()),
-                    not_before_ms: recovered_at + 2,
-                    checkpoint: None,
-                },
-                now_ms: recovered_at + 1,
-            })
-            .await
-            .expect("new owner can settle"));
         assert_eq!(
             claim_analysis(recovered_at + 2)
                 .await
@@ -1915,7 +1990,7 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             .await
             .expect("rebuild after restart"));
         let later = store
-            .dv_title_demand_for_file(&scanner, file.id, 2_000)
+            .dv_title_demand_for_file(&scanner, 1, file.id, 2_000)
             .await
             .expect("look up the warm target independent of the cursor")
             .expect("existing head episode");
@@ -1957,7 +2032,7 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             .await
             .expect("deduplicated refresh"));
         let pending = store
-            .dv_title_demand_for_file(&scanner, file.id, 2_005)
+            .dv_title_demand_for_file(&scanner, 1, file.id, 2_005)
             .await
             .expect("read prewarm demand")
             .expect("queued refresh");
@@ -2045,6 +2120,7 @@ async fn title_viewer_bootstraps_current_work_and_keeps_recipe_interest_exact() 
             viewer: "viewer".into(),
             request,
             scanner_digest: scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now + 60_000,
             now_ms: now,
         };
@@ -2174,18 +2250,18 @@ async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
         let new = seed(&store, "title-after-error").await;
         let mut cursor = TitleMaintenanceCursor::default();
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1000)
+            .next_page(store.as_ref(), &scanner, 1, 1000)
             .await
             .expect("discovery");
         assert_eq!(rows[0].file_id, old.id, "{backend}");
         *after = rows[0].probe_revision;
         // Make just the revisit read fail, before it can return or advance a row.
         assert!(cursor
-            .next_page(store.as_ref(), "invalid scanner", 1001)
+            .next_page(store.as_ref(), "invalid scanner", 1, 1001)
             .await
             .is_err());
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1002)
+            .next_page(store.as_ref(), &scanner, 1, 1002)
             .await
             .expect("next turn");
         assert_eq!(
@@ -2194,17 +2270,17 @@ async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
         );
         *after = rows[0].probe_revision;
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1003)
+            .next_page(store.as_ref(), &scanner, 1, 1003)
             .await
             .expect("historical turn");
         assert_eq!(rows[0].file_id, old.id, "{backend}");
         *after = rows[0].probe_revision;
         assert!(cursor
-            .next_page(store.as_ref(), "invalid scanner", 1004)
+            .next_page(store.as_ref(), "invalid scanner", 1, 1004)
             .await
             .is_err());
         let (rows, _) = cursor
-            .next_page(store.as_ref(), &scanner, 1005)
+            .next_page(store.as_ref(), &scanner, 1, 1005)
             .await
             .expect("retry historical work");
         assert_eq!(
@@ -2220,6 +2296,10 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
     use plurx_core::store::background_jobs_resources::StorageDomainMapping;
 
     for_each_backend(|store, backend| async move {
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         let scanner = "a".repeat(64);
         let old = seed(&store, "title-oldest").await;
         let (_, independent_id) = seed_file(&store, "title-independent").await;
@@ -2275,7 +2355,7 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
         // A permanently blocked prefix must leave a discovery turn for the next disk.
         for _ in 0..2 {
             let (rows, after) = cursor
-                .next_page(store.as_ref(), &scanner, 1_003)
+                .next_page(store.as_ref(), &scanner, 1, 1_003)
                 .await
                 .expect("page");
             assert_eq!(rows.len(), 128, "{backend}");
@@ -2308,14 +2388,14 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
             *after = rows.last().expect("full page").probe_revision;
         }
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1_004)
+            .next_page(store.as_ref(), &scanner, 1, 1_004)
             .await
             .expect("next disk");
         let free = rows.first().expect("disjoint title");
         assert_eq!(free.file_id, independent.id, "{backend}");
         *after = free.probe_revision;
         store
-            .bind_dv_title_demand(free.probe_revision, &scanner)
+            .bind_dv_title_demand(free.probe_revision, &scanner, 1, 1_000)
             .await
             .expect("bind independent");
         let EnqueueOutcome::Accepted {
@@ -2344,7 +2424,7 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
             .await
             .expect("new demand keeps the forward walk nonempty");
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1_006)
+            .next_page(store.as_ref(), &scanner, 1, 1_006)
             .await
             .expect("revisit released disk");
         let revisited = rows.first().expect("old demand");
@@ -2394,7 +2474,7 @@ async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
                 .find(|demand| demand.file_id == id)
                 .expect("new source follows the setup cursor");
             store
-                .bind_dv_title_demand(current.probe_revision, &scanner)
+                .bind_dv_title_demand(current.probe_revision, &scanner, 1, 1_000)
                 .await
                 .expect("bind fixture scanner")
                 .expect("current fixture generation");
@@ -2527,6 +2607,7 @@ async fn title_terminal_episode_new_recipe_bootstraps_a_new_job() {
             viewer: "viewer".into(),
             request,
             scanner_digest: scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now + 60_000,
             now_ms: now,
         };
@@ -2597,6 +2678,7 @@ async fn title_manual_cancellation_suppresses_same_viewer_renewal_until_new_inte
             viewer: name.into(),
             request: recipe.clone(),
             scanner_digest: scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now + 60_000,
             now_ms: now,
         };
@@ -2666,6 +2748,10 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
     use plurx_core::store::NewAnalysisRequest;
 
     for_each_backend(|store, backend| async move {
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         let scanner = "a".repeat(64);
         let mut domains = Vec::new();
         let mut libraries = Vec::new();
@@ -2727,6 +2813,14 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
             keys
         };
 
+        let root_key = |path: &str| {
+            format!(
+                "source_io:root/{}/{}",
+                libraries[0],
+                hex::encode_upper(path)
+            )
+        };
+
         // Analysis hashes only its own file, on disk-a of the same library.
         let analysis = store
             .enqueue_analysis_request(&NewAnalysisRequest {
@@ -2756,7 +2850,7 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
         let holders = store.source_io_holders(1_001).await.expect("holders");
         assert_eq!(
             held(&holders, &analysis.request_id),
-            ["source_io:disk-a"],
+            ["source_io:disk-a".to_owned(), root_key("/scope-a")],
             "{backend}: analysis reserves only the disk holding its file"
         );
 
@@ -2807,30 +2901,205 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
         let holders = store.source_io_holders(1_002).await.expect("holders");
         assert_eq!(
             held(&holders, &busy.id),
-            ["source_io:disk-b"],
+            ["source_io:disk-b".to_owned(), root_key("/scope-b")],
             "{backend}: a title scan reserves only the disk holding its file"
         );
-        // A file under no root still needs every root, so disk-b blocks it.
+        // The unmapped file uses the node-local fallback and shares the title node's budget.
         let nowhere = queued("/scope-x/z.mkv", 1_003).await;
         assert_eq!(
             admission(nowhere, 1_003).await,
             Some(ClaimBlock::MaintenanceReader),
-            "{backend}: a file under no root keeps every root"
+            "{backend}: a file under no root respects the node-local budget"
         );
-        // Disk-a's analysis is its one maintenance reader, so a title scan
-        // there waits.
+        // The reader on scope-a fills its root budget across nodes.
         let analysis_disk = queued("/scope-a/a.mkv", 1_004).await;
         assert_eq!(
             admission(analysis_disk, 1_004).await,
             Some(ClaimBlock::MaintenanceReader),
-            "{backend}: disk-a keeps one maintenance reader"
+            "{backend}: scope-a keeps one maintenance reader"
         );
         // A second reader on disk-b is still refused.
         let same_disk = queued("/scope-b/c.mkv", 1_005).await;
         assert_eq!(
             admission(same_disk, 1_005).await,
             Some(ClaimBlock::MaintenanceReader),
-            "{backend}: disk-b keeps one maintenance reader"
+            "{backend}: scope-b keeps one maintenance reader"
+        );
+    })
+    .await;
+}
+
+/// A Dolby Vision title stored as MP4, on an item of its own.
+async fn seed_mp4(store: &Arc<dyn Store>, name: &str) -> MediaFile {
+    let (item, _) = seed_file(store, name).await;
+    let id = store
+        .upsert_file(
+            item,
+            &format!("/{name}/title.mp4"),
+            20_000,
+            30,
+            &ProbeResult {
+                container: Some("mp4".into()),
+                ..probe()
+            },
+        )
+        .await
+        .expect("MP4 title");
+    store.get_file(id).await.expect("file").expect("file")
+}
+async fn refuse(store: &Arc<dyn Store>, job: BackgroundJob, now: i64) {
+    assert!(store
+        .settle_job(SettleJob {
+            token: job.token.expect("token"),
+            settlement: JobSettlement::Fail {
+                error_code: "title_scan_refused".into(),
+            },
+            now_ms: now,
+        })
+        .await
+        .expect("refusal verdict"));
+}
+
+/// A successor scanner keeps what it would only reproduce: a predecessor's
+/// complete aggregate, settled or on still-open demand. Refusals (whatever
+/// the container), open work, and another scanner's aggregate are left for
+/// the ordinary rotation, which reads them again. Nothing is written when
+/// there is nothing to carry.
+#[tokio::test]
+async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them() {
+    for_each_backend(|store, backend| async move {
+        let predecessor = "a".repeat(64);
+        let successor = "b".repeat(64);
+        let stranger = "c".repeat(64);
+        let predecessors = vec![predecessor.clone()];
+
+        let published = seed(&store, "carry-published").await;
+        assert_eq!(published.container.as_deref(), Some("mkv"), "{backend}");
+        let (demand, job) = active(&store, published.id, &predecessor, 1_000).await;
+        let carried = demand.probe_revision;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &predecessor, 1_001))
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let refused_mkv = seed(&store, "carry-refused-mkv").await;
+        let (_, job) = active(&store, refused_mkv.id, &predecessor, 1_000).await;
+        refuse(&store, job, 1_001).await;
+        let refused_mp4 = seed_mp4(&store, "carry-refused-mp4").await;
+        assert_eq!(refused_mp4.container.as_deref(), Some("mp4"), "{backend}");
+        let (_, job) = active(&store, refused_mp4.id, &predecessor, 1_000).await;
+        refuse(&store, job, 1_001).await;
+        let open = seed(&store, "carry-open").await;
+        let open_demand = bound(&store, open.id, &predecessor).await;
+        assert!(matches!(
+            enqueue(&store, &open_demand, &predecessor, 1_000).await,
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let open_aggregate = seed(&store, "carry-open-aggregate").await;
+        assert!(matches!(
+            store
+                .publish_dv_title_from_analysis(analysis(&open_aggregate, &predecessor))
+                .await
+                .expect("index pass aggregate"),
+            AnalysisTitleOutcome::Published
+        ));
+        let foreign = seed(&store, "carry-foreign").await;
+        let (demand, job) = active(&store, foreign.id, &stranger, 1_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &stranger, 1_001))
+                .await
+                .expect("publish under another scanner"),
+            JobPublishOutcome::Published { .. }
+        ));
+
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, 2, &predecessors)
+                .await
+                .expect("carry"),
+            2,
+            "{backend}: the settled and the open aggregate"
+        );
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, 2, &predecessors)
+                .await
+                .expect("carry again"),
+            0,
+            "{backend}: nothing left to carry"
+        );
+        let mut reread: Vec<i64> = store
+            .dv_title_demands(&successor, 0, 2_000)
+            .await
+            .expect("successor demands")
+            .into_iter()
+            .map(|d| d.file_id)
+            .collect();
+        reread.sort_unstable();
+        let mut expected = vec![
+            refused_mkv.id,
+            refused_mp4.id,
+            open.id,
+            open_aggregate.id,
+            foreign.id,
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            reread, expected,
+            "{backend}: what the successor reads again"
+        );
+        assert_eq!(
+            stored_aggregate(&store, published.id).await,
+            Some(stats()),
+            "{backend}: the carried aggregate stays published"
+        );
+        let reopened = store
+            .dv_title_demands(&successor, 0, 2_000)
+            .await
+            .expect("successor demands")
+            .into_iter()
+            .find(|d| d.file_id == open_aggregate.id)
+            .expect("open demand stays open");
+        assert_eq!(
+            DvTitleStats::from_probe_json(&reopened.probe_json),
+            Some(stats()),
+            "{backend}: the open title settles from its carried aggregate, without a read"
+        );
+        // The carried generation is the successor's own: binding it is a no-op,
+        // and it still reopens when the source changes.
+        assert_eq!(
+            store
+                .bind_dv_title_demand(carried, &successor, 2, 1_000)
+                .await
+                .expect("bind carried"),
+            Some(carried),
+            "{backend}"
+        );
+        assert_eq!(stored_aggregate(&store, published.id).await, Some(stats()));
+        reprobe(&store, &published).await;
+        assert!(
+            demand_for(&store, published.id, &successor).await > carried,
+            "{backend}: a changed source is read again"
+        );
+
+        for invalid in [vec!["not a digest".to_owned()], vec![successor.clone()]] {
+            assert!(
+                store
+                    .carry_forward_dv_title_verdicts(&successor, 2, &invalid)
+                    .await
+                    .is_err(),
+                "{backend}: {invalid:?}"
+            );
+        }
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, 2, &[])
+                .await
+                .expect("no predecessors"),
+            0
         );
     })
     .await;

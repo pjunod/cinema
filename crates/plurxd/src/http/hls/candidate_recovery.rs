@@ -358,10 +358,16 @@ async fn authenticate_cause(
     Ok(Some(cause))
 }
 
-pub(super) struct BoundRecovery {
+pub(super) struct BoundRecovery<C = QualityCandidate> {
     pub(super) scope: CandidateRecoveryScope,
     pub(super) route: MediaSessionRoute,
-    pub(super) candidate: QualityCandidate,
+    pub(super) candidate: C,
+}
+
+#[derive(Clone, Copy)]
+enum IncumbentCandidate {
+    Required,
+    OptionalForProcessedUpgrade,
 }
 
 pub(crate) async fn auto_catalog(
@@ -639,17 +645,22 @@ pub(crate) async fn processed_candidate_recovery_evidence(
         return ProcessedRecoveryEvidence::Rejected;
     };
     let stage = RecoveryReadStage::default();
-    // Err is an unreadable incumbent or memory; Ok(false) is a verdict.
-    let read = async {
-        let bound = bind_incumbent(
+    // Original and manual starts can own this recovery lifetime without a
+    // selected catalog row. They still inherit rejected recipes in that scope.
+    let bind = || {
+        bind_incumbent(
             state,
             network,
             file,
             playback,
             Some(&predecessor.session_id),
+            IncumbentCandidate::OptionalForProcessedUpgrade,
             &stage,
         )
-        .await?;
+    };
+    // Err is an unreadable incumbent or memory; Ok(false) is a verdict.
+    let read = async {
+        let bound = bind().await?;
         if bound.route.incarnation_id != predecessor.incarnation_id {
             return Ok(false);
         }
@@ -659,19 +670,12 @@ pub(crate) async fn processed_candidate_recovery_evidence(
             .candidate_recovery_memory(&bound.scope)
             .await
             .map_err(|_| RecoveryUnavailable::MemoryStoreError)?;
-        let current = bind_incumbent(
-            state,
-            network,
-            file,
-            playback,
-            Some(&predecessor.session_id),
-            &stage,
-        )
-        .await?;
+        let current = bind().await?;
         Ok::<_, RecoveryUnavailable>(
             current.scope == bound.scope
-                && current.route.incarnation_id == bound.route.incarnation_id
-                && current.candidate.id == bound.candidate.id
+                && same_incumbent_authority(&bound.route, &current.route)
+                && current.candidate.as_ref().map(|c| c.id)
+                    == bound.candidate.as_ref().map(|c| c.id)
                 && !memory.rejected_recipes.contains(&candidate.recipe_digest),
         )
     };
@@ -769,13 +773,26 @@ pub(super) async fn incumbent(
     deadline: tokio::time::Instant,
 ) -> Option<BoundRecovery> {
     let stage = RecoveryReadStage::default();
-    tokio::time::timeout_at(
+    let bound = tokio::time::timeout_at(
         deadline,
-        bind_incumbent(state, network, file, playback, previous, &stage),
+        bind_incumbent(
+            state,
+            network,
+            file,
+            playback,
+            previous,
+            IncumbentCandidate::Required,
+            &stage,
+        ),
     )
     .await
     .ok()?
-    .ok()
+    .ok()?;
+    Some(BoundRecovery {
+        scope: bound.scope,
+        route: bound.route,
+        candidate: bound.candidate?,
+    })
 }
 
 /// [`incumbent`] without its deadline, naming the exit that did not bind.
@@ -786,8 +803,9 @@ async fn bind_incumbent(
     file: &MediaFile,
     playback: &str,
     previous: Option<&str>,
+    candidate_requirement: IncumbentCandidate,
     stage: &RecoveryReadStage,
-) -> Result<BoundRecovery, RecoveryUnavailable> {
+) -> Result<BoundRecovery<Option<QualityCandidate>>, RecoveryUnavailable> {
     use RecoveryUnavailable as Miss;
     let user = network.user_id.ok_or(Miss::NoNetworkUser)?;
     let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user };
@@ -829,31 +847,11 @@ async fn bind_incumbent(
     }
     let response: StartResponse =
         serde_json::from_str(&route.response_json).map_err(|_| Miss::ResponseMismatch)?;
-    let id = response
-        .quality_candidate_id
-        .ok_or(Miss::ResponseMismatch)?;
-    if recipe.candidate_id != Some(id) || response.session_id != route.session_id {
-        return Err(Miss::ResponseMismatch);
-    }
-    let candidates = response
-        .quality_candidates
-        .filter(|candidates| candidates.len() <= 64)
-        .ok_or(Miss::CandidateMismatch)?;
-    let mut matches = candidates
-        .into_iter()
-        .filter(|candidate| candidate.id == id);
-    let candidate = matches.next().ok_or(Miss::CandidateMismatch)?;
-    if matches.next().is_some() {
-        return Err(Miss::CandidateMismatch);
-    }
-    if !candidate.identity_matches() {
-        return Err(Miss::CandidateIdentity);
-    }
+    let candidate = incumbent_candidate(&route, &recipe, response, candidate_requirement)?;
     stage.enter(RecoveryReadStage::SOURCE);
     let source = super::link_receipts::SourceLinkIdentity::for_request_classified(network, file)
         .await
-        .map_err(Miss::from)?
-        .candidate(candidate.recipe_digest, candidate.route);
+        .map_err(Miss::from)?;
     // Source work may await. A retired/replaced incumbent cannot mint memory.
     stage.enter(RecoveryReadStage::REREAD);
     let current = state
@@ -862,29 +860,14 @@ async fn bind_incumbent(
         .await
         .map_err(|_| Miss::RouteRereadStoreError)?
         .ok_or(Miss::RouteRereadMissing)?;
-    if current.incarnation_id != route.incarnation_id
-        || current.session_id != route.session_id
-        || current.owner_node_id != route.owner_node_id
-        || current.owner_epoch != route.owner_epoch
-        || current.recovery_epoch != route.recovery_epoch
-        || current.recipe_json != route.recipe_json
+    if !same_incumbent_authority(&route, &current)
         || current.state != "active"
         || current.publication_ready_at_ms != 0
         || current.lease_expires_at_ms <= super::unix_ms()
     {
         return Err(Miss::RouteMoved);
     }
-    let scope = CandidateRecoveryScope {
-        user_id: user,
-        playback_id: playback.to_owned(),
-        recovery_epoch: route.recovery_epoch.clone(),
-        file_id: file.id,
-        source_size: file.size,
-        source_mtime: file.mtime,
-        source_object_version: source.source_object_version,
-        credential_generation: source.credential_generation,
-        client_class: source.client_class,
-    };
+    let scope = source.recovery_scope(playback, &route.recovery_epoch);
     if !scope.valid() {
         return Err(Miss::ScopeInvalid);
     }
@@ -893,4 +876,50 @@ async fn bind_incumbent(
         route,
         candidate,
     })
+}
+
+fn same_incumbent_authority(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool {
+    left.incarnation_id == right.incarnation_id
+        && left.session_id == right.session_id
+        && left.owner_node_id == right.owner_node_id
+        && left.owner_epoch == right.owner_epoch
+        && left.recovery_epoch == right.recovery_epoch
+        && left.recipe_json == right.recipe_json
+}
+
+fn incumbent_candidate(
+    route: &MediaSessionRoute,
+    recipe: &RemoteStartRequest,
+    response: StartResponse,
+    requirement: IncumbentCandidate,
+) -> Result<Option<QualityCandidate>, RecoveryUnavailable> {
+    use RecoveryUnavailable as Miss;
+    if response.session_id != route.session_id
+        || response.quality_candidate_id != recipe.candidate_id
+    {
+        return Err(Miss::ResponseMismatch);
+    }
+    let Some(id) = response.quality_candidate_id else {
+        return match requirement {
+            IncumbentCandidate::OptionalForProcessedUpgrade
+                if recipe.candidate_catalog.is_none() =>
+            {
+                Ok(None)
+            }
+            _ => Err(Miss::ResponseMismatch),
+        };
+    };
+    let candidates = response
+        .quality_candidates
+        .filter(|candidates| candidates.len() <= 64)
+        .ok_or(Miss::CandidateMismatch)?;
+    // One public row; a response stored before the catalogue repeated no ID
+    // may list worker twins of the same recipe, which address that one row.
+    let candidate = plurx_core::playback::candidate::single_public_row(&candidates, id)
+        .cloned()
+        .ok_or(Miss::CandidateMismatch)?;
+    if !candidate.identity_matches() {
+        return Err(Miss::CandidateIdentity);
+    }
+    Ok(Some(candidate))
 }

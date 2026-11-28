@@ -16,6 +16,7 @@ concurrency:
 # Clippy in main-fast-lane.yml (`make lint`) after the one adversarial review.
 jobs:
   lint:
+    if: github.server_url != 'https://github.com'
     name: rustfmt + clippy
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
