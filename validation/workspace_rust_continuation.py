@@ -283,7 +283,7 @@ def continuation_preflight_recipe(raw):
     check = job_body(raw, 'check', 'cluster_store_legacy')
     expected_check = job_body(original, 'check', 'cluster_store_legacy').replace(RETIRED_ROOT_RECOVERY_STEP, b'')
     if b'Run an official Rust partition' in check:
-        receipts.require(retention.digest(check) == OFFICIAL_RUST_CHECK_SHA256,
+        receipts.require(hashlib.sha256(check).hexdigest() == OFFICIAL_RUST_CHECK_SHA256,
                          'Unreviewed official Rust partition job')
     else:
         receipts.require(hdr_guard in check and check.replace(hdr_guard, hdr_original) == expected_check,
