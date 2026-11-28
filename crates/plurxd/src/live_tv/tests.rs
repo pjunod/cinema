@@ -2509,6 +2509,13 @@ async fn a_warm_start_spawns_before_the_prefix_ceiling_and_publishes_only_after_
         "a publishable inventory must not be published before the probe agrees"
     );
     assert!(
+        matches!(
+            *session.split_projection.lock().await,
+            split::Projection::Pending
+        ),
+        "a private scan must leave the layout undecided while the probe runs"
+    );
+    assert!(
         session.tuner_bytes.load(Ordering::Acquire) > 0,
         "the warm FFmpeg is fed while its verification probe is still running"
     );
